@@ -13536,10 +13536,32 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                         st.caption("No fresh headlines found (feeds may be rate-limited).")
 
                 _rows = []
+                try:                                   # ex-div event for this ticker (12h-cached)
+                    import telegram_bot_optimized as _tbo_ev
+                    _dv = _tbo_ev._divcap_stats(_tk)
+                except Exception:
+                    _dv = None
                 for l in _tl:
                     money = "ITM" if ((l["spot"] > l["K"]) if l["typ"] == "call" else (l["spot"] < l["K"])) else "OTM"
                     pnl_pct = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
+                    # ── Event column: earnings / ex-div landing before this leg's expiry ──
+                    _evt = []
+                    _ed = _earn.get("days") if _earn else None
+                    if _ed is not None:
+                        if 0 <= _ed <= l["dte"]:
+                            _evt.append(f"📊 ER {_ed}d ⚠️pre-exp")
+                        elif 0 <= _ed <= 14:
+                            _evt.append(f"📊 ER {_ed}d")
+                    _xd = _dv.get("ex_days") if _dv else None
+                    if _xd is not None and 0 <= _xd <= max(l["dte"], 0):
+                        _evt.append(f"💵 ex-div {_xd}d")
+                    _event_s = " · ".join(_evt) if _evt else "—"
                     acts = []
+                    if _ed is not None and 0 <= _ed <= l["dte"]:
+                        acts.append("⚠️ earnings before expiry — decide pre-print (IV crush + gap)")
+                    if (_xd is not None and 0 <= _xd <= max(l["dte"], 0)
+                            and l["typ"] == "call" and l["side"] == "short" and money == "ITM"):
+                        acts.append(f"💵 ex-div {_xd}d — early-assignment risk on short ITM call")
                     if l["dte"] <= 7:
                         acts.append(f"{l['dte']}DTE — decide now")
                     elif l["dte"] <= 21:
@@ -13584,7 +13606,7 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                             f"{_pa['pop']:.0f}%") if _pa else "—"
                     _rows.append({
                         "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
-                        "Exp": l["exp"][:10], "DTE": l["dte"], "Money": money,
+                        "Exp": l["exp"][:10], "DTE": l["dte"], "Money": money, "Event": _event_s,
                         "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
                         "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
                         "Est Open": _topen_disp, "Day L–H": f"${_olo:.2f}–${_ohi:.2f}",

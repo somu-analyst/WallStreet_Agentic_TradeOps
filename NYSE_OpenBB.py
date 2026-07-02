@@ -152,7 +152,11 @@ def build_expanded_universe():
             + _BIO_AI)
     # keep the current active names too (nothing lost)
     tks += load_universe(sheet=UNIVERSE_SHEET_ACTIVE)
-    uni = sorted(dict.fromkeys(t for t in tks if t and t not in ("DXY",)))
+    # drop non-optionable: crypto spot pairs, index carets, known non-CBOE names
+    _skip = {"DXY", "ME", "HONA", "EXAS", "BITF", "PHYS", "PSLV", "CYBR", "NVR"}
+    uni = sorted(dict.fromkeys(
+        t for t in tks
+        if t and t not in _skip and "-USD" not in t and not t.startswith("^")))
     df = pd.DataFrame({"ticker": uni})
     with pd.ExcelWriter(UNIVERSE_FILE, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
         df.to_excel(w, sheet_name=EXPANDED_SHEET, index=False)

@@ -279,8 +279,12 @@ def main():
                     help=f"universe sheet name (e.g. {EXPANDED_SHEET})")
     ap.add_argument("--build-universe", action="store_true",
                     help="build the expanded S&P500+NDX+tiers universe sheet and exit")
-    ap.add_argument("--pace", type=float, default=0.15,
+    ap.add_argument("--pace", type=float, default=0.6,
                     help="per-request stagger seconds (rate-limit guard; 0 = blast)")
+    ap.add_argument("--chunk-size", type=int, default=80,
+                    help="tickers per chunk (rest between chunks lets the rate window reset)")
+    ap.add_argument("--rest", type=int, default=45,
+                    help="seconds to rest between chunks")
     args = ap.parse_args()
     if args.strike_pct is not None:
         global STRIKE_PCT
@@ -296,59 +300,79 @@ def main():
     print(f"OpenBB fetch: {len(tickers)} tickers · provider={args.provider} · workers={args.workers}")
     print(f"Output (isolated): {OUT_DB_PATH} · table={table}  (production US_data.db untouched)")
 
+    # ---- logging: everything goes to console AND a dated log file ----
+    log_path = os.path.join(DATA_DIR, f"openbb_fetch_{trade_dt.strftime('%Y%m%d')}.log")
+    _logf = open(log_path, "a", encoding="utf-8")
+
+    def log(msg):
+        line = f"{datetime.now().strftime('%H:%M:%S')}  {msg}"
+        print(line)
+        _logf.write(line + "\n"); _logf.flush()
+
+    log(f"=== RUN start · {len(tickers)} tickers · chunk={args.chunk_size} rest={args.rest}s "
+        f"workers={args.workers} pace={args.pace}s · provider={args.provider} ===")
+
     t0 = time.time()
-    frames, failed = [], []
+    today_str = pd.Timestamp(trade_dt).strftime("%Y-%m-%d")
+    conn = sqlite3.connect(OUT_DB_PATH)
+    # idempotent per day: clear today's rows once, then APPEND per chunk (crash-safe)
+    try:
+        conn.execute(f"DELETE FROM {table} WHERE trade_date=?", (today_str,))
+        conn.commit()
+    except Exception:
+        pass
+    failed, total_ok, total_rows = [], 0, 0
 
     def run_pass(tks, workers, pace, label):
-        """One fetch pass. `pace` = per-submit stagger (sec) so we stay under
-        CBOE's rate limit (8 workers unpaced -> throttled after ~60 tickers)."""
-        ok = 0
+        nonlocal total_ok, total_rows
+        frames, ok = [], 0
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {}
             for tk in tks:
                 futs[ex.submit(fetch_chain_openbb, obb, tk, args.provider, trade_dt)] = tk
                 time.sleep(pace)
-            for i, fut in enumerate(as_completed(futs), 1):
+            for fut in as_completed(futs):
                 df = fut.result()
                 if df is not None and len(df):
                     frames.append(df); ok += 1
                 else:
                     failed.append(futs[fut])
-                if i % 50 == 0:
-                    print(f"  [{label}] {i}/{len(tks)} · {time.time()-t0:.0f}s elapsed")
+        if frames:
+            chunk_df = pd.concat(frames, ignore_index=True)
+            chunk_df.to_sql(table, conn, if_exists="append", index=False)
+            total_rows += len(chunk_df)
+        total_ok += ok
+        log(f"[{label}] ok {ok}/{len(tks)} · rows so far {total_rows} · {time.time()-t0:.0f}s elapsed")
         return ok
 
-    ok1 = run_pass(tickers, args.workers, args.pace, "pass1")
-    retry = list(dict.fromkeys(failed)); failed = []
-    ok2 = 0
-    if retry:
-        print(f"Retrying {len(retry)} failures slowly (backoff 20s)…")
-        time.sleep(20)
-        ok2 = run_pass(retry, 2, max(args.pace, 0.35), "retry")
-    empty = len(failed)
+    # chunked main passes with rests so CBOE's throttle window resets
+    chunks = [tickers[i:i + args.chunk_size] for i in range(0, len(tickers), args.chunk_size)]
+    for ci, ch in enumerate(chunks, 1):
+        run_pass(ch, args.workers, args.pace, f"chunk {ci}/{len(chunks)}")
+        if ci < len(chunks):
+            time.sleep(args.rest)
+
+    # final slow retry rounds for anything that failed
+    for rnd in (1, 2):
+        retry = list(dict.fromkeys(failed)); failed = []
+        if not retry:
+            break
+        log(f"retry round {rnd}: {len(retry)} tickers (60s backoff, slow)")
+        time.sleep(60)
+        for i in range(0, len(retry), 40):
+            run_pass(retry[i:i + 40], 1, 1.2, f"retry{rnd} {i//40+1}")
+            time.sleep(args.rest)
+
+    conn.close()
     elapsed = time.time() - t0
-
-    rows = 0
-    if frames:
-        allrows = pd.concat(frames, ignore_index=True)
-        rows = len(allrows)
-        conn = sqlite3.connect(OUT_DB_PATH)     # separate file — cannot affect US_data.db
-        try:
-            allrows.to_sql(table, conn, if_exists="replace", index=False)
-        finally:
-            conn.close()
-
-    # ---- benchmark summary ----
-    per = elapsed / max(len(tickers), 1)
-    print("\n================ OpenBB benchmark ================")
-    print(f"tickers      : {len(tickers)}  (empty/failed: {empty})")
-    print(f"rows written : {rows}  -> table '{table}'")
-    print(f"total time   : {elapsed:.1f}s   ({elapsed/60:.1f} min)")
-    print(f"per ticker   : {per:.2f}s")
-    print(f"yfinance NYSE_YFin baseline is ~3s/ticker + 1s sleep = ~4s/ticker SEQUENTIAL.")
-    print(f"  => est yfinance time for {len(tickers)} tickers: {len(tickers)*4/60:.1f} min sequential")
-    print(f"  => OpenBB here: {elapsed/60:.1f} min  ({(len(tickers)*4)/max(elapsed,1):.1f}x speedup vs that baseline)")
-    print("==================================================")
+    log("================ SUMMARY ================")
+    log(f"success      : {total_ok}/{len(tickers)} tickers  (final failures: {len(set(failed))})")
+    if failed:
+        log(f"failed names : {', '.join(sorted(set(failed))[:40])}")
+    log(f"rows written : {total_rows} -> {table} (trade_date {today_str})")
+    log(f"total time   : {elapsed/60:.1f} min  (yfinance baseline ~{len(tickers)*4/60:.0f} min sequential)")
+    log(f"log file     : {log_path}")
+    _logf.close()
 
 
 if __name__ == "__main__":

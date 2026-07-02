@@ -2,6 +2,19 @@
 
 > Append newest at top. Recap here every ~10–20 messages and before any context reset.
 
+## 2026-07-02 (later) — OpenBB capture hardening + storage + rate limits
+- **Storage fixed:** parquet-zstd daily export (`openbb_chains/chains_YYYY-MM-DD.parquet`), sqlite = staging
+  only. Measured **7x compression** (26.5MB → 3.6MB/day → ~0.9GB/yr; contractSymbols dropped, float32).
+- **Rate limits:** `KeyError 'data'` = CBOE throttle (NOT symbols). Mitigations shipped: chunking+rests,
+  slow retry rounds, ADAPTIVE pacing (chunk >25% fails → slow down). Bad symbols removed from builder.
+  Community options if still needed: curl_cffi browser-impersonation session (NYSE_YFin already does this
+  for yahoo), provider interleave (alternate cboe/yfinance chunks), requests-cache. NOT done yet.
+- Positions table: Event col (ER/ex-div pre-expiry) + event-aware Action (38bda1d).
+- #10-16 user list done (engine consolidation e71d195, weekly rotate, scn_* persistence, /ic tearsheet,
+  vectorbt sweep 22335ec). qlib deferred (own project), graphify blocked (no CLI).
+- **NEXT: user's 743 capture SUMMARY → validate day → production migration** (ALTER options_daily,
+  wire into run_all_offhours, retire 4-hr yfinance options leg).
+
 ## 2026-07-02 — Strategy build series + DB history layer + portfolio/validation
 - **Done (strategy scanners, bot + dashboard "⚙️ Strategy Scanners" hub):** `/wan` `/earnvol` `/cc`
   `/pairs` `/season` `/rotate` `/revert` `/condor` `/calendar` `/divcap` `/pwindex` `/pead`

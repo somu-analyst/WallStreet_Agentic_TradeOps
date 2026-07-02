@@ -3375,7 +3375,7 @@ def _cached_hp_engine(ticker):
     analysis doesn't re-run all 24 models on every rerun / 30s auto-refresh. OI is EOD so a
     2-min cache loses nothing."""
     try:
-        import telegram_bot as _tbe
+        import telegram_bot_optimized as _tbe
         conn = get_conn()
         try:
             return _tbe.high_prob_signals_engine(ticker, conn)
@@ -17138,7 +17138,7 @@ if page == "🧠 High-Prob Engine":
     @st.cache_resource(show_spinner=False)
     def _get_hp_ns():
         try:
-            import telegram_bot as _tb
+            import telegram_bot_optimized as _tb
             _ns = vars(_tb)
             if "high_prob_signals_engine" in _ns:
                 return _ns
@@ -19086,7 +19086,7 @@ def _macro_playbook(slope2s10s, infl_dir, fed_dir):
 if page == "📡 Macro/Event Hub":
     _page_header("📡 Macro / Event Hub")
     try:
-        import telegram_bot as _tbmod
+        import telegram_bot_optimized as _tbmod
     except Exception as _e:
         st.error(f"Could not load engine module: {_e}")
         _tbmod = None

@@ -22865,6 +22865,26 @@ async def earnings_alert(ctx: ContextTypes.DEFAULT_TYPE):
         log.warning(f"earnings_alert send failed: {e}")
 
 
+async def rotate_alert(ctx: ContextTypes.DEFAULT_TYPE):
+    """Weekly sector-rotation push (Mondays pre-market): leaders/laggards for the week ahead."""
+    _, chat_id = load_creds()
+    rows = _rotate_scan()
+    if not rows:
+        return
+    n = len(rows); top = max(1, n // 3)
+    _data = [("🟢" if i < top else ("🔴" if i >= n - top else "🟡"), r["name"],
+              f"{r['r3']*100:+.1f}", f"{r['r6']*100:+.1f}") for i, r in enumerate(rows)]
+    table = _pipe_table(("ST", "Sector", "3M%", "6M%"), _data, right_cols={2, 3},
+                        legend="weekly rotation · 🟢 overweight / 🔴 underweight")
+    msg = (hdr("🔄 WEEKLY SECTOR ROTATION") + "\n"
+           f"<i>Leaders: {', '.join(r['name'] for r in rows[:3])} · "
+           f"Laggards: {', '.join(r['name'] for r in rows[-3:])}</i>\n" + table)
+    try:
+        await ctx.bot.send_message(chat_id=int(chat_id), text=msg[:4090], parse_mode=H)
+    except Exception as e:
+        log.warning(f"rotate_alert send failed: {e}")
+
+
 async def building_command(update, ctx):
     """/building — positioning tracker: new/increasing call (long) or put (short) OI with price starting to confirm."""
     await update.message.reply_text("🧭 Scanning positioning builds…", parse_mode=H)
@@ -25702,6 +25722,7 @@ def main():
         job_queue.run_daily(plan_alert, time=dt_time(13, 30, 0))     # next-day game plan ~8:30 AM ET pre-market
         job_queue.run_daily(wrap_alert, time=dt_time(21, 15, 0))     # daily market wrap ~4:15 PM ET post-close
         job_queue.run_daily(earnings_alert, time=dt_time(13, 45, 0)) # Earnings Radar ~8:45 AM ET pre-market
+        job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # weekly sector rotation, Mondays
         log.info("Scheduled morning alert at 9:00 AM ET daily")
         # 15-min intraday alert (fires every 15 min; function checks market hours internally)
         job_queue.run_repeating(intraday_alert, interval=900, first=30)

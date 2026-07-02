@@ -43,7 +43,7 @@ MAX_HORIZON_DAYS = 45          # same horizon window as NYSE_YFin
 # Strike filter: PERCENT of spot (not strike count). NYSE_YFin uses +/-25 STRIKES,
 # which is only ~+/-3% on dense-strike names like SPY but ~+/-36% on NVDA — inconsistent.
 # CBOE returns the full chain in one call, so a wider window costs no extra fetch time.
-STRIKE_PCT = 0.30              # keep strikes within +/-30% of spot; 0 = full chain
+STRIKE_PCT = 0.0               # 0 = FULL chain (fetch is one call regardless); use --strike-pct to trim
 TEST_TABLE = "options_openbb_test"
 
 
@@ -90,6 +90,11 @@ def _normalize_chain(df):
         "last": pick("last_trade_price", "last_price", "close", "lastprice", "mark"),
         "contract": pick("contract_symbol", "contractsymbol", "symbol"),
         "underlying": pick("underlying_price", "underlyingprice", "spot"),
+        # backtest-grade extras (CBOE has all of these; yfinance DB never did)
+        "bid": pick("bid"),
+        "ask": pick("ask"),
+        "iv": pick("implied_volatility", "impliedvolatility", "iv"),
+        "delta": pick("delta"),
     }
     if not (m["expiration"] and m["strike"] and m["option_type"]):
         raise KeyError(f"Cannot map option columns. Got: {list(df.columns)}")
@@ -141,13 +146,20 @@ def fetch_chain_openbb(obb, ticker, provider, trade_dt):
     calls = df[df["_type"] == "c"]; puts = df[df["_type"] == "p"]
 
     def side(d, suff):
+        def num(key):
+            return pd.to_numeric(d[m[key]], errors="coerce").values if m[key] else np.nan
         out = pd.DataFrame({
             "strike": d["_strike"].values,
             "expiry_date": d["_exp"].dt.strftime("%Y-%m-%d").values,
             f"contractSymbol_{suff}": d[m["contract"]].values if m["contract"] else None,
-            f"openInt_{suff}": pd.to_numeric(d[m["open_interest"]], errors="coerce").values if m["open_interest"] else np.nan,
-            f"lastPrice_{suff}": pd.to_numeric(d[m["last"]], errors="coerce").values if m["last"] else np.nan,
-            f"vol_{suff}": pd.to_numeric(d[m["volume"]], errors="coerce").values if m["volume"] else np.nan,
+            f"openInt_{suff}": num("open_interest"),
+            f"lastPrice_{suff}": num("last"),
+            f"vol_{suff}": num("volume"),
+            # backtest-grade columns not in the yfinance pipeline
+            f"bid_{suff}": num("bid"),
+            f"ask_{suff}": num("ask"),
+            f"iv_{suff}": num("iv"),
+            f"delta_{suff}": num("delta"),
         })
         return out
 

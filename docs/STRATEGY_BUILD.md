@@ -63,6 +63,10 @@ so nothing is hidden.
   `stock_daily` for FREE ongoing maintenance (no repeat API). Backfilled full universe (~135 tickers, ~105k rows, 6y).
 - Repointed `/ic`, `/season`, `/rotate`, `/pwindex` to it → `/ic` momentum N went **21 → ~1,400** (t≈+5, real edge).
 - Can't be backfilled (yfinance serves no history): option-chain bid/ask/IV → `/cc /condor /calendar` stay live.
+- **OHLC tested 2026-07-02:** 106k rows/135 tks/6y, 0 consistency violations; `open` null 3.5% (stock_daily
+  sync rows — by design). OpenBB OHLC speed ≈ yfinance (no win, unlike options). ⚠️ OpenBB closes are
+  UNadjusted vs yfinance's adjusted (median 0.19% diff, AAPL) — if the dormant fallback fires, it mixes
+  bases at ex-div dates. Fine for short-window scanners; prefer yfinance for long-window (/season, /ic).
 
 ## 1b. Streamlit dashboard mirror
 - ✅ **"⚙️ Strategy Scanners" page** (dashboard.py) — one hub, selectbox + Run scan, reuses the

@@ -31,6 +31,17 @@ so nothing is hidden.
 | 19 | Positioning builder (new/increasing OI + price starting) | `/building` | ✅ Done | `e1cf636`/`404e9c9` | LONG=calls / SHORT=puts vs standing OI; stage S/I/C; options_change+stock_daily; dashboard hub + **30-min scheduled stream** (daily dedup) |
 
 | 20 | Portfolio risk optimizer (Aladdin risk side) | `/allocate` | ✅ Done | pending | max-Sharpe/min-var/risk-parity on 6y covariance; weight-capped; native; dashboard hub |
+| 21 | Factor IC validation (Alphalens-style) | `/ic` | ✅ Done | `b35d7e8` | rank IC + IC-IR + t-stat + Q5−Q1 quantile spread vs fwd returns; reversal/momentum/lowvol; dashboard hub |
+
+## 1e. Scheduled jobs & UX (this session)
+| Item | What | Commit |
+|------|------|--------|
+| WAN streamer | 15-min market-hours push of new ensemble signals (daily dedup) | `8f7fbb5` |
+| Positioning streamer | 30-min push of new long/short OI builds (daily dedup) | `404e9c9` |
+| **Earnings Radar** job | daily 8:45am ET push: `/earnvol` + `/pead` combined | `80e7d6f` |
+| **Slash-command autocomplete** | `set_my_commands` — 35 commands in Telegram "/" menu | `8ceeb28` |
+| **OpenBB history fallback** | `_fetch_openbb_history` dormant fallback in `_daily_history` | `9753eec` |
+| **NYSE_OpenBB.py** | isolated OpenBB options-fetch benchmark (separate DB) | `ddd8625` |
 
 ## 1d. OpenBB benchmark (NYSE_OpenBB.py) — status 2026-07-02
 - `NYSE_OpenBB.py` written: OpenBB CBOE full-chain-in-one-call + threaded, isolated output DB

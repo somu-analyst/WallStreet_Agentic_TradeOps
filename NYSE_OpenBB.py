@@ -49,6 +49,41 @@ STRIKE_PCT = 0.0               # 0 = FULL chain (fetch is one call regardless); 
 TEST_TABLE = "options_openbb"
 
 
+def compare_vs_yfinance(trade_date=None):
+    """Parallel-test scorer: join today's options_openbb (US_data_OpenBB.db) vs
+    options_daily (production US_data.db, read-only) on ticker+expiry+strike and
+    report coverage + OI/price agreement. Run daily during the trial period."""
+    prod = os.path.join(DATA_DIR, "US_data.db")
+    td = trade_date or datetime.now().strftime("%Y-%m-%d")
+    co = sqlite3.connect(OUT_DB_PATH); cy = sqlite3.connect(f"file:{prod}?mode=ro", uri=True)
+    try:
+        ob = pd.read_sql("SELECT ticker,expiry_date,strike,openInt_Call,openInt_Put,"
+                         "lastPrice_Call,lastPrice_Put FROM options_openbb WHERE trade_date=?", co, params=(td,))
+        yf_ = pd.read_sql("SELECT ticker,expiry_date,strike,openInt_Call,openInt_Put,"
+                          "lastPrice_Call,lastPrice_Put FROM options_daily WHERE trade_date=?", cy, params=(td,))
+    finally:
+        co.close(); cy.close()
+    print(f"=== PARALLEL COMPARE {td} ===")
+    print(f"openbb rows: {len(ob):,} ({ob.ticker.nunique()} tickers) | yfinance rows: {len(yf_):,} ({yf_.ticker.nunique()} tickers)")
+    if ob.empty or yf_.empty:
+        print("one side empty — run both pipelines for this date first"); return
+    for d in (ob, yf_):
+        d["ticker"] = d["ticker"].str.upper()
+        d["strike"] = pd.to_numeric(d["strike"], errors="coerce")
+    j = ob.merge(yf_, on=["ticker", "expiry_date", "strike"], suffixes=("_ob", "_yf"))
+    print(f"overlapping contracts: {len(j):,}")
+    if len(j):
+        for col in ("openInt_Call", "lastPrice_Call"):
+            a = pd.to_numeric(j[f"{col}_ob"], errors="coerce"); b = pd.to_numeric(j[f"{col}_yf"], errors="coerce")
+            m = a.notna() & b.notna() & (b != 0)
+            if m.sum():
+                agree = (abs(a[m] - b[m]) / b[m].abs() <= 0.02).mean()
+                print(f"  {col:14} within 2%: {agree*100:.0f}%  (n={m.sum():,})")
+        only_ob = ob.ticker.nunique() - j.ticker.nunique()
+        print(f"  tickers only in openbb (extra coverage): ~{ob.ticker.nunique() - yf_.ticker.nunique()}")
+    print("==============================")
+
+
 def _load_openbb():
     """Return the obb client or exit with a clear message if not installed."""
     try:
@@ -361,12 +396,17 @@ def main():
                     help="seconds to rest between chunks")
     ap.add_argument("--parquet", action="store_true",
                     help="space-saver: export the day to parquet-zstd and clear it from sqlite")
+    ap.add_argument("--compare", nargs="?", const="today", default=None,
+                    help="parallel-test scorer: compare openbb vs yfinance for a date (default today) and exit")
     args = ap.parse_args()
     if args.strike_pct is not None:
         global STRIKE_PCT
         STRIKE_PCT = args.strike_pct
     if args.build_universe:
         build_expanded_universe()
+        return
+    if args.compare:
+        compare_vs_yfinance(args.compare if args.compare != "today" else None)
         return
 
     obb = _load_openbb()

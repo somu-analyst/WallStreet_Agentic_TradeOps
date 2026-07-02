@@ -17,9 +17,15 @@ On first run you may need to tweak the column-name normalisation in _normalize_c
 to match your OpenBB version's schema — the code prints the raw columns if it can't map.
 
 Install first:   pip install openbb openbb-cboe
-Run (quick test):  python NYSE_OpenBB.py --limit 50 --workers 8
-Run (full):        python NYSE_OpenBB.py --workers 8
-Compare provider:  python NYSE_OpenBB.py --limit 50 --provider yfinance
+Run (daily):       python NYSE_OpenBB.py
+                   -> expanded 740-name universe (auto-built if missing), safe pacing
+                      (workers 4 / pace 0.75s / chunk rests), adaptive slowdown on throttle,
+                      3 escalating retry rounds, per-day idempotent write, auto --compare
+                      vs the yfinance DB when both sides have today's data.
+Quick test:        python NYSE_OpenBB.py --limit 20
+Small prod set:    python NYSE_OpenBB.py --universe ticker_universe
+Score a day:       python NYSE_OpenBB.py --compare [YYYY-MM-DD]
+If throttled anyway: just rerun the same command later — reruns are idempotent.
 """
 import os
 import time
@@ -47,6 +53,7 @@ MAX_HORIZON_DAYS = 45          # same horizon window as NYSE_YFin
 # CBOE returns the full chain in one call, so a wider window costs no extra fetch time.
 STRIKE_PCT = 0.0               # 0 = FULL chain (fetch is one call regardless); use --strike-pct to trim
 TEST_TABLE = "options_openbb"
+PERMANENT_FAIL = set()         # names with no listed options anywhere (CBOE + yahoo) — never retried
 
 
 def compare_vs_yfinance(trade_date=None):
@@ -303,6 +310,9 @@ def fetch_chain_openbb(obb, ticker, provider, trade_dt):
         if raw is not None:
             print(f"  {ticker}: not on CBOE -> recovered via raw yfinance ({len(raw)} rows)")
             return raw
+        # not on CBOE AND yahoo has no chains either -> genuinely optionless.
+        # Mark permanent so the retry rounds don't waste requests re-hammering it.
+        PERMANENT_FAIL.add(ticker)
     if df is None or len(df) == 0:
         print(f"  {ticker}: chain fetch failed ({last_err})")
         return None
@@ -380,15 +390,17 @@ def fetch_chain_openbb(obb, ticker, provider, trade_dt):
 def main():
     ap = argparse.ArgumentParser(description="OpenBB options fetch benchmark vs NYSE_YFin.py")
     ap.add_argument("--limit", type=int, default=None, help="only first N tickers (quick benchmark)")
-    ap.add_argument("--workers", type=int, default=8, help="parallel fetch workers (no inter-ticker sleep)")
+    ap.add_argument("--workers", type=int, default=4,
+                    help="parallel fetch workers (4 = safe for CBOE; 8 trips the throttle)")
     ap.add_argument("--provider", default="cboe", help="OpenBB options provider (cboe|yfinance|...)")
     ap.add_argument("--strike-pct", type=float, default=None,
                     help="strike window as fraction of spot (e.g. 0.30 = ±30%%; 0 = full chain)")
-    ap.add_argument("--universe", default=UNIVERSE_SHEET_ACTIVE,
-                    help=f"universe sheet name (e.g. {EXPANDED_SHEET})")
+    ap.add_argument("--universe", default=EXPANDED_SHEET,
+                    help=f"universe sheet (default {EXPANDED_SHEET}; auto-built if missing; "
+                         f"'{UNIVERSE_SHEET_ACTIVE}' = small production set)")
     ap.add_argument("--build-universe", action="store_true",
                     help="build the expanded S&P500+NDX+tiers universe sheet and exit")
-    ap.add_argument("--pace", type=float, default=0.6,
+    ap.add_argument("--pace", type=float, default=0.75,
                     help="per-request stagger seconds (rate-limit guard; 0 = blast)")
     ap.add_argument("--chunk-size", type=int, default=80,
                     help="tickers per chunk (rest between chunks lets the rate window reset)")
@@ -410,6 +422,13 @@ def main():
         return
 
     obb = _load_openbb()
+    # auto-build the expanded sheet on first run (so plain `python NYSE_OpenBB.py` just works)
+    if args.universe == EXPANDED_SHEET:
+        try:
+            pd.read_excel(UNIVERSE_FILE, sheet_name=EXPANDED_SHEET, nrows=1)
+        except Exception:
+            print(f"universe sheet '{EXPANDED_SHEET}' missing -> building it now (one-time)…")
+            build_expanded_universe()
     tickers = load_universe(args.limit, sheet=args.universe)
     trade_dt = datetime.now().date()
     table = TEST_TABLE
@@ -477,27 +496,31 @@ def main():
     # chunked main passes with rests so CBOE's throttle window resets.
     # ADAPTIVE: if a chunk gets >25% throttled, slow down for the rest of the run.
     chunks = [tickers[i:i + args.chunk_size] for i in range(0, len(tickers), args.chunk_size)]
-    pace, rest = args.pace, args.rest
+    pace, rest, workers = args.pace, args.rest, args.workers
     for ci, ch in enumerate(chunks, 1):
         f0 = len(failed)
-        run_pass(ch, args.workers, pace, f"chunk {ci}/{len(chunks)}")
+        run_pass(ch, workers, pace, f"chunk {ci}/{len(chunks)}")
         fail_frac = (len(failed) - f0) / max(len(ch), 1)
-        if fail_frac > 0.25:
+        if fail_frac > 0.25:                    # heavy throttle -> back off on ALL levers
             pace = min(pace * 1.5, 2.0); rest = min(int(rest * 1.5), 120)
-            log(f"  throttled ({fail_frac*100:.0f}% fails) -> slowing: pace {pace:.2f}s rest {rest}s")
+            workers = max(2, workers // 2)
+            log(f"  throttled ({fail_frac*100:.0f}% fails) -> slowing: "
+                f"workers {workers} pace {pace:.2f}s rest {rest}s")
         if ci < len(chunks):
             time.sleep(rest)
 
-    # final slow retry rounds for anything that failed
-    for rnd in (1, 2):
-        retry = list(dict.fromkeys(failed)); failed = []
+    # final slow retry rounds — escalating backoff, permanently-optionless names excluded
+    for rnd in (1, 2, 3):
+        retry = [t for t in dict.fromkeys(failed) if t not in PERMANENT_FAIL]
+        failed = [t for t in failed if t in PERMANENT_FAIL]      # keep only permanent in the tally
         if not retry:
             break
-        log(f"retry round {rnd}: {len(retry)} tickers (60s backoff, slow)")
-        time.sleep(60)
+        backoff = 60 * rnd
+        log(f"retry round {rnd}: {len(retry)} throttled tickers ({backoff}s backoff, slow single-file)")
+        time.sleep(backoff)
         for i in range(0, len(retry), 40):
-            run_pass(retry[i:i + 40], 1, 1.2, f"retry{rnd} {i//40+1}", count_progress=False)
-            time.sleep(args.rest)
+            run_pass(retry[i:i + 40], 1, 1.2 + 0.3 * rnd, f"retry{rnd} {i//40+1}", count_progress=False)
+            time.sleep(rest)
 
     # ── optional: ALSO archive the day to Parquet (zstd) and clear it from sqlite
     # (space-saver mode). Default now KEEPS rows in the DB (user wants one DB).
@@ -518,14 +541,26 @@ def main():
             log(f"parquet export failed ({e}) — data remains in sqlite")
     conn.close()
     elapsed = time.time() - t0
+    perm = sorted(PERMANENT_FAIL)
+    thr = sorted(set(failed) - PERMANENT_FAIL)
     log("================ SUMMARY ================")
-    log(f"success      : {total_ok}/{len(tickers)} tickers  (final failures: {len(set(failed))})")
-    if failed:
-        log(f"failed names : {', '.join(sorted(set(failed))[:40])}")
+    log(f"success      : {total_ok}/{len(tickers)} tickers")
+    if perm:
+        log(f"no options   : {', '.join(perm)}  (not optionable anywhere — ignore / purge from sheet)")
+    if thr:
+        log(f"throttled    : {', '.join(thr[:40])}  -> just rerun the same command later (idempotent, "
+            "already-captured names are refetched cleanly)")
     log(f"rows written : {total_rows} -> {table} (trade_date {today_str})")
     log(f"total time   : {elapsed/60:.1f} min  (yfinance baseline ~{len(tickers)*4/60:.0f} min sequential)")
     log(f"log file     : {log_path}")
     _logf.close()
+
+    # parallel-test scorer: runs automatically when the yfinance side also has today's data
+    print()
+    try:
+        compare_vs_yfinance(None)
+    except Exception as e:
+        print(f"(compare vs yfinance skipped: {e})")
 
 
 if __name__ == "__main__":

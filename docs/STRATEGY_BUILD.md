@@ -79,6 +79,15 @@ so nothing is hidden.
 | Prophet / ARIMA "forecast" | One-liner | Markets aren't smoothly trending; garbage on returns |
 | Single-indicator "signal" repos | Easy to copy | No OOS validation; survivorship bias |
 
+### 3D. Adoption status (are we USING these, or just aware of them?)
+| Tool | "Bloomberg/Aladdin" role | Status in our stack | Decision |
+|------|--------------------------|---------------------|----------|
+| **OpenBB** (Bloomberg-like terminal) | data+analytics terminal | ❌ not integrated | **Our `dashboard.py` already IS the Bloomberg-like terminal** (24 pages). Full OpenBB SDK = heavy dep, overlaps yfinance/Finnhub → skip unless a specific feed is needed |
+| **PyPortfolioOpt / Riskfolio-Lib** (Aladdin *risk* side) | signals → risk-sized positions | ❌ not built | **Highest-value gap. Now feasible** (6y `stock_history` → covariance). Recommend building a native risk-sizer/optimizer (no dep) |
+| **Alphalens** (factor eval) | prove a signal | ✅ built natively as `/ic` | done |
+| **vectorbt** (fast backtest) | universe signal sweeps | ❌ not adopted | optional; our scanners already vectorize enough. Revisit if backtests get heavy |
+| **microsoft/qlib** (ML alpha) | walk-forward ML | ❌ not adopted | big lift; only if we want an ML alpha layer. Parked |
+
 ### Best fits for THIS bot (priority order)
 1. ✅ **DONE — Alphalens-style IC built natively** as `/ic` (`_ic_analyze`): cross-sectional rank IC (Spearman) + IC-IR + t-stat + Q5−Q1 quantile spread vs forward returns, no dependency. In bot + dashboard hub. (Adopting the actual `alphalens-reloaded` lib later would add plotting/tearsheets.)
 2. **vectorbt** — sweep the 24-model ensemble across the whole universe fast (vs per-ticker loop).

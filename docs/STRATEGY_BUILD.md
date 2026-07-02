@@ -28,6 +28,15 @@ so nothing is hidden.
 | 11 | Dividend-capture / ex-div assignment risk | `/divcap` | ✅ Done | pending | fwd yield + ex-date via yfinance .info, 12h cache |
 | 12 | Put-write / covered-call systematic index (PUT/BXM style) | `/pwindex` | ✅ Done | pending | APPROX BS-priced backtest vs B&H; labeled educational |
 
+| 19 | Positioning builder (new/increasing OI + price starting) | `/building` | ✅ Done | pending | LONG=calls added / SHORT=puts added vs standing OI; stage S/I/C; options_change + stock_daily; in dashboard hub |
+
+## 1c. Data layer — DB-first history (reduce API dependence)
+- ✅ **`stock_history` table** added to `US_data.db` — multi-year daily OHLC. `_daily_history()` / `_history_matrix()`
+  read DB-first, lazily backfill from yfinance once (write-through), and `_sync_history_from_daily()` folds in
+  `stock_daily` for FREE ongoing maintenance (no repeat API). Backfilled full universe (~135 tickers, ~105k rows, 6y).
+- Repointed `/ic`, `/season`, `/rotate`, `/pwindex` to it → `/ic` momentum N went **21 → ~1,400** (t≈+5, real edge).
+- Can't be backfilled (yfinance serves no history): option-chain bid/ask/IV → `/cc /condor /calendar` stay live.
+
 ## 1b. Streamlit dashboard mirror
 - ✅ **"⚙️ Strategy Scanners" page** (dashboard.py) — one hub, selectbox + Run scan, reuses the
   `telegram_bot_optimized` scanner functions (single engine, two front-ends). Covers WAN, Earnvol,

@@ -63,7 +63,7 @@
 - `trades`: trade_id, ticker, strategy, entry_date, expiry, status (OPEN/CLOSED), strike, option_type, quantity, entry_price, pnl
 - `us_analytics_daily`: call_notional_oi, put_notional_oi, bull_score, bear_score, avg_spot
 - self-managed: `signal_accuracy`, `signal_weights`, `momentum_ranks`, `gamma_wall_trades`, `event_journal`, `bookmarks`, `alert_dedup`
-- `stock_history`: ticker, trade_date, open, high, low, close, volume (multi-year daily; DB-first history layer). Read via `_daily_history(tk, years)` (single) / `_history_matrix(tickers, years)` (universe) — DB-first, lazy yfinance backfill + write-through, maintained FREE by `_sync_history_from_daily()` folding in `stock_daily`. Powers `/ic`, `/season`, `/rotate`, `/pwindex` with years of history instead of the ~6mo `stock_daily` window. Reduces per-call API dependence.
+- `stock_history`: ticker, trade_date, open, high, low, close, volume (multi-year daily; DB-first history layer). Read via `_daily_history(tk, years)` (single) / `_history_matrix(tickers, years)` (universe) — DB-first; backfill = `_fetch_yf_history` (primary) → `_fetch_openbb_history` (fallback, dormant unless `pip install openbb`); write-through; maintained FREE by `_sync_history_from_daily()` folding in `stock_daily`. Powers `/ic`, `/season`, `/rotate`, `/pwindex` with years of history instead of the ~6mo `stock_daily` window. Reduces per-call API dependence.
 
 ## Key functions
 - `_oi_signal_light(call_chg, put_chg, pcr)` — hedge-aware aggregate OI signal

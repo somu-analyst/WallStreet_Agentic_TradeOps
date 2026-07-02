@@ -10955,6 +10955,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await pairs_view(query)
         elif data == "season_view":
             await season_view(query)
+        elif data == "rotate_view":
+            await rotate_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -21759,6 +21761,85 @@ async def season_view(query):
     await _send_season(query.message, rows)
 
 
+# ── SECTOR ROTATION / RELATIVE STRENGTH (ETF momentum ranking) ───
+_SECTOR_ETFS = {
+    "Tech": "XLK", "Comm": "XLC", "Discr": "XLY", "Staples": "XLP",
+    "Enrgy": "XLE", "Fin": "XLF", "Health": "XLV", "Indu": "XLI",
+    "Matls": "XLB", "Util": "XLU", "REIT": "XLRE", "Semis": "SMH",
+}
+_ROTATE_CACHE = {}   # 'ALL' -> (ts, rows)
+
+def _rotate_scan():
+    """Rank sector ETFs by relative strength (blended 1/3/6-mo return, excess
+    vs SPY). Top = overweight, bottom = underweight. Cached 1h."""
+    import time as _t
+    now = _t.time()
+    c = _ROTATE_CACHE.get("ALL")
+    if c and now - c[0] < 3600:
+        return c[1]
+    rows = []
+    spy_ref = {}
+    try:
+        spyh = yf.Ticker("SPY").history(period="1y")["Close"].dropna()
+        for n, d in (("1m", 21), ("3m", 63), ("6m", 126)):
+            if len(spyh) > d:
+                spy_ref[n] = float(spyh.iloc[-1] / spyh.iloc[-d - 1] - 1)
+    except Exception:
+        spy_ref = {}
+    for name, sym in _SECTOR_ETFS.items():
+        try:
+            h = yf.Ticker(sym).history(period="1y")["Close"].dropna()
+            if len(h) < 130:
+                continue
+            r1 = float(h.iloc[-1] / h.iloc[-22] - 1)
+            r3 = float(h.iloc[-1] / h.iloc[-64] - 1)
+            r6 = float(h.iloc[-1] / h.iloc[-127] - 1)
+            rs = 0.2 * r1 + 0.5 * r3 + 0.3 * r6                 # blended relative strength
+            excess = r3 - spy_ref.get("3m", 0.0)                # excess vs SPY (3m)
+            rows.append({"name": name, "sym": sym, "r1": r1, "r3": r3, "r6": r6,
+                         "rs": rs, "excess": excess})
+        except Exception:
+            continue
+    rows.sort(key=lambda z: -z["rs"])
+    _ROTATE_CACHE["ALL"] = (now, rows)
+    return rows
+
+
+async def _send_rotate(msg, rows):
+    if not rows:
+        await msg.reply_text("Sector data unavailable (yfinance).", parse_mode=H)
+        return
+    n = len(rows); top = max(1, n // 3)
+    _hdrs = ("ST", "Sector", "3M%", "6M%")
+    _data = []
+    for i, r in enumerate(rows):
+        emoji = "🟢" if i < top else ("🔴" if i >= n - top else "🟡")
+        _data.append((emoji, r["name"], f"{r['r3']*100:+.1f}", f"{r['r6']*100:+.1f}"))
+    table = _pipe_table(_hdrs, _data, right_cols={2, 3},
+                        legend="ranked by relative strength · 🟢 overweight / 🔴 underweight · 3M/6M return")
+    lead = rows[0]; lag = rows[-1]
+    best = (f"<b>Leaders:</b> {', '.join(r['name'] for r in rows[:3])}  ·  "
+            f"<b>Laggards:</b> {', '.join(r['name'] for r in rows[-3:])}\n"
+            f"<b>Top:</b> {lead['name']} ({lead['sym']}) 3M {lead['r3']*100:+.1f}% "
+            f"({lead['excess']*100:+.1f}% vs SPY)")
+    txt = ("🔄 <b>Sector Rotation — Relative Strength</b>\n"
+           "<i>ride leaders, avoid laggards · momentum rotates · not advice</i>\n\n"
+           + table + "\n\n" + best)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="rotate_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def rotate_command(update, ctx):
+    """/rotate — sector-ETF relative-strength ranking (overweight leaders, avoid laggards)."""
+    await update.message.reply_text("🔄 Ranking sectors…", parse_mode=H)
+    await _send_rotate(update.message, _rotate_scan())
+
+
+async def rotate_view(query):
+    await _send_rotate(query.message, _rotate_scan())
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -23951,6 +24032,7 @@ def main():
     app.add_handler(CommandHandler("cc", cc_command))
     app.add_handler(CommandHandler("pairs", pairs_command))
     app.add_handler(CommandHandler("season", season_command))
+    app.add_handler(CommandHandler("rotate", rotate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

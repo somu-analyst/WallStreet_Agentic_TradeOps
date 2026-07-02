@@ -25,7 +25,7 @@ so nothing is hidden.
 | 8 | Sector rotation / relative-strength ranker | `/rotate` | ✅ Done | pending | 12 sector ETFs, blended 1/3/6-mo RS vs SPY, 1h cache |
 | 9 | Cross-sectional mean-reversion (short-term reversal) | `/revert` | ✅ Done | pending | 5d return z-score vs universe; pure stock_daily |
 | 10 | Macro event positioner (FOMC/CPI/NFP drift+vol) | `/macro` (enhance) | ⏳ Planned | — | modest, decaying edge |
-| 11 | Dividend-capture / ex-div assignment risk | `/divcap` | ⏳ Planned | — | needs dividend calendar |
+| 11 | Dividend-capture / ex-div assignment risk | `/divcap` | ✅ Done | pending | fwd yield + ex-date via yfinance .info, 12h cache |
 | 12 | Put-write / covered-call systematic index (PUT/BXM style) | `/pwindex` | ⏳ Planned | — | backtest-style, educational |
 
 ## 2. Already in the bot (don't rebuild — enhance only)

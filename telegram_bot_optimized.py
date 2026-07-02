@@ -10969,6 +10969,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await pead_view(query)
         elif data == "ic_view":
             await ic_view(query)
+        elif data == "building_view":
+            await building_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -21684,8 +21686,8 @@ def _season_stats(tk, years=10):
         return c[1]
     res = None
     try:
-        h = yf.Ticker(tk).history(period=f"{years}y", interval="1d")["Close"].dropna()
-        if len(h) > 250:
+        h = _daily_history(tk, years)          # DB-first + yfinance backfill
+        if h is not None and len(h) > 250:
             today = datetime.now()
             m = today.month
             # Monthly returns by calendar month
@@ -21792,16 +21794,16 @@ def _rotate_scan():
     rows = []
     spy_ref = {}
     try:
-        spyh = yf.Ticker("SPY").history(period="1y")["Close"].dropna()
+        spyh = _daily_history("SPY", 1)
         for n, d in (("1m", 21), ("3m", 63), ("6m", 126)):
-            if len(spyh) > d:
+            if spyh is not None and len(spyh) > d:
                 spy_ref[n] = float(spyh.iloc[-1] / spyh.iloc[-d - 1] - 1)
     except Exception:
         spy_ref = {}
     for name, sym in _SECTOR_ETFS.items():
         try:
-            h = yf.Ticker(sym).history(period="1y")["Close"].dropna()
-            if len(h) < 130:
+            h = _daily_history(sym, 1)
+            if h is None or len(h) < 130:
                 continue
             r1 = float(h.iloc[-1] / h.iloc[-22] - 1)
             r3 = float(h.iloc[-1] / h.iloc[-64] - 1)
@@ -22309,8 +22311,8 @@ def _pwindex_sim(symbol="SPY", years=3, r=0.045, vrp=0.03):
 
     res = None
     try:
-        h = yf.Ticker(symbol).history(period=f"{years}y")["Close"].dropna()
-        if len(h) > 260:
+        h = _daily_history(symbol, years)
+        if h is not None and len(h) > 260:
             daily_ret = h.pct_change()
             # month-start anchor points
             month_start = h.resample("MS").first().dropna()
@@ -22476,6 +22478,96 @@ async def pead_view(query):
     await _send_pead(query.message, _pead_scan())
 
 
+# ── MULTI-YEAR PRICE HISTORY (DB-first, yfinance fallback + backfill) ─
+_HIST_FETCHED = set()   # in-process guard: fetch each ticker's backfill at most once/run
+
+def _ensure_stock_history(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stock_history (
+            ticker TEXT NOT NULL, trade_date TEXT NOT NULL,
+            open REAL, high REAL, low REAL, close REAL, volume REAL,
+            PRIMARY KEY (ticker, trade_date)
+        )
+    """)
+    conn.commit()
+
+
+def _sync_history_from_daily(conn):
+    """Keep stock_history current for FREE (no API): fold any newer stock_daily
+    rows into stock_history. The EOD pipeline already fills stock_daily daily, so
+    this is how history is maintained without repeat yfinance calls. Idempotent."""
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO stock_history (ticker, trade_date, open, high, low, close, volume) "
+            "SELECT UPPER(ticker), trade_date, NULL, high, low, close, volume "
+            "FROM stock_daily WHERE close IS NOT NULL")
+        conn.commit()
+    except Exception:
+        log.debug("stock_history sync-from-daily failed", exc_info=True)
+
+
+def _daily_history(ticker, years=6, conn=None):
+    """Daily close Series (datetime index), DB-first from stock_history; if a
+    ticker is missing or short, lazily backfill ~years from yfinance and persist
+    (write-through). None if nothing available. Extends US_data.db, no new file."""
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        _ensure_stock_history(conn)
+        if own:
+            _sync_history_from_daily(conn)      # free top-up from EOD pipeline
+        tk = ticker.upper()
+        q = "SELECT trade_date, close FROM stock_history WHERE ticker=? ORDER BY trade_date"
+        df = pd.read_sql(q, conn, params=(tk,))
+        if len(df) < years * 252 * 0.7 and tk not in _HIST_FETCHED:
+            _HIST_FETCHED.add(tk)
+            try:
+                h = yf.Ticker(tk).history(period=f"{years}y")[["Open", "High", "Low", "Close", "Volume"]].dropna()
+                if len(h):
+                    rows = [(tk, d.strftime("%Y-%m-%d"), float(r.Open), float(r.High),
+                             float(r.Low), float(r.Close), float(r.Volume)) for d, r in h.iterrows()]
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO stock_history "
+                        "(ticker,trade_date,open,high,low,close,volume) VALUES (?,?,?,?,?,?,?)", rows)
+                    conn.commit()
+                    df = pd.read_sql(q, conn, params=(tk,))
+            except Exception:
+                log.debug("stock_history backfill failed for %s", tk, exc_info=True)
+        if df.empty:
+            return None
+        return pd.Series(df["close"].values, index=pd.to_datetime(df["trade_date"]))
+    finally:
+        if own:
+            conn.close()
+
+
+def _history_matrix(tickers, years=6, conn=None):
+    """Wide close matrix (dates × tickers) from stock_history, lazily backfilling
+    any missing tickers. For universe-wide factor/pairs work with real history."""
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        _ensure_stock_history(conn)
+        _sync_history_from_daily(conn)          # free top-up from EOD pipeline
+        tks = [str(t).upper() for t in tickers]
+        for tk in tks:
+            _daily_history(tk, years, conn)      # ensure each is populated
+        ph = ",".join("?" * len(tks))
+        df = pd.read_sql(
+            f"SELECT ticker, trade_date, close FROM stock_history WHERE ticker IN ({ph})",
+            conn, params=tks)
+        if df.empty:
+            return pd.DataFrame()
+        wide = df.pivot_table(index="trade_date", columns="ticker", values="close", aggfunc="last").sort_index()
+        wide.index = pd.to_datetime(wide.index)
+        return wide
+    finally:
+        if own:
+            conn.close()
+
+
 # ── FACTOR IC / QUANTILE VALIDATION (Alphalens-style, no dependency) ─
 def _ic_factor_matrix(wide, factor):
     """Per-(date,ticker) factor value. Higher factor = more bullish expectation."""
@@ -22493,16 +22585,9 @@ def _ic_analyze(conn, factor="reversal", horizons=(1, 3, 5, 10), n_buckets=5):
     return, per horizon, plus pooled quantile-spread (Q_top - Q_bottom). Pure
     stock_daily read. Returns {horizon: metrics or None}."""
     from scipy.stats import spearmanr
-    try:
-        df = pd.read_sql("SELECT ticker, trade_date, close FROM stock_daily", conn)
-    except Exception:
+    wide = _history_matrix(SCAN_UNIVERSE, years=6, conn=conn)   # DB-first, years of history
+    if wide is None or wide.empty:
         return {}
-    if df.empty:
-        return {}
-    df["ticker"] = df["ticker"].str.upper()
-    wide = df.pivot_table(index="trade_date", columns="ticker", values="close", aggfunc="last").sort_index()
-    uni = [t for t in SCAN_UNIVERSE if t in wide.columns]
-    wide = wide[uni]
     fac = _ic_factor_matrix(wide, factor)
     if fac is None:
         return {}
@@ -22593,6 +22678,124 @@ async def ic_command(update, ctx):
 
 async def ic_view(query):
     await _send_ic(query.message)
+
+
+# ── POSITIONING BUILDER (new/increasing OI bets + price confirming) ─
+def _positioning_scan(conn, min_build_pct=0.03):
+    """Detect directional option positioning BUILDING + price starting to confirm.
+    Bearish = puts being added (new/increasing OI) while price rolls over.
+    Bullish = calls being added while price turns up. Pure DB (options_change +
+    stock_daily). Stage: S(tarting) OI build only · I(ncreasing) big build ·
+    C(onfirmed) build + price already moving the same way. Sorted by score."""
+    try:
+        latest = pd.read_sql(
+            "SELECT trade_date_now FROM options_change ORDER BY "
+            "substr(trade_date_now,7,4)||substr(trade_date_now,1,2)||substr(trade_date_now,4,2) "
+            "DESC LIMIT 1", conn)
+        if latest.empty:
+            # ISO-date DBs: fall back to plain max
+            latest = pd.read_sql("SELECT MAX(trade_date_now) AS trade_date_now FROM options_change", conn)
+        ld = latest["trade_date_now"].iloc[0]
+        agg = pd.read_sql("""
+            SELECT UPPER(ticker) AS ticker,
+                   SUM(COALESCE(change_OI_Call,0)) AS c_chg,
+                   SUM(COALESCE(change_OI_Put,0))  AS p_chg,
+                   SUM(COALESCE(openInt_Call_now,0)) AS c_oi,
+                   SUM(COALESCE(openInt_Put_now,0))  AS p_oi,
+                   SUM(COALESCE(vol_Call_now,0)) AS c_vol,
+                   SUM(COALESCE(vol_Put_now,0))  AS p_vol
+            FROM options_change WHERE trade_date_now=? GROUP BY UPPER(ticker)
+        """, conn, params=(ld,))
+    except Exception:
+        return []
+    if agg.empty:
+        return []
+
+    # 5-day price change per ticker (is the move starting?)
+    try:
+        sd = pd.read_sql("SELECT UPPER(ticker) AS ticker, trade_date, close FROM stock_daily", conn)
+        wide = sd.pivot_table(index="trade_date", columns="ticker", values="close", aggfunc="last").sort_index()
+        ret5 = (wide.iloc[-1] / wide.iloc[-6] - 1) if len(wide) >= 6 else pd.Series(dtype=float)
+    except Exception:
+        ret5 = pd.Series(dtype=float)
+
+    rows = []
+    for _, r in agg.iterrows():
+        tk = r["ticker"]
+        c_chg, p_chg = float(r["c_chg"]), float(r["p_chg"])
+        c_oi, p_oi = float(r["c_oi"]), float(r["p_oi"])
+        # dominant side + build intensity vs standing OI
+        if c_chg >= p_chg:
+            bias, dom_chg, dom_oi = "LONG", c_chg, c_oi
+        else:
+            bias, dom_chg, dom_oi = "SHORT", p_chg, p_oi
+        if dom_chg <= 0 or dom_oi <= 0:
+            continue
+        build_pct = dom_chg / dom_oi
+        if build_pct < min_build_pct:
+            continue
+        pr = float(ret5.get(tk, 0.0)) if len(ret5) else 0.0
+        confirm = (bias == "LONG" and pr > 0.01) or (bias == "SHORT" and pr < -0.01)
+        against = (bias == "LONG" and pr < -0.03) or (bias == "SHORT" and pr > 0.03)
+        if against:
+            continue                                   # OI build fighting the tape — skip
+        if confirm and abs(pr) >= 0.02:
+            stage = "C"                                # move already starting
+        elif build_pct >= 0.10:
+            stage = "I"                                # big new positioning, price not yet
+        else:
+            stage = "S"                                # just starting
+        score = build_pct * 100 + (15 if stage == "C" else 8 if stage == "I" else 0)
+        rows.append({"ticker": tk, "bias": bias, "stage": stage, "build_pct": build_pct,
+                     "dom_chg": dom_chg, "ret5": pr})
+    rows.sort(key=lambda x: -(x["build_pct"] * 100 + (15 if x["stage"] == "C" else 8 if x["stage"] == "I" else 0)))
+    return rows
+
+
+async def _send_positioning(msg, rows):
+    if not rows:
+        await msg.reply_text("No fresh directional positioning building right now.", parse_mode=H)
+        return
+    longs = [r for r in rows if r["bias"] == "LONG"][:8]
+    shorts = [r for r in rows if r["bias"] == "SHORT"][:8]
+
+    def _tbl(rs, title):
+        _data = []
+        for r in rs:
+            emoji = "🟢" if r["bias"] == "LONG" else "🔴"
+            _data.append((emoji, r["ticker"], f"{r['build_pct']*100:.0f}", r["stage"], f"{r['ret5']*100:+.1f}"))
+        return _pipe_table(("ST", "Tkr", "OI+%", "Stg", "5d%"), _data, right_cols={2, 4}, title=title)
+
+    parts = ["🧭 <b>Positioning Builder — bets forming + price starting</b>",
+             "<i>new/increasing option OI with price beginning to confirm. "
+             "Stg: S=starting · I=increasing · C=confirmed (moving). OI+%=new OI vs standing. Not advice.</i>"]
+    if longs:
+        parts.append(_tbl(longs, "LONGS BUILDING (calls added)"))
+    if shorts:
+        parts.append(_tbl(shorts, "SHORTS BUILDING (puts added)"))
+    await msg.reply_text("\n\n".join(parts)[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="building_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def building_command(update, ctx):
+    """/building — positioning tracker: new/increasing call (long) or put (short) OI with price starting to confirm."""
+    await update.message.reply_text("🧭 Scanning positioning builds…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _positioning_scan(conn)
+    finally:
+        conn.close()
+    await _send_positioning(update.message, rows)
+
+
+async def building_view(query):
+    conn = get_conn()
+    try:
+        rows = _positioning_scan(conn)
+    finally:
+        conn.close()
+    await _send_positioning(query.message, rows)
 
 
 async def plan_command(update, ctx):
@@ -24795,6 +24998,7 @@ def main():
     app.add_handler(CommandHandler("pwindex", pwindex_command))
     app.add_handler(CommandHandler("pead", pead_command))
     app.add_handler(CommandHandler("ic", ic_command))
+    app.add_handler(CommandHandler("building", building_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

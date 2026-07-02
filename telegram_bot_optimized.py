@@ -22798,6 +22798,52 @@ async def building_view(query):
     await _send_positioning(query.message, rows)
 
 
+async def building_alert(ctx: ContextTypes.DEFAULT_TYPE):
+    """Scheduled positioning streamer: push NEW Increasing/Confirmed builds once
+    per day (dedup by ticker|bias|stage). Market-hours / weekday gated."""
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    if now_utc.weekday() >= 5:
+        return
+    hour_min = now_utc.hour * 60 + now_utc.minute
+    if not (14 * 60 + 30 <= hour_min <= 21 * 60):
+        return
+    _, chat_id = load_creds()
+    conn = get_conn()
+    try:
+        _ensure_alert_dedup_table(conn)
+        rows = _positioning_scan(conn)
+        today_str = (now_utc - timedelta(hours=5)).date().isoformat()
+        fresh = [r for r in rows if r["stage"] in ("I", "C")
+                 and not _alert_already_sent(
+                     conn, today_str, f"{r['ticker']}|{r['bias']}|{r['stage']}", "building")]
+    except Exception as e:
+        log.warning(f"building_alert scan failed: {e}")
+        conn.close(); return
+    finally:
+        conn.close()
+    if not fresh:
+        return
+    longs = [r for r in fresh if r["bias"] == "LONG"][:8]
+    shorts = [r for r in fresh if r["bias"] == "SHORT"][:8]
+
+    def _tbl(rs, title):
+        _data = [("🟢" if r["bias"] == "LONG" else "🔴", r["ticker"],
+                  f"{r['build_pct']*100:.0f}", r["stage"], f"{r['ret5']*100:+.1f}") for r in rs]
+        return _pipe_table(("ST", "Tkr", "OI+%", "Stg", "5d%"), _data, right_cols={2, 4}, title=title)
+
+    now_et = now_utc - timedelta(hours=5)
+    parts = [hdr(f"🧭 POSITIONING BUILDING · {now_et.strftime('%H:%M ET')}"),
+             f"<i>{len(fresh)} new build(s) · Stg I=increasing / C=confirmed</i>"]
+    if longs:
+        parts.append(_tbl(longs, "LONGS BUILDING"))
+    if shorts:
+        parts.append(_tbl(shorts, "SHORTS BUILDING"))
+    try:
+        await ctx.bot.send_message(chat_id=int(chat_id), text="\n\n".join(parts), parse_mode=H)
+    except Exception as e:
+        log.warning(f"building_alert send failed: {e}")
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -25039,6 +25085,9 @@ def main():
         # WAN-streamer: 15-min ensemble signal stream (market-hours gated, daily dedup)
         job_queue.run_repeating(wan_streamer_alert, interval=900, first=120)
         log.info("Scheduled 15-min WAN-streamer ensemble signal stream")
+        # Positioning-builder streamer: 30-min, market-hours gated, daily dedup
+        job_queue.run_repeating(building_alert, interval=1800, first=150)
+        log.info("Scheduled 30-min positioning-builder stream")
 
         # Event writeup system — pre/post macro briefs + anomaly scan
         try:

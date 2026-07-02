@@ -250,10 +250,11 @@ def fetch_chain_openbb(obb, ticker, provider, trade_dt):
     def side(d, suff):
         def num(key):
             return pd.to_numeric(d[m[key]], errors="coerce").values if m[key] else np.nan
+        # NOTE: contractSymbol columns dropped — fully reconstructable from
+        # ticker+expiry+strike+type, and they were ~35% of storage (long strings).
         out = pd.DataFrame({
             "strike": d["_strike"].values,
             "expiry_date": d["_exp"].dt.strftime("%Y-%m-%d").values,
-            f"contractSymbol_{suff}": d[m["contract"]].values if m["contract"] else None,
             f"openInt_{suff}": num("open_interest"),
             f"lastPrice_{suff}": num("last"),
             f"vol_{suff}": num("volume"),
@@ -267,6 +268,9 @@ def fetch_chain_openbb(obb, ticker, provider, trade_dt):
 
     merged = pd.merge(side(calls, "Call"), side(puts, "Put"),
                       on=["strike", "expiry_date"], how="outer")
+    for c in merged.columns:                     # float32 halves numeric storage
+        if merged[c].dtype == "float64":
+            merged[c] = merged[c].astype("float32")
 
     # strike window: percent of spot (consistent across tickers; 0 = full chain)
     if spot is not None and STRIKE_PCT > 0 and not merged.empty:
@@ -297,6 +301,8 @@ def main():
                     help="tickers per chunk (rest between chunks lets the rate window reset)")
     ap.add_argument("--rest", type=int, default=45,
                     help="seconds to rest between chunks")
+    ap.add_argument("--no-parquet", action="store_true",
+                    help="keep the day's rows in sqlite instead of compressing to parquet")
     args = ap.parse_args()
     if args.strike_pct is not None:
         global STRIKE_PCT
@@ -370,12 +376,19 @@ def main():
         log(f"[{label}] ok {ok}/{len(tks)} · {_progress()} · rows {total_rows:,}")
         return ok
 
-    # chunked main passes with rests so CBOE's throttle window resets
+    # chunked main passes with rests so CBOE's throttle window resets.
+    # ADAPTIVE: if a chunk gets >25% throttled, slow down for the rest of the run.
     chunks = [tickers[i:i + args.chunk_size] for i in range(0, len(tickers), args.chunk_size)]
+    pace, rest = args.pace, args.rest
     for ci, ch in enumerate(chunks, 1):
-        run_pass(ch, args.workers, args.pace, f"chunk {ci}/{len(chunks)}")
+        f0 = len(failed)
+        run_pass(ch, args.workers, pace, f"chunk {ci}/{len(chunks)}")
+        fail_frac = (len(failed) - f0) / max(len(ch), 1)
+        if fail_frac > 0.25:
+            pace = min(pace * 1.5, 2.0); rest = min(int(rest * 1.5), 120)
+            log(f"  throttled ({fail_frac*100:.0f}% fails) -> slowing: pace {pace:.2f}s rest {rest}s")
         if ci < len(chunks):
-            time.sleep(args.rest)
+            time.sleep(rest)
 
     # final slow retry rounds for anything that failed
     for rnd in (1, 2):
@@ -388,6 +401,22 @@ def main():
             run_pass(retry[i:i + 40], 1, 1.2, f"retry{rnd} {i//40+1}", count_progress=False)
             time.sleep(args.rest)
 
+    # ── compress the day to Parquet (zstd) and keep SQLite only as staging ──
+    pq_path = None
+    if not args.no_parquet:
+        try:
+            pq_dir = os.path.join(DATA_DIR, "openbb_chains")
+            os.makedirs(pq_dir, exist_ok=True)
+            day_df = pd.read_sql(f"SELECT * FROM {table} WHERE trade_date=?", conn, params=(today_str,))
+            if len(day_df):
+                pq_path = os.path.join(pq_dir, f"chains_{today_str}.parquet")
+                day_df.to_parquet(pq_path, compression="zstd", index=False)
+                conn.execute(f"DELETE FROM {table} WHERE trade_date=?", (today_str,))
+                conn.commit(); conn.execute("VACUUM"); conn.commit()
+                mb = os.path.getsize(pq_path) / 1e6
+                log(f"parquet      : {pq_path}  ({mb:.1f} MB, zstd; sqlite staging cleared)")
+        except Exception as e:
+            log(f"parquet export failed ({e}) — data remains in sqlite")
     conn.close()
     elapsed = time.time() - t0
     log("================ SUMMARY ================")

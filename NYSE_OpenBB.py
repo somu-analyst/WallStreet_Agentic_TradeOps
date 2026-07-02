@@ -57,17 +57,75 @@ def _load_openbb():
         raise SystemExit(1)
 
 
-def load_universe(limit=None):
-    """Active ticker list from ticker_universe.xlsx (same source as NYSE_YFin)."""
+def load_universe(limit=None, sheet=UNIVERSE_SHEET_ACTIVE):
+    """Ticker list from ticker_universe.xlsx (same file as NYSE_YFin; sheet selectable)."""
     try:
-        df = pd.read_excel(UNIVERSE_FILE, sheet_name=UNIVERSE_SHEET_ACTIVE)
+        df = pd.read_excel(UNIVERSE_FILE, sheet_name=sheet)
         col = "ticker" if "ticker" in df.columns else df.columns[0]
         tks = [str(t).strip().upper() for t in df[col].dropna().tolist() if str(t).strip()]
     except Exception as e:
-        print(f"Universe file unavailable ({e}); falling back to a small default set.")
+        print(f"Universe sheet '{sheet}' unavailable ({e}); falling back to a small default set.")
         tks = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "AMD", "GOOGL"]
     tks = sorted(dict.fromkeys(tks))
     return tks[:limit] if limit else tks
+
+
+# ── EXPANDED UNIVERSE (S&P500 + NDX + buzz/global/commodity/crypto tiers) ──
+EXPANDED_SHEET = "openbb_universe"
+# Curated tiers (options-listed only; spot crypto pairs like BTC-USD have no options)
+_BUZZ = ["GME", "AMC", "PLTR", "SOFI", "HOOD", "RKLB", "SMCI", "IONQ", "RGTI", "QUBT",
+         "ACHR", "JOBY", "HIMS", "OKLO", "SMR", "RDDT", "DJT", "LUNR", "ASTS", "NBIS",
+         "TEM", "APP", "CRWV", "SNOW", "NET", "DDOG", "CRWD", "ZS", "PANW", "MSTR"]
+_GLOBAL_ADR = ["TSM", "BABA", "ASML", "SAP", "NVO", "TM", "SONY", "SHOP", "SE", "MELI",
+               "PDD", "JD", "BIDU", "NIO", "GRAB", "ARM", "INFY", "IBN", "UL", "BP"]
+_COUNTRY_ETF = ["EEM", "EFA", "VEA", "VWO", "FXI", "KWEB", "EWJ", "EWZ", "INDA", "EWY",
+                "EWT", "EWG", "EWU", "EWC", "EWA"]
+_COMMODITY = ["GLD", "SLV", "USO", "UNG", "CPER", "PPLT", "PALL", "URA", "DBA", "WEAT",
+              "CORN", "GDX", "GDXJ", "SIL", "XME", "SLX", "LIT"]
+_CRYPTO_EQ = ["IBIT", "FBTC", "ETHA", "BITO", "COIN", "MARA", "RIOT", "CLSK", "HUT", "BITF"]
+_RATES_VOL = ["TLT", "IEF", "SHY", "HYG", "LQD", "AGG", "TMF", "VXX", "UVXY"]
+_BROAD_ETF = ["SPY", "QQQ", "IWM", "DIA", "MDY", "RSP", "XLK", "XLE", "XLF", "XLV", "XLI",
+              "XLB", "XLU", "XLY", "XLP", "XLRE", "XLC", "SMH", "SOXX", "SOXL", "SQQQ",
+              "TQQQ", "ARKK", "XBI", "ITB", "JETS", "TAN"]
+
+
+def _wiki_tickers(url, col_candidates=("Symbol", "Ticker")):
+    """Constituent tickers from a Wikipedia list page (free, no key)."""
+    import urllib.request
+    from io import StringIO
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", "ignore")
+    for t in pd.read_html(StringIO(html)):
+        for col in col_candidates:
+            if col in t.columns:
+                return [str(x).strip().upper().replace(".", "-") for x in t[col].dropna() if str(x).strip()]
+    return []
+
+
+def build_expanded_universe():
+    """Build the expanded universe -> new sheet 'openbb_universe' (production sheets untouched)."""
+    tks = []
+    try:
+        sp = _wiki_tickers("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+        print(f"S&P 500 from Wikipedia: {len(sp)}")
+        tks += sp
+    except Exception as e:
+        print(f"S&P 500 fetch failed ({e}) — continuing without")
+    try:
+        ndx = _wiki_tickers("https://en.wikipedia.org/wiki/Nasdaq-100")
+        print(f"Nasdaq-100 from Wikipedia: {len(ndx)}")
+        tks += ndx
+    except Exception as e:
+        print(f"Nasdaq-100 fetch failed ({e}) — continuing without")
+    tks += _BUZZ + _GLOBAL_ADR + _COUNTRY_ETF + _COMMODITY + _CRYPTO_EQ + _RATES_VOL + _BROAD_ETF
+    # keep the current active names too (nothing lost)
+    tks += load_universe(sheet=UNIVERSE_SHEET_ACTIVE)
+    uni = sorted(dict.fromkeys(t for t in tks if t and t not in ("DXY",)))
+    df = pd.DataFrame({"ticker": uni})
+    with pd.ExcelWriter(UNIVERSE_FILE, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
+        df.to_excel(w, sheet_name=EXPANDED_SHEET, index=False)
+    print(f"Wrote {len(uni)} tickers -> sheet '{EXPANDED_SHEET}' (production sheets untouched)")
+    return uni
 
 
 def _normalize_chain(df):
@@ -185,13 +243,20 @@ def main():
     ap.add_argument("--provider", default="cboe", help="OpenBB options provider (cboe|yfinance|...)")
     ap.add_argument("--strike-pct", type=float, default=None,
                     help="strike window as fraction of spot (e.g. 0.30 = ±30%%; 0 = full chain)")
+    ap.add_argument("--universe", default=UNIVERSE_SHEET_ACTIVE,
+                    help=f"universe sheet name (e.g. {EXPANDED_SHEET})")
+    ap.add_argument("--build-universe", action="store_true",
+                    help="build the expanded S&P500+NDX+tiers universe sheet and exit")
     args = ap.parse_args()
     if args.strike_pct is not None:
         global STRIKE_PCT
         STRIKE_PCT = args.strike_pct
+    if args.build_universe:
+        build_expanded_universe()
+        return
 
     obb = _load_openbb()
-    tickers = load_universe(args.limit)
+    tickers = load_universe(args.limit, sheet=args.universe)
     trade_dt = datetime.now().date()
     table = TEST_TABLE
     print(f"OpenBB fetch: {len(tickers)} tickers · provider={args.provider} · workers={args.workers}")

@@ -40,7 +40,10 @@ UNIVERSE_SHEET_ACTIVE = "ticker_universe"
 OUT_DB_PATH = os.path.join(DATA_DIR, "US_data_openbb_test.db")
 
 MAX_HORIZON_DAYS = 45          # same horizon window as NYSE_YFin
-STRIKE_WINDOW = 25             # +/- strikes around spot (same as NYSE_YFin)
+# Strike filter: PERCENT of spot (not strike count). NYSE_YFin uses +/-25 STRIKES,
+# which is only ~+/-3% on dense-strike names like SPY but ~+/-36% on NVDA — inconsistent.
+# CBOE returns the full chain in one call, so a wider window costs no extra fetch time.
+STRIKE_PCT = 0.30              # keep strikes within +/-30% of spot; 0 = full chain
 TEST_TABLE = "options_openbb_test"
 
 
@@ -151,13 +154,10 @@ def fetch_chain_openbb(obb, ticker, provider, trade_dt):
     merged = pd.merge(side(calls, "Call"), side(puts, "Put"),
                       on=["strike", "expiry_date"], how="outer")
 
-    # strike window (+/- 25 around spot) — same as NYSE_YFin
-    if spot is not None and not merged.empty:
-        strikes = np.sort(merged["strike"].dropna().unique())
-        if len(strikes):
-            i = int(np.abs(strikes - spot).argmin())
-            keep = set(strikes[max(i - STRIKE_WINDOW, 0): i + STRIKE_WINDOW + 1])
-            merged = merged[merged["strike"].isin(keep)].copy()
+    # strike window: percent of spot (consistent across tickers; 0 = full chain)
+    if spot is not None and STRIKE_PCT > 0 and not merged.empty:
+        lo, hi = spot * (1 - STRIKE_PCT), spot * (1 + STRIKE_PCT)
+        merged = merged[(merged["strike"] >= lo) & (merged["strike"] <= hi)].copy()
 
     if merged.empty:
         return None
@@ -171,7 +171,12 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="only first N tickers (quick benchmark)")
     ap.add_argument("--workers", type=int, default=8, help="parallel fetch workers (no inter-ticker sleep)")
     ap.add_argument("--provider", default="cboe", help="OpenBB options provider (cboe|yfinance|...)")
+    ap.add_argument("--strike-pct", type=float, default=None,
+                    help="strike window as fraction of spot (e.g. 0.30 = ±30%%; 0 = full chain)")
     args = ap.parse_args()
+    if args.strike_pct is not None:
+        global STRIKE_PCT
+        STRIKE_PCT = args.strike_pct
 
     obb = _load_openbb()
     tickers = load_universe(args.limit)

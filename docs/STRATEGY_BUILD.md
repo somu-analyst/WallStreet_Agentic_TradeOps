@@ -49,8 +49,13 @@ so nothing is hidden.
 - **Schema VALIDATED live:** CBOE AAPL = 3,538 rows in **one 5.6s call** (all expiries); columns
   (expiration/strike/option_type/open_interest/volume/last_trade_price/contract_symbol/underlying_price)
   match `_normalize_chain()` → no tweak needed. `import openbb` ~31s one-time.
-- Pending: user runs the actual A/B benchmark (`python NYSE_OpenBB.py --limit 50 --workers 8`).
-  Real win = parallelism + no 1s inter-ticker sleep (same levers apply to the yfinance pipeline).
+- ✅ **BENCHMARK RUN 2026-07-02:** 20 tickers · 8 workers → **5.9s total (0.29s/ticker), 3,428 rows**,
+  1 expected fail (DXY not on CBOE). vs ~4s/ticker sequential yfinance = **~13.6x speedup**.
+  Extrapolated: ~135 active tickers ≈ **40s**; even 1,000 tickers ≈ 5 min (vs 3–5 hr today).
+  Data quality: 78% call rows have OI>0 (normal — far-OTM is 0), schema matches production.
+- 🔓 **Strategic unlock:** CBOE chains include **bid/ask + implied_volatility + delta** — adopting this
+  in the EOD pipeline (and storing bid/ask) would ALSO unblock `/skew`, dispersion (#14), box-arb (#17).
+- Next: user-scale full-universe run, then decide on migrating NYSE_YFin's options leg to CBOE.
 
 ## 1c. Data layer — DB-first history (reduce API dependence)
 - ✅ **`stock_history` table** added to `US_data.db` — multi-year daily OHLC. `_daily_history()` / `_history_matrix()`

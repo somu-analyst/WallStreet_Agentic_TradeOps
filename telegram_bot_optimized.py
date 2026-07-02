@@ -10961,6 +10961,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await revert_view(query)
         elif data == "condor_view":
             await condor_view(query)
+        elif data == "calendar_view":
+            await calendar_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -22064,6 +22066,124 @@ async def condor_view(query):
     await _send_condor(query.message, rows)
 
 
+# ── CALENDAR SPREADS (front theta + term-structure richness) ─────
+def _calendar_scan(tickers, near_lo=20, near_hi=40, far_lo=50, far_hi=100, conn=None):
+    """ATM call calendar per ticker: SELL near-dated / BUY far-dated same strike.
+    Best when front IV > back IV (rich front to sell) and price pins the strike.
+    Ranks by front/back IV ratio. Live yfinance chains. Sorted by score desc."""
+    import datetime as _dt
+
+    def _mid(dfrow):
+        b = float(dfrow.get("bid") or 0); a = float(dfrow.get("ask") or 0)
+        return (b + a) / 2 if (b > 0 and a > 0) else float(dfrow.get("lastPrice") or 0)
+
+    def _nearest(df, target):
+        if df is None or df.empty:
+            return None
+        return df.loc[(df["strike"] - target).abs().idxmin()]
+
+    rows = []
+    for tk in tickers:
+        tk = str(tk).strip().upper()
+        if not tk:
+            continue
+        try:
+            t = yf.Ticker(tk)
+            spot = _last_price(tk) or float(t.history(period="1d")["Close"].iloc[-1])
+            if not spot:
+                continue
+            near_e = near_d = far_e = far_d = None
+            for e in (t.options or []):
+                try:
+                    d = (_dt.datetime.strptime(e, "%Y-%m-%d").date() - _dt.date.today()).days
+                except Exception:
+                    continue
+                if near_e is None and near_lo <= d <= near_hi:
+                    near_e, near_d = e, d
+                elif far_e is None and far_lo <= d <= far_hi:
+                    far_e, far_d = e, d
+                if near_e and far_e:
+                    break
+            if not (near_e and far_e):
+                continue
+            nc = t.option_chain(near_e).calls
+            fc = t.option_chain(far_e).calls
+            n_atm = _nearest(nc, spot)
+            if n_atm is None:
+                continue
+            K = float(n_atm["strike"])
+            f_atm = _nearest(fc[fc["strike"] == K], K)
+            if f_atm is None:
+                f_atm = _nearest(fc, K)
+            if f_atm is None:
+                continue
+            iv_n = float(n_atm.get("impliedVolatility") or 0)
+            iv_f = float(f_atm.get("impliedVolatility") or 0)
+            if not (iv_n > 0 and iv_f > 0):
+                continue
+            near_mid = _mid(n_atm); far_mid = _mid(f_atm)
+            net_debit = far_mid - near_mid
+            if net_debit <= 0.02:
+                continue
+            iv_ratio = iv_n / iv_f
+            # front-rich term structure + capital efficiency (theta earned / debit)
+            score = 100 * (0.7 * min(iv_ratio / 1.10, 1.0) + 0.3 * min(near_mid / net_debit, 1.0))
+            rows.append({
+                "score": score, "ticker": tk, "strike": K, "spot": round(spot, 2),
+                "near_d": near_d, "far_d": far_d, "iv_n": iv_n, "iv_f": iv_f,
+                "iv_ratio": iv_ratio, "net_debit": net_debit,
+            })
+        except Exception:
+            continue
+    rows.sort(key=lambda z: -z["score"])
+    return rows
+
+
+async def _send_calendar(msg, rows):
+    if not rows:
+        await msg.reply_text("No calendar spreads passed the filters. Try <code>/calendar NVDA AAPL</code>.", parse_mode=H)
+        return
+    _hdrs = ("ST", "Tkr", "IVr", "Deb")
+    _data = []
+    for r in rows[:15]:
+        emoji = "🟢" if r["iv_ratio"] >= 1.05 else ("🟡" if r["iv_ratio"] >= 0.98 else "🔴")
+        _data.append((emoji, r["ticker"], f"{r['iv_ratio']:.2f}", f"{r['net_debit']:.2f}"))
+    table = _pipe_table(_hdrs, _data, right_cols={2, 3},
+                        legend="IVr=front/back IV (🟢≥1.05 rich front) · Deb=net debit · sell near/buy far")
+    top = rows[0]
+    best = (f"<b>Top:</b> {top['ticker']} ${top['strike']:g} call calendar · "
+            f"SELL {top['near_d']}d / BUY {top['far_d']}d · debit ${top['net_debit']:.2f} · "
+            f"front IV {top['iv_n']*100:.0f}% vs back {top['iv_f']*100:.0f}% (ratio {top['iv_ratio']:.2f})")
+    txt = ("🗓️ <b>Calendar Spreads — Front-Theta / Term Structure</b>\n"
+           "<i>sell rich near IV, own far leg; profits if price pins the strike · not advice</i>\n\n"
+           + table + "\n\n" + best)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="calendar_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def calendar_command(update, ctx):
+    """/calendar [TICKERS] — ATM call calendar spreads ranked by front/back IV richness."""
+    args = list(getattr(ctx, "args", []) or [])
+    tks = [a.upper() for a in args] if args else _hiprob_default_tickers()
+    await update.message.reply_text("🗓️ Scanning calendar spreads…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _calendar_scan(tuple(tks[:8]), conn=conn)
+    finally:
+        conn.close()
+    await _send_calendar(update.message, rows)
+
+
+async def calendar_view(query):
+    conn = get_conn()
+    try:
+        rows = _calendar_scan(tuple(_hiprob_default_tickers()[:8]), conn=conn)
+    finally:
+        conn.close()
+    await _send_calendar(query.message, rows)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -24259,6 +24379,7 @@ def main():
     app.add_handler(CommandHandler("rotate", rotate_command))
     app.add_handler(CommandHandler("revert", revert_command))
     app.add_handler(CommandHandler("condor", condor_command))
+    app.add_handler(CommandHandler("calendar", calendar_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

@@ -18656,6 +18656,19 @@ def _ss_dataframe(_tbo, conn, choice, tks):
         df.attrs["caption"] = (f"Max-Sharpe · exp {res['port_ret']*100:+.1f}%/yr · vol {res['port_vol']*100:.1f}% "
                                f"· Sharpe {res['sharpe']:.2f} ({res['years']}y, cap {res['max_w']*100:.0f}%)")
         return df
+    if choice.startswith("🎡"):                                   # Wheel / CSP (shared bot code — dicts)
+        rows = _tbo._wheel_scan_bot(tuple(tks) or tuple(_tbo._hiprob_default_tickers()))
+        return pd.DataFrame([{"Ticker": r["ticker"], "Put": f"{r['strike']:g}P", "DTE": r["dte"],
+                              "Yr %": round(r["ann"] * 100, 0), "POP %": round(r["pop"] * 100, 0),
+                              "Breakeven": round(r["be"], 2), "Cushion %": round(r["cushion"] * 100, 1),
+                              "Capital": r.get("capital"),
+                              "IVR": (round(r["ivr"], 0) if r.get("ivr") is not None else None)} for r in rows])
+    if choice.startswith("📞"):                                   # Covered call (shared bot code)
+        rows = _tbo._cc_scan_bot(tuple(tks) or tuple(_tbo._hiprob_default_tickers()), conn=conn)
+        return pd.DataFrame([{"Ticker": r["ticker"], "Call": f"{r['strike']:g}C", "DTE": r["dte"],
+                              "Yr %": round(r["ann"] * 100, 0), "POP %": round(r["pop"] * 100, 0),
+                              "If-called %": round(r["if_called"] * 100, 1),
+                              "IVR": (round(r["ivr"], 0) if r.get("ivr") is not None else None)} for r in rows])
     if choice.startswith("🧭"):                                   # Positioning builder
         rows = _tbo._positioning_scan(conn)
         _stg = {"S": "Starting", "I": "Increasing", "C": "Confirmed"}
@@ -18696,6 +18709,7 @@ if page == "⚙️ Strategy Scanners":
     import telegram_bot_optimized as _tbo
     _ss_opts = ["🧭 Positioning builder", "⚖️ Portfolio optimizer", "📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
                 "🔗 Pairs mean-reversion", "📅 Seasonality", "🔄 Sector rotation", "↩️ Short-term reversal",
+                "🎡 Wheel (CSP)", "📞 Covered call",
                 "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar", "📈 Put-write index",
                 "🔬 Factor IC validation"]
     _c1, _c2 = st.columns([2, 3])

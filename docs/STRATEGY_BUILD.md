@@ -116,6 +116,19 @@ so nothing is hidden.
 3. **microsoft/qlib** — optional ML alpha layer with walk-forward CV (fixes low-N backtests).
 4. **Riskfolio-Lib / PyPortfolioOpt** — signals → risk-sized positions (the genuinely Aladdin-like piece).
 
+## 3E. Candidate additions (FEASIBLE with current data — not yet built, audit 2026-07-02)
+| Candidate | Command | Data | Note |
+|-----------|---------|------|------|
+| VRP screener (IV vs realized vol) | `/vrp` | options IV + stock_history RV | exists as internal ensemble model (`vrp`/`rv_iv`); surface standalone |
+| Unusual options activity (vol÷OI) | `/uoa` | options_change | genuinely new; partial logic already in intraday_alert |
+| IV-skew extremes (put/call skew) | `/skew` | options IV | internal model (`iv_skew`); surface standalone |
+| 52-week high/low breakout / proximity | `/breakout` | stock_history (6y) | classic momentum-breakout, not built |
+| Single-name time-series mean-reversion | `/zrev` | stock_history | /revert is cross-sectional; this is per-ticker Bollinger/z |
+| Stock-level relative strength vs SPY | `/rs` | stock_history | /rotate is sector-level only |
+- Git repos: all catalog items reconciled — Alphalens→/ic, PyPortfolioOpt/Riskfolio→/allocate built;
+  qlib/vectorbt/OpenBB/Lean/backtrader/zipline/FinRL/FinGPT/finBERT parked (finBERT redundant — Finnhub
+  sentiment already wired). Nothing missed.
+
 ## 4. Later backlog (blocked on a prerequisite — do once unblocked, NOT dropped)
 | # | Strategy | Command | Prerequisite to unblock |
 |---|----------|---------|-------------------------|

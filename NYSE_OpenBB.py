@@ -111,6 +111,8 @@ _DEFENSE_TECH = ["KTOS", "AVAV", "AXON", "LMT", "RTX", "NOC", "GD", "LHX", "LDOS
 _BIOTECH_NEXT = ["LLY", "NVO", "VKTX", "AMGN", "REGN", "VRTX", "CRSP", "NTLA",
                  "BEAM", "RXRX", "ILMN", "XBI", "ARKG"]
 _FINTECH = ["HOOD", "SOFI", "AFRM", "TOST", "NU", "PYPL", "XYZ", "COIN"]
+_BIO_AI = ["RXRX", "TEM", "SDGR", "ABSI", "DNA", "TWST", "PACB", "GH", "NTRA",
+           "CERT", "MRNA", "EXAS", "ME"]   # AI drug discovery / techbio / AI dx
 _BROAD_ETF = ["SPY", "QQQ", "IWM", "DIA", "MDY", "RSP", "XLK", "XLE", "XLF", "XLV", "XLI",
               "XLB", "XLU", "XLY", "XLP", "XLRE", "XLC", "SMH", "SOXX", "SOXL", "SQQQ",
               "TQQQ", "ARKK", "XBI", "ITB", "JETS", "TAN"]
@@ -146,7 +148,8 @@ def build_expanded_universe():
         print(f"Nasdaq-100 fetch failed ({e}) — continuing without")
     tks += (_BUZZ + _GLOBAL_ADR + _COUNTRY_ETF + _COMMODITY + _CRYPTO_EQ + _RATES_VOL + _BROAD_ETF
             + _SEMIS + _ROBOTICS_AI + _SPACE + _NUCLEAR + _CYBER + _COMMODITY_STOCKS
-            + _AI_SOFT + _QUANTUM + _AI_INFRA_POWER + _DEFENSE_TECH + _BIOTECH_NEXT + _FINTECH)
+            + _AI_SOFT + _QUANTUM + _AI_INFRA_POWER + _DEFENSE_TECH + _BIOTECH_NEXT + _FINTECH
+            + _BIO_AI)
     # keep the current active names too (nothing lost)
     tks += load_universe(sheet=UNIVERSE_SHEET_ACTIVE)
     uni = sorted(dict.fromkeys(t for t in tks if t and t not in ("DXY",)))

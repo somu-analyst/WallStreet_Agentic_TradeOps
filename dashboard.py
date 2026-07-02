@@ -4906,20 +4906,23 @@ if page == "🌍 Market Overview":
             _c.close()
     try:
         _ro = _mo_riskoff()
-        _rfn = st.error if _ro["score"] >= 55 else (st.warning if _ro["score"] >= 30 else st.success)
-        _rfn(f"{_ro['remoji']} **Risk-Off Radar — {_ro['headline']} · {_ro['score']:.0f}/100**  "
-             "_(0 = calm, 100 = danger)_")
-        st.markdown(f"👉 **What to do:** {_ro['action']}")
+        _t = _ro["turbulence"]; _d = _ro["direction"]
+        _rfn = st.error if _t["level"] == "HIGH" else (st.warning if _t["level"] == "ELEVATED" else st.success)
+        _rfn(f"{_ro['remoji']} **Market Radar — {_ro['headline']}**")
+        st.markdown(f"🌪️ **Big-move risk (next ~week): {_t['level']}** — {_t['text']}")
+        st.markdown(f"🧭 **Direction lean: {_d['lean']}** _(low confidence)_ — {_d['text']}")
+        st.markdown(f"👉 **Bottom line:** {_ro['action']}")
         _nd = _ro.get("nextday")
         if _nd:
             st.markdown(f"📅 **Next session — {_nd['lean']}**  \n{_nd['text']}")
-        with st.expander("Why — the 5 warning lights", expanded=_ro["score"] >= 55):
-            st.dataframe(pd.DataFrame([{"": p["emoji"], "Warning light": p["label"],
-                                        "Signal": p["reading"], "What it means": p["why"],
-                                        "Pts": int(p["pts"])} for p in _ro["pillars"]]),
+        with st.expander("Context (not proven predictive)", expanded=False):
+            st.dataframe(pd.DataFrame([{"": p["emoji"], "Signal": p["label"],
+                                        "Reading": p["reading"], "Note": p["why"]} for p in _ro["pillars"]]),
                          hide_index=True, use_container_width=True)
+            st.caption("Backtest (Jan–Jul 2026): index put-flow predicts move SIZE "
+                       "(QQQ t+5 corr +0.37, p<0.001); direction is a weak hint; froth/vol-pricing are context only.")
     except Exception as _roe:
-        st.caption(f"🛡️ Risk-Off Radar unavailable: {_roe}")
+        st.caption(f"🛡️ Market Radar unavailable: {_roe}")
 
     # ── Controls row ──
     _ov_c1, _ov_c2, _ov_c3 = st.columns([3, 1, 1])
@@ -19085,13 +19088,12 @@ def _ss_dataframe(_tbo, conn, choice, tks):
                              for r in rows])
     if choice.startswith("🛡"):                                   # Composite risk-off radar
         res = _tbo._riskoff_scan(conn)
-        df = pd.DataFrame([{"": p["emoji"], "Warning light": p["label"],
-                            "Signal": p["reading"], "What it means": p["why"],
-                            "Pts": int(p["pts"])} for p in res["pillars"]])
-        _nd = res.get("nextday")
+        _t = res["turbulence"]; _d = res["direction"]; _nd = res.get("nextday")
+        df = pd.DataFrame([{"": p["emoji"], "Signal": p["label"],
+                            "Reading": p["reading"], "Note": p["why"]} for p in res["pillars"]])
         _ndtxt = f"  📅 Next session — {_nd['lean']}: {_nd['text']}" if _nd else ""
-        df.attrs["caption"] = (f"{res['remoji']} {res['headline']} — score {res['score']:.0f}/100 "
-                               f"(0 = calm, 100 = danger). 👉 What to do: {res['action']}{_ndtxt}")
+        df.attrs["caption"] = (f"{res['remoji']} {res['headline']}.  🌪️ Big-move risk: {_t['level']} — {_t['text']}  "
+                               f"🧭 Direction lean: {_d['lean']} (low confidence).{_ndtxt}")
         return df
     if choice.startswith("🐋"):                                   # Unusual options activity
         rows = _tbo._uoa_scan(conn)

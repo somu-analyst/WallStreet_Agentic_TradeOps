@@ -19194,7 +19194,7 @@ def _opex_spot(conn, ticker):
     return 0.0
 
 def _opex_parse_date(s):
-    for fmt in ("%Y-%m-%d", "%Y-%m-%d"):
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"):
         try:
             return datetime.strptime(str(s), fmt).date()
         except ValueError:
@@ -19650,7 +19650,7 @@ def _iv_rank(conn, tk):
             spot_by = {str(d): float(x) for d, x in zip(sd["trade_date"], sd["close"])}
 
             def _pdt(x):
-                for f in ("%Y-%m-%d", "%Y-%m-%d"):
+                for f in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"):
                     try:
                         return datetime.strptime(str(x), f)
                     except Exception:
@@ -19801,7 +19801,7 @@ def _plan_oi_flow(conn, tk, spot):
         pass
 
     def _ek(s):
-        for f in ("%Y-%m-%d", "%Y-%m-%d"):
+        for f in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"):
             try:
                 return datetime.strptime(str(s), f)
             except Exception:
@@ -20093,7 +20093,7 @@ def _next_day_plan(conn):
             typ = "call" if str(t["option_type"]).lower().startswith("c") else "put"
             K = float(t["strike"] or 0); qty = int(t["quantity"] or 0); exp = str(t["expiry"])
             dte = None
-            for fmt in ("%Y-%m-%d", "%Y-%m-%d"):
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"):
                 try:
                     dte = (datetime.strptime(exp, fmt) - datetime.now()).days; break
                 except Exception:
@@ -20103,6 +20103,14 @@ def _next_day_plan(conn):
             T = max(dte, 0) / 365.0
             entry = float(t["entry_price"] or 0)
             prem = _plan_prem(conn, tk, K, exp, typ)
+            # prefer the live option mid (yfinance bid/ask) so "Now"/P&L match the broker and the
+            # IV below is anchored to the live quote; fall back to the DB last price when unavailable.
+            try:
+                _lm = _option_price_by_mode(tk, typ, K, exp, mode="mid", fallback=0.0)
+                if _lm and _lm > 0:
+                    prem = _lm
+            except Exception:
+                log.debug("live option mid failed", exc_info=True)
             iv = _implied_vol_hp(prem, spot, K, T, R) if (prem and T > 0) else (float(t["entry_iv"] or 0) or 0.30)
             ivs.append(iv)
             gg = bs_greeks(spot, K, T, R, iv, typ) if T > 0 else {"delta": 0, "theta": 0, "price": (prem or entry)}
@@ -21366,7 +21374,7 @@ def _plan_legs_for(conn, tk):
         typ = "call" if str(t["option_type"]).lower().startswith("c") else "put"
         K = float(t["strike"] or 0); qty = int(t["quantity"] or 0); exp = str(t["expiry"])
         dte = None
-        for fmt in ("%Y-%m-%d", "%Y-%m-%d"):
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"):
             try:
                 dte = (datetime.strptime(exp, fmt) - datetime.now()).days; break
             except Exception:
@@ -22140,7 +22148,7 @@ def _fmt_squeeze_inline(sq):
 
 
 def _to_mdy(s):
-    for f in ("%Y-%m-%d", "%Y-%m-%d"):
+    for f in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"):
         try:
             return datetime.strptime(str(s)[:10], f).strftime("%Y-%m-%d")
         except ValueError:
@@ -23206,6 +23214,140 @@ async def vanna_view(query):
     await query.message.reply_text("\n\n".join(msgs), parse_mode=H, reply_markup=HUB_MENU_KB)
 
 
+# ── EARNINGS VOL (IV-crush income scanner) ───────────────────────
+# Pre-earnings volatility scanner: ranks names with earnings soon by
+# IV-rank + implied expected move, to surface short-premium (IV-crush)
+# vs cheap-vol (long straddle) setups. Non-directional income focus.
+# Data: yfinance earnings date + IV-rank (HV proxy), DB ATM straddle
+# for expected move. No API key required. (PEAD drift = future phase 2,
+# needs Finnhub earnings-surprise history.)
+EARNVOL_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AVGO", "ORCL", "AMD",
+    "MU", "QCOM", "INTC", "ARM", "SMCI", "PLTR", "SNOW", "NET", "CRWD",
+    "PANW", "NOW", "JPM", "GS", "MS", "BAC", "V", "MA", "COIN", "HOOD",
+    "TSLA", "LLY", "ABBV", "COST", "WMT", "NKE", "NFLX", "MSTR",
+]
+EARNVOL_WITHIN_DAYS = 10        # only names reporting within this window
+
+
+def _earnvol_em(conn, ticker, spot):
+    """(em_pct, straddle, dte) from the nearest-expiry ATM straddle in the DB.
+    Mirrors _hp_model_expected_move's straddle read. (None,None,None) on miss."""
+    try:
+        if spot <= 0:
+            return (None, None, None)
+        ld = pd.read_sql(
+            "SELECT trade_date_now FROM options_change WHERE ticker=?"
+            " ORDER BY trade_date_now DESC LIMIT 1", conn, params=(ticker,))
+        if ld.empty:
+            return (None, None, None)
+        latest = ld.iloc[0, 0]
+        atm = pd.read_sql(
+            "SELECT strike, expiry_date, lastPrice_Call_now, lastPrice_Put_now"
+            " FROM options_change WHERE ticker=? AND trade_date_now=?"
+            " AND lastPrice_Call_now > 0.2 AND lastPrice_Put_now > 0.2"
+            " AND ABS(strike - ?) / ? < 0.03"
+            " ORDER BY ABS(strike - ?) ASC LIMIT 10",
+            conn, params=(ticker, latest, spot, spot, spot))
+        if atm.empty:
+            return (None, None, None)
+        today = datetime.now().date()
+        best = None; best_dte = 9999
+        for _, r in atm.iterrows():
+            try:
+                exp = datetime.strptime(r["expiry_date"], "%Y-%m-%d").date()
+                d = (exp - today).days
+                if 1 <= d < best_dte:
+                    best_dte = d; best = r
+            except Exception:
+                continue
+        if best is None:
+            return (None, None, None)
+        straddle = float(best["lastPrice_Call_now"]) + float(best["lastPrice_Put_now"])
+        return (straddle / spot * 100, straddle, best_dte)
+    except Exception:
+        log.debug("earnvol EM failed for %s", ticker, exc_info=True)
+        return (None, None, None)
+
+
+def _earnvol_scan(conn, tickers, within_days=EARNVOL_WITHIN_DAYS):
+    """Rank names reporting within `within_days` by an IV-crush score
+    (rich IV rank + fat implied move = better short-premium candidate)."""
+    out = []
+    for tk in tickers:
+        tk = str(tk).upper()
+        ne = _next_earnings(tk)            # cached (2h) yfinance next-earnings
+        dte_e = ne.get("days") if ne else None
+        if dte_e is None or dte_e > within_days:
+            continue
+        try:
+            sp = pd.read_sql(
+                "SELECT close FROM stock_daily WHERE ticker=?"
+                " ORDER BY trade_date DESC LIMIT 1", conn, params=(tk,))
+            spot = float(sp["close"].iloc[0]) if not sp.empty else 0.0
+        except Exception:
+            spot = 0.0
+        em_pct, straddle, dte = _earnvol_em(conn, tk, spot)
+        ivr_res = _iv_rank(conn, tk)       # DB-based {iv, rank}; no network
+        ivr = ivr_res.get("rank") if ivr_res else None
+        if ivr is None and em_pct is None:
+            continue
+        # IV-crush score: weight IV-rank richness + implied move size.
+        crush = 0.6 * (ivr or 0) + 0.4 * min((em_pct or 0) * 4, 100)
+        if (ivr or 0) >= 60:
+            play, emoji = "SELL vol · IC/strangle", "🔴"
+        elif (ivr if ivr is not None else 100) <= 30:
+            play, emoji = "BUY straddle · cheap", "🟢"
+        else:
+            play, emoji = "Wait · mid IV", "🟡"
+        out.append({
+            "ticker": tk, "dte_e": dte_e, "ed_date": (ne.get("date") if ne else None),
+            "ivr": ivr, "em_pct": em_pct,
+            "straddle": straddle, "spot": round(spot, 2),
+            "play": play, "emoji": emoji, "crush": crush,
+        })
+    out.sort(key=lambda r: r["crush"], reverse=True)
+    return out
+
+
+def _earnvol_table(rows):
+    """Render the earnings-vol scan as a uniform _pipe_table."""
+    _hdrs = ("ST", "Tkr", "ED", "IVR", "EM%")
+    _data = []
+    for r in rows:
+        ivr_s = f"{r['ivr']:.0f}" if r["ivr"] is not None else "--"
+        em_s  = f"{r['em_pct']:.1f}" if r["em_pct"] is not None else "--"
+        _data.append((r["emoji"], r["ticker"], f"{r['dte_e']}d", ivr_s, em_s))
+    return _pipe_table(_hdrs, _data, right_cols={2, 3, 4},
+                       legend="🔴 sell vol · 🟢 buy vol · ED=days to earnings")
+
+
+async def earnvol_command(update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/earnvol [TICKERS…] — pre-earnings IV-crush scanner. Ranks names
+    reporting soon by IV-rank + expected move (short-premium vs long-vol)."""
+    args = list(getattr(ctx, "args", []) or [])
+    tickers = [a.upper() for a in args] if args else EARNVOL_UNIVERSE
+    within = EARNVOL_WITHIN_DAYS if not args else 60  # explicit tickers: wider window
+    msg = await update.message.reply_text("📅 Scanning earnings vol…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _earnvol_scan(conn, tickers, within_days=within)
+    except Exception as e:
+        await msg.edit_text(f"⚠️ earnvol scan failed: {e}")
+        conn.close(); return
+    finally:
+        conn.close()
+    if not rows:
+        await msg.edit_text(
+            f"📅 <b>EARNINGS VOL</b>\nNo earnings within {within}d for the scanned set.",
+            parse_mode=H)
+        return
+    parts = [hdr("📅 EARNINGS VOL — IV crush"), _earnvol_table(rows[:15]),
+             "<i>High IVR → sell premium (crush after report). "
+             "Low IVR → buy straddle. Non-directional; size for a gap.</i>"]
+    await msg.edit_text("\n".join(parts), parse_mode=H)
+
+
 # ── WAN-STREAMER ─────────────────────────────────────────────────
 # "Wide-Area Network" signal streamer: continuously polls the 24-model
 # ensemble across the watchlist and streams each newly-fired actionable
@@ -23389,6 +23531,7 @@ def main():
     app.add_handler(CommandHandler("vanna", vanna_command))
     app.add_handler(CommandHandler("squeeze", squeeze_command))
     app.add_handler(CommandHandler("wan", wan_command))
+    app.add_handler(CommandHandler("earnvol", earnvol_command))
 
     # Button callbacks
     app.add_handler(CallbackQueryHandler(button_handler))

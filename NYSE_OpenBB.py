@@ -321,28 +321,41 @@ def main():
         conn.commit()
     except Exception:
         pass
-    failed, total_ok, total_rows = [], 0, 0
+    failed, total_ok, total_rows, processed = [], 0, 0, 0
+    total_n = len(tickers)
 
-    def run_pass(tks, workers, pace, label):
-        nonlocal total_ok, total_rows
+    def _progress():
+        """'processed/total (pct%) · ETA mm:ss' string for terminal progress."""
+        if processed == 0:
+            return "0%"
+        pct = processed / total_n * 100
+        eta = (time.time() - t0) / processed * (total_n - processed)
+        return f"{processed}/{total_n} ({pct:.0f}%) · ETA {int(eta//60)}m{int(eta%60):02d}s"
+
+    def run_pass(tks, workers, pace, label, count_progress=True):
+        nonlocal total_ok, total_rows, processed
         frames, ok = [], 0
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {}
             for tk in tks:
                 futs[ex.submit(fetch_chain_openbb, obb, tk, args.provider, trade_dt)] = tk
                 time.sleep(pace)
-            for fut in as_completed(futs):
+            for i, fut in enumerate(as_completed(futs), 1):
                 df = fut.result()
                 if df is not None and len(df):
                     frames.append(df); ok += 1
                 else:
                     failed.append(futs[fut])
+                if count_progress:
+                    processed += 1
+                    if i % 20 == 0:                      # live tick every 20 tickers
+                        print(f"    … {_progress()}")
         if frames:
             chunk_df = pd.concat(frames, ignore_index=True)
             chunk_df.to_sql(table, conn, if_exists="append", index=False)
             total_rows += len(chunk_df)
         total_ok += ok
-        log(f"[{label}] ok {ok}/{len(tks)} · rows so far {total_rows} · {time.time()-t0:.0f}s elapsed")
+        log(f"[{label}] ok {ok}/{len(tks)} · {_progress()} · rows {total_rows:,}")
         return ok
 
     # chunked main passes with rests so CBOE's throttle window resets
@@ -360,7 +373,7 @@ def main():
         log(f"retry round {rnd}: {len(retry)} tickers (60s backoff, slow)")
         time.sleep(60)
         for i in range(0, len(retry), 40):
-            run_pass(retry[i:i + 40], 1, 1.2, f"retry{rnd} {i//40+1}")
+            run_pass(retry[i:i + 40], 1, 1.2, f"retry{rnd} {i//40+1}", count_progress=False)
             time.sleep(args.rest)
 
     conn.close()

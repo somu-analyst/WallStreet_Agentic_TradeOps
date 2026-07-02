@@ -119,7 +119,7 @@ so nothing is hidden.
 ## 3E. Candidate additions (FEASIBLE with current data — not yet built, audit 2026-07-02)
 | Candidate | Command | Data | Note |
 |-----------|---------|------|------|
-| VRP screener (IV vs realized vol) | `/vrp` | options IV + stock_history RV | exists as internal ensemble model (`vrp`/`rv_iv`); surface standalone |
+| VRP screener (IV vs realized vol) | `/vrp` | options IV + stock_history RV | ✅ **BUILT** — IV vs jump-robust (MAD) realized vol; sell rich / buy cheap; bot + dashboard hub |
 | Unusual options activity (vol÷OI) | `/uoa` | options_change | ✅ **BUILT** — vol≫OI, DTE≥7 (skips 0DTE index churn), ranked by $ notional; bot + dashboard hub |
 | IV-skew extremes (put/call skew) | `/skew` | options IV | internal model (`iv_skew`); surface standalone |
 | 52-week high/low breakout / proximity | `/breakout` | stock_history (6y) | classic momentum-breakout, not built |

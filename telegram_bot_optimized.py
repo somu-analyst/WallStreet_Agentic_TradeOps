@@ -10973,6 +10973,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await building_view(query)
         elif data == "uoa_view":
             await uoa_view(query)
+        elif data == "vrp_view":
+            await vrp_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -23134,6 +23136,86 @@ async def uoa_view(query):
     await _send_uoa(query.message, rows)
 
 
+# ── VARIANCE RISK PREMIUM (implied vol vs realized vol) ──────────
+def _vrp_scan(conn, tickers=None, rv_window=30, sell_thr=0.03, buy_thr=-0.02):
+    """VRP = ATM implied vol − realized vol. High VRP → options rich (sell
+    premium); negative → cheap (buy vol / long gamma). IV from _iv_rank (DB);
+    RV = jump-robust MAD estimator (1.4826·MAD·√252) so a single earnings gap
+    doesn't inflate 'normal' vol. Returns dicts sorted by VRP desc."""
+    import numpy as _np
+    tickers = tickers or SCAN_UNIVERSE
+    rows = []
+    for tk in tickers:
+        tk = str(tk).upper()
+        try:
+            ivr = _iv_rank(conn, tk)
+            iv = ivr.get("iv") if ivr else None
+            if not iv or iv <= 0:
+                continue
+            h = _daily_history(tk, 1, conn)
+            if h is None or len(h) < rv_window + 2:
+                continue
+            r = h.pct_change().dropna().tail(rv_window)
+            mad = float((r - r.median()).abs().median())        # robust to earnings jumps
+            rv = 1.4826 * mad * _np.sqrt(252)
+            if rv <= 0:
+                continue
+            vrp = iv - rv
+            if buy_thr < vrp < sell_thr:
+                continue                      # only surface meaningful richness/cheapness
+            rows.append({"ticker": tk, "iv": iv, "rv": rv, "vrp": vrp,
+                         "ratio": iv / rv, "iv_rank": ivr.get("rank"),
+                         "side": "SELL" if vrp >= sell_thr else "BUY"})
+        except Exception:
+            continue
+    rows.sort(key=lambda x: -x["vrp"])
+    return rows
+
+
+async def _send_vrp(msg, rows):
+    if not rows:
+        await msg.reply_text("No notable VRP dislocation right now.", parse_mode=H)
+        return
+    _data = []
+    for r in rows[:15]:
+        emoji = "🔴" if r["side"] == "SELL" else "🟢"
+        _data.append((emoji, r["ticker"], f"{r['iv']*100:.0f}", f"{r['rv']*100:.0f}", f"{r['vrp']*100:+.0f}"))
+    table = _pipe_table(("ST", "Tkr", "IV%", "RV%", "VRP"), _data, right_cols={2, 3, 4},
+                        legend="VRP=IV−RV (vol pts) · 🔴 rich→sell premium · 🟢 cheap→buy vol")
+    sells = [r for r in rows if r["side"] == "SELL"][:3]
+    buys = [r for r in rows if r["side"] == "BUY"][-3:]
+    best = (f"<b>Richest (sell):</b> {', '.join(r['ticker'] for r in sells) or '—'}  ·  "
+            f"<b>Cheapest (buy vol):</b> {', '.join(r['ticker'] for r in buys) or '—'}")
+    txt = ("🌪️ <b>Variance Risk Premium — IV vs Realized</b>\n"
+           "<i>IV richer than realized → premium-selling edge (ICs/strangles); IV below realized → "
+           "long-gamma. RV = 20d. Not advice.</i>\n\n" + table + "\n\n" + best)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="vrp_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def vrp_command(update, ctx):
+    """/vrp — variance risk premium: IV vs realized vol (rich→sell premium, cheap→buy vol)."""
+    args = list(getattr(ctx, "args", []) or [])
+    tks = [a.upper() for a in args] if args else None
+    await update.message.reply_text("🌪️ Computing variance risk premium…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _vrp_scan(conn, tks)
+    finally:
+        conn.close()
+    await _send_vrp(update.message, rows)
+
+
+async def vrp_view(query):
+    conn = get_conn()
+    try:
+        rows = _vrp_scan(conn)
+    finally:
+        conn.close()
+    await _send_vrp(query.message, rows)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -25310,6 +25392,7 @@ async def _post_init(app):
             BotCommand("wan", "Live 24-model ensemble signals"),
             BotCommand("building", "Positioning: new long/short OI building"),
             BotCommand("uoa", "Unusual options activity (vol>>OI)"),
+            BotCommand("vrp", "Variance risk premium (IV vs realized)"),
             BotCommand("hiprob", "High-probability option setups"),
             BotCommand("momentum", "Momentum 12-1 ranks"),
             BotCommand("rotate", "Sector-ETF relative strength"),
@@ -25384,6 +25467,7 @@ def main():
     app.add_handler(CommandHandler("ic", ic_command))
     app.add_handler(CommandHandler("building", building_command))
     app.add_handler(CommandHandler("uoa", uoa_command))
+    app.add_handler(CommandHandler("vrp", vrp_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))

@@ -39,10 +39,42 @@ so nothing is hidden.
 - Signed GEX / walls → `/gex` · Vanna → `/vanna` · Max pain/OPEX → `/opex` · Squeeze → `/squeeze`
 - Regime / VIX term structure → `/regime` · Macro (BLS+yields) → `/macro` · Earnings news → `/earnings`
 
-## 3. Infrastructure (validation & sizing — NOT strategies, hence not in build queue)
-- **Alphalens-reloaded** — IC / quantile forward-return validation (upgrade `/validate-signal`)
-- **vectorbt** — fast universe-wide signal sweeps · **microsoft/qlib** — ML alpha with walk-forward CV
-- **PyPortfolioOpt / Riskfolio-Lib** — turn signals into risk-sized positions (the "Aladdin" piece)
+## 3. External quant-repo catalog (reference — infra/tools, NOT strategies)
+
+### 3A. The real gems — serious, widely-used infrastructure
+| Repo | What it is | Significance | Effort | Realistic edge |
+|------|-----------|--------------|--------|----------------|
+| `microsoft/qlib` | AI quant platform (data/factor/model zoo/backtest) | Closest "open Aladdin" for research | Med–High | Framework, not a signal |
+| `OpenBB-finance/OpenBB` | Open Bloomberg-Terminal alternative | Best free data+analytics aggregation | Low–Med | Data/analysis, no alpha itself |
+| `QuantConnect/Lean` | Institutional backtest+live engine, multi-asset incl options | Production-grade, broker-connected | Med | Infra; supports options (fits us) |
+| `mementum/backtrader` | Python event-driven backtester | De-facto teaching/retail standard | Low | Infra |
+| `stefan-jansen/zipline-reloaded` | Backtest engine behind old Quantopian | Historically dominant; pairs w/ Alphalens | Med | Infra |
+| `polakowo/vectorbt` | Vectorized ultra-fast backtest/research | Best for large-scale signal sweeps | Med | Infra; great for our OI signal grid |
+| `stefan-jansen/alphalens-reloaded` | Factor/alpha eval (IC, quantile returns) | Standard way to prove a signal | Low | **What /validate-signal should mimic** |
+| `robertmartin8/PyPortfolioOpt` | Mean-variance / Black-Litterman opt | Cleanest portfolio construction lib | Low | Allocation, not prediction |
+| `dcajasn/Riskfolio-Lib` | Advanced risk & portfolio opt | "Aladdin-ish" on the risk side | Med | Risk/allocation |
+
+### 3B. ML / prediction-oriented (higher hype, handle with care)
+| Repo | What it is | Honest note |
+|------|-----------|-------------|
+| `AI4Finance-Foundation/FinRL` | Deep RL for trading | Impressive demos; live edge unproven, overfits easily |
+| `AI4Finance-Foundation/FinGPT` | LLMs for finance | Good for *features* (sentiment), not a price oracle |
+| `ProsusAI/finBERT` | BERT financial sentiment | Solid input feature, not a signal alone |
+| `microsoft/qlib` (benchmarks) | LightGBM/Transformer alpha baselines | Realistic ~small IC; honest about decay |
+
+### 3C. Naive / popular-but-overrated (do NOT trust blindly)
+| Pattern | Why popular | Why it fails |
+|---------|-------------|--------------|
+| "LSTM stock price prediction" (thousands of clones) | Looks impressive | Predicts lagged price ≈ yesterday; future leaks; no edge |
+| MA crossover / RSI bots | Simple, intuitive | ~Zero edge net of costs on liquid names |
+| Prophet / ARIMA "forecast" | One-liner | Markets aren't smoothly trending; garbage on returns |
+| Single-indicator "signal" repos | Easy to copy | No OOS validation; survivorship bias |
+
+### Best fits for THIS bot (priority order)
+1. **Alphalens-reloaded** — plug OI/PCR/GEX signals → IC + quantile forward-return decay (rigorous `/validate-signal`). Highest-value.
+2. **vectorbt** — sweep the 24-model ensemble across the whole universe fast (vs per-ticker loop).
+3. **microsoft/qlib** — optional ML alpha layer with walk-forward CV (fixes low-N backtests).
+4. **Riskfolio-Lib / PyPortfolioOpt** — signals → risk-sized positions (the genuinely Aladdin-like piece).
 
 ## 4. Later backlog (blocked on a prerequisite — do once unblocked, NOT dropped)
 | # | Strategy | Command | Prerequisite to unblock |

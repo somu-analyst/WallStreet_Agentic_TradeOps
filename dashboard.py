@@ -18602,6 +18602,13 @@ def _ss_dataframe(_tbo, conn, choice, tks):
         rows = _tbo._earnvol_scan(conn, list(tks) or default, within_days=(60 if tks else 10))
         return pd.DataFrame([{"Ticker": r["ticker"], "Earnings": r.get("ed_date"), "Days": r["dte_e"],
                               "IV Rank": r["ivr"], "Exp Move %": r["em_pct"], "Play": r["play"]} for r in rows])
+    if choice.startswith("📊"):                                   # PEAD post-earnings drift
+        rows = _tbo._pead_scan()
+        if rows is None:
+            return pd.DataFrame([{"Note": "Set FINNHUB_API_KEY in api_keys.enc to enable PEAD."}])
+        return pd.DataFrame([{"Ticker": r["ticker"], "Report": r["date"], "Days": r["days_since"],
+                              "Surprise %": round(r["surprise"] * 100, 0), "Actual": r["actual"],
+                              "Estimate": r["estimate"], "Drift": r["side"]} for r in rows])
     if choice.startswith("🔗"):                                   # Pairs
         rows = _tbo._pairs_scan(conn)
         return pd.DataFrame([{"Pair": r["pair"], "Group": r["group"], "Z": round(r["z"], 2),
@@ -18659,9 +18666,9 @@ if page == "⚙️ Strategy Scanners":
     _page_header("⚙️ Strategy Scanners",
                  "Income · event · stat-arb · seasonality — the same engine as the Telegram bot. Screeners, not proven alpha.")
     import telegram_bot_optimized as _tbo
-    _ss_opts = ["📡 WAN ensemble signals", "📆 Earnings IV-crush", "🔗 Pairs mean-reversion",
-                "📅 Seasonality", "🔄 Sector rotation", "↩️ Short-term reversal", "🦅 Iron condor",
-                "🗓️ Calendar spreads", "💵 Dividend calendar", "📈 Put-write index"]
+    _ss_opts = ["📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
+                "🔗 Pairs mean-reversion", "📅 Seasonality", "🔄 Sector rotation", "↩️ Short-term reversal",
+                "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar", "📈 Put-write index"]
     _c1, _c2 = st.columns([2, 3])
     _ss_choice = _c1.selectbox("Scanner", _ss_opts, key="ss_choice")
     _ss_tk_in = _c2.text_input("Tickers (optional; blank = sensible defaults)", "", key="ss_tks")

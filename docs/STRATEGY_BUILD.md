@@ -47,7 +47,7 @@ so nothing is hidden.
 ## 4. Later backlog (blocked on a prerequisite — do once unblocked, NOT dropped)
 | # | Strategy | Command | Prerequisite to unblock |
 |---|----------|---------|-------------------------|
-| 13 | PEAD (post-earnings drift) | `/earnvol` (lane 2) | Finnhub earnings-surprise history (API key) |
+| 13 | PEAD (post-earnings drift) — ✅ DONE `/pead` | `/pead` | UNBLOCKED: FINNHUB_API_KEY is set (verified 2026-07-01). Finnhub calendar/earnings; in dashboard hub too |
 | 14 | Dispersion (index vs constituent vol) | `/dispersion` | Bulk live option chains + perf budget |
 | 15 | Index rebalance (S&P add/delete) | `/rebal` | Corporate-action announcement feed |
 | 16 | Gamma scalping | `/gscalp` | Intraday tick storage |

@@ -10949,6 +10949,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await spreads_view(query)
         elif data == "wheel_view":
             await wheel_view(query)
+        elif data == "cc_view":
+            await cc_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -21387,6 +21389,138 @@ async def _send_wheel(msg, rows):
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
 
 
+# ── COVERED-CALL INCOME (mirror of wheel, call side) ─────────────
+def _cc_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, otm_max=0.15, conn=None):
+    """Covered-call income optimizer: for shares you hold, rank OTM calls to
+    sell by income yield vs the chance of being called away (upside cap).
+    Score blends POP (not called), annualized income yield, upside room left,
+    and IV-rank (richer premium). Flags earnings before expiry. Structured rows."""
+    import datetime as _dt
+    from scipy.stats import norm as _nm
+
+    def _pgt(S, X, T, iv):   # risk-neutral P(S_T > X) = N(d2)
+        if min(S, X, T, iv) <= 0:
+            return None
+        return float(_nm.cdf((np.log(S / X) + (r - 0.5 * iv * iv) * T) / (iv * np.sqrt(T))))
+
+    rows = []
+    for tk in tickers:
+        tk = str(tk).strip().upper()
+        if not tk:
+            continue
+        try:
+            t = yf.Ticker(tk)
+            spot = _last_price(tk) or float(t.history(period="1d")["Close"].iloc[-1])
+            if not spot:
+                continue
+            exp = dte = None
+            for e in (t.options or []):
+                try:
+                    d = (_dt.datetime.strptime(e, "%Y-%m-%d").date() - _dt.date.today()).days
+                except Exception:
+                    continue
+                if dte_lo <= d <= dte_hi:
+                    exp, dte = e, d
+                    break
+            if not exp:
+                continue
+            ivr = None
+            if conn is not None:
+                try:
+                    _ivr = _iv_rank(conn, tk)
+                    ivr = _ivr.get("rank") if _ivr else None
+                except Exception:
+                    ivr = None
+            earn_days = None
+            try:
+                _ne = _next_earnings(tk)
+                earn_days = _ne.get("days") if _ne else None
+            except Exception:
+                earn_days = None
+            earn_flag = earn_days is not None and earn_days <= dte
+
+            T = max(dte, 1) / 365.0
+            ch = t.option_chain(exp)
+            calls = ch.calls.copy()
+            calls["mid"] = ((calls["bid"].fillna(0) + calls["ask"].fillna(0)) / 2).where(
+                (calls["bid"] > 0) & (calls["ask"] > 0), calls["lastPrice"])
+            cl = calls[(calls["strike"] > spot) & (calls["strike"] <= spot * (1 + otm_max)) & (calls["mid"] > 0.03)]
+            for _, row in cl.iterrows():
+                K = float(row["strike"]); cr = float(row["mid"]); iv = float(row.get("impliedVolatility") or 0)
+                if not (iv > 0):
+                    continue
+                pgt = _pgt(spot, K, T, iv)
+                if pgt is None:
+                    continue
+                pop = 1.0 - pgt                     # P(not called away) = P(S_T < K)
+                ann = (cr / spot) * (365.0 / max(dte, 1))   # income yield on the stock
+                upside = (K - spot) / spot          # room before cap
+                if_called = ((K - spot) + cr) / spot        # static return if assigned
+                sc = 100 * (0.40 * pop + 0.30 * min(ann, 1.0)
+                            + 0.15 * min(upside, 0.10) / 0.10
+                            + 0.15 * (ivr if ivr is not None else 40) / 100)
+                if earn_flag:
+                    sc *= 0.85     # earnings before expiry = gap risk to the cap
+                rows.append({
+                    "score": sc, "ticker": tk, "strike": K, "dte": dte,
+                    "credit": cr, "ann": ann, "pop": pop, "upside": upside,
+                    "if_called": if_called, "spot": round(spot, 2),
+                    "ivr": ivr, "earn_days": earn_days, "earn_flag": earn_flag,
+                })
+        except Exception:
+            continue
+    rows.sort(key=lambda z: -z["score"])
+    return rows
+
+
+async def _send_cc(msg, rows):
+    if not rows:
+        await msg.reply_text("No covered calls passed the filters. Try <code>/cc NVDA AAPL MSFT</code>.", parse_mode=H)
+        return
+    _hdrs = ("ST", "Tkr", "Call", "Yr%", "POP")
+    _data = []
+    for r in rows[:15]:
+        emoji = ("⚠️" if r["earn_flag"]
+                 else ("🟢" if (r["ivr"] or 0) >= 50 else "🟡"))
+        _data.append((emoji, r["ticker"], f"{r['strike']:g}C",
+                      f"{r['ann']*100:.0f}%", f"{r['pop']*100:.0f}"))
+    table = _pipe_table(_hdrs, _data, right_cols={3, 4},
+                        legend="🟢 rich IV · ⚠️ earnings before expiry · Yr%=annualized income · POP=% not called")
+    top = rows[0]
+    ivr_s = f"{top['ivr']:.0f}" if top["ivr"] is not None else "n/a"
+    best = (f"<b>Top:</b> {top['ticker']} SELL ${top['strike']:g}C · {top['dte']}d · "
+            f"{top['ann']*100:.0f}%/yr income · POP {top['pop']*100:.0f}% · "
+            f"if called +{top['if_called']*100:.1f}% (cap {top['upside']*100:.1f}% + premium) · IVR {ivr_s}")
+    txt = ("📞 <b>Covered Calls — Income Optimizer</b>\n"
+           "<i>sell upside on shares you own; called away = sell at a profit · not advice</i>\n\n"
+           + table + "\n\n" + best)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="cc_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def cc_command(update, ctx):
+    """/cc [TICKERS] — covered-call income: OTM calls ranked by yield vs call-away risk."""
+    args = list(getattr(ctx, "args", []) or [])
+    tks = [a.upper() for a in args] if args else _hiprob_default_tickers()
+    await update.message.reply_text("📞 Scanning covered calls…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _cc_scan_bot(tuple(tks[:8]), conn=conn)
+    finally:
+        conn.close()
+    await _send_cc(update.message, rows)
+
+
+async def cc_view(query):
+    conn = get_conn()
+    try:
+        rows = _cc_scan_bot(tuple(_hiprob_default_tickers()[:8]), conn=conn)
+    finally:
+        conn.close()
+    await _send_cc(query.message, rows)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -23576,6 +23710,7 @@ def main():
     app.add_handler(CommandHandler("hiprob", hiprob_command))
     app.add_handler(CommandHandler("spreads", spreads_command))
     app.add_handler(CommandHandler("wheel", wheel_command))
+    app.add_handler(CommandHandler("cc", cc_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

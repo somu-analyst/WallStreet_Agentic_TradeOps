@@ -10967,6 +10967,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await divcap_view(query)
         elif data == "pead_view":
             await pead_view(query)
+        elif data == "ic_view":
+            await ic_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -22474,6 +22476,125 @@ async def pead_view(query):
     await _send_pead(query.message, _pead_scan())
 
 
+# ── FACTOR IC / QUANTILE VALIDATION (Alphalens-style, no dependency) ─
+def _ic_factor_matrix(wide, factor):
+    """Per-(date,ticker) factor value. Higher factor = more bullish expectation."""
+    if factor == "reversal":
+        return -(wide / wide.shift(5) - 1)             # oversold (neg 5d ret) -> high factor
+    if factor == "momentum":
+        return (wide.shift(21) / wide.shift(105) - 1)  # ~4-mo minus recent-month momentum
+    if factor == "lowvol":
+        return -(wide.pct_change().rolling(21).std())  # low realized vol -> high factor
+    return None
+
+
+def _ic_analyze(conn, factor="reversal", horizons=(1, 3, 5, 10), n_buckets=5):
+    """Alphalens-style: cross-sectional rank IC (Spearman) of factor vs forward
+    return, per horizon, plus pooled quantile-spread (Q_top - Q_bottom). Pure
+    stock_daily read. Returns {horizon: metrics or None}."""
+    from scipy.stats import spearmanr
+    try:
+        df = pd.read_sql("SELECT ticker, trade_date, close FROM stock_daily", conn)
+    except Exception:
+        return {}
+    if df.empty:
+        return {}
+    df["ticker"] = df["ticker"].str.upper()
+    wide = df.pivot_table(index="trade_date", columns="ticker", values="close", aggfunc="last").sort_index()
+    uni = [t for t in SCAN_UNIVERSE if t in wide.columns]
+    wide = wide[uni]
+    fac = _ic_factor_matrix(wide, factor)
+    if fac is None:
+        return {}
+    out = {}
+    for h in horizons:
+        fwd = wide.shift(-h) / wide - 1
+        ics, allf, allr = [], [], []
+        for dt in fac.index:
+            if dt not in fwd.index:
+                continue
+            pair = pd.concat([fac.loc[dt], fwd.loc[dt]], axis=1).dropna()
+            if len(pair) < 8:
+                continue
+            ic = spearmanr(pair.iloc[:, 0], pair.iloc[:, 1]).correlation
+            if np.isfinite(ic):
+                ics.append(ic)
+            allf.extend(pair.iloc[:, 0].tolist()); allr.extend(pair.iloc[:, 1].tolist())
+        ics = np.array(ics)
+        if len(ics) < 5:
+            out[h] = None
+            continue
+        mean_ic = float(ics.mean()); sd = float(ics.std())
+        ir = mean_ic / sd if sd > 0 else 0.0
+        tstat = ir * np.sqrt(len(ics))
+        hit = float((ics > 0).mean())
+        spread = top = bot = None
+        try:
+            af = np.array(allf); ar = np.array(allr)
+            q = pd.qcut(af, n_buckets, labels=False, duplicates="drop")
+            if q is not None and q.max() > 0:
+                top = float(ar[q == q.max()].mean()); bot = float(ar[q == 0].mean())
+                spread = top - bot
+        except Exception:
+            pass
+        out[h] = {"mean_ic": mean_ic, "ir": ir, "tstat": float(tstat), "hit": hit,
+                  "n": int(len(ics)), "spread": spread, "top": top, "bot": bot}
+    return out
+
+
+_IC_FACTORS = [("reversal", "Rev"), ("momentum", "Mom"), ("lowvol", "LoVol")]
+
+
+async def _send_ic(msg):
+    conn = get_conn()
+    try:
+        results = {name: _ic_analyze(conn, name) for name, _ in _IC_FACTORS}
+    finally:
+        conn.close()
+    _hdrs = ("ST", "Fac", "H", "IC", "t")
+    _data = []
+    detail = []
+    for name, short in _IC_FACTORS:
+        res = results.get(name) or {}
+        best = None
+        for h in (1, 3, 5, 10):
+            m = res.get(h)
+            if not m:
+                continue
+            sig = abs(m["tstat"]) >= 2
+            emoji = "🟢" if sig else ("🟡" if abs(m["tstat"]) >= 1 else "🔴")
+            _data.append((emoji, short, f"{h}d", f"{m['mean_ic']:+.3f}", f"{m['tstat']:+.1f}"))
+            if best is None or abs(m["tstat"]) > abs(best[1]["tstat"]):
+                best = (h, m)
+        if best:
+            h, m = best
+            sp = f"{m['spread']*100:+.2f}%" if m["spread"] is not None else "n/a"
+            detail.append(f"<b>{short}</b> best {h}d: IC {m['mean_ic']:+.3f}, t {m['tstat']:+.1f}, "
+                          f"IC-hit {m['hit']*100:.0f}%, Q{5}-Q1 {sp} (N={m['n']})")
+    if not _data:
+        await msg.reply_text("Not enough history to compute IC (need more stock_daily dates).", parse_mode=H)
+        return
+    table = _pipe_table(_hdrs, _data, right_cols={3, 4},
+                        legend="rank IC vs fwd return · t=t-stat (|t|≥2 🟢 sig) · H=horizon")
+    txt = ("🔬 <b>Factor Validation — IC / Quantile (Alphalens-style)</b>\n"
+           "<i>rank IC = cross-sectional Spearman(factor, forward return). ~6mo history = LOW power; "
+           "|t|≥2 is the bar. Honest: expect tiny/insignificant IC — that's the point of measuring.</i>\n\n"
+           + table + "\n\n" + "\n".join(detail))
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="ic_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def ic_command(update, ctx):
+    """/ic — Alphalens-style factor validation: rank IC + quantile spread vs forward returns."""
+    await update.message.reply_text("🔬 Computing factor IC…", parse_mode=H)
+    await _send_ic(update.message)
+
+
+async def ic_view(query):
+    await _send_ic(query.message)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -24673,6 +24794,7 @@ def main():
     app.add_handler(CommandHandler("divcap", divcap_command))
     app.add_handler(CommandHandler("pwindex", pwindex_command))
     app.add_handler(CommandHandler("pead", pead_command))
+    app.add_handler(CommandHandler("ic", ic_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

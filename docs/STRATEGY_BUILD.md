@@ -56,6 +56,13 @@ so nothing is hidden.
 - 🔓 **Strategic unlock:** CBOE chains include **bid/ask + implied_volatility + delta** — adopting this
   in the EOD pipeline (and storing bid/ask) would ALSO unblock `/skew`, dispersion (#14), box-arb (#17).
 - Next: user-scale full-universe run, then decide on migrating NYSE_YFin's options leg to CBOE.
+- **2026-07-02 upgrades:** strike window → percent-of-spot then → **FULL chain default** (`--strike-pct`
+  to trim); now also captures **bid/ask/IV/delta** per side (67–87% populated, sanity-verified).
+  20 tickers = 7,146 rows / 5.4s (2.1× the ±25-strike rows, same speed).
+- **Backtest DB decision:** historical option chains can't be backfilled free (no provider serves
+  past chains). Plan = **capture-forward**: run the full-chain job daily from now → own backtest-grade
+  options DB (full strikes + bid/ask/IV/delta) in 3–6 months. Interim backtests use the existing
+  ~6.5-mo `options_daily`. Paid alternative if urgent: ThetaData/Polygon (~$40–80/mo) via OpenBB.
 
 ## 1c. Data layer — DB-first history (reduce API dependence)
 - ✅ **`stock_history` table** added to `US_data.db` — multi-year daily OHLC. `_daily_history()` / `_history_matrix()`

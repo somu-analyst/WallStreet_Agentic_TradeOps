@@ -28,6 +28,12 @@ so nothing is hidden.
 | 11 | Dividend-capture / ex-div assignment risk | `/divcap` | ✅ Done | pending | fwd yield + ex-date via yfinance .info, 12h cache |
 | 12 | Put-write / covered-call systematic index (PUT/BXM style) | `/pwindex` | ✅ Done | pending | APPROX BS-priced backtest vs B&H; labeled educational |
 
+## 1b. Streamlit dashboard mirror
+- ✅ **"⚙️ Strategy Scanners" page** (dashboard.py) — one hub, selectbox + Run scan, reuses the
+  `telegram_bot_optimized` scanner functions (single engine, two front-ends). Covers WAN, Earnvol,
+  Pairs, Season, Rotation, Reversal, Condor, Calendar, Dividends, Put-Write. Wheel/CC already have
+  their own dashboard pages. Commit pending.
+
 ## 2. Already in the bot (don't rebuild — enhance only)
 - Credit/debit spreads → `/spreads` · High-prob ensemble → `/hiprob` · Momentum 12-1 → `/momentum`
 - Signed GEX / walls → `/gex` · Vanna → `/vanna` · Max pain/OPEX → `/opex` · Squeeze → `/squeeze`

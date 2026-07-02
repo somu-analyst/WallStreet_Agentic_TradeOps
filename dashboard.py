@@ -4799,6 +4799,7 @@ with st.sidebar:
             "🎯 High-Prob Options",
             "📐 Spreads Scanner",
             "🎡 Wheel / CSP",
+            "⚙️ Strategy Scanners",
             "📊 GEX Profile",
             "🏁 Spread Backtest",
             "🔎 Smart-Money Flow",
@@ -18586,6 +18587,104 @@ if page == "🎡 Wheel / CSP":
                    "premium without assignment under the IV-implied distribution.")
     else:
         st.info("Pick tickers, then **Scan wheel setups**.")
+
+
+def _ss_dataframe(_tbo, conn, choice, tks):
+    """Reuse telegram_bot_optimized scanner functions → clean DataFrame (one engine,
+    two front-ends). tks is a tuple of upper-case tickers (may be empty for defaults)."""
+    default = _tbo._hiprob_default_tickers()
+    if choice.startswith("📡"):                                   # WAN ensemble
+        rows = _tbo._wan_scan(conn, _tbo._wan_spy_ret(conn))
+        return pd.DataFrame([{"Ticker": r["ticker"], "Signal": r["signal"], "Conf": r["conf"],
+                              "Prob %": round(float(r["prob"]), 0), "Spot": r["spot"],
+                              "Bull": r.get("bull_v"), "Bear": r.get("bear_v")} for r in rows])
+    if choice.startswith("📆"):                                   # Earnings IV-crush
+        rows = _tbo._earnvol_scan(conn, list(tks) or default, within_days=(60 if tks else 10))
+        return pd.DataFrame([{"Ticker": r["ticker"], "Earnings": r.get("ed_date"), "Days": r["dte_e"],
+                              "IV Rank": r["ivr"], "Exp Move %": r["em_pct"], "Play": r["play"]} for r in rows])
+    if choice.startswith("🔗"):                                   # Pairs
+        rows = _tbo._pairs_scan(conn)
+        return pd.DataFrame([{"Pair": r["pair"], "Group": r["group"], "Z": round(r["z"], 2),
+                              "Corr": round(r["corr"], 2), "Beta": round(r["beta"], 2),
+                              "Half-life (d)": (round(r["hl"], 0) if r["hl"] else None),
+                              "Action": r["action"]} for r in rows])
+    if choice.startswith("📅"):                                   # Seasonality
+        rows = _tbo._season_scan(list(tks) or default)
+        mn = _tbo._MONTHS
+        return pd.DataFrame([{"Ticker": r["ticker"], "Month Avg %": round(r["mo_avg"] * 100, 1),
+                              "Win %": round(r["mo_win"] * 100, 0), "Yrs": r["mo_n"],
+                              "Best Mo": mn[r["best_m"]], "Worst Mo": mn[r["worst_m"]],
+                              "In TOM": r["in_tom"]} for r in rows])
+    if choice.startswith("🔄"):                                   # Sector rotation
+        rows = _tbo._rotate_scan()
+        return pd.DataFrame([{"Sector": r["name"], "ETF": r["sym"], "1M %": round(r["r1"] * 100, 1),
+                              "3M %": round(r["r3"] * 100, 1), "6M %": round(r["r6"] * 100, 1),
+                              "vs SPY 3M %": round(r["excess"] * 100, 1)} for r in rows])
+    if choice.startswith("↩"):                                    # Short-term reversal
+        rows = _tbo._revert_scan(conn)
+        return pd.DataFrame([{"Ticker": r["ticker"], "5d %": round(r["ret"] * 100, 1),
+                              "Z": round(r["z"], 2), "Side": r["side"]} for r in rows])
+    if choice.startswith("🦅"):                                   # Iron condor
+        rows = _tbo._condor_scan(tuple(tks) if tks else tuple(default), conn=conn)
+        return pd.DataFrame([{"Ticker": r["ticker"], "DTE": r["dte"],
+                              "Short P/C": f"{r['sp']:g}/{r['sc']:g}", "Long P/C": f"{r['lp']:g}/{r['lc']:g}",
+                              "Credit": round(r["credit"], 2), "POP %": round(r["pop"] * 100, 0),
+                              "RoR": round(r["ror"], 2), "Range": f"{r['lo_be']:.0f}-{r['hi_be']:.0f}"} for r in rows])
+    if choice.startswith("🗓"):                                   # Calendar spreads
+        rows = _tbo._calendar_scan(tuple(tks) if tks else tuple(default), conn=conn)
+        return pd.DataFrame([{"Ticker": r["ticker"], "Strike": r["strike"], "Near (d)": r["near_d"],
+                              "Far (d)": r["far_d"], "Front IV %": round(r["iv_n"] * 100, 0),
+                              "Back IV %": round(r["iv_f"] * 100, 0), "IV Ratio": round(r["iv_ratio"], 2),
+                              "Debit": round(r["net_debit"], 2)} for r in rows])
+    if choice.startswith("💵"):                                   # Dividend calendar
+        rows = _tbo._divcap_scan(tuple(tks) if tks else tuple(_tbo._DIV_PAYERS))
+        return pd.DataFrame([{"Ticker": r["ticker"], "Yield %": round(r["yield"] * 100, 2),
+                              "Ex-date": r["ex_date"], "Ex in (d)": r["ex_days"]} for r in rows])
+    if choice.startswith("📈"):                                   # Put-write index
+        res = _tbo._pwindex_sim((list(tks)[0] if tks else "SPY"))
+        if not res:
+            return pd.DataFrame()
+        pw, bh = res["pw"], res["bh"]
+        return pd.DataFrame([
+            {"Metric": "CAGR %", "Put-Write": round(pw["cagr"] * 100, 1), "Buy & Hold": round(bh["cagr"] * 100, 1)},
+            {"Metric": "Vol %", "Put-Write": round(pw["vol"] * 100, 1), "Buy & Hold": round(bh["vol"] * 100, 1)},
+            {"Metric": "Sharpe", "Put-Write": round(pw["sharpe"], 2), "Buy & Hold": round(bh["sharpe"], 2)},
+            {"Metric": "Max DD %", "Put-Write": round(pw["maxdd"] * 100, 0), "Buy & Hold": round(bh["maxdd"] * 100, 0)},
+            {"Metric": "Win %", "Put-Write": round(pw["win"] * 100, 0), "Buy & Hold": round(bh["win"] * 100, 0)},
+        ])
+    return pd.DataFrame()
+
+
+if page == "⚙️ Strategy Scanners":
+    _page_header("⚙️ Strategy Scanners",
+                 "Income · event · stat-arb · seasonality — the same engine as the Telegram bot. Screeners, not proven alpha.")
+    import telegram_bot_optimized as _tbo
+    _ss_opts = ["📡 WAN ensemble signals", "📆 Earnings IV-crush", "🔗 Pairs mean-reversion",
+                "📅 Seasonality", "🔄 Sector rotation", "↩️ Short-term reversal", "🦅 Iron condor",
+                "🗓️ Calendar spreads", "💵 Dividend calendar", "📈 Put-write index"]
+    _c1, _c2 = st.columns([2, 3])
+    _ss_choice = _c1.selectbox("Scanner", _ss_opts, key="ss_choice")
+    _ss_tk_in = _c2.text_input("Tickers (optional; blank = sensible defaults)", "", key="ss_tks")
+    if st.button("▶️ Run scan", type="primary", key="ss_btn"):
+        _ss_tks = tuple([x.strip().upper() for x in re.split(r"[ ,]+", _ss_tk_in) if x.strip()])
+        with st.spinner("Running scan…"):
+            _ss_conn = _tbo.get_conn()
+            try:
+                st.session_state["_ss_df"] = _ss_dataframe(_tbo, _ss_conn, _ss_choice, _ss_tks)
+            finally:
+                _ss_conn.close()
+        st.session_state["_ss_for"] = _ss_choice
+    _ss_df = st.session_state.get("_ss_df")
+    if _ss_df is not None:
+        st.caption(f"Results — {st.session_state.get('_ss_for', '')}")
+        if isinstance(_ss_df, pd.DataFrame) and not _ss_df.empty:
+            st.dataframe(_ss_df, hide_index=True, use_container_width=True)
+        else:
+            st.warning("No results / data unavailable for this scanner right now.")
+    else:
+        st.info("Choose a scanner and click **Run scan**.")
+    st.caption("⚠️ Same honesty caveats as the bot — validate vs history before trading. "
+               "Put-write is a Black-Scholes approximation, not real option marks.")
 
 
 if page == "📊 GEX Profile":

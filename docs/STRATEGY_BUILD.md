@@ -63,6 +63,13 @@ so nothing is hidden.
   past chains). Plan = **capture-forward**: run the full-chain job daily from now → own backtest-grade
   options DB (full strikes + bid/ask/IV/delta) in 3–6 months. Interim backtests use the existing
   ~6.5-mo `options_daily`. Paid alternative if urgent: ThetaData/Polygon (~$40–80/mo) via OpenBB.
+- **VERIFIED 2026-07-02: no free historical-options source.** AlphaVantage `HISTORICAL_OPTIONS`
+  tested with our key → "premium endpoint" (0 rows). Finnhub options = premium too. Capture-forward
+  is the only free path; AV premium (~$50/mo, key already wired) is the simplest paid backfill.
+- **Update timing (CBOE):** quotes 15-min delayed intraday → post-close run = final day prices/volume;
+  **OI updates once daily next morning (~6–8am ET via OCC)** — same semantics as yfinance/run_all_offhours.
+- **Migration shape agreed:** keep `options_daily`, ALTER TABLE to add bid/ask/iv/delta (+`source` stamp
+  yfin/openbb), OpenBB job appends full-chain rows from now → one continuous table, old rows stay.
 
 ## 1c. Data layer — DB-first history (reduce API dependence)
 - ✅ **`stock_history` table** added to `US_data.db` — multi-year daily OHLC. `_daily_history()` / `_history_matrix()`

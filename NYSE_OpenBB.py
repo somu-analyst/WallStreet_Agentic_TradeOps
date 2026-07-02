@@ -286,6 +286,92 @@ def _fetch_chain_raw_yf(ticker, trade_dt):
         return None
 
 
+def _fetch_chain_cdn(ticker, trade_dt):
+    """Throttle-buster: hit CBOE's public delayed-quotes CDN directly with a
+    browser-impersonated client (curl_cffi — same trick NYSE_YFin uses for yahoo).
+    Same data OpenBB's cboe provider reads, but a browser HTTP fingerprint, so it
+    usually succeeds while the vanilla client is being rejected (KeyError 'data')."""
+    import re
+    try:
+        try:
+            from curl_cffi import requests as _rq
+
+            def _get(url):
+                return _rq.get(url, impersonate="chrome", timeout=30)
+        except Exception:                                # curl_cffi missing -> plain UA spoof
+            import requests as _rq
+            _hdr = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
+
+            def _get(url):
+                return _rq.get(url, headers=_hdr, timeout=30)
+
+        js = None
+        for sym in dict.fromkeys([ticker.replace("-", "."), ticker, "_" + ticker]):
+            try:
+                r = _get(f"https://cdn.cboe.com/api/global/delayed_quotes/options/{sym}.json")
+                if r.status_code != 200:
+                    continue
+                j = r.json()
+            except Exception:
+                continue
+            if isinstance(j, dict) and j.get("data", {}).get("options"):
+                js = j
+                break
+        if not js:
+            return None
+        d = js["data"]
+        spot = d.get("current_price") or d.get("close")
+        cutoff = trade_dt + timedelta(days=MAX_HORIZON_DAYS)
+        rows = []
+        for o in d["options"]:
+            m = re.match(r"^(.+?)(\d{6})([CP])(\d{8})$", str(o.get("option") or ""))
+            if not m:
+                continue
+            try:
+                exp = datetime.strptime(m.group(2), "%y%m%d").date()
+            except Exception:
+                continue
+            if exp > cutoff:
+                continue
+            rows.append({"expiry_date": exp.strftime("%Y-%m-%d"),
+                         "strike": int(m.group(4)) / 1000.0, "typ": m.group(3),
+                         "oi": o.get("open_interest"), "last": o.get("last_trade_price"),
+                         "vol": o.get("volume"), "bid": o.get("bid"), "ask": o.get("ask"),
+                         "iv": o.get("iv"), "delta": o.get("delta")})
+        if not rows:
+            return None
+        raw = pd.DataFrame(rows).drop_duplicates(subset=["expiry_date", "strike", "typ"])
+
+        def side(dd, suff):
+            return pd.DataFrame({
+                "strike": dd["strike"].values,
+                "expiry_date": dd["expiry_date"].values,
+                f"openInt_{suff}": pd.to_numeric(dd["oi"], errors="coerce").values,
+                f"lastPrice_{suff}": pd.to_numeric(dd["last"], errors="coerce").values,
+                f"vol_{suff}": pd.to_numeric(dd["vol"], errors="coerce").values,
+                f"bid_{suff}": pd.to_numeric(dd["bid"], errors="coerce").values,
+                f"ask_{suff}": pd.to_numeric(dd["ask"], errors="coerce").values,
+                f"iv_{suff}": pd.to_numeric(dd["iv"], errors="coerce").values,
+                f"delta_{suff}": pd.to_numeric(dd["delta"], errors="coerce").values,
+            })
+        merged = pd.merge(side(raw[raw["typ"] == "C"], "Call"), side(raw[raw["typ"] == "P"], "Put"),
+                          on=["strike", "expiry_date"], how="outer")
+        if spot and STRIKE_PCT > 0 and not merged.empty:
+            lo, hi = float(spot) * (1 - STRIKE_PCT), float(spot) * (1 + STRIKE_PCT)
+            merged = merged[(merged["strike"] >= lo) & (merged["strike"] <= hi)].copy()
+        if merged.empty:
+            return None
+        for c in merged.columns:
+            if merged[c].dtype == "float64":
+                merged[c] = merged[c].astype("float32")
+        merged["ticker"] = ticker
+        merged["trade_date"] = pd.Timestamp(trade_dt).strftime("%Y-%m-%d")
+        return merged
+    except Exception:
+        return None
+
+
 def fetch_chain_openbb(obb, ticker, provider, trade_dt):
     """Fetch + shape one ticker's chain into NYSE_YFin's merged schema. Returns df or None."""
     df = None
@@ -313,6 +399,13 @@ def fetch_chain_openbb(obb, ticker, provider, trade_dt):
         # not on CBOE AND yahoo has no chains either -> genuinely optionless.
         # Mark permanent so the retry rounds don't waste requests re-hammering it.
         PERMANENT_FAIL.add(ticker)
+    # throttle response (KeyError 'data'): don't wait for the retry rounds — go
+    # straight at the CDN with a browser-impersonated client (different fingerprint).
+    if (df is None or len(df) == 0) and "KeyError" in str(last_err):
+        cdn = _fetch_chain_cdn(ticker, trade_dt)
+        if cdn is not None:
+            print(f"  {ticker}: throttled on OpenBB -> recovered via CBOE CDN ({len(cdn)} rows)")
+            return cdn
     if df is None or len(df) == 0:
         print(f"  {ticker}: chain fetch failed ({last_err})")
         return None
@@ -509,12 +602,20 @@ def main():
         if ci < len(chunks):
             time.sleep(rest)
 
-    # final slow retry rounds — escalating backoff, permanently-optionless names excluded
-    for rnd in (1, 2, 3):
+    # final slow retry rounds — escalating backoff, permanently-optionless names excluded,
+    # keeps going (up to 5 rounds) as long as each round recovers something
+    prev_left = None
+    for rnd in (1, 2, 3, 4, 5):
         retry = [t for t in dict.fromkeys(failed) if t not in PERMANENT_FAIL]
         failed = [t for t in failed if t in PERMANENT_FAIL]      # keep only permanent in the tally
         if not retry:
             break
+        if prev_left is not None and len(retry) >= prev_left:
+            log(f"retry stopped: round {rnd-1} recovered nothing ({len(retry)} still throttled) — "
+                "rerun the same command later, it only needs to refill these")
+            failed.extend(retry)
+            break
+        prev_left = len(retry)
         backoff = 60 * rnd
         log(f"retry round {rnd}: {len(retry)} throttled tickers ({backoff}s backoff, slow single-file)")
         time.sleep(backoff)

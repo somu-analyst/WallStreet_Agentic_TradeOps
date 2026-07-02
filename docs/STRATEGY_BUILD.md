@@ -17,11 +17,11 @@ so nothing is hidden.
 | 0 | WAN-streamer — 24-model ensemble stream + AI chat | `/wan` | ✅ Done | `8f7fbb5` | 15-min job, daily dedup |
 | 1 | Earnings IV-crush income scanner | `/earnvol` | ✅ Done | `075a8d1` | IV-rank + expected move |
 | 2 | Wheel CSP income optimizer | `/wheel` | ✅ Done (pre-existing) | — | already had annualized yield + POP; left as-is |
-| 3 | Covered-call income (yield on held/long names) | `/cc` | ✅ Done | pending | OTM calls ranked yield vs call-away POP; IVR + earnings flag |
-| 4 | Pairs / statistical mean-reversion (within-sector z-score) | `/pairs` | ✅ Done | pending | spread z-score + OU half-life; risky screen, not arb |
+| 3 | Covered-call income (yield on held/long names) | `/cc` | ✅ Done | `c1dcd63` | OTM calls ranked yield vs call-away POP; IVR + earnings flag |
+| 4 | Pairs / statistical mean-reversion (within-sector z-score) | `/pairs` | ✅ Done | `3d73271` | spread z-score + OU half-life; risky screen, not arb |
 | 5 | Calendar / diagonal spreads (theta + vega, term structure) | `/calendar` | ⏳ Planned | — | uses VIX/VIX3M + chain |
 | 6 | Iron condor / strangle range-income optimizer | `/condor` | ⏳ Planned | — | extends /earnvol + /spreads |
-| 7 | Seasonality engine (turn-of-month, DoW, pre-holiday) | `/season` | ⏳ Planned | — | needs multi-year yfinance pull |
+| 7 | Seasonality engine (current-month avg/win, DoW, turn-of-month) | `/season` | ✅ Done | pending | on-the-fly ~10y yfinance, cached 24h |
 | 8 | Sector rotation / relative-strength ranker | `/rotate` | ⏳ Planned | — | ETFs; from stock_daily |
 | 9 | Cross-sectional mean-reversion (short-term reversal) | `/revert` | ⏳ Planned | — | from stock_daily |
 | 10 | Macro event positioner (FOMC/CPI/NFP drift+vol) | `/macro` (enhance) | ⏳ Planned | — | modest, decaying edge |

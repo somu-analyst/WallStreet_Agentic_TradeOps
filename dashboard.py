@@ -18674,6 +18674,21 @@ def _ss_dataframe(_tbo, conn, choice, tks):
         return pd.DataFrame([{"Ticker": r["ticker"], "IV %": round(r["iv"] * 100, 0),
                               "RV %": round(r["rv"] * 100, 0), "VRP (pts)": round(r["vrp"] * 100, 1),
                               "IV/RV": round(r["ratio"], 2), "Side": r["side"]} for r in rows])
+    if choice.startswith("💪"):                                   # Relative strength vs SPY
+        rows = _tbo._rs_scan(conn)
+        return pd.DataFrame([{"Ticker": r["ticker"], "3M %": round(r["r3"] * 100, 1),
+                              "vs SPY %": round(r["ex3"] * 100, 1), "RS score": round(r["rs"] * 100, 1)}
+                             for r in rows])
+    if choice.startswith("🚀"):                                   # 52-week breakout/breakdown
+        rows = _tbo._breakout_scan(conn)
+        return pd.DataFrame([{"Ticker": r["ticker"], "Signal": ("52w HIGH" if r["sig"] == "HIGH" else "52w LOW"),
+                              "% from Hi": round(r["from_hi"] * 100, 1), "% from Lo": round(r["from_lo"] * 100, 1)}
+                             for r in rows])
+    if choice.startswith("↕"):                                    # Single-name mean reversion
+        rows = _tbo._zrev_scan(conn)
+        return pd.DataFrame([{"Ticker": r["ticker"], "Z": round(r["z"], 2),
+                              "vs 20d avg %": round((r["px"] / r["mean"] - 1) * 100, 1), "Side": r["side"]}
+                             for r in rows])
     if choice.startswith("🐋"):                                   # Unusual options activity
         rows = _tbo._uoa_scan(conn)
         return pd.DataFrame([{"Ticker": r["ticker"], "Contract": f"{r['strike']:g}{r['side']}",
@@ -18721,7 +18736,8 @@ if page == "⚙️ Strategy Scanners":
     _ss_opts = ["🐋 Unusual options activity", "🌪️ Variance risk premium", "🧭 Positioning builder", "⚖️ Portfolio optimizer", "📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
                 "🔗 Pairs mean-reversion", "📅 Seasonality", "🔄 Sector rotation", "↩️ Short-term reversal",
                 "🎡 Wheel (CSP)", "📞 Covered call",
-                "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar", "📈 Put-write index",
+                "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar",
+                "💪 Relative strength", "🚀 52-week breakout", "↕️ Mean reversion (z)", "📈 Put-write index",
                 "🔬 Factor IC validation"]
     _c1, _c2 = st.columns([2, 3])
     _ss_choice = _c1.selectbox("Scanner", _ss_opts, key="ss_choice")

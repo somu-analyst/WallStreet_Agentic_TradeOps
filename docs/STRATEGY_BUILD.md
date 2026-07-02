@@ -121,10 +121,10 @@ so nothing is hidden.
 |-----------|---------|------|------|
 | VRP screener (IV vs realized vol) | `/vrp` | options IV + stock_history RV | ✅ **BUILT** — IV vs jump-robust (MAD) realized vol; sell rich / buy cheap; bot + dashboard hub |
 | Unusual options activity (vol÷OI) | `/uoa` | options_change | ✅ **BUILT** — vol≫OI, DTE≥7 (skips 0DTE index churn), ranked by $ notional; bot + dashboard hub |
-| IV-skew extremes (put/call skew) | `/skew` | options IV | internal model (`iv_skew`); surface standalone |
-| 52-week high/low breakout / proximity | `/breakout` | stock_history (6y) | classic momentum-breakout, not built |
-| Single-name time-series mean-reversion | `/zrev` | stock_history | /revert is cross-sectional; this is per-ticker Bollinger/z |
-| Stock-level relative strength vs SPY | `/rs` | stock_history | /rotate is sector-level only |
+| IV-skew extremes (put/call skew) | `/skew` | options IV | ❌ TRIED & REVERTED 2026-07-02 — needs OTM **bid/ask**; DB only has `lastPrice` → stale OTM prints give nonsense IV (putIV 1%, call-skew everywhere). Blocked until bid/ask stored (same limit as dispersion) |
+| 52-week high/low breakout / proximity | `/breakout` | stock_history (6y) | ✅ **BUILT** — at/near 52w highs (breakout) / lows (breakdown); bot + hub |
+| Single-name time-series mean-reversion | `/zrev` | stock_history | ✅ **BUILT** — price z-score vs own 20d mean; bot + hub |
+| Stock-level relative strength vs SPY | `/rs` | stock_history | ✅ **BUILT** — blended 3M/6M excess vs SPY; bot + hub |
 - Git repos: all catalog items reconciled — Alphalens→/ic, PyPortfolioOpt/Riskfolio→/allocate built;
   qlib/vectorbt/OpenBB/Lean/backtrader/zipline/FinRL/FinGPT/finBERT parked (finBERT redundant — Finnhub
   sentiment already wired). Nothing missed.

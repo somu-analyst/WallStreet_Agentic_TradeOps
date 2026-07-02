@@ -48,7 +48,7 @@ so nothing is hidden.
 | # | Strategy | Command | Prerequisite to unblock |
 |---|----------|---------|-------------------------|
 | 13 | PEAD (post-earnings drift) — ✅ DONE `/pead` | `/pead` | UNBLOCKED: FINNHUB_API_KEY is set (verified 2026-07-01). Finnhub calendar/earnings; in dashboard hub too |
-| 14 | Dispersion (index vs constituent vol) | `/dispersion` | Bulk live option chains + perf budget |
+| 14 | Dispersion (index vs constituent vol) | `/dispersion` | Bulk live option chains for ~full constituent set. TRIED 2026-07-01 with top-8 only → implied-correlation math meaningless (8-name tech basket ~37% IV vs SPY 14% → corr ≈ 0, misleading). Reverted; needs ≥30-50 weighted constituents to be valid. |
 | 15 | Index rebalance (S&P add/delete) | `/rebal` | Corporate-action announcement feed |
 | 16 | Gamma scalping | `/gscalp` | Intraday tick storage |
 | 17 | Riskless arbitrage (box / put-call parity) | `/boxarb` | Live bid/ask + borrow rates in DB |

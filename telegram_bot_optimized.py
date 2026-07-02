@@ -10963,6 +10963,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await condor_view(query)
         elif data == "calendar_view":
             await calendar_view(query)
+        elif data == "divcap_view":
+            await divcap_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -22184,6 +22186,100 @@ async def calendar_view(query):
     await _send_calendar(query.message, rows)
 
 
+# ── DIVIDEND CALENDAR / CAPTURE (ex-date + forward yield) ────────
+_DIV_PAYERS = ["KO", "PEP", "JNJ", "PG", "XOM", "CVX", "JPM", "VZ", "T", "IBM",
+               "MO", "ABBV", "PFE", "MMM", "O", "MAIN", "HD", "CSCO", "TXN", "AVGO"]
+_DIVCAP_CACHE = {}   # tk -> (ts, dict)
+
+def _divcap_stats(tk):
+    """Forward dividend yield + next ex-date via yfinance. Cached 12h. None if not a payer."""
+    import time as _t
+    now = _t.time()
+    c = _DIVCAP_CACHE.get(tk)
+    if c and now - c[0] < 43200:
+        return c[1]
+    res = None
+    try:
+        info = yf.Ticker(tk).info or {}
+        rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate")
+        dy = info.get("dividendYield") or info.get("trailingAnnualDividendYield")
+        price = info.get("currentPrice") or info.get("regularMarketPrice") or _last_price(tk)
+        if dy and dy > 1:        # some feeds return percent, normalise to fraction
+            dy = dy / 100.0
+        if (not dy) and rate and price:
+            dy = float(rate) / float(price)
+        ex_days = None; ex_date = None
+        ed = info.get("exDividendDate")
+        if ed:
+            try:
+                ex_date = datetime.utcfromtimestamp(int(ed))
+                ex_days = (ex_date.date() - datetime.utcnow().date()).days
+            except Exception:
+                ex_days = None
+        if dy:
+            res = {"yield": float(dy), "rate": float(rate) if rate else None,
+                   "ex_days": ex_days, "ex_date": ex_date.strftime("%b %d") if ex_date else "n/a"}
+    except Exception:
+        res = None
+    _DIVCAP_CACHE[tk] = (now, res)
+    return res
+
+
+def _divcap_scan(tickers):
+    out = []
+    for tk in tickers:
+        tk = str(tk).strip().upper()
+        if not tk:
+            continue
+        s = _divcap_stats(tk)
+        if s:
+            s["ticker"] = tk
+            out.append(s)
+    # upcoming ex-dates first (0..30d), then by yield
+    out.sort(key=lambda r: (0 if (r["ex_days"] is not None and 0 <= r["ex_days"] <= 30) else 1,
+                            -(r["yield"] or 0)))
+    return out
+
+
+async def _send_divcap(msg, rows):
+    if not rows:
+        await msg.reply_text("No dividend data (yfinance).", parse_mode=H)
+        return
+    _hdrs = ("ST", "Tkr", "Yld%", "ExIn")
+    _data = []
+    for r in rows[:15]:
+        upcoming = r["ex_days"] is not None and 0 <= r["ex_days"] <= 14
+        emoji = "🟢" if upcoming else "🟡"
+        ex_s = f"{r['ex_days']}d" if (r["ex_days"] is not None and r["ex_days"] >= 0) else "—"
+        _data.append((emoji, r["ticker"], f"{r['yield']*100:.1f}", ex_s))
+    table = _pipe_table(_hdrs, _data, right_cols={2, 3},
+                        legend="fwd yield · ExIn=days to ex-date · 🟢 ex within 14d")
+    top = rows[0]
+    best = (f"<b>Next up:</b> {top['ticker']} — {top['yield']*100:.1f}% yield · ex-date {top['ex_date']}"
+            + (f" (in {top['ex_days']}d)" if top['ex_days'] is not None and top['ex_days'] >= 0 else ""))
+    txt = ("💵 <b>Dividend Calendar / Capture</b>\n"
+           "<i>NOTE: price drops ~by the dividend on ex-date — capture is not free money. "
+           "Also: short ITM calls face early assignment near ex-date. Info tool · not advice.</i>\n\n"
+           + table + "\n\n" + best)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="divcap_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def divcap_command(update, ctx):
+    """/divcap [TICKERS] — dividend calendar: forward yield + next ex-date (assignment-risk aware)."""
+    args = list(getattr(ctx, "args", []) or [])
+    tks = [a.upper() for a in args] if args else _DIV_PAYERS
+    await update.message.reply_text("💵 Loading dividend calendar…", parse_mode=H)
+    rows = _divcap_scan(tuple(tks[:16]))
+    await _send_divcap(update.message, rows)
+
+
+async def divcap_view(query):
+    rows = _divcap_scan(tuple(_DIV_PAYERS[:16]))
+    await _send_divcap(query.message, rows)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -24380,6 +24476,7 @@ def main():
     app.add_handler(CommandHandler("revert", revert_command))
     app.add_handler(CommandHandler("condor", condor_command))
     app.add_handler(CommandHandler("calendar", calendar_command))
+    app.add_handler(CommandHandler("divcap", divcap_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

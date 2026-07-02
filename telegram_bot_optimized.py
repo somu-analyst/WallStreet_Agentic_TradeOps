@@ -23835,6 +23835,116 @@ async def riskoff_view(query):
     await _send_riskoff(query.message, res)
 
 
+def _spearman(a, b):
+    """Rank correlation with no scipy dep (Pearson on ranks)."""
+    a = pd.Series(list(a)).astype(float); b = pd.Series(list(b)).astype(float)
+    m = a.notna() & b.notna()
+    if m.sum() < 8:
+        return float("nan"), int(m.sum())
+    ra = a[m].rank(); rb = b[m].rank()
+    return float(_np_corr(ra, rb)), int(m.sum())
+
+
+def _np_corr(x, y):
+    import numpy as _np
+    x = _np.asarray(x, float); y = _np.asarray(y, float)
+    if x.std() == 0 or y.std() == 0:
+        return float("nan")
+    return float(_np.corrcoef(x, y)[0, 1])
+
+
+def _riskoff_backtest(conn):
+    """Re-run the Market Radar over DB history and report whether it holds up.
+    Turbulence (index put-flow) is scored vs the SIZE of the forward move (|ret|);
+    Direction (neg-gamma + breadth) vs the SIGNED move. Pure DB — same construction
+    as the live gauges, evaluated per past trade_date. Returns a plain-English dict."""
+    import numpy as _np
+    idx = tuple(_RISKOFF_INDEX)
+    sd = pd.read_sql("SELECT ticker,trade_date,close FROM stock_daily", conn)
+    px = sd.pivot_table(index="trade_date", columns="ticker", values="close").sort_index()
+    dates = list(px.index)
+    stocks = [c for c in px.columns if not c.startswith("^")]
+    mean20 = px.rolling(20).mean()
+
+    qm = ",".join("?" * len(idx))
+    od = pd.read_sql(f"SELECT ticker,trade_date,expiry_date,strike,openInt_Call,openInt_Put,vol_Put "
+                     f"FROM options_daily WHERE ticker IN ({qm})", conn, params=idx)
+    od["dte"] = (pd.to_datetime(od.expiry_date, errors="coerce")
+                 - pd.to_datetime(od.trade_date, errors="coerce")).dt.days
+    for c in ("openInt_Call", "openInt_Put", "vol_Put", "strike"):
+        od[c] = pd.to_numeric(od[c], errors="coerce")
+    uoa = od[(od.dte >= 7) & (od.openInt_Put > 50) & (od.vol_Put >= 300) & (od.vol_Put >= 2 * od.openInt_Put)]
+    fires = uoa.groupby("trade_date").size()
+    g3 = od[od.ticker.isin(["SPY", "QQQ", "IWM"]) & (od.dte >= 0) & (od.dte <= 45)].copy()
+    sm = {(t, d): px.at[d, t] for t, d in g3[["ticker", "trade_date"]].drop_duplicates().itertuples(index=False)
+          if d in px.index and t in px.columns}
+    g3["spot"] = [sm.get((t, d), _np.nan) for t, d in zip(g3.ticker, g3.trade_date)]
+    g3 = g3[_np.abs(g3.strike / g3.spot - 1) <= 0.03]
+    netoi = g3.groupby(["trade_date", "ticker"]).apply(
+        lambda x: x.openInt_Call.sum() - x.openInt_Put.sum(), include_groups=False)
+    neg_gamma = (netoi < 0).groupby(level=0).sum()
+
+    rows = []
+    for i, d in enumerate(dates):
+        if i < 20:
+            continue
+        below = int((px.loc[d, stocks] < mean20.loc[d, stocks]).sum())
+        tot = int(px.loc[d, stocks].notna().sum())
+        pct = below / tot * 100 if tot else _np.nan
+        turb = float(fires.get(d, 0))
+        direction = float(neg_gamma.get(d, 0)) + (1 if pct >= 60 else (-1 if pct <= 45 else 0))
+        def f(tk, h):
+            s = px[tk]
+            return (s.iloc[i + h] / s.iloc[i] - 1) if (tk in px.columns and i + h < len(dates)) else _np.nan
+        rows.append(dict(turb=turb, direction=direction,
+                         qf5=f("QQQ", 5), sf5=f("SPY", 5), qf3=f("QQQ", 3)))
+    bt = pd.DataFrame(rows)
+    tr, tn = _spearman(bt.turb, bt.qf5.abs())        # turbulence → |QQQ move| (the proven one)
+    tr3, _ = _spearman(bt.turb, bt.qf3.abs())
+    dr, dn = _spearman(bt.direction, bt.qf5)          # direction → signed QQQ move
+    # hot-day move size vs baseline
+    val = bt.dropna(subset=["qf5"])
+    thr = val.turb.quantile(2 / 3)
+    hot = val[val.turb >= thr]; base_abs = val.qf5.abs().mean()
+    hot_abs = hot.qf5.abs().mean() if len(hot) else float("nan")
+    hot_down = (hot.qf5 < 0).mean() if len(hot) else float("nan")
+    return {"window": (str(px.index.min()), str(px.index.max())), "n": len(val),
+            "turb_corr5": tr, "turb_corr3": tr3, "turb_n": tn,
+            "dir_corr5": dr, "dir_n": dn,
+            "hot_abs": hot_abs, "base_abs": base_abs, "hot_down": hot_down, "hot_n": len(hot)}
+
+
+async def rovalidate_command(update, ctx):
+    """/rovalidate — backtest the Market Radar vs DB history (does it still hold up?)."""
+    await update.message.reply_text("🔬 Backtesting the Market Radar vs history…", parse_mode=H)
+    conn = get_conn()
+    try:
+        r = _riskoff_backtest(conn)
+    except Exception as e:
+        await update.message.reply_text(f"Backtest failed: {e}", parse_mode=H); return
+    finally:
+        conn.close()
+    def _grade(c, good_pos=True):
+        if c != c:  # NaN
+            return "n/a"
+        strong = (c >= 0.25) if good_pos else (c <= -0.25)
+        ok = (c >= 0.12) if good_pos else (c <= -0.12)
+        return "✅ real" if strong else ("🟡 weak" if ok else "🔴 none")
+    txt = (f"🔬 <b>Market Radar — backtest</b>\n"
+           f"<i>window {r['window'][0]} → {r['window'][1]} · {r['n']} days</i>\n\n"
+           f"🌪️ <b>Turbulence → move SIZE</b> (the core claim)\n"
+           f"  QQQ 5-day |move| corr: <b>{r['turb_corr5']:+.2f}</b>  {_grade(r['turb_corr5'])}\n"
+           f"  QQQ 3-day |move| corr: {r['turb_corr3']:+.2f}  {_grade(r['turb_corr3'])}\n"
+           f"  On high put-flow days, QQQ moved <b>{r['hot_abs']*100:.1f}%</b> vs "
+           f"{r['base_abs']*100:.1f}% baseline (n={r['hot_n']})\n\n"
+           f"🧭 <b>Direction → up/down</b> (should be negative)\n"
+           f"  QQQ 5-day signed corr: <b>{r['dir_corr5']:+.2f}</b>  {_grade(r['dir_corr5'], good_pos=False)}\n"
+           f"  High-signal days closed down {r['hot_down']*100:.0f}% of the time\n\n"
+           f"<i>Turbulence should be POSITIVE (put-flow → bigger move); direction NEGATIVE "
+           f"(more risk → down). ~6mo = low power; re-run as history grows. Not advice.</i>")
+    await update.message.reply_text(txt[:4000], parse_mode=H)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -26094,6 +26204,7 @@ def main():
     app.add_handler(CommandHandler("breakout", breakout_command))
     app.add_handler(CommandHandler("zrev", zrev_command))
     app.add_handler(CommandHandler("riskoff", riskoff_command))
+    app.add_handler(CommandHandler("rovalidate", rovalidate_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))

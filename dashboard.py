@@ -18647,6 +18647,19 @@ def _ss_dataframe(_tbo, conn, choice, tks):
         rows = _tbo._divcap_scan(tuple(tks) if tks else tuple(_tbo._DIV_PAYERS))
         return pd.DataFrame([{"Ticker": r["ticker"], "Yield %": round(r["yield"] * 100, 2),
                               "Ex-date": r["ex_date"], "Ex in (d)": r["ex_days"]} for r in rows])
+    if choice.startswith("🔬"):                                   # Factor IC validation
+        rows = []
+        for name, short in _tbo._IC_FACTORS:
+            res = _tbo._ic_analyze(conn, name)
+            for h in (1, 3, 5, 10):
+                m = res.get(h)
+                if not m:
+                    continue
+                rows.append({"Factor": short, "Horizon": f"{h}d", "IC": round(m["mean_ic"], 3),
+                             "IR": round(m["ir"], 2), "t-stat": round(m["tstat"], 1),
+                             "IC hit %": round(m["hit"] * 100, 0), "N": m["n"],
+                             "Q5-Q1 %": (round(m["spread"] * 100, 2) if m["spread"] is not None else None)})
+        return pd.DataFrame(rows)
     if choice.startswith("📈"):                                   # Put-write index
         res = _tbo._pwindex_sim((list(tks)[0] if tks else "SPY"))
         if not res:
@@ -18668,7 +18681,8 @@ if page == "⚙️ Strategy Scanners":
     import telegram_bot_optimized as _tbo
     _ss_opts = ["📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
                 "🔗 Pairs mean-reversion", "📅 Seasonality", "🔄 Sector rotation", "↩️ Short-term reversal",
-                "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar", "📈 Put-write index"]
+                "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar", "📈 Put-write index",
+                "🔬 Factor IC validation"]
     _c1, _c2 = st.columns([2, 3])
     _ss_choice = _c1.selectbox("Scanner", _ss_opts, key="ss_choice")
     _ss_tk_in = _c2.text_input("Tickers (optional; blank = sensible defaults)", "", key="ss_tks")

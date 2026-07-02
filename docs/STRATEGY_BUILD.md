@@ -71,7 +71,7 @@ so nothing is hidden.
 | Single-indicator "signal" repos | Easy to copy | No OOS validation; survivorship bias |
 
 ### Best fits for THIS bot (priority order)
-1. **Alphalens-reloaded** — plug OI/PCR/GEX signals → IC + quantile forward-return decay (rigorous `/validate-signal`). Highest-value.
+1. ✅ **DONE — Alphalens-style IC built natively** as `/ic` (`_ic_analyze`): cross-sectional rank IC (Spearman) + IC-IR + t-stat + Q5−Q1 quantile spread vs forward returns, no dependency. In bot + dashboard hub. (Adopting the actual `alphalens-reloaded` lib later would add plotting/tearsheets.)
 2. **vectorbt** — sweep the 24-model ensemble across the whole universe fast (vs per-ticker loop).
 3. **microsoft/qlib** — optional ML alpha layer with walk-forward CV (fixes low-N backtests).
 4. **Riskfolio-Lib / PyPortfolioOpt** — signals → risk-sized positions (the genuinely Aladdin-like piece).

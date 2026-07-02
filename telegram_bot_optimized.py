@@ -22506,10 +22506,52 @@ def _sync_history_from_daily(conn):
         log.debug("stock_history sync-from-daily failed", exc_info=True)
 
 
+def _fetch_yf_history(tk, years):
+    """Backfill rows from yfinance (primary source). None on failure."""
+    try:
+        h = yf.Ticker(tk).history(period=f"{years}y")[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        if len(h):
+            return [(tk, d.strftime("%Y-%m-%d"), float(r.Open), float(r.High),
+                     float(r.Low), float(r.Close), float(r.Volume)) for d, r in h.iterrows()]
+    except Exception:
+        log.debug("yf history failed for %s", tk, exc_info=True)
+    return None
+
+
+def _fetch_openbb_history(tk, years):
+    """FALLBACK: multi-year daily bars via OpenBB, used only if yfinance fails AND
+    openbb is installed (`pip install openbb`). Dormant otherwise — no hard dep.
+    OpenBB standardises ~100 providers, so this gives automatic provider fallback."""
+    try:
+        import importlib.util
+        if importlib.util.find_spec("openbb") is None:
+            return None
+        from openbb import obb
+        import datetime as _dt
+        start = (_dt.date.today() - _dt.timedelta(days=int(years * 365.25))).isoformat()
+        d = obb.equity.price.historical(symbol=tk, start_date=start).to_dataframe()
+        if d is None or len(d) == 0:
+            return None
+        d = d.reset_index()
+        cl = {c.lower(): c for c in d.columns}
+        def _g(row, name):
+            return float(row[cl[name]]) if name in cl and pd.notna(row[cl[name]]) else None
+        dcol = cl.get("date") or cl.get("index")
+        out = []
+        for _, row in d.iterrows():
+            ds = pd.Timestamp(row[dcol]).strftime("%Y-%m-%d")
+            out.append((tk, ds, _g(row, "open"), _g(row, "high"), _g(row, "low"),
+                        _g(row, "close"), _g(row, "volume")))
+        return out or None
+    except Exception:
+        log.debug("openbb history fallback failed for %s", tk, exc_info=True)
+        return None
+
+
 def _daily_history(ticker, years=6, conn=None):
     """Daily close Series (datetime index), DB-first from stock_history; if a
-    ticker is missing or short, lazily backfill ~years from yfinance and persist
-    (write-through). None if nothing available. Extends US_data.db, no new file."""
+    ticker is missing or short, lazily backfill ~years (yfinance primary, OpenBB
+    fallback) and persist (write-through). None if nothing available."""
     own = conn is None
     if own:
         conn = get_conn()
@@ -22522,18 +22564,16 @@ def _daily_history(ticker, years=6, conn=None):
         df = pd.read_sql(q, conn, params=(tk,))
         if len(df) < years * 252 * 0.7 and tk not in _HIST_FETCHED:
             _HIST_FETCHED.add(tk)
-            try:
-                h = yf.Ticker(tk).history(period=f"{years}y")[["Open", "High", "Low", "Close", "Volume"]].dropna()
-                if len(h):
-                    rows = [(tk, d.strftime("%Y-%m-%d"), float(r.Open), float(r.High),
-                             float(r.Low), float(r.Close), float(r.Volume)) for d, r in h.iterrows()]
+            rows = _fetch_yf_history(tk, years) or _fetch_openbb_history(tk, years)   # yf primary, OpenBB fallback
+            if rows:
+                try:
                     conn.executemany(
                         "INSERT OR REPLACE INTO stock_history "
                         "(ticker,trade_date,open,high,low,close,volume) VALUES (?,?,?,?,?,?,?)", rows)
                     conn.commit()
                     df = pd.read_sql(q, conn, params=(tk,))
-            except Exception:
-                log.debug("stock_history backfill failed for %s", tk, exc_info=True)
+                except Exception:
+                    log.debug("stock_history write failed for %s", tk, exc_info=True)
         if df.empty:
             return None
         return pd.Series(df["close"].values, index=pd.to_datetime(df["trade_date"]))

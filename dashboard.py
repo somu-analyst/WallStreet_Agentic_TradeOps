@@ -18669,6 +18669,12 @@ def _ss_dataframe(_tbo, conn, choice, tks):
                               "Yr %": round(r["ann"] * 100, 0), "POP %": round(r["pop"] * 100, 0),
                               "If-called %": round(r["if_called"] * 100, 1),
                               "IVR": (round(r["ivr"], 0) if r.get("ivr") is not None else None)} for r in rows])
+    if choice.startswith("🐋"):                                   # Unusual options activity
+        rows = _tbo._uoa_scan(conn)
+        return pd.DataFrame([{"Ticker": r["ticker"], "Contract": f"{r['strike']:g}{r['side']}",
+                              "Expiry": r["expiry"], "Volume": int(r["vol"]), "OI": int(r["oi"]),
+                              "Vol/OI": round(r["ratio"], 1), "Notional $": _tbo._knum(r["notional"])}
+                             for r in rows])
     if choice.startswith("🧭"):                                   # Positioning builder
         rows = _tbo._positioning_scan(conn)
         _stg = {"S": "Starting", "I": "Increasing", "C": "Confirmed"}
@@ -18707,7 +18713,7 @@ if page == "⚙️ Strategy Scanners":
     _page_header("⚙️ Strategy Scanners",
                  "Income · event · stat-arb · seasonality — the same engine as the Telegram bot. Screeners, not proven alpha.")
     import telegram_bot_optimized as _tbo
-    _ss_opts = ["🧭 Positioning builder", "⚖️ Portfolio optimizer", "📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
+    _ss_opts = ["🐋 Unusual options activity", "🧭 Positioning builder", "⚖️ Portfolio optimizer", "📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
                 "🔗 Pairs mean-reversion", "📅 Seasonality", "🔄 Sector rotation", "↩️ Short-term reversal",
                 "🎡 Wheel (CSP)", "📞 Covered call",
                 "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar", "📈 Put-write index",

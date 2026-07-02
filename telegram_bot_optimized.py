@@ -21253,7 +21253,12 @@ async def _send_spreads(msg, rows):
 
 
 # ── Wheel / CSP screener (annualized yield vs assignment risk) ────────────────
-def _wheel_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, otm_max=0.18):
+def _wheel_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, otm_max=0.18, conn=None):
+    """Cash-secured-put income optimizer. Returns structured, ranked rows.
+    Score blends POP (no assignment), annualized yield, credit cushion, and
+    IV-rank (only worth selling when premium is rich). Flags earnings before
+    expiry (gap/assignment risk) with a score haircut. `conn` enables the
+    DB-based IV-rank + earnings enrichment; None degrades gracefully."""
     import datetime as _dt
     from scipy.stats import norm as _nm
 
@@ -21283,6 +21288,22 @@ def _wheel_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, otm_max=0.18):
                     break
             if not exp:
                 continue
+            # Per-ticker enrichment (once): IV-rank (rich premium?) + earnings window.
+            ivr = None
+            if conn is not None:
+                try:
+                    _ivr = _iv_rank(conn, tk)
+                    ivr = _ivr.get("rank") if _ivr else None
+                except Exception:
+                    ivr = None
+            earn_days = None
+            try:
+                _ne = _next_earnings(tk)
+                earn_days = _ne.get("days") if _ne else None
+            except Exception:
+                earn_days = None
+            earn_flag = earn_days is not None and earn_days <= dte
+
             T = max(dte, 1) / 365.0
             ch = t.option_chain(exp)
             puts = ch.puts.copy()
@@ -21298,12 +21319,22 @@ def _wheel_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, otm_max=0.18):
                     continue
                 ann = (cr / K) * (365.0 / max(dte, 1))
                 be = K - cr
-                sc = 100 * (0.45 * pop + 0.35 * min(ann, 1.0) + 0.20 * min(cr / spot, 0.05) / 0.05)
-                rows.append((sc, f"{tk} SELL {K:g}P · {dte}d · {ann*100:.0f}%/yr · POP {pop*100:.0f}% · BE ${be:.0f} ({(spot-be)/spot*100:.1f}%) · sc{sc:.0f}"))
+                # Optimizer score: POP + annualized yield + cushion + IV-rank richness.
+                sc = 100 * (0.40 * pop + 0.30 * min(ann, 1.0)
+                            + 0.15 * min(cr / spot, 0.05) / 0.05
+                            + 0.15 * (ivr if ivr is not None else 40) / 100)
+                if earn_flag:
+                    sc *= 0.85     # haircut: earnings before expiry = gap/assignment risk
+                rows.append({
+                    "score": sc, "ticker": tk, "strike": K, "dte": dte,
+                    "credit": cr, "ann": ann, "pop": pop, "be": be,
+                    "cushion": (spot - be) / spot, "capital": K * 100,
+                    "ivr": ivr, "earn_days": earn_days, "earn_flag": earn_flag,
+                })
         except Exception:
             continue
-    rows.sort(key=lambda z: -z[0])
-    return [ln for _, ln in rows]
+    rows.sort(key=lambda z: -z["score"])
+    return rows
 
 
 async def wheel_command(update, ctx):
@@ -21311,12 +21342,20 @@ async def wheel_command(update, ctx):
     args = list(getattr(ctx, "args", []) or [])
     tks = [a.upper() for a in args] if args else _hiprob_default_tickers()
     await update.message.reply_text("🎡 Scanning cash-secured puts…", parse_mode=H)
-    rows = _wheel_scan_bot(tuple(tks[:8]))
+    conn = get_conn()
+    try:
+        rows = _wheel_scan_bot(tuple(tks[:8]), conn=conn)
+    finally:
+        conn.close()
     await _send_wheel(update.message, rows)
 
 
 async def wheel_view(query):
-    rows = _wheel_scan_bot(tuple(_hiprob_default_tickers()[:8]))
+    conn = get_conn()
+    try:
+        rows = _wheel_scan_bot(tuple(_hiprob_default_tickers()[:8]), conn=conn)
+    finally:
+        conn.close()
     await _send_wheel(query.message, rows)
 
 
@@ -21324,8 +21363,25 @@ async def _send_wheel(msg, rows):
     if not rows:
         await msg.reply_text("No CSPs passed the filters. Try <code>/wheel SPY QQQ NVDA</code>.", parse_mode=H)
         return
-    txt = ("🎡 <b>Wheel — Cash-Secured Puts</b>\n<i>get paid to wait; assigned = buy at a discount · "
-           "annualized yield vs assignment risk · not advice</i>\n\n" + "\n".join("• " + r for r in rows[:16]))
+    _hdrs = ("ST", "Tkr", "Put", "Yr%", "POP")
+    _data = []
+    for r in rows[:15]:
+        emoji = ("⚠️" if r["earn_flag"]
+                 else ("🟢" if (r["ivr"] or 0) >= 50 else "🟡"))
+        _data.append((emoji, r["ticker"], f"{r['strike']:g}P",
+                      f"{r['ann']*100:.0f}%", f"{r['pop']*100:.0f}"))
+    table = _pipe_table(_hdrs, _data, right_cols={3, 4},
+                        legend="🟢 rich IV · ⚠️ earnings before expiry · Yr%=annualized · POP=% expire OTM")
+    # Best-pick detail line (top row) for actionable context.
+    top = rows[0]
+    ivr_s = f"{top['ivr']:.0f}" if top["ivr"] is not None else "n/a"
+    best = (f"<b>Top:</b> {top['ticker']} SELL ${top['strike']:g}P · {top['dte']}d · "
+            f"{top['ann']*100:.0f}%/yr · POP {top['pop']*100:.0f}% · "
+            f"BE ${top['be']:.2f} ({top['cushion']*100:.1f}% cushion) · "
+            f"cap ${top['capital']:,.0f} · IVR {ivr_s}")
+    txt = ("🎡 <b>Wheel — CSP Income Optimizer</b>\n"
+           "<i>get paid to wait; assigned = buy at a discount · not advice</i>\n\n"
+           + table + "\n\n" + best)
     await msg.reply_text(txt[:4000], parse_mode=H,
                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="wheel_view"),
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))

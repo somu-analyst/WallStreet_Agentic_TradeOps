@@ -193,13 +193,21 @@ def _normalize_chain(df):
 
 def fetch_chain_openbb(obb, ticker, provider, trade_dt):
     """Fetch + shape one ticker's chain into NYSE_YFin's merged schema. Returns df or None."""
-    try:
-        res = obb.derivatives.options.chains(symbol=ticker, provider=provider)
-        df = res.to_dataframe()
-        if df is None or len(df) == 0:
-            return None
-    except Exception as e:
-        print(f"  {ticker}: chain fetch failed ({e})")
+    df = None
+    # class shares: Yahoo style 'BRK-B' -> CBOE directory wants 'BRK.B'
+    variants = [ticker] + ([ticker.replace("-", ".")] if "-" in ticker else [])
+    last_err = None
+    for sym in variants:
+        try:
+            res = obb.derivatives.options.chains(symbol=sym, provider=provider)
+            df = res.to_dataframe()
+            if df is not None and len(df):
+                break
+        except Exception as e:
+            last_err = e
+            df = None
+    if df is None or len(df) == 0:
+        print(f"  {ticker}: chain fetch failed ({last_err})")
         return None
 
     try:

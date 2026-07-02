@@ -22818,6 +22818,43 @@ async def _send_positioning(msg, rows):
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
 
 
+async def earnings_alert(ctx: ContextTypes.DEFAULT_TYPE):
+    """Daily pre-market Earnings Radar: upcoming IV-crush candidates (/earnvol)
+    + post-earnings drift (/pead). Weekday gated; run once daily."""
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    if now_utc.weekday() >= 5:
+        return
+    _, chat_id = load_creds()
+    conn = get_conn()
+    try:
+        ev = _earnvol_scan(conn, SCAN_UNIVERSE, within_days=10)
+    except Exception:
+        ev = []
+    finally:
+        conn.close()
+    try:
+        pe = _pead_scan()
+    except Exception:
+        pe = None
+
+    parts = []
+    if ev:
+        parts.append("<b>⏳ PRE-EARNINGS · IV-crush (next 10d)</b>\n" + _earnvol_table(ev[:10]))
+    if pe:
+        _pd = [("🟢" if r["side"] == "LONG" else "🔴", r["ticker"],
+                f"{r['surprise']*100:+.0f}", f"{r['days_since']}") for r in pe[:10]]
+        parts.append("<b>📊 POST-EARNINGS DRIFT</b>\n" +
+                     _pipe_table(("ST", "Tkr", "Surp%", "Days"), _pd, right_cols={2, 3},
+                                 legend="🟢 beat→long · 🔴 miss→short · Days=since report"))
+    if not parts:
+        return
+    msg = hdr("📅 EARNINGS RADAR") + "\n" + "\n\n".join(parts)
+    try:
+        await ctx.bot.send_message(chat_id=int(chat_id), text=msg[:4090], parse_mode=H)
+    except Exception as e:
+        log.warning(f"earnings_alert send failed: {e}")
+
+
 async def building_command(update, ctx):
     """/building — positioning tracker: new/increasing call (long) or put (short) OI with price starting to confirm."""
     await update.message.reply_text("🧭 Scanning positioning builds…", parse_mode=H)
@@ -25218,6 +25255,7 @@ def main():
         job_queue.run_daily(briefing_alert, time=dt_time(14, 5, 0))  # daily brief 9:05 AM ET
         job_queue.run_daily(plan_alert, time=dt_time(13, 30, 0))     # next-day game plan ~8:30 AM ET pre-market
         job_queue.run_daily(wrap_alert, time=dt_time(21, 15, 0))     # daily market wrap ~4:15 PM ET post-close
+        job_queue.run_daily(earnings_alert, time=dt_time(13, 45, 0)) # Earnings Radar ~8:45 AM ET pre-market
         log.info("Scheduled morning alert at 9:00 AM ET daily")
         # 15-min intraday alert (fires every 15 min; function checks market hours internally)
         job_queue.run_repeating(intraday_alert, interval=900, first=30)

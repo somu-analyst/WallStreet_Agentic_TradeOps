@@ -22280,6 +22280,108 @@ async def divcap_view(query):
     await _send_divcap(query.message, rows)
 
 
+# ── PUT-WRITE INDEX (approx systematic backtest, BS-priced) ──────
+_PWINDEX_CACHE = {}   # (sym,years) -> (ts, dict)
+
+def _pwindex_sim(symbol="SPY", years=3, r=0.045, vrp=0.03):
+    """APPROXIMATE systematic put-write (CBOE PUT-style): each month sell a
+    1-mo ATM cash-secured put, premium Black-Scholes-priced with IV = trailing
+    realized vol + variance-risk-premium markup (real option marks not stored).
+    Compare CAGR/vol/maxDD/win% vs SPY buy-and-hold. Cached 12h."""
+    from scipy.stats import norm as _nm
+    key = (symbol, years)
+    import time as _t
+    now = _t.time()
+    c = _PWINDEX_CACHE.get(key)
+    if c and now - c[0] < 43200:
+        return c[1]
+
+    def _bs_put(S, K, T, iv):
+        if min(S, K, T, iv) <= 0:
+            return 0.0
+        d1 = (np.log(S / K) + (r + 0.5 * iv * iv) * T) / (iv * np.sqrt(T))
+        d2 = d1 - iv * np.sqrt(T)
+        return float(K * np.exp(-r * T) * _nm.cdf(-d2) - S * _nm.cdf(-d1))
+
+    res = None
+    try:
+        h = yf.Ticker(symbol).history(period=f"{years}y")["Close"].dropna()
+        if len(h) > 260:
+            daily_ret = h.pct_change()
+            # month-start anchor points
+            month_start = h.resample("MS").first().dropna()
+            idx = h.index
+            pw_rets, bh_rets = [], []
+            T = 1 / 12
+            for i in range(len(month_start) - 1):
+                d0 = month_start.index[i]
+                # nearest available trading day >= month start
+                pos = idx.searchsorted(d0)
+                if pos >= len(idx) - 21:
+                    continue
+                S0 = float(h.iloc[pos])
+                # end ~21 trading days later
+                S1 = float(h.iloc[min(pos + 21, len(h) - 1)])
+                rv = float(daily_ret.iloc[max(0, pos - 21):pos].std() * np.sqrt(252))
+                if not (rv > 0):
+                    continue
+                iv = rv + vrp
+                prem = _bs_put(S0, S0, T, iv)
+                assigned_loss = max(0.0, S0 - S1)
+                pw_rets.append((prem - assigned_loss) / S0)
+                bh_rets.append(S1 / S0 - 1)
+            if len(pw_rets) >= 12:
+                def _metrics(rets):
+                    a = np.asarray(rets)
+                    cum = float(np.prod(1 + a))
+                    yrs = len(a) / 12.0
+                    cagr = cum ** (1 / yrs) - 1 if cum > 0 else -1
+                    vol = float(a.std() * np.sqrt(12))
+                    sharpe = (cagr - r) / vol if vol > 0 else 0.0
+                    curve = np.cumprod(1 + a)
+                    dd = float((curve / np.maximum.accumulate(curve) - 1).min())
+                    win = float((a > 0).mean())
+                    return {"cagr": cagr, "vol": vol, "sharpe": sharpe, "maxdd": dd, "win": win}
+                res = {"symbol": symbol, "years": years, "n_months": len(pw_rets),
+                       "pw": _metrics(pw_rets), "bh": _metrics(bh_rets)}
+    except Exception:
+        res = None
+    _PWINDEX_CACHE[key] = (now, res)
+    return res
+
+
+async def _send_pwindex(msg, res):
+    if not res:
+        await msg.reply_text("Put-write sim unavailable (need history).", parse_mode=H)
+        return
+    pw, bh = res["pw"], res["bh"]
+    _hdrs = ("Metric", "PutWr", "B&H")
+    _data = [
+        ("CAGR%",  f"{pw['cagr']*100:+.1f}", f"{bh['cagr']*100:+.1f}"),
+        ("Vol%",   f"{pw['vol']*100:.1f}",   f"{bh['vol']*100:.1f}"),
+        ("Sharpe", f"{pw['sharpe']:.2f}",    f"{bh['sharpe']:.2f}"),
+        ("MaxDD%", f"{pw['maxdd']*100:.0f}", f"{bh['maxdd']*100:.0f}"),
+        ("Win%",   f"{pw['win']*100:.0f}",   f"{bh['win']*100:.0f}"),
+    ]
+    table = _pipe_table(_hdrs, _data, right_cols={1, 2})
+    txt = (f"📈 <b>Put-Write Index — {res['symbol']} ({res['years']}y, {res['n_months']} mo)</b>\n"
+           "<i>APPROXIMATION: BS-priced monthly ATM puts (IV = realized vol + VRP), "
+           "not real option marks. Educational — understates/overstates true PUT index.</i>\n\n"
+           + table + "\n\n<i>Put-write usually shows lower vol & drawdown than buy-and-hold, "
+           "with capped upside — the classic premium-selling profile.</i>")
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def pwindex_command(update, ctx):
+    """/pwindex [SYMBOL] — approximate systematic put-write vs buy-and-hold backtest."""
+    args = list(getattr(ctx, "args", []) or [])
+    sym = args[0].upper() if args else "SPY"
+    await update.message.reply_text(f"📈 Simulating put-write on {sym}…", parse_mode=H)
+    res = _pwindex_sim(sym)
+    await _send_pwindex(update.message, res)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -24477,6 +24579,7 @@ def main():
     app.add_handler(CommandHandler("condor", condor_command))
     app.add_handler(CommandHandler("calendar", calendar_command))
     app.add_handler(CommandHandler("divcap", divcap_command))
+    app.add_handler(CommandHandler("pwindex", pwindex_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

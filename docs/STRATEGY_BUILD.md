@@ -84,7 +84,7 @@ so nothing is hidden.
 ### 3D. Adoption status (are we USING these, or just aware of them?)
 | Tool | "Bloomberg/Aladdin" role | Status in our stack | Decision |
 |------|--------------------------|---------------------|----------|
-| **OpenBB** (Bloomberg-like terminal) | data+analytics terminal | ❌ not integrated | **Our `dashboard.py` already IS the Bloomberg-like terminal** (24 pages). Full OpenBB SDK = heavy dep, overlaps yfinance/Finnhub → skip unless a specific feed is needed |
+| **OpenBB** (Bloomberg-like terminal) | data+analytics terminal | ❌ not integrated (researched 2026-07-02) | Real edge = ~100 providers with **standardization → automatic multi-provider fallback** (matches "reduce API dep" goal) + REST/CLI/**MCP-for-AI**/Excel from one def. BUT: heavy dep, redundant with our direct feeds + dashboard, and its *free* option data still has **no historical chains/bid-ask/borrow** → does NOT unblock dispersion/box-arb/gamma. **Verdict: keep parked**; only selectively adopt as a fallback data layer (e.g. `pip install openbb` + CBOE/macro extensions) if a relied-on provider flakes |
 | **PyPortfolioOpt / Riskfolio-Lib** (Aladdin *risk* side) | signals → risk-sized positions | ✅ **built natively as `/allocate`** | max-Sharpe/min-var/risk-parity on 6y covariance, weight-capped, no dep; bot + dashboard hub |
 | **Alphalens** (factor eval) | prove a signal | ✅ built natively as `/ic` | done |
 | **vectorbt** (fast backtest) | universe signal sweeps | ❌ not adopted | optional; our scanners already vectorize enough. Revisit if backtests get heavy |

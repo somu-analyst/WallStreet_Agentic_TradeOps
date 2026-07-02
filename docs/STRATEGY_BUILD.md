@@ -32,6 +32,15 @@ so nothing is hidden.
 
 | 20 | Portfolio risk optimizer (Aladdin risk side) | `/allocate` | ✅ Done | pending | max-Sharpe/min-var/risk-parity on 6y covariance; weight-capped; native; dashboard hub |
 
+## 1d. OpenBB benchmark (NYSE_OpenBB.py) — status 2026-07-02
+- `NYSE_OpenBB.py` written: OpenBB CBOE full-chain-in-one-call + threaded, isolated output DB
+  (`US_data_openbb_test.db`, never touches `US_data.db`). User installed OpenBB.
+- **Schema VALIDATED live:** CBOE AAPL = 3,538 rows in **one 5.6s call** (all expiries); columns
+  (expiration/strike/option_type/open_interest/volume/last_trade_price/contract_symbol/underlying_price)
+  match `_normalize_chain()` → no tweak needed. `import openbb` ~31s one-time.
+- Pending: user runs the actual A/B benchmark (`python NYSE_OpenBB.py --limit 50 --workers 8`).
+  Real win = parallelism + no 1s inter-ticker sleep (same levers apply to the yfinance pipeline).
+
 ## 1c. Data layer — DB-first history (reduce API dependence)
 - ✅ **`stock_history` table** added to `US_data.db` — multi-year daily OHLC. `_daily_history()` / `_history_matrix()`
   read DB-first, lazily backfill from yfinance once (write-through), and `_sync_history_from_daily()` folds in

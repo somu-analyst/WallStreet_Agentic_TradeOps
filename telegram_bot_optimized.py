@@ -22714,12 +22714,39 @@ async def _send_ic(msg):
     table = _pipe_table(_hdrs, _data, right_cols={3, 4},
                         legend="rank IC vs fwd return · t=t-stat (|t|≥2 🟢 sig) · H=horizon")
     txt = ("🔬 <b>Factor Validation — IC / Quantile (Alphalens-style)</b>\n"
-           "<i>rank IC = cross-sectional Spearman(factor, forward return). ~6mo history = LOW power; "
+           "<i>rank IC = cross-sectional Spearman(factor, forward return). "
            "|t|≥2 is the bar. Honest: expect tiny/insignificant IC — that's the point of measuring.</i>\n\n"
            + table + "\n\n" + "\n".join(detail))
     await msg.reply_text(txt[:4000], parse_mode=H,
                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="ic_view"),
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+    # tearsheet PNG: IC by horizon per factor (bars) with t-stat annotations
+    try:
+        import io
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        horizons = (1, 3, 5, 10)
+        fig, ax = plt.subplots(figsize=(7, 3.6), dpi=120)
+        width = 0.25
+        for fi, (name, short) in enumerate(_IC_FACTORS):
+            res = results.get(name) or {}
+            xs = [h + (fi - 1) * width * 2.2 for h in range(len(horizons))]
+            ys = [(res.get(h) or {}).get("mean_ic", 0) or 0 for h in horizons]
+            ts = [(res.get(h) or {}).get("tstat", 0) or 0 for h in horizons]
+            bars = ax.bar(xs, ys, width * 2, label=short,
+                          alpha=[0.95 if abs(t) >= 2 else 0.45 for t in ts][0] if ts else 0.6)
+            for x, y, t in zip(xs, ys, ts):
+                ax.text(x, y + (0.002 if y >= 0 else -0.006), f"t{t:+.1f}", ha="center", fontsize=7)
+        ax.set_xticks(range(len(horizons)))
+        ax.set_xticklabels([f"{h}d" for h in horizons])
+        ax.axhline(0, color="gray", lw=0.8)
+        ax.set_ylabel("mean rank IC"); ax.set_title("Factor IC by horizon (t-stat annotated; |t|≥2 = significant)")
+        ax.legend(fontsize=8); fig.tight_layout()
+        buf = io.BytesIO(); fig.savefig(buf, format="png"); plt.close(fig); buf.seek(0)
+        await msg.reply_photo(photo=buf, caption="IC tearsheet — factor × horizon")
+    except Exception:
+        log.debug("ic tearsheet render failed", exc_info=True)
 
 
 async def ic_command(update, ctx):
@@ -23058,6 +23085,42 @@ async def allocate_command(update, ctx):
     finally:
         conn.close()
     await _send_allocate(update.message, res)
+
+
+# ── VECTORBT SWEEP (vectorized universe backtest; needs `pip install vectorbt`) ─
+def _vbt_reversal_sweep(conn, z_entry=2.0, hold=5, years=3):
+    """vectorbt-powered backtest of the /zrev-style reversal rule across the whole
+    universe at once: long when cross-sectional 5d-return z < -z_entry, exit after
+    `hold` days. Returns per-ticker stats + aggregate. None if vectorbt missing."""
+    try:
+        import vectorbt as vbt
+    except Exception:
+        return None
+    wide = _history_matrix(SCAN_UNIVERSE, years, conn)
+    if wide is None or wide.empty:
+        return None
+    ret5 = wide.pct_change(5)
+    z = ret5.sub(ret5.mean(axis=1), axis=0).div(ret5.std(axis=1), axis=0)
+    entries = z < -z_entry
+    exits = entries.shift(hold).fillna(False).astype(bool)
+    try:
+        pf = vbt.Portfolio.from_signals(wide, entries, exits, fees=0.0005, freq="1D")
+        tot = pf.total_return()
+        trades = pf.trades
+        per = pd.DataFrame({"total_return": tot})
+        try:
+            per["win_rate"] = trades.win_rate()
+            per["n_trades"] = trades.count()
+        except Exception:
+            pass
+        per = per.dropna(subset=["total_return"]).sort_values("total_return", ascending=False)
+        agg = {"tickers": int(len(per)), "avg_return": float(per["total_return"].mean()),
+               "pct_positive": float((per["total_return"] > 0).mean()),
+               "n_trades": int(per.get("n_trades", pd.Series(dtype=float)).sum() or 0)}
+        return {"per": per, "agg": agg, "years": years, "rule": f"z<-{z_entry:g} hold {hold}d"}
+    except Exception:
+        log.debug("vbt sweep failed", exc_info=True)
+        return None
 
 
 # ── SCANNER FIRE PERSISTENCE (feeds signal_accuracy → hit-rates/weights) ─

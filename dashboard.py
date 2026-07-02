@@ -13704,6 +13704,25 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
         """Build batch exit analysis rows for a set of open trades."""
         rows = []
         today = datetime.now().date()
+        _ev_cache = {}                                  # ticker -> (er_days, exdiv_days), one lookup per ticker
+
+        def _leg_events(tk):
+            if tk not in _ev_cache:
+                er = xd = None
+                try:
+                    _e = _next_earnings(tk)
+                    er = _e.get("days") if _e else None
+                except Exception:
+                    pass
+                try:
+                    import telegram_bot_optimized as _tbo_ev
+                    _d = _tbo_ev._divcap_stats(tk)
+                    xd = _d.get("ex_days") if _d else None
+                except Exception:
+                    pass
+                _ev_cache[tk] = (er, xd)
+            return _ev_cache[tk]
+
         for _, r in trades_df.iterrows():
             try:
                 strike = float(r["strike"])
@@ -13742,6 +13761,24 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     sig = "🟡 CLOSE SOON"
                 else:
                     sig = "⚪ HOLD"
+                # ── Event column: earnings / ex-div landing before this leg's expiry ──
+                _er, _xd = _leg_events(ticker)
+                _evt = []
+                if _er is not None:
+                    if dte is not None and 0 <= _er <= dte:
+                        _evt.append(f"📊 ER {_er}d ⚠️pre-exp")
+                    elif 0 <= _er <= 14:
+                        _evt.append(f"📊 ER {_er}d")
+                if _xd is not None and dte is not None and 0 <= _xd <= max(dte, 0):
+                    _evt.append(f"💵 ex-div {_xd}d")
+                event_s = " · ".join(_evt) if _evt else "—"
+                # event-aware advice: only escalate a plain HOLD, never mask profit/loss/expiry signals
+                if sig == "⚪ HOLD":
+                    if _er is not None and dte is not None and 0 <= _er <= dte:
+                        sig = "🟡 ER PRE-EXP — decide before print"
+                    elif (_xd is not None and dte is not None and 0 <= _xd <= max(dte, 0)
+                          and side == "SELL" and opt == "call" and spot and spot > strike):
+                        sig = "🟡 EX-DIV — early-assignment risk"
                 price_note = ""
                 if mid is not None:
                     direction = "↑" if mid > entry else "↓"
@@ -13753,6 +13790,7 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     "Strike": f"${strike:.0f}",
                     "Expiry": str(r["expiry"]),
                     "DTE": dte,
+                    "Event": event_s,
                     "Qty": f"{side} ×{qty}",
                     "Premium paid→now": price_note if mid is not None else "N/A",
                     "P&L $": f"${pnl:+,.0f}" if pnl is not None else "N/A",
@@ -13812,16 +13850,20 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                         "- **P&L $**: Dollar profit/loss. For BUY: (now − entry) × qty × 100. For SELL: (entry − now) × qty × 100\n"
                         "- **P&L %**: % change in option premium. A 50% loss means the option halved in value\n"
                         "- **IV**: Implied Volatility — higher IV = more expensive options\n"
-                        "- **Signal**: TAKE PROFIT (>50% gain), CUT LOSS (>30% loss), NEAR EXPIRY (<5 DTE), HOLD otherwise\n"
+                        "- **Event**: 📊 ER Xd = earnings in X days (⚠️pre-exp = lands *before* this leg expires → IV crush + gap risk); "
+                          "💵 ex-div Xd = ex-dividend before expiry (early-assignment risk on short ITM calls)\n"
+                        "- **Signal**: TAKE PROFIT (>50% gain), CUT LOSS (>30% loss), NEAR EXPIRY (<5 DTE), "
+                          "ER PRE-EXP / EX-DIV (event lands before expiry — decide ahead of it), HOLD otherwise\n"
                         "- **TOTAL row**: Last row shows sum of all P&L and win/loss count"
                     )
                 st.dataframe(_add_total_row(_ep_batch_df), hide_index=True, use_container_width=True)
                 # Highlight alerts
-                _alerts = _ep_batch_df[_ep_batch_df["Signal"].str.contains("TAKE PROFIT|CUT LOSS|NEAR EXPIRY|CLOSE SOON")]
+                _alerts = _ep_batch_df[_ep_batch_df["Signal"].str.contains("TAKE PROFIT|CUT LOSS|NEAR EXPIRY|CLOSE SOON|ER PRE-EXP|EX-DIV")]
                 if not _alerts.empty:
                     st.warning("⚠️ **Action Required:**")
                     for _, _ar in _alerts.iterrows():
-                        st.markdown(f"- **{_ar['Ticker']} {_ar['Type']} {_ar['Strike']}** exp {_ar['Expiry']} — {_ar['Signal']} | P&L: {_ar['P&L $']} ({_ar['P&L %']})")
+                        _ev_note = f" | Event: {_ar['Event']}" if _ar.get("Event") and _ar["Event"] != "—" else ""
+                        st.markdown(f"- **{_ar['Ticker']} {_ar['Type']} {_ar['Strike']}** exp {_ar['Expiry']} — {_ar['Signal']} | P&L: {_ar['P&L $']} ({_ar['P&L %']}){_ev_note}")
         st.stop()
 
     elif _ep_mode == "🏢 All positions — by Ticker":
@@ -13897,7 +13939,10 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     "- **P&L $**: Total dollar P&L = (price change) × contracts × 100\n"
                     "- **P&L %**: % gain or loss on the option premium paid/received\n"
                     "- **IV**: Implied Volatility — market's expectation of future move\n"
-                    "- **Signal**: TAKE PROFIT (>50% gain), CUT LOSS (>30% loss), NEAR EXPIRY (<5 DTE)\n"
+                    "- **Event**: 📊 ER Xd = earnings in X days (⚠️pre-exp = before this leg expires); "
+                      "💵 ex-div Xd = ex-dividend before expiry (assignment risk on short ITM calls)\n"
+                    "- **Signal**: TAKE PROFIT (>50% gain), CUT LOSS (>30% loss), NEAR EXPIRY (<5 DTE), "
+                      "ER PRE-EXP / EX-DIV (event before expiry)\n"
                     "- **TOTAL row**: Last row shows sum of all P&L and win/loss count"
                 )
             st.dataframe(_add_total_row(_ep_tk_batch), hide_index=True, use_container_width=True)

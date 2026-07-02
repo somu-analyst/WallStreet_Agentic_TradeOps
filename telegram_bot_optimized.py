@@ -10981,6 +10981,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await breakout_view(query)
         elif data == "zrev_view":
             await zrev_view(query)
+        elif data == "riskoff_view":
+            await riskoff_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -22916,6 +22918,29 @@ async def rotate_alert(ctx: ContextTypes.DEFAULT_TYPE):
         log.warning(f"rotate_alert send failed: {e}")
 
 
+async def riskoff_alert(ctx: ContextTypes.DEFAULT_TYPE):
+    """Auto Risk-Off Radar push — fires once on bot startup and daily post-close.
+    Fuses index put-flow + froth + underpriced vol + weak breadth + thin gamma into
+    a 0-100 downside score. Startup run always sends; the daily run only pushes when
+    caution+ (score≥30) to avoid quiet-day noise (gate via job.data['gate'])."""
+    conn = get_conn()
+    try:
+        res = _riskoff_scan(conn)
+    except Exception as e:
+        log.warning(f"riskoff_alert scan failed: {e}")
+        return
+    finally:
+        conn.close()
+    gate = bool(getattr(getattr(ctx, "job", None), "data", None) or {})  # daily job passes {'gate':True}
+    if gate and res["score"] < 30:
+        return
+    _, chat_id = load_creds()
+    try:
+        await ctx.bot.send_message(chat_id=int(chat_id), text=_riskoff_message(res)[:4090], parse_mode=H)
+    except Exception as e:
+        log.warning(f"riskoff_alert send failed: {e}")
+
+
 async def building_command(update, ctx):
     """/building — positioning tracker: new/increasing call (long) or put (short) OI with price starting to confirm."""
     await update.message.reply_text("🧭 Scanning positioning builds…", parse_mode=H)
@@ -23558,6 +23583,207 @@ async def zrev_view(query):
     finally:
         conn.close()
     await _send_zrev(query.message, rows)
+
+
+# ── COMPOSITE RISK-OFF RADAR (multi-pillar EOD downside warning) ──
+# ETFs whose bearish flow / gamma is a market-level (not single-name) tell.
+_RISKOFF_INDEX = {"SPY", "QQQ", "IWM", "DIA", "SMH", "SOXX", "SOXL", "XLK", "XLF",
+                  "XLE", "XLI", "XLRE", "EEM", "FXI", "KWEB", "TLT", "GLD",
+                  "TQQQ", "UPRO", "SPXL"}
+
+
+def _riskoff_scan(conn):
+    """Composite EOD 'risk-off' radar: fuses 5 plain-English downside warning lights
+    into a 0-100 score (0 = calm, 100 = danger). Catches the froth/complacency setup
+    that precedes selloffs while trend/momentum models still read bullish. Lights:
+      1 Crash-insurance buying  — big traders buying index/ETF puts (UOA put flow)
+      2 Hot stocks overstretched— crowd favorites ran too far (zrev overbought)
+      3 Market too calm         — options cheap vs actual moves (negative VRP)
+      4 Broad weakness          — share of stocks rolling over (% below 20d mean)
+      5 No shock absorbers       — dealer hedging amplifies drops (negative gamma)
+    Each light is 0-20 pts. Returns plain 'pillars' (dicts), plus headline/action text.
+    Persists an SPY BEAR fire when RED so it self-scores vs forward returns."""
+    import numpy as _np
+    pillars = []            # dicts: emoji, label, reading, pts, why
+    def _emoji(pts):
+        return "🔴" if pts >= 12 else ("🟡" if pts >= 5 else "🟢")
+    def _add(pts, label, reading, why):
+        pillars.append({"emoji": _emoji(pts), "label": label, "reading": reading,
+                        "pts": pts, "why": why})
+
+    # 1) Crash-insurance buying (index put flow via UOA)
+    try:
+        uoa = _uoa_scan(conn, top=40)
+        ib = [r for r in uoa if r["side"] == "P" and r["ticker"] in _RISKOFF_INDEX]
+        names = ", ".join(dict.fromkeys(r["ticker"] for r in ib))
+        pts = min(20.0, len(ib) * 4.0)
+        _add(pts, "Crash-insurance buying", f"{len(ib)} bets",
+             f"Big traders loading downside bets on {names}" if names
+             else "No unusual downside bets — calm")
+    except Exception:
+        _add(0.0, "Crash-insurance buying", "n/a", "Data unavailable")
+
+    # 2) Hot stocks overstretched (zrev overbought)
+    try:
+        shorts = [r for r in _zrev_scan(conn) if r["side"] == "SHORT"]
+        names = ", ".join(r["ticker"] for r in shorts[:6])
+        pts = min(20.0, len(shorts) * 2.5)
+        _add(pts, "Hot stocks overstretched", f"{len(shorts)} names",
+             f"{names} ran too far, too fast — snap-back risk" if names
+             else "No crowd favorites look overstretched")
+    except Exception:
+        _add(0.0, "Hot stocks overstretched", "n/a", "Data unavailable")
+
+    # 3) Market too calm (negative VRP: index IV below realized moves)
+    try:
+        neg = []
+        for tk in ("SPY", "QQQ", "IWM"):
+            ivr = _iv_rank(conn, tk); iv = (ivr or {}).get("iv")
+            h = _daily_history(tk, 1, conn)
+            if not iv or iv <= 0 or h is None or len(h) < 22:
+                continue
+            r = h.pct_change().dropna().tail(20)
+            mad = float((r - r.median()).abs().median())
+            rv = 1.4826 * mad * _np.sqrt(252)
+            if rv > 0 and (iv - rv) < 0:
+                neg.append(tk)
+        pts = min(20.0, len(neg) * 7.0)
+        _add(pts, "Market too calm", f"{len(neg)} of 3",
+             f"Options cheap vs how much {', '.join(neg)} is actually moving" if neg
+             else "Options fairly priced for the moves")
+    except Exception:
+        _add(0.0, "Market too calm", "n/a", "Data unavailable")
+
+    # 4) Broad weakness (% of universe below its 20d mean)
+    try:
+        below = tot = 0
+        for tk in SCAN_UNIVERSE:
+            h = _daily_history(tk, 1, conn)
+            if h is None or len(h) < 21:
+                continue
+            tot += 1
+            if float(h.iloc[-1]) < float(h.tail(20).mean()):
+                below += 1
+        pct = (below / tot * 100) if tot else 0.0
+        pts = max(0.0, min(20.0, (pct - 40) / 40 * 20))     # 40%→0, 80%→20
+        _add(pts, "Broad weakness", f"{pct:.0f}% soft",
+             f"{pct:.0f}% of stocks already rolling over under the surface")
+    except Exception:
+        _add(0.0, "Broad weakness", "n/a", "Data unavailable")
+
+    # 5) No shock absorbers (negative dealer gamma on the index complex)
+    try:
+        negg = []
+        for tk in ("SPY", "QQQ", "IWM"):
+            spot = _gex_spot(conn, tk) or _last_price(tk)
+            if not spot:
+                continue
+            if (_compute_gex(tk, conn, spot).get("total_gex") or 0) < 0:
+                negg.append(tk)
+        pts = min(20.0, len(negg) * 7.0)
+        _add(pts, "No shock absorbers", f"{len(negg)} of 3",
+             f"Dealer hedging now amplifies drops on {', '.join(negg)}" if negg
+             else "Dealer hedging still cushions moves")
+    except Exception:
+        _add(0.0, "No shock absorbers", "n/a", "Data unavailable")
+
+    score = sum(p["pts"] for p in pillars)
+    if score >= 55:
+        regime, remoji, headline = "RISK-OFF WARNING", "🔴", "Play defense"
+        action = ("Trim risk, tighten stops, favor hedges or cash. "
+                  "Not a spot to chase new longs.")
+    elif score >= 30:
+        regime, remoji, headline = "CAUTION building", "🟡", "Stay cautious"
+        action = ("Mixed picture — stay selective, size positions down, "
+                  "keep some hedges on.")
+    else:
+        regime, remoji, headline = "Calm / risk-on", "🟢", "All clear"
+        action = "Calm, risk-on conditions — normal position sizing is fine."
+    if score >= 55:        # let it self-score vs SPY forward return like other scn_* fires
+        _persist_scanner_fires(conn, "riskoff", [("SPY", "BEAR", min(99.0, score))])
+    return {"score": score, "regime": regime, "remoji": remoji,
+            "headline": headline, "action": action, "pillars": pillars,
+            "nextday": _riskoff_nextday(conn, score)}
+
+
+def _riskoff_nextday(conn, score):
+    """Plain next-session game plan for SPY, anchored to dealer gamma walls + the
+    20d trend. Combines the risk-off score, price vs gamma-flip (stable above /
+    amplified below), and price vs 20d mean into a lean (up/down/chop) with concrete
+    hold-vs-lose trigger levels. Returns None if SPY spot/levels unavailable."""
+    try:
+        import numpy as _np
+        spot = _gex_spot(conn, "SPY") or _last_price("SPY")
+        if not spot:
+            return None
+        g = _compute_gex("SPY", conn, spot)
+        flip = g.get("zero_gamma")
+        support = g.get("put_wall")
+        resist = g.get("call_wall")
+        h = _daily_history("SPY", 1, conn)
+        mean20 = float(_np.mean(list(h.tail(20)))) if (h is not None and len(h) >= 20) else spot
+        if not support or support >= spot:      # need a level below price
+            support = round(mean20)
+        if not resist or resist <= spot:         # need a level above price
+            resist = round(spot * 1.012)
+        down2 = round(support * 0.985)           # next stop if support breaks (~1.5% lower)
+        tilt = 0
+        if flip:
+            tilt += 1 if spot >= flip else -1    # above gamma-flip = dampened/stable
+        tilt += 1 if spot >= mean20 else -1      # above/below 20d trend
+        tilt += (-1 if score >= 55 else (1 if score < 30 else 0))
+        if tilt >= 2:
+            lean, lemoji = "Lean UP — relief / bounce", "🟢"
+        elif tilt <= -2:
+            lean, lemoji = "Lean DOWN — more downside risk", "🔴"
+        else:
+            lean, lemoji = "Choppy — range-bound, no clear edge", "🟡"
+        flip_txt = f" (flip {flip:.0f})" if flip else ""
+        text = (f"SPY ~{spot:.0f}. Holds {support:.0f} → bounce toward {resist:.0f}{flip_txt}; "
+                f"loses {support:.0f} → downside opens toward ~{down2:.0f}.")
+        return {"lean": lean, "emoji": lemoji, "spot": spot, "support": support,
+                "resist": resist, "flip": flip, "down2": down2, "text": text}
+    except Exception:
+        return None
+
+
+def _riskoff_message(res):
+    """Plain-English Telegram body shared by /riskoff and the auto alert."""
+    lights = "\n".join(f"{p['emoji']} <b>{p['label']}</b> — {p['why']}" for p in res["pillars"])
+    nd = res.get("nextday")
+    nd_block = (f"\n\n📅 <b>Next session — {nd['lean']}</b>\n{nd['text']}") if nd else ""
+    return (f"{res['remoji']} <b>RISK-OFF RADAR — {res['headline']}</b>\n"
+            f"Warning score: <b>{res['score']:.0f}/100</b>  <i>(0 = calm · 100 = danger)</i>\n\n"
+            f"👉 <b>What to do:</b> {res['action']}\n\n"
+            f"<b>Why — the 5 warning lights:</b>\n{lights}"
+            f"{nd_block}\n\n"
+            f"<i>A quick risk gauge, not advice. 🔴 = warning · 🟡 = mixed · 🟢 = fine.</i>")
+
+
+async def _send_riskoff(msg, res):
+    await msg.reply_text(_riskoff_message(res)[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="riskoff_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def riskoff_command(update, ctx):
+    """/riskoff — composite EOD risk-off radar (index put-flow, froth, VRP, breadth, gamma)."""
+    await update.message.reply_text("🛡️ Scanning downside radar…", parse_mode=H)
+    conn = get_conn()
+    try:
+        res = _riskoff_scan(conn)
+    finally:
+        conn.close()
+    await _send_riskoff(update.message, res)
+
+
+async def riskoff_view(query):
+    conn = get_conn()
+    try:
+        res = _riskoff_scan(conn)
+    finally:
+        conn.close()
+    await _send_riskoff(query.message, res)
 
 
 async def plan_command(update, ctx):
@@ -25818,6 +26044,7 @@ def main():
     app.add_handler(CommandHandler("rs", rs_command))
     app.add_handler(CommandHandler("breakout", breakout_command))
     app.add_handler(CommandHandler("zrev", zrev_command))
+    app.add_handler(CommandHandler("riskoff", riskoff_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
@@ -25849,6 +26076,9 @@ def main():
         job_queue.run_daily(wrap_alert, time=dt_time(21, 15, 0))     # daily market wrap ~4:15 PM ET post-close
         job_queue.run_daily(earnings_alert, time=dt_time(13, 45, 0)) # Earnings Radar ~8:45 AM ET pre-market
         job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # weekly sector rotation, Mondays
+        job_queue.run_once(riskoff_alert, when=25)                    # Risk-Off Radar readout ~on startup
+        job_queue.run_daily(riskoff_alert, time=dt_time(21, 20, 0), data={"gate": True})  # post-close ~4:20 PM ET, only if caution+
+        log.info("Scheduled Risk-Off Radar (startup + post-close)")
         log.info("Scheduled morning alert at 9:00 AM ET daily")
         # 15-min intraday alert (fires every 15 min; function checks market hours internally)
         job_queue.run_repeating(intraday_alert, interval=900, first=30)

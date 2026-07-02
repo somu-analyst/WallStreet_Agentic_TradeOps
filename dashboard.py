@@ -4894,6 +4894,33 @@ def _page_header(title: str, help_text: str = ""):
 # ===================================================================
 if page == "🌍 Market Overview":
     _page_header("🌍 Market Overview", _PAGE_HELP["🌍 Market Overview"])
+
+    # ── 🛡️ Risk-Off Radar banner (top of page) ──
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _mo_riskoff():
+        import telegram_bot_optimized as _tbo
+        _c = _tbo.get_conn()
+        try:
+            return _tbo._riskoff_scan(_c)
+        finally:
+            _c.close()
+    try:
+        _ro = _mo_riskoff()
+        _rfn = st.error if _ro["score"] >= 55 else (st.warning if _ro["score"] >= 30 else st.success)
+        _rfn(f"{_ro['remoji']} **Risk-Off Radar — {_ro['headline']} · {_ro['score']:.0f}/100**  "
+             "_(0 = calm, 100 = danger)_")
+        st.markdown(f"👉 **What to do:** {_ro['action']}")
+        _nd = _ro.get("nextday")
+        if _nd:
+            st.markdown(f"📅 **Next session — {_nd['lean']}**  \n{_nd['text']}")
+        with st.expander("Why — the 5 warning lights", expanded=_ro["score"] >= 55):
+            st.dataframe(pd.DataFrame([{"": p["emoji"], "Warning light": p["label"],
+                                        "Signal": p["reading"], "What it means": p["why"],
+                                        "Pts": int(p["pts"])} for p in _ro["pillars"]]),
+                         hide_index=True, use_container_width=True)
+    except Exception as _roe:
+        st.caption(f"🛡️ Risk-Off Radar unavailable: {_roe}")
+
     # ── Controls row ──
     _ov_c1, _ov_c2, _ov_c3 = st.columns([3, 1, 1])
     with _ov_c1:
@@ -19056,6 +19083,16 @@ def _ss_dataframe(_tbo, conn, choice, tks):
         return pd.DataFrame([{"Ticker": r["ticker"], "Z": round(r["z"], 2),
                               "vs 20d avg %": round((r["px"] / r["mean"] - 1) * 100, 1), "Side": r["side"]}
                              for r in rows])
+    if choice.startswith("🛡"):                                   # Composite risk-off radar
+        res = _tbo._riskoff_scan(conn)
+        df = pd.DataFrame([{"": p["emoji"], "Warning light": p["label"],
+                            "Signal": p["reading"], "What it means": p["why"],
+                            "Pts": int(p["pts"])} for p in res["pillars"]])
+        _nd = res.get("nextday")
+        _ndtxt = f"  📅 Next session — {_nd['lean']}: {_nd['text']}" if _nd else ""
+        df.attrs["caption"] = (f"{res['remoji']} {res['headline']} — score {res['score']:.0f}/100 "
+                               f"(0 = calm, 100 = danger). 👉 What to do: {res['action']}{_ndtxt}")
+        return df
     if choice.startswith("🐋"):                                   # Unusual options activity
         rows = _tbo._uoa_scan(conn)
         return pd.DataFrame([{"Ticker": r["ticker"], "Contract": f"{r['strike']:g}{r['side']}",
@@ -19110,7 +19147,7 @@ if page == "⚙️ Strategy Scanners":
     _page_header("⚙️ Strategy Scanners",
                  "Income · event · stat-arb · seasonality — the same engine as the Telegram bot. Screeners, not proven alpha.")
     import telegram_bot_optimized as _tbo
-    _ss_opts = ["🐋 Unusual options activity", "🌪️ Variance risk premium", "🧭 Positioning builder", "⚖️ Portfolio optimizer", "📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
+    _ss_opts = ["🛡️ Risk-off radar", "🐋 Unusual options activity", "🌪️ Variance risk premium", "🧭 Positioning builder", "⚖️ Portfolio optimizer", "📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
                 "🔗 Pairs mean-reversion", "📅 Seasonality", "🔄 Sector rotation", "↩️ Short-term reversal",
                 "🎡 Wheel (CSP)", "📞 Covered call",
                 "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar",

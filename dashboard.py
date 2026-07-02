@@ -18701,6 +18701,16 @@ def _ss_dataframe(_tbo, conn, choice, tks):
         return pd.DataFrame([{"Ticker": r["ticker"], "Bias": r["bias"], "Stage": _stg.get(r["stage"], r["stage"]),
                               "New OI %": round(r["build_pct"] * 100, 0), "5d %": round(r["ret5"] * 100, 1)}
                              for r in rows])
+    if choice.startswith("🧪"):                                   # vectorbt reversal sweep
+        res = _tbo._vbt_reversal_sweep(conn)
+        if not res:
+            return pd.DataFrame([{"Note": "vectorbt not installed or no history — pip install vectorbt"}])
+        a = res["agg"]
+        df = res["per"].head(20).reset_index().rename(columns={"index": "Ticker"})
+        df.attrs["caption"] = (f"Rule {res['rule']} · {res['years']}y · {a['tickers']} tickers · "
+                               f"avg {a['avg_return']*100:+.1f}% · {a['pct_positive']*100:.0f}% positive · "
+                               f"{a['n_trades']} trades (fees 5bp)")
+        return df
     if choice.startswith("🔬"):                                   # Factor IC validation
         rows = []
         for name, short in _tbo._IC_FACTORS:
@@ -18738,7 +18748,7 @@ if page == "⚙️ Strategy Scanners":
                 "🎡 Wheel (CSP)", "📞 Covered call",
                 "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar",
                 "💪 Relative strength", "🚀 52-week breakout", "↕️ Mean reversion (z)", "📈 Put-write index",
-                "🔬 Factor IC validation"]
+                "🔬 Factor IC validation", "🧪 Reversal sweep (vectorbt)"]
     _c1, _c2 = st.columns([2, 3])
     _ss_choice = _c1.selectbox("Scanner", _ss_opts, key="ss_choice")
     _ss_tk_in = _c2.text_input("Tickers (optional; blank = sensible defaults)", "", key="ss_tks")

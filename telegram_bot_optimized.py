@@ -25192,12 +25192,59 @@ async def wan_command(update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text("\n".join(parts), parse_mode=H)
 
 
+async def _post_init(app):
+    """Register the slash-command list so all commands show in Telegram's / autocomplete."""
+    try:
+        from telegram import BotCommand
+        cmds = [
+            BotCommand("start", "Menu & command list"),
+            BotCommand("wan", "Live 24-model ensemble signals"),
+            BotCommand("building", "Positioning: new long/short OI building"),
+            BotCommand("hiprob", "High-probability option setups"),
+            BotCommand("momentum", "Momentum 12-1 ranks"),
+            BotCommand("rotate", "Sector-ETF relative strength"),
+            BotCommand("revert", "Short-term reversal (oversold/overbought)"),
+            BotCommand("pairs", "Stat mean-reversion pairs"),
+            BotCommand("season", "Calendar seasonality"),
+            BotCommand("spreads", "Credit/debit spread scanner"),
+            BotCommand("wheel", "Cash-secured puts (wheel)"),
+            BotCommand("cc", "Covered-call income"),
+            BotCommand("condor", "Iron-condor range income"),
+            BotCommand("calendar", "Calendar spreads"),
+            BotCommand("earnvol", "Pre-earnings IV-crush"),
+            BotCommand("pead", "Post-earnings drift"),
+            BotCommand("divcap", "Dividend calendar / yield"),
+            BotCommand("pwindex", "Put-write index backtest"),
+            BotCommand("allocate", "Portfolio risk optimizer"),
+            BotCommand("ic", "Factor IC validation"),
+            BotCommand("gex", "Signed GEX / walls"),
+            BotCommand("vanna", "Vanna exposure"),
+            BotCommand("opex", "OPEX / max pain"),
+            BotCommand("regime", "Market regime (VIX term)"),
+            BotCommand("squeeze", "Squeeze scan"),
+            BotCommand("macro", "Macro (BLS + yields)"),
+            BotCommand("earnings", "Earnings & news"),
+            BotCommand("wrap", "Market wrap"),
+            BotCommand("briefing", "Daily briefing"),
+            BotCommand("plan", "Trade game plan"),
+            BotCommand("journal", "Trade/event journal"),
+            BotCommand("bookmarks", "Saved items"),
+            BotCommand("event", "Event writeup"),
+            BotCommand("logevent", "Add event"),
+            BotCommand("tv", "TradingView chart"),
+        ]
+        await app.bot.set_my_commands(cmds)
+        log.info(f"Registered {len(cmds)} slash commands with Telegram")
+    except Exception as e:
+        log.warning(f"set_my_commands failed: {e}")
+
+
 def main():
     _acquire_lock()
     token, chat_id = load_creds()
     log.info(f"Starting bot... Chat ID: {chat_id} (PID: {os.getpid()})")
 
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(_post_init).build()
 
     # Auto-open local dashboard URL on bot startup.
     open_dashboard_on_startup()

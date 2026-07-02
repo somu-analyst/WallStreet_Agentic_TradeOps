@@ -1,0 +1,10 @@
+# OpenBB capture pipeline (NYSE_OpenBB.py) — PINNED versions, verified working 2026-07-02.
+# Guard against silent chain-schema renames in openbb releases. If you upgrade on purpose,
+# run `python NYSE_OpenBB.py --limit 20` and eyeball the columns before the daily run.
+# Restore with:  pip install -r requirements_openbb.txt
+openbb==4.7.2
+openbb-core==1.6.13
+openbb-cboe==1.6.1
+openbb-derivatives==1.6.2
+openbb-yfinance==1.6.3
+curl_cffi==0.15.0

@@ -80,14 +80,22 @@ def compare_vs_yfinance(trade_date=None):
     j = ob.merge(yf_, on=["ticker", "expiry_date", "strike"], suffixes=("_ob", "_yf"))
     print(f"overlapping contracts: {len(j):,}")
     if len(j):
-        for col in ("openInt_Call", "lastPrice_Call"):
+        oi_agree = None
+        for col in ("openInt_Call", "openInt_Put", "lastPrice_Call"):
             a = pd.to_numeric(j[f"{col}_ob"], errors="coerce"); b = pd.to_numeric(j[f"{col}_yf"], errors="coerce")
             m = a.notna() & b.notna() & (b != 0)
             if m.sum():
                 agree = (abs(a[m] - b[m]) / b[m].abs() <= 0.02).mean()
                 print(f"  {col:14} within 2%: {agree*100:.0f}%  (n={m.sum():,})")
-        only_ob = ob.ticker.nunique() - j.ticker.nunique()
+                if col == "openInt_Call":
+                    oi_agree = agree
         print(f"  tickers only in openbb (extra coverage): ~{ob.ticker.nunique() - yf_.ticker.nunique()}")
+        # the go/no-go metric is OPEN INTEREST (same OCC settle on both sides).
+        # lastPrice is expected to disagree more (different quote timestamps) — informational only.
+        if oi_agree is not None:
+            print("VERDICT: PASS ✔ — OI agreement ≥95%; this day counts toward the 3-5 day migration streak"
+                  if oi_agree >= 0.95 else
+                  "VERDICT: CHECK ✖ — OI agreement <95%; inspect mismatched tickers before counting this day")
     print("==============================")
 
 
@@ -537,8 +545,13 @@ def main():
         print(line)
         _logf.write(line + "\n"); _logf.flush()
 
+    try:                                       # stamp the lib version (schema-drift forensics)
+        from importlib.metadata import version as _ver
+        obb_ver = f"openbb {_ver('openbb')}/cboe {_ver('openbb-cboe')}"
+    except Exception:
+        obb_ver = "openbb ?"
     log(f"=== RUN start · {len(tickers)} tickers · chunk={args.chunk_size} rest={args.rest}s "
-        f"workers={args.workers} pace={args.pace}s · provider={args.provider} ===")
+        f"workers={args.workers} pace={args.pace}s · provider={args.provider} · {obb_ver} ===")
 
     t0 = time.time()
     today_str = pd.Timestamp(trade_dt).strftime("%Y-%m-%d")
@@ -623,23 +636,24 @@ def main():
             run_pass(retry[i:i + 40], 1, 1.2 + 0.3 * rnd, f"retry{rnd} {i//40+1}", count_progress=False)
             time.sleep(rest)
 
-    # ── optional: ALSO archive the day to Parquet (zstd) and clear it from sqlite
-    # (space-saver mode). Default now KEEPS rows in the DB (user wants one DB).
-    pq_path = None
-    if args.parquet:
-        try:
-            pq_dir = os.path.join(DATA_DIR, "openbb_chains")
-            os.makedirs(pq_dir, exist_ok=True)
-            day_df = pd.read_sql(f"SELECT * FROM {table} WHERE trade_date=?", conn, params=(today_str,))
-            if len(day_df):
-                pq_path = os.path.join(pq_dir, f"chains_{today_str}.parquet")
-                day_df.to_parquet(pq_path, compression="zstd", index=False)
+    # ── automatic daily backup: the day's rows -> parquet-zstd in openbb_chains\.
+    # Capture-forward data is IRREPLACEABLE (no free historical source), so every run
+    # leaves a ~3-4 MB second copy. --parquet additionally clears sqlite (space-saver).
+    try:
+        pq_dir = os.path.join(DATA_DIR, "openbb_chains")
+        os.makedirs(pq_dir, exist_ok=True)
+        day_df = pd.read_sql(f"SELECT * FROM {table} WHERE trade_date=?", conn, params=(today_str,))
+        if len(day_df):
+            pq_path = os.path.join(pq_dir, f"chains_{today_str}.parquet")
+            day_df.to_parquet(pq_path, compression="zstd", index=False)
+            mb = os.path.getsize(pq_path) / 1e6
+            log(f"backup       : {pq_path}  ({mb:.1f} MB zstd — copy this folder offsite weekly)")
+            if args.parquet:
                 conn.execute(f"DELETE FROM {table} WHERE trade_date=?", (today_str,))
                 conn.commit(); conn.execute("VACUUM"); conn.commit()
-                mb = os.path.getsize(pq_path) / 1e6
-                log(f"parquet      : {pq_path}  ({mb:.1f} MB, zstd; sqlite staging cleared)")
-        except Exception as e:
-            log(f"parquet export failed ({e}) — data remains in sqlite")
+                log("sqlite staging cleared (--parquet space-saver mode; parquet is the copy of record)")
+    except Exception as e:
+        log(f"parquet backup failed ({e}) — data remains in sqlite")
     conn.close()
     elapsed = time.time() - t0
     perm = sorted(PERMANENT_FAIL)

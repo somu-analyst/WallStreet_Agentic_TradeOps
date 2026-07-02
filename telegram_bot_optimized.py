@@ -10971,6 +10971,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ic_view(query)
         elif data == "building_view":
             await building_view(query)
+        elif data == "uoa_view":
+            await uoa_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -23025,6 +23027,113 @@ async def allocate_command(update, ctx):
     await _send_allocate(update.message, res)
 
 
+# ── UNUSUAL OPTIONS ACTIVITY (volume >> open interest = fresh flow) ─
+def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15):
+    """Unusual options activity: contracts where today's volume >> standing OI
+    (vol/OI ratio high) = new positioning/smart-money flow. Calls=bullish lean,
+    puts=bearish. Excludes near-dated (< min_dte) to skip 0DTE/weekly index churn
+    (which is normal, not positioning). Pure options_change. Sorted by $ notional."""
+    try:
+        latest = pd.read_sql(
+            "SELECT trade_date_now FROM options_change ORDER BY "
+            "substr(trade_date_now,7,4)||substr(trade_date_now,1,2)||substr(trade_date_now,4,2) "
+            "DESC LIMIT 1", conn)
+        if latest.empty:
+            latest = pd.read_sql("SELECT MAX(trade_date_now) AS trade_date_now FROM options_change", conn)
+        ld = latest["trade_date_now"].iloc[0]
+        df = pd.read_sql("""
+            SELECT UPPER(ticker) AS ticker, strike, expiry_date,
+                   vol_Call_now, vol_Put_now, openInt_Call_now, openInt_Put_now
+            FROM options_change WHERE trade_date_now=?""", conn, params=(ld,))
+    except Exception:
+        return []
+    if df.empty:
+        return []
+
+    def _dte(exp):
+        for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y"):
+            try:
+                return (datetime.strptime(str(exp)[:10], fmt).date()
+                        - datetime.strptime(str(ld)[:10], "%Y-%m-%d").date()).days
+            except Exception:
+                continue
+        return None
+
+    rows = []
+    for _, r in df.iterrows():
+        try:
+            strike = float(r["strike"])
+        except Exception:
+            continue
+        dte = _dte(r.get("expiry_date"))
+        if dte is None or dte < min_dte:          # skip 0DTE / near-expiry churn
+            continue
+        for side, vcol, ocol in (("C", "vol_Call_now", "openInt_Call_now"),
+                                 ("P", "vol_Put_now", "openInt_Put_now")):
+            vol = float(r.get(vcol) or 0); oi = float(r.get(ocol) or 0)
+            if vol < min_vol or oi <= 0:
+                continue
+            ratio = vol / oi
+            if ratio < min_ratio:
+                continue
+            rows.append({"ticker": r["ticker"], "strike": strike, "side": side, "dte": dte,
+                         "expiry": str(r.get("expiry_date") or "")[:10],
+                         "vol": vol, "oi": oi, "ratio": ratio,
+                         "notional": vol * strike * 100})
+    rows.sort(key=lambda x: -x["notional"])
+    return rows[:top]
+
+
+def _knum(n):
+    a = abs(n)
+    if a >= 1e9: return f"{n/1e9:.1f}B"
+    if a >= 1e6: return f"{n/1e6:.1f}M"
+    if a >= 1e3: return f"{n/1e3:.0f}K"
+    return f"{n:.0f}"
+
+
+async def _send_uoa(msg, rows):
+    if not rows:
+        await msg.reply_text("No unusual options activity (vol≫OI) in the latest snapshot.", parse_mode=H)
+        return
+    _data = []
+    for r in rows:
+        emoji = "🟢" if r["side"] == "C" else "🔴"
+        _data.append((emoji, r["ticker"], f"{r['strike']:g}{r['side']}",
+                      f"{r['ratio']:.1f}", _knum(r["notional"])))
+    table = _pipe_table(("ST", "Tkr", "Opt", "V/OI", "$"), _data, right_cols={3, 4},
+                        legend="vol÷OI (≥2 = unusual) · 🟢 call flow · 🔴 put flow · $=notional")
+    top = rows[0]
+    best = (f"<b>Biggest:</b> {top['ticker']} {top['strike']:g}{top['side']} exp {top['expiry']} · "
+            f"vol {_knum(top['vol'])} vs OI {_knum(top['oi'])} ({top['ratio']:.1f}x) · ${_knum(top['notional'])} notional")
+    txt = ("🐋 <b>Unusual Options Activity — fresh flow</b>\n"
+           "<i>today's volume ≫ standing OI = new positioning. Calls=bullish lean, puts=bearish. "
+           "Flow ≠ certainty (could be hedges/spreads). Not advice.</i>\n\n" + table + "\n\n" + best)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="uoa_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def uoa_command(update, ctx):
+    """/uoa — unusual options activity: contracts with volume >> open interest (fresh flow)."""
+    await update.message.reply_text("🐋 Scanning unusual options flow…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _uoa_scan(conn)
+    finally:
+        conn.close()
+    await _send_uoa(update.message, rows)
+
+
+async def uoa_view(query):
+    conn = get_conn()
+    try:
+        rows = _uoa_scan(conn)
+    finally:
+        conn.close()
+    await _send_uoa(query.message, rows)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -25200,6 +25309,7 @@ async def _post_init(app):
             BotCommand("start", "Menu & command list"),
             BotCommand("wan", "Live 24-model ensemble signals"),
             BotCommand("building", "Positioning: new long/short OI building"),
+            BotCommand("uoa", "Unusual options activity (vol>>OI)"),
             BotCommand("hiprob", "High-probability option setups"),
             BotCommand("momentum", "Momentum 12-1 ranks"),
             BotCommand("rotate", "Sector-ETF relative strength"),
@@ -25273,6 +25383,7 @@ def main():
     app.add_handler(CommandHandler("pead", pead_command))
     app.add_handler(CommandHandler("ic", ic_command))
     app.add_handler(CommandHandler("building", building_command))
+    app.add_handler(CommandHandler("uoa", uoa_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))

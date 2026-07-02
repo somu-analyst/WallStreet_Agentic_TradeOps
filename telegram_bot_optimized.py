@@ -22578,7 +22578,7 @@ def _daily_history(ticker, years=6, conn=None):
         df = pd.read_sql(q, conn, params=(tk,))
         if len(df) < years * 252 * 0.7 and tk not in _HIST_FETCHED:
             _HIST_FETCHED.add(tk)
-            rows = _fetch_yf_history(tk, years) or _fetch_openbb_history(tk, years)   # yf primary, OpenBB fallback
+            rows = _fetch_yf_history(tk, years)   # yfinance only in the live bot; OpenBB is a parallel test lane (NYSE_OpenBB*.py)
             if rows:
                 try:
                     conn.executemany(

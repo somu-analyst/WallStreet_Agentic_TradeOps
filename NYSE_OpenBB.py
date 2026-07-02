@@ -84,6 +84,33 @@ _COMMODITY = ["GLD", "SLV", "USO", "UNG", "CPER", "PPLT", "PALL", "URA", "DBA", 
               "CORN", "GDX", "GDXJ", "SIL", "XME", "SLX", "LIT"]
 _CRYPTO_EQ = ["IBIT", "FBTC", "ETHA", "BITO", "COIN", "MARA", "RIOT", "CLSK", "HUT", "BITF"]
 _RATES_VOL = ["TLT", "IEF", "SHY", "HYG", "LQD", "AGG", "TMF", "VXX", "UVXY"]
+# Thematic tiers (individual stocks, not just ETFs)
+_SEMIS = ["NVDA", "AMD", "AVGO", "MU", "QCOM", "MRVL", "TXN", "AMAT", "LRCX", "KLAC",
+          "ARM", "INTC", "ON", "ADI", "NXPI", "MCHP", "TER", "ENTG", "SWKS", "QRVO",
+          "COHR", "ALAB", "TSM", "ASML"]
+_ROBOTICS_AI = ["ISRG", "ROK", "PATH", "SYM", "CGNX", "ZBRA", "TER", "PONY",
+                "BOTZ", "ROBO", "ARKQ"]
+_SPACE = ["RKLB", "ASTS", "LUNR", "RDW", "PL", "BKSY", "SPCE", "IRDM", "GSAT",
+          "HEI", "KTOS", "AVAV", "UFO", "ARKX"]
+_NUCLEAR = ["OKLO", "SMR", "NNE", "CCJ", "LEU", "UEC", "DNN", "NXE", "UUUU",
+            "BWXT", "CEG", "VST", "TLN", "URNM", "URNJ"]
+_CYBER = ["CRWD", "ZS", "PANW", "FTNT", "OKTA", "S", "NET", "CYBR", "TENB",
+          "RPD", "QLYS", "CHKP", "GEN", "AKAM", "HACK", "CIBR", "BUG"]
+_COMMODITY_STOCKS = ["NEM", "FCX", "SCCO", "AA", "CLF", "NUE", "STLD", "GOLD", "AEM",
+                     "WPM", "FNV", "RGLD", "KGC", "HL", "PAAS", "MP", "ALB", "SQM",
+                     "XOM", "CVX", "COP", "OXY", "SLB", "HAL", "DVN", "FANG", "EOG",
+                     "LNG", "EQT", "AR", "RRC", "BTU", "AMR"]
+# "Next wave" tiers — for EARLY tracking via /building /uoa /rs (not chase-buying)
+_AI_SOFT = ["PLTR", "SNOW", "MDB", "AI", "SOUN", "BBAI", "UPST", "TEM", "DUOL",
+            "APP", "NOW", "ADBE", "CRM", "IGV", "AIQ", "WCLD"]
+_QUANTUM = ["IONQ", "RGTI", "QUBT", "QBTS", "ARQQ"]
+_AI_INFRA_POWER = ["VRT", "ETN", "GEV", "ANET", "CIEN", "CRDO", "MOD", "POWL",
+                   "EME", "PWR", "DLR", "EQIX", "NRG", "DELL", "IREN", "APLD",
+                   "WULF", "CORZ", "NBIS", "CRWV"]
+_DEFENSE_TECH = ["KTOS", "AVAV", "AXON", "LMT", "RTX", "NOC", "GD", "LHX", "LDOS", "ITA"]
+_BIOTECH_NEXT = ["LLY", "NVO", "VKTX", "AMGN", "REGN", "VRTX", "CRSP", "NTLA",
+                 "BEAM", "RXRX", "ILMN", "XBI", "ARKG"]
+_FINTECH = ["HOOD", "SOFI", "AFRM", "TOST", "NU", "PYPL", "XYZ", "COIN"]
 _BROAD_ETF = ["SPY", "QQQ", "IWM", "DIA", "MDY", "RSP", "XLK", "XLE", "XLF", "XLV", "XLI",
               "XLB", "XLU", "XLY", "XLP", "XLRE", "XLC", "SMH", "SOXX", "SOXL", "SQQQ",
               "TQQQ", "ARKK", "XBI", "ITB", "JETS", "TAN"]
@@ -117,7 +144,9 @@ def build_expanded_universe():
         tks += ndx
     except Exception as e:
         print(f"Nasdaq-100 fetch failed ({e}) — continuing without")
-    tks += _BUZZ + _GLOBAL_ADR + _COUNTRY_ETF + _COMMODITY + _CRYPTO_EQ + _RATES_VOL + _BROAD_ETF
+    tks += (_BUZZ + _GLOBAL_ADR + _COUNTRY_ETF + _COMMODITY + _CRYPTO_EQ + _RATES_VOL + _BROAD_ETF
+            + _SEMIS + _ROBOTICS_AI + _SPACE + _NUCLEAR + _CYBER + _COMMODITY_STOCKS
+            + _AI_SOFT + _QUANTUM + _AI_INFRA_POWER + _DEFENSE_TECH + _BIOTECH_NEXT + _FINTECH)
     # keep the current active names too (nothing lost)
     tks += load_universe(sheet=UNIVERSE_SHEET_ACTIVE)
     uni = sorted(dict.fromkeys(t for t in tks if t and t not in ("DXY",)))
@@ -247,6 +276,8 @@ def main():
                     help=f"universe sheet name (e.g. {EXPANDED_SHEET})")
     ap.add_argument("--build-universe", action="store_true",
                     help="build the expanded S&P500+NDX+tiers universe sheet and exit")
+    ap.add_argument("--pace", type=float, default=0.15,
+                    help="per-request stagger seconds (rate-limit guard; 0 = blast)")
     args = ap.parse_args()
     if args.strike_pct is not None:
         global STRIKE_PCT
@@ -263,18 +294,35 @@ def main():
     print(f"Output (isolated): {OUT_DB_PATH} · table={table}  (production US_data.db untouched)")
 
     t0 = time.time()
-    frames, done, empty = [], 0, 0
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(fetch_chain_openbb, obb, tk, args.provider, trade_dt): tk for tk in tickers}
-        for fut in as_completed(futs):
-            df = fut.result()
-            done += 1
-            if df is not None and len(df):
-                frames.append(df)
-            else:
-                empty += 1
-            if done % 25 == 0:
-                print(f"  {done}/{len(tickers)} done · {time.time()-t0:.0f}s elapsed")
+    frames, failed = [], []
+
+    def run_pass(tks, workers, pace, label):
+        """One fetch pass. `pace` = per-submit stagger (sec) so we stay under
+        CBOE's rate limit (8 workers unpaced -> throttled after ~60 tickers)."""
+        ok = 0
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {}
+            for tk in tks:
+                futs[ex.submit(fetch_chain_openbb, obb, tk, args.provider, trade_dt)] = tk
+                time.sleep(pace)
+            for i, fut in enumerate(as_completed(futs), 1):
+                df = fut.result()
+                if df is not None and len(df):
+                    frames.append(df); ok += 1
+                else:
+                    failed.append(futs[fut])
+                if i % 50 == 0:
+                    print(f"  [{label}] {i}/{len(tks)} · {time.time()-t0:.0f}s elapsed")
+        return ok
+
+    ok1 = run_pass(tickers, args.workers, args.pace, "pass1")
+    retry = list(dict.fromkeys(failed)); failed = []
+    ok2 = 0
+    if retry:
+        print(f"Retrying {len(retry)} failures slowly (backoff 20s)…")
+        time.sleep(20)
+        ok2 = run_pass(retry, 2, max(args.pace, 0.35), "retry")
+    empty = len(failed)
     elapsed = time.time() - t0
 
     rows = 0

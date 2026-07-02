@@ -10953,6 +10953,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await cc_view(query)
         elif data == "pairs_view":
             await pairs_view(query)
+        elif data == "season_view":
+            await season_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -21655,6 +21657,108 @@ async def pairs_view(query):
     await _send_pairs(query.message, rows)
 
 
+# ── SEASONALITY (on-the-fly ~10y yfinance; weak, decaying edge) ───
+_SEASON_CACHE = {}   # tk -> (ts, dict)
+
+def _season_stats(tk, years=10):
+    """Current-month avg return + win-rate, best/worst month, top weekday,
+    and turn-of-month edge, from ~10y daily history. Cached 24h. None if no data."""
+    import time as _t
+    now = _t.time()
+    c = _SEASON_CACHE.get(tk)
+    if c and now - c[0] < 86400:
+        return c[1]
+    res = None
+    try:
+        h = yf.Ticker(tk).history(period=f"{years}y", interval="1d")["Close"].dropna()
+        if len(h) > 250:
+            today = datetime.now()
+            m = today.month
+            # Monthly returns by calendar month
+            monthly = h.resample("ME").last().pct_change().dropna()
+            cur = monthly[monthly.index.month == m]
+            mo_avg = float(cur.mean()) if len(cur) else 0.0
+            mo_win = float((cur > 0).mean()) if len(cur) else 0.0
+            by_month = monthly.groupby(monthly.index.month).mean()
+            best_m = int(by_month.idxmax()); worst_m = int(by_month.idxmin())
+            # Day-of-week
+            dr = h.pct_change().dropna()
+            by_dow = dr.groupby(dr.index.dayofweek).mean()
+            dow_best = int(by_dow.idxmax())
+            # Turn-of-month (approx via calendar day: last few + first 3)
+            day = dr.index.day
+            tom_mask = (day <= 3) | (day >= 25)
+            tom_edge = float(dr[tom_mask].mean() - dr[~tom_mask].mean())
+            in_tom = today.day <= 3 or today.day >= 25
+            res = {
+                "mo_avg": mo_avg, "mo_win": mo_win, "mo_n": int(len(cur)),
+                "best_m": best_m, "worst_m": worst_m, "dow_best": dow_best,
+                "tom_edge": tom_edge, "in_tom": in_tom, "years": int(len(monthly) // 12),
+            }
+    except Exception:
+        res = None
+    _SEASON_CACHE[tk] = (now, res)
+    return res
+
+
+def _season_scan(tickers, years=10):
+    out = []
+    for tk in tickers:
+        tk = str(tk).strip().upper()
+        if not tk:
+            continue
+        s = _season_stats(tk, years)
+        if s:
+            s["ticker"] = tk
+            out.append(s)
+    out.sort(key=lambda r: -(r["mo_avg"] * (1 if r["mo_win"] >= 0.5 else 0.5)))
+    return out
+
+
+_MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_DOWS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+async def _send_season(msg, rows):
+    if not rows:
+        await msg.reply_text("No seasonality data (yfinance history unavailable).", parse_mode=H)
+        return
+    mo_name = _MONTHS[datetime.now().month]
+    _hdrs = ("ST", "Tkr", "Mo%", "Win", "TOM")
+    _data = []
+    for r in rows[:15]:
+        emoji = ("🟢" if (r["mo_avg"] > 0 and r["mo_win"] >= 0.55)
+                 else ("🔴" if (r["mo_avg"] < 0 and r["mo_win"] <= 0.45) else "🟡"))
+        tom = "✓" if (r["in_tom"] and r["tom_edge"] > 0) else "—"
+        _data.append((emoji, r["ticker"], f"{r['mo_avg']*100:+.1f}", f"{r['mo_win']*100:.0f}", tom))
+    table = _pipe_table(_hdrs, _data, right_cols={2, 3},
+                        legend=f"{mo_name} avg return · Win=% up years · TOM=in turn-of-month window now · 🟢 bullish/🔴 bearish month")
+    top = rows[0]
+    best = (f"<b>Top:</b> {top['ticker']} — {mo_name} avg {top['mo_avg']*100:+.1f}% "
+            f"(up {top['mo_win']*100:.0f}% of {top['mo_n']} yrs) · best month {_MONTHS[top['best_m']]}, "
+            f"worst {_MONTHS[top['worst_m']]} · strongest day {_DOWS[top['dow_best']]}")
+    txt = ("📅 <b>Seasonality — Calendar Edges</b>\n"
+           f"<i>~10y history · weak/decaying edge, context only · not advice</i>\n\n"
+           + table + "\n\n" + best)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="season_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def season_command(update, ctx):
+    """/season [TICKERS] — calendar seasonality: current-month return, win-rate, turn-of-month."""
+    args = list(getattr(ctx, "args", []) or [])
+    tks = [a.upper() for a in args] if args else _hiprob_default_tickers()
+    await update.message.reply_text("📅 Crunching ~10y seasonality…", parse_mode=H)
+    rows = _season_scan(tuple(tks[:8]))
+    await _send_season(update.message, rows)
+
+
+async def season_view(query):
+    rows = _season_scan(tuple(_hiprob_default_tickers()[:8]))
+    await _send_season(query.message, rows)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -23846,6 +23950,7 @@ def main():
     app.add_handler(CommandHandler("wheel", wheel_command))
     app.add_handler(CommandHandler("cc", cc_command))
     app.add_handler(CommandHandler("pairs", pairs_command))
+    app.add_handler(CommandHandler("season", season_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

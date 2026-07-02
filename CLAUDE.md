@@ -43,7 +43,7 @@
 
 ### Bot commands (registered in `telegram_bot_optimized.py`)
 - `/start` `/menu` entry + command list · `/gex` signed GEX profile (walls, zero-gamma flip) · `/vanna` vanna exposure · `/opex` OPEX / max pain · `/regime` market regime (VIX term structure) · `/squeeze` squeeze scan.
-- Scanners: `/spreads` · `/wheel` (CSP) · `/hiprob` high-prob ensemble · `/momentum` momentum ranks.
+- Scanners: `/spreads` · `/wheel` (CSP) · `/hiprob` high-prob ensemble · `/momentum` momentum ranks · `/earnvol` pre-earnings IV-crush (IV-rank + expected move; short-premium vs long-vol; PEAD lane = phase 2).
 - Narratives/data: `/wrap` market wrap · `/briefing` daily briefing · `/macro` macro (BLS+yields) · `/earnings` earnings/news · `/event` event writeup · `/logevent` add event.
 - Tools: `/plan` trade planner · `/journal` trade/event journal · `/bookmarks` saved items · `/tv` TradingView chart bridge.
 - `/wan` WAN-streamer: live snapshot of actionable 24-model ensemble signals (BULL/BEAR, conf≥MED, prob≥70). Also runs as a 15-min `run_repeating` job (market-hours, daily dedup) that pushes new fires; its cached snapshot feeds `ai_chat_handler`, so plain-text questions like "why is NVDA bullish?" are answered with the live signal context.

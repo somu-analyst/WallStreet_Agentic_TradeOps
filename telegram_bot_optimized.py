@@ -22844,6 +22844,110 @@ async def building_alert(ctx: ContextTypes.DEFAULT_TYPE):
         log.warning(f"building_alert send failed: {e}")
 
 
+# ── PORTFOLIO RISK OPTIMIZER (Aladdin-style, native, no dependency) ─
+def _optimize_portfolio(conn, tickers, method="sharpe", max_w=0.35, years=3, rf=0.045):
+    """Long-only portfolio weights from the stock_history covariance.
+    method: sharpe (tangency ∝ Σ⁻¹(μ−rf)) · minvar (∝ Σ⁻¹1) · riskparity
+    (inverse-vol). Caps each weight at max_w (iterative redistribute). Returns
+    weights + annualised μ/σ/Sharpe. Uses years of DB history (no API if cached)."""
+    wide = _history_matrix(tickers, max(years + 1, 3), conn)
+    if wide is None or wide.empty:
+        return None
+    rets = wide.pct_change().iloc[1:]              # drop first all-NaN row
+    rets = rets.tail(int(years * 252))
+    rets = rets.dropna(axis=1, how="any")          # keep tickers fully populated in window
+    cols = [c for c in rets.columns]
+    if len(cols) < 2 or len(rets) < 60:
+        return None
+    R = rets[cols].to_numpy()
+    mu = R.mean(axis=0) * 252
+    cov = np.cov(R, rowvar=False) * 252
+    n = len(cols)
+    try:
+        inv = np.linalg.pinv(cov)
+    except Exception:
+        return None
+    if method == "minvar":
+        w = inv @ np.ones(n)
+    elif method in ("riskparity", "rp"):
+        vol = np.sqrt(np.clip(np.diag(cov), 1e-9, None))
+        w = 1.0 / vol
+    else:                                          # sharpe / tangency
+        w = inv @ (mu - rf)
+    w = np.where(np.isfinite(w) & (w > 0), w, 0.0)  # long-only
+    if w.sum() <= 0:
+        w = np.ones(n)
+    w = w / w.sum()
+    for _ in range(20):                            # enforce max weight cap
+        over = w > max_w
+        if not over.any():
+            break
+        spill = float((w[over] - max_w).sum())
+        w[over] = max_w
+        room = (~over) & (w > 0)
+        if not room.any():
+            break
+        w[room] += spill * (w[room] / w[room].sum())
+        w = w / w.sum()
+    port_ret = float(w @ mu); port_vol = float(np.sqrt(max(w @ cov @ w, 0)))
+    sharpe = (port_ret - rf) / port_vol if port_vol > 0 else 0.0
+    avol = np.sqrt(np.clip(np.diag(cov), 0, None))
+    assets = sorted([(cols[i], float(w[i]), float(avol[i]), float(mu[i])) for i in range(n)],
+                    key=lambda x: -x[1])
+    return {"method": method, "assets": assets, "port_ret": port_ret, "port_vol": port_vol,
+            "sharpe": sharpe, "n": n, "years": years, "max_w": max_w}
+
+
+_ALLOC_LABEL = {"sharpe": "Max-Sharpe", "minvar": "Min-Variance", "riskparity": "Risk-Parity"}
+
+
+async def _send_allocate(msg, res):
+    if not res:
+        await msg.reply_text("Need ≥2 tickers with enough history. Try <code>/allocate SPY QQQ NVDA GLD</code>.", parse_mode=H)
+        return
+    _data = [(tk, f"{w*100:.0f}", f"{v*100:.0f}", f"{m*100:+.0f}")
+             for tk, w, v, m in res["assets"] if w > 0.005]
+    table = _pipe_table(("Tkr", "Wt%", "σ%", "μ%"), _data, right_cols={1, 2, 3},
+                        legend="Wt=allocation · σ=ann vol · μ=ann return (historical)")
+    txt = (f"⚖️ <b>Portfolio Optimizer — {_ALLOC_LABEL.get(res['method'], res['method'])}</b>\n"
+           f"<i>{res['n']} assets · {res['years']}y history · long-only · cap {res['max_w']*100:.0f}%/name</i>\n\n"
+           f"<b>Exp return {res['port_ret']*100:+.1f}%/yr · vol {res['port_vol']*100:.1f}% · "
+           f"Sharpe {res['sharpe']:.2f}</b>\n\n" + table +
+           "\n\n<i>⚠️ Historical μ is noisy — min-variance / risk-parity are more robust than "
+           "max-Sharpe out-of-sample. Sizing aid, not advice.</i>")
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def allocate_command(update, ctx):
+    """/allocate [sharpe|minvar|rp] [TICKERS] — risk-based portfolio weights from covariance."""
+    method = "sharpe"; tks = []
+    for a in list(getattr(ctx, "args", []) or []):
+        al = a.lower()
+        if al in ("sharpe", "minvar", "riskparity", "rp"):
+            method = "riskparity" if al == "rp" else al
+        else:
+            tks.append(a.upper())
+    if not tks:
+        conn = get_conn()
+        try:
+            df = pd.read_sql("SELECT DISTINCT UPPER(ticker) AS t FROM trades WHERE status='OPEN'", conn)
+            tks = [t for t in df["t"].tolist() if t]
+        except Exception:
+            tks = []
+        finally:
+            conn.close()
+        if len(tks) < 2:
+            tks = DEFAULT_TICKERS
+    await update.message.reply_text("⚖️ Optimizing portfolio…", parse_mode=H)
+    conn = get_conn()
+    try:
+        res = _optimize_portfolio(conn, tks[:20], method=method)
+    finally:
+        conn.close()
+    await _send_allocate(update.message, res)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -25045,6 +25149,7 @@ def main():
     app.add_handler(CommandHandler("pead", pead_command))
     app.add_handler(CommandHandler("ic", ic_command))
     app.add_handler(CommandHandler("building", building_command))
+    app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

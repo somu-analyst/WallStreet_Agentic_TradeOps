@@ -23,7 +23,7 @@ so nothing is hidden.
 | 6 | Iron condor / strangle range-income optimizer | `/condor` | ⏳ Planned | — | extends /earnvol + /spreads |
 | 7 | Seasonality engine (current-month avg/win, DoW, turn-of-month) | `/season` | ✅ Done | pending | on-the-fly ~10y yfinance, cached 24h |
 | 8 | Sector rotation / relative-strength ranker | `/rotate` | ✅ Done | pending | 12 sector ETFs, blended 1/3/6-mo RS vs SPY, 1h cache |
-| 9 | Cross-sectional mean-reversion (short-term reversal) | `/revert` | ⏳ Planned | — | from stock_daily |
+| 9 | Cross-sectional mean-reversion (short-term reversal) | `/revert` | ✅ Done | pending | 5d return z-score vs universe; pure stock_daily |
 | 10 | Macro event positioner (FOMC/CPI/NFP drift+vol) | `/macro` (enhance) | ⏳ Planned | — | modest, decaying edge |
 | 11 | Dividend-capture / ex-div assignment risk | `/divcap` | ⏳ Planned | — | needs dividend calendar |
 | 12 | Put-write / covered-call systematic index (PUT/BXM style) | `/pwindex` | ⏳ Planned | — | backtest-style, educational |

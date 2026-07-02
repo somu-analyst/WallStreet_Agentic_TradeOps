@@ -10957,6 +10957,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await season_view(query)
         elif data == "rotate_view":
             await rotate_view(query)
+        elif data == "revert_view":
+            await revert_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -21840,6 +21842,82 @@ async def rotate_view(query):
     await _send_rotate(query.message, _rotate_scan())
 
 
+# ── CROSS-SECTIONAL SHORT-TERM REVERSAL (oversold bounce / fade) ──
+def _revert_scan(conn, lookback=5, z_min=1.0):
+    """Cross-sectional short-term reversal: rank the liquid universe by N-day
+    return z-score. Most negative = oversold (long-reversal), most positive =
+    overbought (fade). Pure stock_daily read. Returns dicts sorted by z asc."""
+    try:
+        df = pd.read_sql("SELECT ticker, trade_date, close FROM stock_daily", conn)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    df["ticker"] = df["ticker"].str.upper()
+    wide = df.pivot_table(index="trade_date", columns="ticker", values="close", aggfunc="last").sort_index()
+    if len(wide) < lookback + 1:
+        return []
+    last = wide.iloc[-1]; prev = wide.iloc[-(lookback + 1)]
+    ret = (last / prev - 1).replace([np.inf, -np.inf], np.nan).dropna()
+    uni = [t for t in SCAN_UNIVERSE if t in ret.index]
+    ret = ret[uni]
+    if len(ret) < 10 or ret.std() == 0:
+        return []
+    mu, sd = ret.mean(), ret.std()
+    rows = []
+    for tk, r in ret.items():
+        z = float((r - mu) / sd)
+        if abs(z) < z_min:
+            continue
+        rows.append({"ticker": tk, "ret": float(r), "z": z,
+                     "side": "LONG" if z < 0 else "FADE"})
+    rows.sort(key=lambda x: x["z"])   # most oversold first
+    return rows
+
+
+async def _send_revert(msg, rows, lookback=5):
+    if not rows:
+        await msg.reply_text("No stretched names (|z|≥1) right now.", parse_mode=H)
+        return
+    _hdrs = ("ST", "Tkr", f"{lookback}d%", "Z")
+    _data = []
+    for r in rows[:15]:
+        emoji = "🟢" if r["side"] == "LONG" else "🔴"
+        _data.append((emoji, r["ticker"], f"{r['ret']*100:+.1f}", f"{r['z']:+.1f}"))
+    table = _pipe_table(_hdrs, _data, right_cols={2, 3},
+                        legend=f"{lookback}d return z-score · 🟢 oversold (long bounce) · 🔴 overbought (fade)")
+    longs = [r["ticker"] for r in rows if r["side"] == "LONG"][:3]
+    fades = [r["ticker"] for r in rows if r["side"] == "FADE"][-3:]
+    best = (f"<b>Oversold (bounce):</b> {', '.join(longs) or '—'}  ·  "
+            f"<b>Overbought (fade):</b> {', '.join(fades) or '—'}")
+    txt = ("↩️ <b>Short-Term Reversal — Cross-Sectional</b>\n"
+           f"<i>{lookback}-day extremes tend to mean-revert · risky, low-N history · not advice</i>\n\n"
+           + table + "\n\n" + best)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="revert_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def revert_command(update, ctx):
+    """/revert — cross-sectional short-term reversal: oversold bounce / overbought fade."""
+    await update.message.reply_text("↩️ Scanning reversals…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _revert_scan(conn)
+    finally:
+        conn.close()
+    await _send_revert(update.message, rows)
+
+
+async def revert_view(query):
+    conn = get_conn()
+    try:
+        rows = _revert_scan(conn)
+    finally:
+        conn.close()
+    await _send_revert(query.message, rows)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -24033,6 +24111,7 @@ def main():
     app.add_handler(CommandHandler("pairs", pairs_command))
     app.add_handler(CommandHandler("season", season_command))
     app.add_handler(CommandHandler("rotate", rotate_command))
+    app.add_handler(CommandHandler("revert", revert_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

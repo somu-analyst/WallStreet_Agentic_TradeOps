@@ -36,15 +36,17 @@ DATA_DIR = r"C:\Users\srini\Options_chain_data"
 US_CHARTS_DIR = os.path.join(DATA_DIR, "US_CHARTS")
 UNIVERSE_FILE = os.path.join(US_CHARTS_DIR, "ticker_universe.xlsx")
 UNIVERSE_SHEET_ACTIVE = "ticker_universe"
-# ISOLATED output DB — production US_data.db is NEVER written to by this script.
-OUT_DB_PATH = os.path.join(DATA_DIR, "US_data_openbb_test.db")
+# Output DB: US_data_OpenBB.db = full copy of the yfinance DB (all 53 tables,
+# seeded once via sqlite backup) + this script's captures accumulating in the
+# 'options_openbb' table. Production US_data.db is STILL never written to.
+OUT_DB_PATH = os.path.join(DATA_DIR, "US_data_OpenBB.db")
 
 MAX_HORIZON_DAYS = 45          # same horizon window as NYSE_YFin
 # Strike filter: PERCENT of spot (not strike count). NYSE_YFin uses +/-25 STRIKES,
 # which is only ~+/-3% on dense-strike names like SPY but ~+/-36% on NVDA — inconsistent.
 # CBOE returns the full chain in one call, so a wider window costs no extra fetch time.
 STRIKE_PCT = 0.0               # 0 = FULL chain (fetch is one call regardless); use --strike-pct to trim
-TEST_TABLE = "options_openbb_test"
+TEST_TABLE = "options_openbb"
 
 
 def _load_openbb():
@@ -83,7 +85,7 @@ _COUNTRY_ETF = ["EEM", "EFA", "VEA", "VWO", "FXI", "KWEB", "EWJ", "EWZ", "INDA",
 _COMMODITY = ["GLD", "SLV", "USO", "UNG", "CPER", "PPLT", "PALL", "URA", "DBA", "WEAT",
               "CORN", "GDX", "GDXJ", "SIL", "XME", "SLX", "LIT"]
 _CRYPTO_EQ = ["IBIT", "FBTC", "ETHA", "BITO", "COIN", "MARA", "RIOT", "CLSK", "HUT", "BITF"]
-_RATES_VOL = ["TLT", "IEF", "SHY", "HYG", "LQD", "AGG", "TMF", "VXX", "UVXY"]
+_RATES_VOL = ["TLT", "IEF", "SHY", "HYG", "LQD", "AGG", "TMF", "VXX", "UVXY", "VIX"]  # VIX = index options via CBOE
 # Thematic tiers (individual stocks, not just ETFs)
 _SEMIS = ["NVDA", "AMD", "AVGO", "MU", "QCOM", "MRVL", "TXN", "AMAT", "LRCX", "KLAC",
           "ARM", "INTC", "ON", "ADI", "NXPI", "MCHP", "TER", "ENTG", "SWKS", "QRVO",
@@ -152,7 +154,9 @@ def build_expanded_universe():
             + _BIO_AI)
     # keep the current active names too (nothing lost)
     tks += load_universe(sheet=UNIVERSE_SHEET_ACTIVE)
-    # drop non-optionable: crypto spot pairs, index carets, known non-CBOE names
+    # drop truly non-optionable (VERIFIED 2026-07-02: 0 expiries on Yahoo too —
+    # CYBR/EXAS acquired, NVR lists no options, PSLV/PHYS/BITF never had chains,
+    # ME delisted, HONA no chain yet). BRK-B/BF-B work via dot-form; VIX works plain.
     _skip = {"DXY", "ME", "HONA", "EXAS", "BITF", "PHYS", "PSLV", "CYBR", "NVR"}
     uni = sorted(dict.fromkeys(
         t for t in tks
@@ -195,6 +199,51 @@ def _normalize_chain(df):
     return m
 
 
+def _fetch_chain_raw_yf(ticker, trade_dt):
+    """Raw-yfinance chain for names absent from CBOE (per-expiry calls; only used
+    for the handful of fallback tickers, so the extra round-trips are fine)."""
+    try:
+        import yfinance as yf
+        import datetime as _dt
+        t = yf.Ticker(ticker)
+        cutoff = trade_dt + _dt.timedelta(days=MAX_HORIZON_DAYS)
+        frames = []
+        for e in (t.options or []):
+            try:
+                ed = _dt.datetime.strptime(e, "%Y-%m-%d").date()
+            except Exception:
+                continue
+            if ed > cutoff:
+                continue
+            oc = t.option_chain(e)
+            def side(d, suff):
+                return pd.DataFrame({
+                    "strike": pd.to_numeric(d["strike"], errors="coerce"),
+                    "expiry_date": e,
+                    f"openInt_{suff}": pd.to_numeric(d.get("openInterest"), errors="coerce"),
+                    f"lastPrice_{suff}": pd.to_numeric(d.get("lastPrice"), errors="coerce"),
+                    f"vol_{suff}": pd.to_numeric(d.get("volume"), errors="coerce"),
+                    f"bid_{suff}": pd.to_numeric(d.get("bid"), errors="coerce"),
+                    f"ask_{suff}": pd.to_numeric(d.get("ask"), errors="coerce"),
+                    f"iv_{suff}": pd.to_numeric(d.get("impliedVolatility"), errors="coerce"),
+                    f"delta_{suff}": np.nan,          # yahoo doesn't serve greeks
+                })
+            m = pd.merge(side(oc.calls, "Call"), side(oc.puts, "Put"),
+                         on=["strike", "expiry_date"], how="outer")
+            frames.append(m)
+        if not frames:
+            return None
+        out = pd.concat(frames, ignore_index=True)
+        for c in out.columns:
+            if out[c].dtype == "float64":
+                out[c] = out[c].astype("float32")
+        out["ticker"] = ticker
+        out["trade_date"] = pd.Timestamp(trade_dt).strftime("%Y-%m-%d")
+        return out
+    except Exception:
+        return None
+
+
 def fetch_chain_openbb(obb, ticker, provider, trade_dt):
     """Fetch + shape one ticker's chain into NYSE_YFin's merged schema. Returns df or None."""
     df = None
@@ -210,6 +259,15 @@ def fetch_chain_openbb(obb, ticker, provider, trade_dt):
         except Exception as e:
             last_err = e
             df = None
+    # non-CBOE names (CYBR/NVR/PSLV/...): their options trade on other exchanges.
+    # OpenBB's yfinance provider also fails for these, so fall back to RAW yfinance
+    # (same machinery as NYSE_YFin — known to serve them).
+    if (df is None or len(df) == 0) and "not found in the cboe" in str(last_err).lower() \
+            and provider == "cboe":
+        raw = _fetch_chain_raw_yf(ticker, trade_dt)
+        if raw is not None:
+            print(f"  {ticker}: not on CBOE -> recovered via raw yfinance ({len(raw)} rows)")
+            return raw
     if df is None or len(df) == 0:
         print(f"  {ticker}: chain fetch failed ({last_err})")
         return None
@@ -301,8 +359,8 @@ def main():
                     help="tickers per chunk (rest between chunks lets the rate window reset)")
     ap.add_argument("--rest", type=int, default=45,
                     help="seconds to rest between chunks")
-    ap.add_argument("--no-parquet", action="store_true",
-                    help="keep the day's rows in sqlite instead of compressing to parquet")
+    ap.add_argument("--parquet", action="store_true",
+                    help="space-saver: export the day to parquet-zstd and clear it from sqlite")
     args = ap.parse_args()
     if args.strike_pct is not None:
         global STRIKE_PCT
@@ -401,9 +459,10 @@ def main():
             run_pass(retry[i:i + 40], 1, 1.2, f"retry{rnd} {i//40+1}", count_progress=False)
             time.sleep(args.rest)
 
-    # ── compress the day to Parquet (zstd) and keep SQLite only as staging ──
+    # ── optional: ALSO archive the day to Parquet (zstd) and clear it from sqlite
+    # (space-saver mode). Default now KEEPS rows in the DB (user wants one DB).
     pq_path = None
-    if not args.no_parquet:
+    if args.parquet:
         try:
             pq_dir = os.path.join(DATA_DIR, "openbb_chains")
             os.makedirs(pq_dir, exist_ok=True)

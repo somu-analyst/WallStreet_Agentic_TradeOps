@@ -21894,6 +21894,8 @@ def _revert_scan(conn, lookback=5, z_min=1.0):
         rows.append({"ticker": tk, "ret": float(r), "z": z,
                      "side": "LONG" if z < 0 else "FADE"})
     rows.sort(key=lambda x: x["z"])   # most oversold first
+    _persist_scanner_fires(conn, "revert",
+        [(r["ticker"], "BULL" if r["side"] == "LONG" else "BEAR", min(99, 50 + abs(r["z"]) * 8)) for r in rows])
     return rows
 
 
@@ -22799,6 +22801,8 @@ def _positioning_scan(conn, min_build_pct=0.03):
         rows.append({"ticker": tk, "bias": bias, "stage": stage, "build_pct": build_pct,
                      "dom_chg": dom_chg, "ret5": pr})
     rows.sort(key=lambda x: -(x["build_pct"] * 100 + (15 if x["stage"] == "C" else 8 if x["stage"] == "I" else 0)))
+    _persist_scanner_fires(conn, "building",
+        [(r["ticker"], "BULL" if r["bias"] == "LONG" else "BEAR", min(99, 50 + r["build_pct"] * 100)) for r in rows])
     return rows
 
 
@@ -22918,6 +22922,7 @@ async def building_alert(ctx: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
     try:
         _ensure_alert_dedup_table(conn)
+        _update_scanner_outcomes(conn)          # mature scn_* fires -> actual_ret/correct
         rows = _positioning_scan(conn)
         today_str = (now_utc - timedelta(hours=5)).date().isoformat()
         fresh = [r for r in rows if r["stage"] in ("I", "C")
@@ -23055,6 +23060,57 @@ async def allocate_command(update, ctx):
     await _send_allocate(update.message, res)
 
 
+# ── SCANNER FIRE PERSISTENCE (feeds signal_accuracy → hit-rates/weights) ─
+def _persist_scanner_fires(conn, model_name, fires):
+    """Record scanner fires (ticker, BULL/BEAR, prob) into signal_accuracy under
+    'scn_<name>' so outcomes fill in later and hit-rates accumulate. Idempotent
+    per (ticker, day, model). fires: iterable of (ticker, signal, prob)."""
+    try:
+        tod = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
+        conn.executemany(
+            "INSERT OR REPLACE INTO signal_accuracy (ticker, trade_date, model_name, signal, prob)"
+            " VALUES (?,?,?,?,?)",
+            [(str(tk).upper(), tod, f"scn_{model_name}", sig, float(prob)) for tk, sig, prob in fires])
+        conn.commit()
+    except Exception:
+        log.debug("persist_scanner_fires failed", exc_info=True)
+
+
+def _update_scanner_outcomes(conn, horizon=5):
+    """Fill actual_ret/correct for matured scn_* rows using stock_history closes
+    (t -> t+horizon trading days). BULL correct if up, BEAR if down."""
+    try:
+        pend = pd.read_sql(
+            "SELECT rowid, ticker, trade_date, signal FROM signal_accuracy"
+            " WHERE model_name LIKE 'scn_%' AND actual_ret IS NULL", conn)
+        if pend.empty:
+            return 0
+        n = 0
+        for tk, grp in pend.groupby("ticker"):
+            h = _daily_history(tk, 1, conn)
+            if h is None or len(h) < horizon + 2:
+                continue
+            dates = [d.strftime("%Y-%m-%d") for d in h.index]
+            for _, r in grp.iterrows():
+                try:
+                    i = dates.index(str(r["trade_date"]))
+                except ValueError:
+                    continue
+                if i + horizon >= len(h):
+                    continue                     # not matured yet
+                ret = float(h.iloc[i + horizon] / h.iloc[i] - 1)
+                sig = str(r["signal"])
+                correct = 1 if ((sig == "BULL" and ret > 0) or (sig == "BEAR" and ret < 0)) else 0
+                conn.execute("UPDATE signal_accuracy SET actual_ret=?, correct=? WHERE rowid=?",
+                             (ret, correct, int(r["rowid"])))
+                n += 1
+        conn.commit()
+        return n
+    except Exception:
+        log.debug("update_scanner_outcomes failed", exc_info=True)
+        return 0
+
+
 # ── UNUSUAL OPTIONS ACTIVITY (volume >> open interest = fresh flow) ─
 def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15):
     """Unusual options activity: contracts where today's volume >> standing OI
@@ -23109,7 +23165,10 @@ def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15):
                          "vol": vol, "oi": oi, "ratio": ratio,
                          "notional": vol * strike * 100})
     rows.sort(key=lambda x: -x["notional"])
-    return rows[:top]
+    out = rows[:top]
+    _persist_scanner_fires(conn, "uoa",
+        [(r["ticker"], "BULL" if r["side"] == "C" else "BEAR", min(99, 50 + r["ratio"] * 5)) for r in out])
+    return out
 
 
 def _knum(n):
@@ -23333,6 +23392,8 @@ def _breakout_scan(conn, tickers=None, near_pct=0.03):
             continue
         rows.append({"ticker": tk, "px": px, "from_hi": from_hi, "from_lo": from_lo, "sig": sig})
     rows.sort(key=lambda x: (0 if x["sig"] == "HIGH" else 1, x["from_hi"] if x["sig"] == "HIGH" else x["from_lo"]))
+    _persist_scanner_fires(conn, "breakout",
+        [(r["ticker"], "BULL" if r["sig"] == "HIGH" else "BEAR", 60) for r in rows])
     return rows
 
 
@@ -23395,6 +23456,8 @@ def _zrev_scan(conn, tickers=None, window=20, z_min=2.0):
         rows.append({"ticker": tk, "z": z, "px": px, "mean": m,
                      "side": "LONG" if z < 0 else "SHORT"})
     rows.sort(key=lambda x: x["z"])
+    _persist_scanner_fires(conn, "zrev",
+        [(r["ticker"], "BULL" if r["side"] == "LONG" else "BEAR", min(99, 50 + abs(r["z"]) * 8)) for r in rows])
     return rows
 
 

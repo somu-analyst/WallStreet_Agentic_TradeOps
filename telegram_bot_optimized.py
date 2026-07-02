@@ -22919,10 +22919,11 @@ async def rotate_alert(ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def riskoff_alert(ctx: ContextTypes.DEFAULT_TYPE):
-    """Auto Risk-Off Radar push — fires once on bot startup and daily post-close.
-    Fuses index put-flow + froth + underpriced vol + weak breadth + thin gamma into
-    a 0-100 downside score. Startup run always sends; the daily run only pushes when
-    caution+ (score≥30) to avoid quiet-day noise (gate via job.data['gate'])."""
+    """Auto Market Radar push — fires once on bot startup and daily post-close.
+    Two gauges: TURBULENCE (index put-flow → move size; the backtested signal) +
+    a soft DIRECTION lean. Startup run always sends; the daily run only pushes when
+    move risk is above normal (turbulence ELEVATED/HIGH) to avoid quiet-day noise
+    (gate via job.data['gate'])."""
     conn = get_conn()
     try:
         res = _riskoff_scan(conn)
@@ -22932,7 +22933,7 @@ async def riskoff_alert(ctx: ContextTypes.DEFAULT_TYPE):
     finally:
         conn.close()
     gate = bool(getattr(getattr(ctx, "job", None), "data", None) or {})  # daily job passes {'gate':True}
-    if gate and res["score"] < 30:
+    if gate and res["turbulence"]["level"] == "NORMAL":
         return
     _, chat_id = load_creds()
     try:
@@ -23605,6 +23606,8 @@ def _riskoff_scan(conn):
     Persists an SPY BEAR fire when RED so it self-scores vs forward returns."""
     import numpy as _np
     pillars = []            # dicts: emoji, label, reading, pts, why
+    raw = {"putfires": 0, "putnames": "", "froth": 0, "negvrp": 0,
+           "breadth": 0.0, "neggamma": 0, "gammanames": ""}
     def _emoji(pts):
         return "🔴" if pts >= 12 else ("🟡" if pts >= 5 else "🟢")
     def _add(pts, label, reading, why):
@@ -23616,6 +23619,7 @@ def _riskoff_scan(conn):
         uoa = _uoa_scan(conn, top=40)
         ib = [r for r in uoa if r["side"] == "P" and r["ticker"] in _RISKOFF_INDEX]
         names = ", ".join(dict.fromkeys(r["ticker"] for r in ib))
+        raw["putfires"] = len(ib); raw["putnames"] = names
         pts = min(20.0, len(ib) * 4.0)
         _add(pts, "Crash-insurance buying", f"{len(ib)} bets",
              f"Big traders loading downside bets on {names}" if names
@@ -23627,6 +23631,7 @@ def _riskoff_scan(conn):
     try:
         shorts = [r for r in _zrev_scan(conn) if r["side"] == "SHORT"]
         names = ", ".join(r["ticker"] for r in shorts[:6])
+        raw["froth"] = len(shorts)
         pts = min(20.0, len(shorts) * 2.5)
         _add(pts, "Hot stocks overstretched", f"{len(shorts)} names",
              f"{names} ran too far, too fast — snap-back risk" if names
@@ -23647,6 +23652,7 @@ def _riskoff_scan(conn):
             rv = 1.4826 * mad * _np.sqrt(252)
             if rv > 0 and (iv - rv) < 0:
                 neg.append(tk)
+        raw["negvrp"] = len(neg)
         pts = min(20.0, len(neg) * 7.0)
         _add(pts, "Market too calm", f"{len(neg)} of 3",
              f"Options cheap vs how much {', '.join(neg)} is actually moving" if neg
@@ -23665,6 +23671,7 @@ def _riskoff_scan(conn):
             if float(h.iloc[-1]) < float(h.tail(20).mean()):
                 below += 1
         pct = (below / tot * 100) if tot else 0.0
+        raw["breadth"] = pct
         pts = max(0.0, min(20.0, (pct - 40) / 40 * 20))     # 40%→0, 80%→20
         _add(pts, "Broad weakness", f"{pct:.0f}% soft",
              f"{pct:.0f}% of stocks already rolling over under the surface")
@@ -23680,6 +23687,7 @@ def _riskoff_scan(conn):
                 continue
             if (_compute_gex(tk, conn, spot).get("total_gex") or 0) < 0:
                 negg.append(tk)
+        raw["neggamma"] = len(negg); raw["gammanames"] = ", ".join(negg)
         pts = min(20.0, len(negg) * 7.0)
         _add(pts, "No shock absorbers", f"{len(negg)} of 3",
              f"Dealer hedging now amplifies drops on {', '.join(negg)}" if negg
@@ -23687,23 +23695,60 @@ def _riskoff_scan(conn):
     except Exception:
         _add(0.0, "No shock absorbers", "n/a", "Data unavailable")
 
-    score = sum(p["pts"] for p in pillars)
-    if score >= 55:
-        regime, remoji, headline = "RISK-OFF WARNING", "🔴", "Play defense"
-        action = ("Trim risk, tighten stops, favor hedges or cash. "
-                  "Not a spot to chase new longs.")
-    elif score >= 30:
-        regime, remoji, headline = "CAUTION building", "🟡", "Stay cautious"
-        action = ("Mixed picture — stay selective, size positions down, "
-                  "keep some hedges on.")
+    score = sum(p["pts"] for p in pillars)      # kept for the context lights only
+
+    # ── TURBULENCE gauge (the one that actually backtests: index put-flow → move
+    # SIZE; QQQ t+5 Spearman +0.37, p<0.001). Predicts a big move, NOT its sign. ──
+    fires = raw["putfires"]
+    turb_score = min(100.0, fires * 15.0)
+    if fires >= 5:
+        turb_lvl, turb_emoji = "HIGH", "🔴"
+        turb_txt = ("A big move is brewing (next ~1 week) — heavy index put-flow. "
+                    "Trade smaller, widen stops, don't assume calm. Options: long premium favored.")
+    elif fires >= 2:
+        turb_lvl, turb_emoji = "ELEVATED", "🟡"
+        turb_txt = ("Above-normal chance of a big move soon — some index put-flow. "
+                    "Keep size sensible and stops a touch wider.")
     else:
-        regime, remoji, headline = "Calm / risk-on", "🟢", "All clear"
-        action = "Calm, risk-on conditions — normal position sizing is fine."
-    if score >= 55:        # let it self-score vs SPY forward return like other scn_* fires
-        _persist_scanner_fires(conn, "riskoff", [("SPY", "BEAR", min(99.0, score))])
-    return {"score": score, "regime": regime, "remoji": remoji,
-            "headline": headline, "action": action, "pillars": pillars,
-            "nextday": _riskoff_nextday(conn, score)}
+        turb_lvl, turb_emoji = "NORMAL", "🟢"
+        turb_txt = "No unusual index put-flow — expect a routine range."
+
+    # ── DIRECTION lean (soft, low confidence: dealer gamma + breadth; correctly
+    # signed but NOT statistically significant in ~6mo history — a hint, not a trigger). ──
+    dir_pts = 0
+    dir_pts += 1 if raw["neggamma"] >= 2 else (-1 if raw["neggamma"] == 0 else 0)
+    dir_pts += 1 if raw["breadth"] >= 60 else (-1 if raw["breadth"] <= 45 else 0)
+    if dir_pts >= 2:
+        dir_lean, dir_emoji = "DOWN", "🔴"
+        dir_txt = (f"Slight downside tilt — dealers short gamma ({raw['gammanames'] or 'none'}) "
+                   f"and {raw['breadth']:.0f}% of stocks soft. Low confidence.")
+    elif dir_pts <= -2:
+        dir_lean, dir_emoji = "UP", "🟢"
+        dir_txt = "Slight upside tilt — dealer gamma cushions and breadth is firm. Low confidence."
+    else:
+        dir_lean, dir_emoji = "NEUTRAL", "🟡"
+        dir_txt = "No directional edge — coin-flip either way. Let price pick the side."
+
+    # headline/action driven by TURBULENCE (proven) first, direction second
+    if turb_lvl == "HIGH":
+        remoji, headline = turb_emoji, "Big move brewing"
+        action = (f"Expect a large move within a week — size down and widen stops. "
+                  f"Direction lean: {dir_lean} (low confidence), so don't bet the house on one side.")
+    elif turb_lvl == "ELEVATED":
+        remoji, headline = turb_emoji, "Stay nimble"
+        action = (f"Above-normal move risk — keep size sensible. Direction lean: {dir_lean} (low confidence).")
+    else:
+        remoji, headline = dir_emoji if dir_lean != "NEUTRAL" else "🟢", "Routine conditions"
+        action = (f"Calm tape expected. Direction lean: {dir_lean} (low confidence) — normal sizing.")
+
+    if turb_lvl == "HIGH":     # self-score the turbulence call vs SPY forward |move|
+        _persist_scanner_fires(conn, "riskoff", [("SPY", "BEAR" if dir_lean == "DOWN" else "BULL",
+                                                  min(99.0, 50 + turb_score / 2))])
+    return {"score": score, "remoji": remoji, "headline": headline, "action": action,
+            "turbulence": {"level": turb_lvl, "score": turb_score, "emoji": turb_emoji,
+                           "text": turb_txt, "fires": fires, "names": raw["putnames"]},
+            "direction": {"lean": dir_lean, "emoji": dir_emoji, "text": dir_txt},
+            "pillars": pillars, "nextday": _riskoff_nextday(conn, score)}
 
 
 def _riskoff_nextday(conn, score):
@@ -23748,16 +23793,20 @@ def _riskoff_nextday(conn, score):
 
 
 def _riskoff_message(res):
-    """Plain-English Telegram body shared by /riskoff and the auto alert."""
-    lights = "\n".join(f"{p['emoji']} <b>{p['label']}</b> — {p['why']}" for p in res["pillars"])
+    """Plain-English Telegram body shared by /riskoff and the auto alert.
+    Two gauges: TURBULENCE (proven — predicts move size) + DIRECTION (soft lean)."""
+    t = res["turbulence"]; d = res["direction"]
+    lights = "\n".join(f"{p['emoji']} {p['label']} — {p['reading']}" for p in res["pillars"])
     nd = res.get("nextday")
     nd_block = (f"\n\n📅 <b>Next session — {nd['lean']}</b>\n{nd['text']}") if nd else ""
-    return (f"{res['remoji']} <b>RISK-OFF RADAR — {res['headline']}</b>\n"
-            f"Warning score: <b>{res['score']:.0f}/100</b>  <i>(0 = calm · 100 = danger)</i>\n\n"
-            f"👉 <b>What to do:</b> {res['action']}\n\n"
-            f"<b>Why — the 5 warning lights:</b>\n{lights}"
+    return (f"{res['remoji']} <b>MARKET RADAR — {res['headline']}</b>\n\n"
+            f"🌪️ <b>Big-move risk (next ~week): {t['level']}</b> {t['emoji']}\n{t['text']}\n\n"
+            f"🧭 <b>Direction lean: {d['lean']}</b> {d['emoji']}\n{d['text']}\n\n"
+            f"👉 <b>Bottom line:</b> {res['action']}"
             f"{nd_block}\n\n"
-            f"<i>A quick risk gauge, not advice. 🔴 = warning · 🟡 = mixed · 🟢 = fine.</i>")
+            f"<i>Backtested: put-flow predicts move SIZE (p&lt;0.01); direction is a weak hint only. "
+            f"Context below · not advice.</i>\n"
+            f"<i>Context: {lights}</i>")
 
 
 async def _send_riskoff(msg, res):

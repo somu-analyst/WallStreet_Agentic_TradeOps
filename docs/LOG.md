@@ -2,6 +2,22 @@
 
 > Append newest at top. Recap here every ~10–20 messages and before any context reset.
 
+## 2026-07-02 (night) — OpenBB capture hardened to hands-off; ops guardrails in
+- **Done (NYSE_OpenBB.py, commits c41e3f2→5c8ba59→this):** plain `python NYSE_OpenBB.py` now does
+  everything — expanded 740-name universe by default (auto-builds sheet if missing), safe pacing
+  (workers 4 / pace 0.75s), adaptive slowdown (pace+rest+worker-halving), **CBOE-CDN fallback with
+  curl_cffi browser impersonation fired instantly on throttle** (verified live: AAPL/BRK-B/SPY
+  recovered mid-throttle), progress-driven retry rounds (≤5, stop when stalled, skip optionless),
+  PERMANENT_FAIL split (no-options vs throttled) in summary, **automatic daily parquet-zstd backup**
+  to `openbb_chains\` (~3-4 MB/day; --parquet additionally clears sqlite), openbb version stamped in
+  run log, auto `--compare` at end with **VERDICT: PASS/CHECK** line (go/no-go = openInt ≥95%;
+  lastPrice informational). `requirements_openbb.txt` pins openbb 4.7.2 / cboe 1.6.1 / curl_cffi 0.15.0.
+- **Decision:** throttle handling = pace+backoff+retries+browser-fingerprint fallback (community
+  standard per OpenBB/yfinance issue threads); NO proxy rotation (ToS-grey, unneeded for 1 run/day).
+  One capture per evening (post-close ET) — multiple same-day runs burn the throttle budget.
+- **User routine:** evening `python NYSE_OpenBB.py` → read VERDICT; weekly offsite copy of
+  `openbb_chains\` (capture-forward data is unrebuildable).
+
 ## 2026-07-02 (evening) — Event column in All-Positions batch tables
 - **Done:** dashboard `_ep_batch_table` (feeds "🌐 All Open Positions" one-table + "🏢 by Ticker" legs)
   now has an **Event** column: 📊 ER Xd (⚠️pre-exp when it lands before that leg's expiry) + 💵 ex-div Xd;

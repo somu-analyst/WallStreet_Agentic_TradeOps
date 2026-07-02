@@ -8,7 +8,8 @@ Options-trading edge system: Telegram bot + dashboard + our own capture-forward 
 (bid/ask/IV/delta), every signal validated against DB history — less API dependence, more provable edge.
 
 ## Open tasks
-- [ ] (user) Parallel-test OpenBB vs yfinance for 3–5 days — daily `python NYSE_OpenBB.py --universe openbb_universe` then `--compare`; pass = ≥95% agreement on overlapping contracts
+- [ ] (user) Parallel-test OpenBB vs yfinance for 3–5 days — ONE evening run of `python NYSE_OpenBB.py` (auto: 740-name universe, CDN throttle fallback, retries, daily parquet backup, auto-compare); pass = compare prints `VERDICT: PASS` (OI ≥95%) on 3–5 days
+- [ ] (user, weekly) Offsite copy of `openbb_chains\*.parquet` (+ `US_data_OpenBB.db` if convenient) — capture-forward data is unrebuildable
 - [ ] (gated: parallel test passes) Production migration to OpenBB — wire capture into `run_all_offhours.py`, ALTER `options_daily` +bid/ask/iv/delta +source, per-ticker yfinance fallback, pin `openbb==`, keep `--compare` as daily sanity job, retire 4-hr options leg
 - [ ] Profile remaining `NYSE_YFin.py` stages — instrument per-stage timing logs to see where the 4 hrs go beyond the options fetch
 - [ ] (gated: ~2 wks of scn_* fires with t+5 outcomes) First scanner backtest read — hit-rate + avg fwd vs baseline for uoa/building/breakout/zrev/revert, persist to `signal_accuracy`, flag thin N

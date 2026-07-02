@@ -2,6 +2,18 @@
 
 > Append newest at top. Recap here every ~10–20 messages and before any context reset.
 
+## 2026-07-02 (evening) — Event column in All-Positions batch tables
+- **Done:** dashboard `_ep_batch_table` (feeds "🌐 All Open Positions" one-table + "🏢 by Ticker" legs)
+  now has an **Event** column: 📊 ER Xd (⚠️pre-exp when it lands before that leg's expiry) + 💵 ex-div Xd;
+  one cached lookup per ticker (`_next_earnings` + bot `_divcap_stats`). Event-aware Signal: plain ⚪ HOLD
+  escalates to 🟡 ER PRE-EXP / 🟡 EX-DIV (short ITM call assignment); never masks TAKE PROFIT/CUT LOSS/
+  NEAR EXPIRY. Action-Required alert filter + both "how to read" legends updated. (Deep-dive per-leg
+  table got Event earlier today.)
+- **Status:** scanner backtests still auto-accumulating — no `scn_*` rows in `signal_accuracy` yet
+  (they populate as /uoa /building /breakout /zrev /revert + building_alert fire; t+5 outcomes follow).
+- **OpenBB lane parked by user** — parallel test ready (daily capture → `--compare`); all other pending
+  items are OpenBB- or data-gated (see STRATEGY_BUILD.md).
+
 ## 2026-07-02 (later) — OpenBB capture hardening + storage + rate limits
 - **Storage fixed:** parquet-zstd daily export (`openbb_chains/chains_YYYY-MM-DD.parquet`), sqlite = staging
   only. Measured **7x compression** (26.5MB → 3.6MB/day → ~0.9GB/yr; contractSymbols dropped, float32).

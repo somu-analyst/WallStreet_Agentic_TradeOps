@@ -19,7 +19,7 @@ so nothing is hidden.
 | 2 | Wheel CSP income optimizer | `/wheel` | ✅ Done (pre-existing) | — | already had annualized yield + POP; left as-is |
 | 3 | Covered-call income (yield on held/long names) | `/cc` | ✅ Done | `c1dcd63` | OTM calls ranked yield vs call-away POP; IVR + earnings flag |
 | 4 | Pairs / statistical mean-reversion (within-sector z-score) | `/pairs` | ✅ Done | `3d73271` | spread z-score + OU half-life; risky screen, not arb |
-| 5 | Calendar / diagonal spreads (theta + vega, term structure) | `/calendar` | ⏳ Planned | — | uses VIX/VIX3M + chain |
+| 5 | Calendar / diagonal spreads (theta + vega, term structure) | `/calendar` | ✅ Done | pending | ATM call calendar, front/back IV ratio |
 | 6 | Iron condor / strangle range-income optimizer | `/condor` | ✅ Done | pending | ~1-EM shorts, defined-risk wings; POP + RoR |
 | 7 | Seasonality engine (current-month avg/win, DoW, turn-of-month) | `/season` | ✅ Done | pending | on-the-fly ~10y yfinance, cached 24h |
 | 8 | Sector rotation / relative-strength ranker | `/rotate` | ✅ Done | pending | 12 sector ETFs, blended 1/3/6-mo RS vs SPY, 1h cache |

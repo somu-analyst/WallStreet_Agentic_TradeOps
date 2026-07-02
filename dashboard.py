@@ -18647,6 +18647,15 @@ def _ss_dataframe(_tbo, conn, choice, tks):
         rows = _tbo._divcap_scan(tuple(tks) if tks else tuple(_tbo._DIV_PAYERS))
         return pd.DataFrame([{"Ticker": r["ticker"], "Yield %": round(r["yield"] * 100, 2),
                               "Ex-date": r["ex_date"], "Ex in (d)": r["ex_days"]} for r in rows])
+    if choice.startswith("⚖"):                                    # Portfolio optimizer (Aladdin risk)
+        res = _tbo._optimize_portfolio(conn, list(tks) or _tbo.DEFAULT_TICKERS, method="sharpe")
+        if not res:
+            return pd.DataFrame([{"Note": "Need ≥2 tickers with history — enter e.g. SPY QQQ NVDA GLD TLT."}])
+        df = pd.DataFrame([{"Ticker": tk, "Weight %": round(w * 100, 1), "Vol %": round(v * 100, 0),
+                            "Return %": round(m * 100, 0)} for tk, w, v, m in res["assets"] if w > 0.005])
+        df.attrs["caption"] = (f"Max-Sharpe · exp {res['port_ret']*100:+.1f}%/yr · vol {res['port_vol']*100:.1f}% "
+                               f"· Sharpe {res['sharpe']:.2f} ({res['years']}y, cap {res['max_w']*100:.0f}%)")
+        return df
     if choice.startswith("🧭"):                                   # Positioning builder
         rows = _tbo._positioning_scan(conn)
         _stg = {"S": "Starting", "I": "Increasing", "C": "Confirmed"}
@@ -18685,7 +18694,7 @@ if page == "⚙️ Strategy Scanners":
     _page_header("⚙️ Strategy Scanners",
                  "Income · event · stat-arb · seasonality — the same engine as the Telegram bot. Screeners, not proven alpha.")
     import telegram_bot_optimized as _tbo
-    _ss_opts = ["🧭 Positioning builder", "📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
+    _ss_opts = ["🧭 Positioning builder", "⚖️ Portfolio optimizer", "📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
                 "🔗 Pairs mean-reversion", "📅 Seasonality", "🔄 Sector rotation", "↩️ Short-term reversal",
                 "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar", "📈 Put-write index",
                 "🔬 Factor IC validation"]

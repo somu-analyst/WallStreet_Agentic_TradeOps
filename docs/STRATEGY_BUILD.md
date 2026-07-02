@@ -30,6 +30,8 @@ so nothing is hidden.
 
 | 19 | Positioning builder (new/increasing OI + price starting) | `/building` | ✅ Done | `e1cf636`/`404e9c9` | LONG=calls / SHORT=puts vs standing OI; stage S/I/C; options_change+stock_daily; dashboard hub + **30-min scheduled stream** (daily dedup) |
 
+| 20 | Portfolio risk optimizer (Aladdin risk side) | `/allocate` | ✅ Done | pending | max-Sharpe/min-var/risk-parity on 6y covariance; weight-capped; native; dashboard hub |
+
 ## 1c. Data layer — DB-first history (reduce API dependence)
 - ✅ **`stock_history` table** added to `US_data.db` — multi-year daily OHLC. `_daily_history()` / `_history_matrix()`
   read DB-first, lazily backfill from yfinance once (write-through), and `_sync_history_from_daily()` folds in
@@ -83,7 +85,7 @@ so nothing is hidden.
 | Tool | "Bloomberg/Aladdin" role | Status in our stack | Decision |
 |------|--------------------------|---------------------|----------|
 | **OpenBB** (Bloomberg-like terminal) | data+analytics terminal | ❌ not integrated | **Our `dashboard.py` already IS the Bloomberg-like terminal** (24 pages). Full OpenBB SDK = heavy dep, overlaps yfinance/Finnhub → skip unless a specific feed is needed |
-| **PyPortfolioOpt / Riskfolio-Lib** (Aladdin *risk* side) | signals → risk-sized positions | ❌ not built | **Highest-value gap. Now feasible** (6y `stock_history` → covariance). Recommend building a native risk-sizer/optimizer (no dep) |
+| **PyPortfolioOpt / Riskfolio-Lib** (Aladdin *risk* side) | signals → risk-sized positions | ✅ **built natively as `/allocate`** | max-Sharpe/min-var/risk-parity on 6y covariance, weight-capped, no dep; bot + dashboard hub |
 | **Alphalens** (factor eval) | prove a signal | ✅ built natively as `/ic` | done |
 | **vectorbt** (fast backtest) | universe signal sweeps | ❌ not adopted | optional; our scanners already vectorize enough. Revisit if backtests get heavy |
 | **microsoft/qlib** (ML alpha) | walk-forward ML | ❌ not adopted | big lift; only if we want an ML alpha layer. Parked |

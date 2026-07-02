@@ -10959,6 +10959,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await rotate_view(query)
         elif data == "revert_view":
             await revert_view(query)
+        elif data == "condor_view":
+            await condor_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -21918,6 +21920,150 @@ async def revert_view(query):
     await _send_revert(query.message, rows)
 
 
+# ── IRON CONDOR (range-income optimizer, ~1 expected-move wings) ──
+def _condor_scan(tickers, dte_lo=20, dte_hi=45, r=0.045, wing_pct=0.03, conn=None):
+    """For each ticker build one iron condor: short strikes ~1 expected-move OTM,
+    long wings wing_pct beyond. Rank by POP (price stays in range) and RoR.
+    Live yfinance chains. Returns dicts sorted by score desc."""
+    import datetime as _dt
+    from scipy.stats import norm as _nm
+
+    def _pgt(S, X, T, iv):   # risk-neutral P(S_T > X) = N(d2)
+        if min(S, X, T, iv) <= 0:
+            return None
+        return float(_nm.cdf((np.log(S / X) + (r - 0.5 * iv * iv) * T) / (iv * np.sqrt(T))))
+
+    def _mid(dfrow):
+        b = float(dfrow.get("bid") or 0); a = float(dfrow.get("ask") or 0)
+        return (b + a) / 2 if (b > 0 and a > 0) else float(dfrow.get("lastPrice") or 0)
+
+    def _nearest(df, target):
+        if df.empty:
+            return None
+        idx = (df["strike"] - target).abs().idxmin()
+        return df.loc[idx]
+
+    rows = []
+    for tk in tickers:
+        tk = str(tk).strip().upper()
+        if not tk:
+            continue
+        try:
+            t = yf.Ticker(tk)
+            spot = _last_price(tk) or float(t.history(period="1d")["Close"].iloc[-1])
+            if not spot:
+                continue
+            exp = dte = None
+            for e in (t.options or []):
+                try:
+                    d = (_dt.datetime.strptime(e, "%Y-%m-%d").date() - _dt.date.today()).days
+                except Exception:
+                    continue
+                if dte_lo <= d <= dte_hi:
+                    exp, dte = e, d
+                    break
+            if not exp:
+                continue
+            T = max(dte, 1) / 365.0
+            ch = t.option_chain(exp)
+            calls = ch.calls.copy(); puts = ch.puts.copy()
+            # ATM IV -> expected move
+            atm = _nearest(calls, spot)
+            atm_iv = float(atm.get("impliedVolatility") or 0) if atm is not None else 0
+            if not (atm_iv > 0):
+                continue
+            em = spot * atm_iv * np.sqrt(T)
+            wing = max(spot * wing_pct, em * 0.5)
+            sp = _nearest(puts[puts["strike"] < spot], spot - em)          # short put
+            sc = _nearest(calls[calls["strike"] > spot], spot + em)         # short call
+            if sp is None or sc is None:
+                continue
+            lp = _nearest(puts[puts["strike"] < sp["strike"]], sp["strike"] - wing)   # long put
+            lc = _nearest(calls[calls["strike"] > sc["strike"]], sc["strike"] + wing) # long call
+            if lp is None or lc is None:
+                continue
+            credit = (_mid(sp) - _mid(lp)) + (_mid(sc) - _mid(lc))
+            if credit <= 0.05:
+                continue
+            put_w = float(sp["strike"] - lp["strike"]); call_w = float(lc["strike"] - sc["strike"])
+            risk_w = max(put_w, call_w)
+            max_loss = risk_w - credit
+            if max_loss <= 0:
+                continue
+            ror = credit / max_loss
+            p_gt_sp = _pgt(spot, float(sp["strike"]), T, atm_iv)
+            p_gt_sc = _pgt(spot, float(sc["strike"]), T, atm_iv)
+            if p_gt_sp is None or p_gt_sc is None:
+                continue
+            pop = max(0.0, p_gt_sp - p_gt_sc)      # P(short_put < S_T < short_call)
+            lo_be = float(sp["strike"]) - credit; hi_be = float(sc["strike"]) + credit
+            score = 100 * (0.6 * pop + 0.4 * min(ror, 1.0))
+            earn_days = None
+            try:
+                _ne = _next_earnings(tk); earn_days = _ne.get("days") if _ne else None
+            except Exception:
+                earn_days = None
+            earn_flag = earn_days is not None and earn_days <= dte
+            if earn_flag:
+                score *= 0.85
+            rows.append({
+                "score": score, "ticker": tk, "dte": dte, "spot": round(spot, 2),
+                "sp": float(sp["strike"]), "sc": float(sc["strike"]),
+                "lp": float(lp["strike"]), "lc": float(lc["strike"]),
+                "credit": credit, "ror": ror, "pop": pop,
+                "lo_be": lo_be, "hi_be": hi_be, "earn_flag": earn_flag,
+            })
+        except Exception:
+            continue
+    rows.sort(key=lambda z: -z["score"])
+    return rows
+
+
+async def _send_condor(msg, rows):
+    if not rows:
+        await msg.reply_text("No iron condors passed the filters. Try <code>/condor SPY QQQ IWM</code>.", parse_mode=H)
+        return
+    _hdrs = ("ST", "Tkr", "POP", "RoR")
+    _data = []
+    for r in rows[:15]:
+        emoji = "⚠️" if r["earn_flag"] else ("🟢" if r["pop"] >= 0.70 else "🟡")
+        _data.append((emoji, r["ticker"], f"{r['pop']*100:.0f}", f"{r['ror']:.2f}"))
+    table = _pipe_table(_hdrs, _data, right_cols={2, 3},
+                        legend="🟢 POP≥70 · ⚠️ earnings before expiry · RoR=credit/max-loss")
+    top = rows[0]
+    best = (f"<b>Top:</b> {top['ticker']} {top['dte']}d IC · SELL {top['sp']:g}P/{top['sc']:g}C, "
+            f"BUY {top['lp']:g}P/{top['lc']:g}C · credit ${top['credit']:.2f} · POP {top['pop']*100:.0f}% · "
+            f"RoR {top['ror']:.2f} · range ${top['lo_be']:.0f}–${top['hi_be']:.0f}")
+    txt = ("🦅 <b>Iron Condor — Range Income</b>\n"
+           "<i>get paid if price stays in the box · defined risk · not advice</i>\n\n"
+           + table + "\n\n" + best)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="condor_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def condor_command(update, ctx):
+    """/condor [TICKERS] — iron-condor range-income setups ranked by POP and return-on-risk."""
+    args = list(getattr(ctx, "args", []) or [])
+    tks = [a.upper() for a in args] if args else _hiprob_default_tickers()
+    await update.message.reply_text("🦅 Scanning iron condors…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _condor_scan(tuple(tks[:8]), conn=conn)
+    finally:
+        conn.close()
+    await _send_condor(update.message, rows)
+
+
+async def condor_view(query):
+    conn = get_conn()
+    try:
+        rows = _condor_scan(tuple(_hiprob_default_tickers()[:8]), conn=conn)
+    finally:
+        conn.close()
+    await _send_condor(query.message, rows)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -24112,6 +24258,7 @@ def main():
     app.add_handler(CommandHandler("season", season_command))
     app.add_handler(CommandHandler("rotate", rotate_command))
     app.add_handler(CommandHandler("revert", revert_command))
+    app.add_handler(CommandHandler("condor", condor_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

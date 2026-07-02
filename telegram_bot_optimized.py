@@ -10951,6 +10951,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await wheel_view(query)
         elif data == "cc_view":
             await cc_view(query)
+        elif data == "pairs_view":
+            await pairs_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -21521,6 +21523,138 @@ async def cc_view(query):
     await _send_cc(query.message, rows)
 
 
+# ── PAIRS / STATISTICAL MEAN-REVERSION (screener, not riskless arb) ──
+# Pairs are only formed WITHIN economically-related groups to avoid spurious
+# cointegration on thin history. Not arbitrage — a risky stat-reversion screen.
+PAIRS_GROUPS = {
+    "Semis":    ["NVDA", "AMD", "AVGO", "MU", "QCOM", "MRVL", "TXN", "AMAT", "LRCX", "KLAC", "ARM", "INTC"],
+    "MegaTech": ["AAPL", "MSFT", "GOOGL", "AMZN", "META"],
+    "Software": ["PLTR", "SNOW", "NET", "CRWD", "ZS", "DDOG", "PANW", "NOW"],
+    "Banks":    ["JPM", "GS", "MS", "BAC"],
+    "Payments": ["V", "MA", "PYPL"],
+    "EV/Enrgy": ["TSLA", "RIVN", "LCID", "ENPH", "FSLR"],
+    "Pharma":   ["LLY", "ABBV", "MRNA", "PFE", "GILD"],
+    "IndexETF": ["SPY", "QQQ", "IWM"],
+    "Crypto":   ["COIN", "MSTR", "HOOD", "IBIT"],
+}
+
+
+def _pairs_scan(conn, lookback=90, min_obs=60, min_corr=0.6, z_entry=2.0):
+    """Within each PAIRS_GROUPS bucket, find pairs whose price spread is
+    statistically stretched (|z|>=z_entry) and mean-reverting. Returns dicts
+    sorted by |z| desc with hedge ratio (beta), return-corr, z, half-life, action."""
+    try:
+        df = pd.read_sql("SELECT ticker, trade_date, close FROM stock_daily", conn)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    df["ticker"] = df["ticker"].str.upper()
+    wide = df.pivot_table(index="trade_date", columns="ticker", values="close", aggfunc="last")
+    wide = wide.sort_index()   # ISO dates sort lexically
+
+    def _halflife(spread):
+        s = np.asarray(spread, dtype=float)
+        lag = s[:-1]; delta = s[1:] - lag
+        lag_c = lag - lag.mean()
+        denom = float((lag_c * lag_c).sum())
+        if denom <= 0:
+            return None
+        lam = float((lag_c * (delta - delta.mean())).sum()) / denom
+        if lam >= 0:      # not mean-reverting
+            return None
+        hl = -np.log(2) / np.log(1 + lam)
+        return hl if np.isfinite(hl) and hl > 0 else None
+
+    rows = []
+    for grp, tks in PAIRS_GROUPS.items():
+        have = [t for t in tks if t in wide.columns]
+        for i in range(len(have)):
+            for j in range(i + 1, len(have)):
+                a, b = have[i], have[j]
+                pair = wide[[a, b]].dropna()
+                if len(pair) < min_obs:
+                    continue
+                pair = pair.tail(lookback)
+                pa = pair[a].to_numpy(dtype=float); pb = pair[b].to_numpy(dtype=float)
+                if (pa <= 0).any() or (pb <= 0).any():
+                    continue
+                ra = np.diff(np.log(pa)); rb = np.diff(np.log(pb))
+                if ra.std() == 0 or rb.std() == 0:
+                    continue
+                corr = float(np.corrcoef(ra, rb)[0, 1])
+                if not np.isfinite(corr) or corr < min_corr:
+                    continue
+                la, lb = np.log(pa), np.log(pb)
+                beta = float(np.polyfit(lb, la, 1)[0])   # la ~ beta*lb
+                if not np.isfinite(beta) or beta == 0:
+                    continue
+                spread = la - beta * lb
+                sd = spread.std()
+                if sd == 0:
+                    continue
+                z = float((spread[-1] - spread.mean()) / sd)
+                if abs(z) < z_entry:
+                    continue
+                hl = _halflife(spread)
+                # z>0: A rich vs B -> short A / long B ; z<0: A cheap -> long A / short B
+                if z > 0:
+                    action = f"SHORT {a} / LONG {b}"; long_first = False
+                else:
+                    action = f"LONG {a} / SHORT {b}"; long_first = True
+                rows.append({
+                    "group": grp, "a": a, "b": b, "pair": f"{a}/{b}",
+                    "corr": corr, "beta": beta, "z": z, "hl": hl,
+                    "action": action, "long_first": long_first, "n": len(pair),
+                })
+    rows.sort(key=lambda r: -abs(r["z"]))
+    return rows
+
+
+async def _send_pairs(msg, rows):
+    if not rows:
+        await msg.reply_text("No pairs are stretched (|z|≥2) right now. Market's aligned.", parse_mode=H)
+        return
+    _hdrs = ("ST", "Pair", "Z", "HLd")
+    _data = []
+    for r in rows[:15]:
+        emoji = "🟢" if r["long_first"] else "🔴"
+        hl_s = f"{r['hl']:.0f}" if r["hl"] else "—"
+        _data.append((emoji, r["pair"], f"{r['z']:+.1f}", hl_s))
+    table = _pipe_table(_hdrs, _data, right_cols={2, 3},
+                        legend="🟢 long 1st/short 2nd · 🔴 short 1st/long 2nd · Z=spread stdevs · HLd=half-life days")
+    top = rows[0]
+    hl_s = f"{top['hl']:.0f}d half-life" if top["hl"] else "half-life n/a"
+    best = (f"<b>Top:</b> {top['action']} (β{top['beta']:.2f}) · z {top['z']:+.1f} · "
+            f"corr {top['corr']:.2f} · {hl_s} · {top['group']}")
+    txt = ("🔗 <b>Pairs — Statistical Mean-Reversion</b>\n"
+           "<i>risky stat-reversion screen, NOT riskless arbitrage · thin ~6mo history · not advice</i>\n\n"
+           + table + "\n\n" + best)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="pairs_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def pairs_command(update, ctx):
+    """/pairs — stat mean-reversion: within-sector pairs whose spread is stretched (|z|≥2)."""
+    await update.message.reply_text("🔗 Scanning pairs…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _pairs_scan(conn)
+    finally:
+        conn.close()
+    await _send_pairs(update.message, rows)
+
+
+async def pairs_view(query):
+    conn = get_conn()
+    try:
+        rows = _pairs_scan(conn)
+    finally:
+        conn.close()
+    await _send_pairs(query.message, rows)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -23711,6 +23845,7 @@ def main():
     app.add_handler(CommandHandler("spreads", spreads_command))
     app.add_handler(CommandHandler("wheel", wheel_command))
     app.add_handler(CommandHandler("cc", cc_command))
+    app.add_handler(CommandHandler("pairs", pairs_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

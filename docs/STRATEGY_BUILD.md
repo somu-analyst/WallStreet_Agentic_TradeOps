@@ -18,7 +18,7 @@ so nothing is hidden.
 | 1 | Earnings IV-crush income scanner | `/earnvol` | ✅ Done | `075a8d1` | IV-rank + expected move |
 | 2 | Wheel CSP income optimizer | `/wheel` | ✅ Done (pre-existing) | — | already had annualized yield + POP; left as-is |
 | 3 | Covered-call income (yield on held/long names) | `/cc` | ✅ Done | pending | OTM calls ranked yield vs call-away POP; IVR + earnings flag |
-| 4 | Pairs / statistical arbitrage (cointegration + z-score) | `/pairs` | 🔨 Next | — | genuinely new; needs history depth |
+| 4 | Pairs / statistical mean-reversion (within-sector z-score) | `/pairs` | ✅ Done | pending | spread z-score + OU half-life; risky screen, not arb |
 | 5 | Calendar / diagonal spreads (theta + vega, term structure) | `/calendar` | ⏳ Planned | — | uses VIX/VIX3M + chain |
 | 6 | Iron condor / strangle range-income optimizer | `/condor` | ⏳ Planned | — | extends /earnvol + /spreads |
 | 7 | Seasonality engine (turn-of-month, DoW, pre-holiday) | `/season` | ⏳ Planned | — | needs multi-year yfinance pull |

@@ -10965,6 +10965,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await calendar_view(query)
         elif data == "divcap_view":
             await divcap_view(query)
+        elif data == "pead_view":
+            await pead_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -22382,6 +22384,96 @@ async def pwindex_command(update, ctx):
     await _send_pwindex(update.message, res)
 
 
+# ── PEAD (post-earnings announcement drift, Finnhub surprises) ────
+_PEAD_CACHE = {}   # window -> (ts, rows)
+
+def _pead_scan(lo_days=1, hi_days=20, min_surprise=0.02):
+    """Post-Earnings Announcement Drift: names that recently reported a notable
+    EPS surprise tend to drift the same direction for weeks. One Finnhub
+    calendar/earnings call over the last hi_days, filtered to SCAN_UNIVERSE.
+    Beat -> LONG drift, miss -> SHORT drift. Cached 3h. Needs FINNHUB_API_KEY."""
+    import os, time as _t, urllib.request, json as _j
+    from datetime import date, timedelta
+    key = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_KEY")
+    if not key:
+        return None                       # signal "no key" distinctly from empty
+    ck = (lo_days, hi_days)
+    now = _t.time()
+    c = _PEAD_CACHE.get(ck)
+    if c and now - c[0] < 10800:
+        return c[1]
+    rows = []
+    try:
+        today = date.today(); frm = today - timedelta(days=hi_days)
+        url = (f"https://finnhub.io/api/v1/calendar/earnings?"
+               f"from={frm}&to={today}&token={key}")
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = _j.loads(r.read().decode())
+        uni = set(SCAN_UNIVERSE)
+        for e in (data.get("earningsCalendar") or []):
+            sym = str(e.get("symbol", "")).upper()
+            if sym not in uni:
+                continue
+            act = e.get("epsActual"); est = e.get("epsEstimate")
+            if act is None or est is None or not est:
+                continue
+            try:
+                d_rep = datetime.strptime(e.get("date", ""), "%Y-%m-%d").date()
+            except Exception:
+                continue
+            days_since = (today - d_rep).days
+            if not (lo_days <= days_since <= hi_days):
+                continue
+            surprise = (float(act) - float(est)) / abs(float(est))
+            if abs(surprise) < min_surprise:
+                continue
+            rows.append({
+                "ticker": sym, "date": e.get("date"), "days_since": days_since,
+                "actual": float(act), "estimate": float(est),
+                "surprise": surprise, "side": "LONG" if surprise > 0 else "SHORT",
+            })
+        rows.sort(key=lambda x: -abs(x["surprise"]))
+    except Exception:
+        rows = []
+    _PEAD_CACHE[ck] = (now, rows)
+    return rows
+
+
+async def _send_pead(msg, rows):
+    if rows is None:
+        await msg.reply_text("⚠️ PEAD needs FINNHUB_API_KEY (set in api_keys.enc).", parse_mode=H)
+        return
+    if not rows:
+        await msg.reply_text("No notable earnings surprises in the drift window right now.", parse_mode=H)
+        return
+    _hdrs = ("ST", "Tkr", "Surp%", "Days")
+    _data = []
+    for r in rows[:15]:
+        emoji = "🟢" if r["side"] == "LONG" else "🔴"
+        _data.append((emoji, r["ticker"], f"{r['surprise']*100:+.0f}", f"{r['days_since']}"))
+    table = _pipe_table(_hdrs, _data, right_cols={2, 3},
+                        legend="EPS surprise · 🟢 beat (long drift) · 🔴 miss (short drift) · Days=since report")
+    top = rows[0]
+    best = (f"<b>Top:</b> {top['ticker']} — {top['surprise']*100:+.0f}% surprise "
+            f"(actual {top['actual']:.2f} vs est {top['estimate']:.2f}), {top['days_since']}d ago → {top['side']} drift")
+    txt = ("📊 <b>PEAD — Post-Earnings Drift</b>\n"
+           "<i>beats/misses tend to drift the same way for weeks · real but modest, decaying edge · not advice</i>\n\n"
+           + table + "\n\n" + best)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="pead_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def pead_command(update, ctx):
+    """/pead — post-earnings drift: recent EPS beats (long) / misses (short) from Finnhub."""
+    await update.message.reply_text("📊 Scanning post-earnings drift…", parse_mode=H)
+    await _send_pead(update.message, _pead_scan())
+
+
+async def pead_view(query):
+    await _send_pead(query.message, _pead_scan())
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -24580,6 +24672,7 @@ def main():
     app.add_handler(CommandHandler("calendar", calendar_command))
     app.add_handler(CommandHandler("divcap", divcap_command))
     app.add_handler(CommandHandler("pwindex", pwindex_command))
+    app.add_handler(CommandHandler("pead", pead_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))

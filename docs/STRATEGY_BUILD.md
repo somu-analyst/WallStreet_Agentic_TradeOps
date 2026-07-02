@@ -16,9 +16,9 @@ so nothing is hidden.
 |---|----------|---------|--------|--------|-------|
 | 0 | WAN-streamer — 24-model ensemble stream + AI chat | `/wan` | ✅ Done | `8f7fbb5` | 15-min job, daily dedup |
 | 1 | Earnings IV-crush income scanner | `/earnvol` | ✅ Done | `075a8d1` | IV-rank + expected move |
-| 2 | Wheel CSP income optimizer (yield + assignment + IV-rank + earnings flag) | `/wheel` | ✅ Done | pending | pipe-table + score haircut |
-| 3 | Covered-call income (yield on held/long names) | `/cc` | ⏳ Next | — | mirror wheel on call side |
-| 4 | Pairs / statistical arbitrage (cointegration + z-score) | `/pairs` | ⏳ Planned | — | genuinely new; needs history depth |
+| 2 | Wheel CSP income optimizer | `/wheel` | ✅ Done (pre-existing) | — | already had annualized yield + POP; left as-is |
+| 3 | Covered-call income (yield on held/long names) | `/cc` | ✅ Done | pending | OTM calls ranked yield vs call-away POP; IVR + earnings flag |
+| 4 | Pairs / statistical arbitrage (cointegration + z-score) | `/pairs` | 🔨 Next | — | genuinely new; needs history depth |
 | 5 | Calendar / diagonal spreads (theta + vega, term structure) | `/calendar` | ⏳ Planned | — | uses VIX/VIX3M + chain |
 | 6 | Iron condor / strangle range-income optimizer | `/condor` | ⏳ Planned | — | extends /earnvol + /spreads |
 | 7 | Seasonality engine (turn-of-month, DoW, pre-holiday) | `/season` | ⏳ Planned | — | needs multi-year yfinance pull |
@@ -38,14 +38,14 @@ so nothing is hidden.
 - **vectorbt** — fast universe-wide signal sweeps · **microsoft/qlib** — ML alpha with walk-forward CV
 - **PyPortfolioOpt / Riskfolio-Lib** — turn signals into risk-sized positions (the "Aladdin" piece)
 
-## 4. Deferred / infeasible (with reason — so they aren't silently dropped)
-| Strategy | Why not queued |
-|----------|----------------|
-| PEAD (post-earnings drift) | Needs Finnhub earnings-surprise history; API key pending ⛔ |
-| Riskless arbitrage (box, put-call parity) | Gone for retail; DB has no bid/ask/borrow ❌ |
-| Dispersion (index vs constituent vol) | Needs many live chains; heavy/fragile ⚠️ |
-| Index rebalance (S&P add/delete) | Needs corporate-action announcement feed ❌ |
-| Gamma scalping | Needs intraday tick data we don't store ❌ |
-| ETF NAV arbitrage | Not accessible to retail ❌ |
+## 4. Later backlog (blocked on a prerequisite — do once unblocked, NOT dropped)
+| # | Strategy | Command | Prerequisite to unblock |
+|---|----------|---------|-------------------------|
+| 13 | PEAD (post-earnings drift) | `/earnvol` (lane 2) | Finnhub earnings-surprise history (API key) |
+| 14 | Dispersion (index vs constituent vol) | `/dispersion` | Bulk live option chains + perf budget |
+| 15 | Index rebalance (S&P add/delete) | `/rebal` | Corporate-action announcement feed |
+| 16 | Gamma scalping | `/gscalp` | Intraday tick storage |
+| 17 | Riskless arbitrage (box / put-call parity) | `/boxarb` | Live bid/ask + borrow rates in DB |
+| 18 | ETF NAV arbitrage | — | Institutional-only; likely stays parked |
 
-**Recommendation order for build queue:** 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12.
+**Recommendation order:** 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12, then unblock 13–18 as data allows.

@@ -10975,6 +10975,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await uoa_view(query)
         elif data == "vrp_view":
             await vrp_view(query)
+        elif data == "rs_view":
+            await rs_view(query)
+        elif data == "breakout_view":
+            await breakout_view(query)
+        elif data == "zrev_view":
+            await zrev_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -23216,6 +23222,198 @@ async def vrp_view(query):
     await _send_vrp(query.message, rows)
 
 
+# ── RELATIVE STRENGTH (single stock vs SPY) ──────────────────────
+def _rs_scan(conn, tickers=None):
+    """Rank stocks by relative strength vs SPY (blended 3M/6M excess return).
+    Complements /rotate (sector-level). DB-first history."""
+    tickers = tickers or SCAN_UNIVERSE
+    wide = _history_matrix(list(dict.fromkeys(list(tickers) + ["SPY"])), years=1, conn=conn)
+    if wide is None or wide.empty or "SPY" not in wide.columns:
+        return []
+
+    def _ret(col, n):
+        s = wide[col].dropna()
+        return float(s.iloc[-1] / s.iloc[-n - 1] - 1) if len(s) > n else None
+    spy3, spy6 = _ret("SPY", 63), _ret("SPY", 126)
+    if spy3 is None:
+        return []
+    rows = []
+    for tk in tickers:
+        if tk == "SPY" or tk not in wide.columns:
+            continue
+        r3, r6 = _ret(tk, 63), _ret(tk, 126)
+        if r3 is None:
+            continue
+        ex3 = r3 - spy3
+        ex6 = (r6 - spy6) if (r6 is not None and spy6 is not None) else ex3
+        rows.append({"ticker": tk, "r3": r3, "ex3": ex3, "rs": 0.6 * ex3 + 0.4 * ex6})
+    rows.sort(key=lambda x: -x["rs"])
+    return rows
+
+
+async def _send_rs(msg, rows):
+    if not rows:
+        await msg.reply_text("Relative-strength data unavailable.", parse_mode=H)
+        return
+    n = len(rows); top = max(1, n // 3)
+    lead = rows[:10]
+    _data = [("🟢" if i < top else ("🔴" if i >= n - top else "🟡"), r["ticker"],
+             f"{r['r3']*100:+.0f}", f"{r['ex3']*100:+.0f}") for i, r in enumerate(lead)]
+    table = _pipe_table(("ST", "Tkr", "3M%", "vsSPY"), _data, right_cols={2, 3},
+                        legend="ranked by RS vs SPY · 🟢 leaders / 🔴 laggards · vsSPY=3M excess")
+    txt = ("💪 <b>Relative Strength — stocks vs SPY</b>\n"
+           "<i>own leaders, avoid laggards · 3M/6M excess return · not advice</i>\n\n"
+           + table + f"\n\n<b>Top:</b> {', '.join(r['ticker'] for r in rows[:5])}  ·  "
+           f"<b>Weakest:</b> {', '.join(r['ticker'] for r in rows[-5:])}")
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="rs_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def rs_command(update, ctx):
+    """/rs — single-stock relative strength vs SPY (leaders/laggards)."""
+    await update.message.reply_text("💪 Ranking relative strength…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _rs_scan(conn)
+    finally:
+        conn.close()
+    await _send_rs(update.message, rows)
+
+
+async def rs_view(query):
+    conn = get_conn()
+    try:
+        rows = _rs_scan(conn)
+    finally:
+        conn.close()
+    await _send_rs(query.message, rows)
+
+
+# ── 52-WEEK BREAKOUT / BREAKDOWN ─────────────────────────────────
+def _breakout_scan(conn, tickers=None, near_pct=0.03):
+    """Names at/near 52-week highs (breakout, bullish) or lows (breakdown). DB-first."""
+    tickers = tickers or SCAN_UNIVERSE
+    rows = []
+    for tk in tickers:
+        tk = str(tk).upper()
+        h = _daily_history(tk, 2, conn)
+        if h is None or len(h) < 200:
+            continue
+        w = h.tail(252)
+        px = float(w.iloc[-1]); hi = float(w.max()); lo = float(w.min())
+        if hi <= 0 or lo <= 0:
+            continue
+        from_hi = px / hi - 1; from_lo = px / lo - 1
+        if from_hi >= -near_pct:
+            sig = "HIGH"
+        elif from_lo <= near_pct:
+            sig = "LOW"
+        else:
+            continue
+        rows.append({"ticker": tk, "px": px, "from_hi": from_hi, "from_lo": from_lo, "sig": sig})
+    rows.sort(key=lambda x: (0 if x["sig"] == "HIGH" else 1, x["from_hi"] if x["sig"] == "HIGH" else x["from_lo"]))
+    return rows
+
+
+async def _send_breakout(msg, rows):
+    if not rows:
+        await msg.reply_text("Nothing at 52-week extremes right now.", parse_mode=H)
+        return
+    _data = [("🟢" if r["sig"] == "HIGH" else "🔴", r["ticker"],
+             f"{r['from_hi']*100:+.0f}", f"{r['from_lo']*100:+.0f}") for r in rows[:15]]
+    table = _pipe_table(("ST", "Tkr", "%Hi", "%Lo"), _data, right_cols={2, 3},
+                        legend="🟢 at 52w HIGH (breakout) · 🔴 at 52w LOW (breakdown) · %Hi/%Lo=dist to extreme")
+    hi = [r["ticker"] for r in rows if r["sig"] == "HIGH"][:5]
+    lo = [r["ticker"] for r in rows if r["sig"] == "LOW"][:5]
+    txt = ("🚀 <b>52-Week Breakouts / Breakdowns</b>\n"
+           "<i>momentum persists near highs; lows = weak/bounce risk · not advice</i>\n\n"
+           + table + f"\n\n<b>Highs:</b> {', '.join(hi) or '—'}  ·  <b>Lows:</b> {', '.join(lo) or '—'}")
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="breakout_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def breakout_command(update, ctx):
+    """/breakout — names at/near 52-week highs (breakout) or lows (breakdown)."""
+    await update.message.reply_text("🚀 Scanning 52-week extremes…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _breakout_scan(conn)
+    finally:
+        conn.close()
+    await _send_breakout(update.message, rows)
+
+
+async def breakout_view(query):
+    conn = get_conn()
+    try:
+        rows = _breakout_scan(conn)
+    finally:
+        conn.close()
+    await _send_breakout(query.message, rows)
+
+
+# ── SINGLE-NAME MEAN REVERSION (Bollinger / z-score) ─────────────
+def _zrev_scan(conn, tickers=None, window=20, z_min=2.0):
+    """Per-ticker price z-score vs its own 20d mean. z<-2 oversold (long),
+    z>+2 overbought (short). DB-first. Complements cross-sectional /revert."""
+    tickers = tickers or SCAN_UNIVERSE
+    rows = []
+    for tk in tickers:
+        tk = str(tk).upper()
+        h = _daily_history(tk, 1, conn)
+        if h is None or len(h) < window + 2:
+            continue
+        w = h.tail(window)
+        m = float(w.mean()); s = float(w.std()); px = float(h.iloc[-1])
+        if s <= 0:
+            continue
+        z = (px - m) / s
+        if abs(z) < z_min:
+            continue
+        rows.append({"ticker": tk, "z": z, "px": px, "mean": m,
+                     "side": "LONG" if z < 0 else "SHORT"})
+    rows.sort(key=lambda x: x["z"])
+    return rows
+
+
+async def _send_zrev(msg, rows):
+    if not rows:
+        await msg.reply_text("No single-name z-score extremes (|z|≥2) right now.", parse_mode=H)
+        return
+    _data = [("🟢" if r["side"] == "LONG" else "🔴", r["ticker"], f"{r['z']:+.1f}",
+             f"{(r['px']/r['mean']-1)*100:+.1f}") for r in rows[:15]]
+    table = _pipe_table(("ST", "Tkr", "Z", "vsAvg"), _data, right_cols={2, 3},
+                        legend="price z vs 20d mean · 🟢 oversold(long) · 🔴 overbought(short)")
+    txt = ("↕️ <b>Single-Name Mean Reversion (z-score)</b>\n"
+           "<i>stretched vs own 20d mean; reverts if no regime change · risky · not advice</i>\n\n"
+           + table)
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="zrev_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def zrev_command(update, ctx):
+    """/zrev — single-name mean reversion: price z-score vs its own 20d mean."""
+    await update.message.reply_text("↕️ Scanning z-score extremes…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _zrev_scan(conn)
+    finally:
+        conn.close()
+    await _send_zrev(update.message, rows)
+
+
+async def zrev_view(query):
+    conn = get_conn()
+    try:
+        rows = _zrev_scan(conn)
+    finally:
+        conn.close()
+    await _send_zrev(query.message, rows)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -25397,6 +25595,9 @@ async def _post_init(app):
             BotCommand("momentum", "Momentum 12-1 ranks"),
             BotCommand("rotate", "Sector-ETF relative strength"),
             BotCommand("revert", "Short-term reversal (oversold/overbought)"),
+            BotCommand("rs", "Relative strength vs SPY"),
+            BotCommand("breakout", "52-week breakouts / breakdowns"),
+            BotCommand("zrev", "Single-name mean reversion (z-score)"),
             BotCommand("pairs", "Stat mean-reversion pairs"),
             BotCommand("season", "Calendar seasonality"),
             BotCommand("spreads", "Credit/debit spread scanner"),
@@ -25468,6 +25669,9 @@ def main():
     app.add_handler(CommandHandler("building", building_command))
     app.add_handler(CommandHandler("uoa", uoa_command))
     app.add_handler(CommandHandler("vrp", vrp_command))
+    app.add_handler(CommandHandler("rs", rs_command))
+    app.add_handler(CommandHandler("breakout", breakout_command))
+    app.add_handler(CommandHandler("zrev", zrev_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))

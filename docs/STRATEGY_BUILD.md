@@ -28,7 +28,7 @@ so nothing is hidden.
 | 11 | Dividend-capture / ex-div assignment risk | `/divcap` | ✅ Done | pending | fwd yield + ex-date via yfinance .info, 12h cache |
 | 12 | Put-write / covered-call systematic index (PUT/BXM style) | `/pwindex` | ✅ Done | pending | APPROX BS-priced backtest vs B&H; labeled educational |
 
-| 19 | Positioning builder (new/increasing OI + price starting) | `/building` | ✅ Done | pending | LONG=calls added / SHORT=puts added vs standing OI; stage S/I/C; options_change + stock_daily; in dashboard hub |
+| 19 | Positioning builder (new/increasing OI + price starting) | `/building` | ✅ Done | `e1cf636`/`404e9c9` | LONG=calls / SHORT=puts vs standing OI; stage S/I/C; options_change+stock_daily; dashboard hub + **30-min scheduled stream** (daily dedup) |
 
 ## 1c. Data layer — DB-first history (reduce API dependence)
 - ✅ **`stock_history` table** added to `US_data.db` — multi-year daily OHLC. `_daily_history()` / `_history_matrix()`

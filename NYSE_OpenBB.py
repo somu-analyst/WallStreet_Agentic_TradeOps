@@ -54,6 +54,26 @@ MAX_HORIZON_DAYS = 45          # same horizon window as NYSE_YFin
 STRIKE_PCT = 0.0               # 0 = FULL chain (fetch is one call regardless); use --strike-pct to trim
 TEST_TABLE = "options_openbb"
 PERMANENT_FAIL = set()         # names with no listed options anywhere (CBOE + yahoo) — never retried
+SKIP_FILE = os.path.join(DATA_DIR, "openbb_skip.txt")   # persistent optionless list (self-healing)
+
+
+def _load_skip():
+    """Names PROVEN optionless (CBOE + yahoo both empty). Every run appends what it
+    proves; load_universe excludes them — so a bad symbol errors exactly once, ever.
+    To give a name another chance (e.g. it relists options), delete its line."""
+    try:
+        with open(SKIP_FILE, encoding="utf-8") as f:
+            return {ln.strip().upper() for ln in f if ln.strip() and not ln.startswith("#")}
+    except FileNotFoundError:
+        return set()
+
+
+def _add_to_skip(names):
+    new = sorted({str(n).upper() for n in names} - _load_skip())
+    if new:
+        with open(SKIP_FILE, "a", encoding="utf-8") as f:
+            f.write("".join(n + "\n" for n in new))
+    return new
 
 _NYSE_HOL_CACHE = {}
 
@@ -190,6 +210,11 @@ def load_universe(limit=None, sheet=UNIVERSE_SHEET_ACTIVE):
         print(f"Universe sheet '{sheet}' unavailable ({e}); falling back to a small default set.")
         tks = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "AMD", "GOOGL"]
     tks = sorted(dict.fromkeys(tks))
+    skip = _load_skip()
+    dropped = sorted(set(tks) & skip)
+    if dropped:
+        print(f"skipping {len(dropped)} proven-optionless names (openbb_skip.txt): {', '.join(dropped)}")
+    tks = [t for t in tks if t not in skip]
     return tks[:limit] if limit else tks
 
 
@@ -734,7 +759,10 @@ def main():
     log("================ SUMMARY ================")
     log(f"success      : {total_ok}/{len(tickers)} tickers")
     if perm:
-        log(f"no options   : {', '.join(perm)}  (not optionable anywhere — ignore / purge from sheet)")
+        newly = _add_to_skip(perm)
+        log(f"no options   : {', '.join(perm)}  (not optionable anywhere"
+            + (f" — auto-added to openbb_skip.txt, never fetched again" if newly else " — already in openbb_skip.txt")
+            + ")")
     if thr:
         log(f"throttled    : {', '.join(thr[:40])}  -> just rerun the same command later (idempotent, "
             "already-captured names are refetched cleanly)")

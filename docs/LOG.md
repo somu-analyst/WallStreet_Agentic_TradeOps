@@ -2,6 +2,19 @@
 
 > Append newest at top. Recap here every ~10–20 messages and before any context reset.
 
+## 2026-07-03 — First stringent DB compare (Jul 2): OpenBB VALIDATED, yahoo OI exposed
+- **Contract-level audit** (17,615 shared contracts, 87 tickers): coverage 100% (0 yfinance
+  contracts missing from openbb; openbb adds 646 extra tickers); lastPrice 98% within 2%;
+  volumes ~70% exact; call-OI only 58% within 2% BUT median diff 0.36%.
+- **Arbiter test settled it:** 5 worst OI mismatches re-fetched fresh from CBOE — all 5 matched
+  the OpenBB value EXACTLY (e.g. FXI 33.5C: ob=1255, yahoo=2, CBOE-now=1255). Yahoo serves
+  stale/near-zero OI on many strikes → the old ≥95% strike-agreement gate measured yahoo's
+  data quality, not ours. Verdict redefined: median OI diff ≤2% + price agreement ≥90% (PASS ✔ day 1).
+- **Hygiene:** deleted 35,055 rows mislabeled 2026-07-03 (holiday; pre-fix run), regenerated
+  chains_2026-07-02.parquet from the full day (178,344 rows / 734 tickers / 3.8 MB), compare now
+  joins ^VIX↔VIX. Self-healing skip file live (openbb_skip.txt, 9 names; universe loads 734).
+- **Implication:** OpenBB/CBOE is the more trustworthy OI source — strengthens the migration case.
+
 ## 2026-07-02 (night) — OpenBB capture hardened to hands-off; ops guardrails in
 - **Done (NYSE_OpenBB.py, commits c41e3f2→5c8ba59→this):** plain `python NYSE_OpenBB.py` now does
   everything — expanded 740-name universe by default (auto-builds sheet if missing), safe pacing

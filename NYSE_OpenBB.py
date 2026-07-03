@@ -55,13 +55,39 @@ STRIKE_PCT = 0.0               # 0 = FULL chain (fetch is one call regardless); 
 TEST_TABLE = "options_openbb"
 PERMANENT_FAIL = set()         # names with no listed options anywhere (CBOE + yahoo) — never retried
 
+# NYSE full-day holidays 2026 (fixed list — update yearly; half-days don't matter for EOD)
+_NYSE_HOLIDAYS_2026 = {"2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+                       "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"}
+
+
+def _is_trading_day(d):
+    return d.weekday() < 5 and d.strftime("%Y-%m-%d") not in _NYSE_HOLIDAYS_2026
+
+
+def _effective_trade_date():
+    """The market session the CBOE feed is actually serving right now (mirrors
+    run_all_offhours gating): weekends/holidays -> last trading day; pre-market
+    NY (<09:30) -> previous trading day (feed still shows yesterday's EOD marks);
+    otherwise today. Prevents Saturday runs stamping Friday data as Saturday."""
+    try:
+        from zoneinfo import ZoneInfo
+        now_ny = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:                            # no tz db -> assume local ≈ fine
+        now_ny = datetime.now()
+    d = now_ny.date()
+    if _is_trading_day(d) and (now_ny.hour, now_ny.minute) < (9, 30):
+        d = d - timedelta(days=1)                # pre-market: feed = yesterday's close
+    while not _is_trading_day(d):
+        d = d - timedelta(days=1)                # weekend / holiday -> last session
+    return d
+
 
 def compare_vs_yfinance(trade_date=None):
     """Parallel-test scorer: join today's options_openbb (US_data_OpenBB.db) vs
     options_daily (production US_data.db, read-only) on ticker+expiry+strike and
     report coverage + OI/price agreement. Run daily during the trial period."""
     prod = os.path.join(DATA_DIR, "US_data.db")
-    td = trade_date or datetime.now().strftime("%Y-%m-%d")
+    td = trade_date or _effective_trade_date().strftime("%Y-%m-%d")
     co = sqlite3.connect(OUT_DB_PATH); cy = sqlite3.connect(f"file:{prod}?mode=ro", uri=True)
     try:
         ob = pd.read_sql("SELECT ticker,expiry_date,strike,openInt_Call,openInt_Put,"
@@ -531,7 +557,9 @@ def main():
             print(f"universe sheet '{EXPANDED_SHEET}' missing -> building it now (one-time)…")
             build_expanded_universe()
     tickers = load_universe(args.limit, sheet=args.universe)
-    trade_dt = datetime.now().date()
+    trade_dt = _effective_trade_date()
+    if trade_dt != datetime.now().date():
+        print(f"off-hours/holiday run -> storing as last market session: {trade_dt}")
     table = TEST_TABLE
     print(f"OpenBB fetch: {len(tickers)} tickers · provider={args.provider} · workers={args.workers}")
     print(f"Output (isolated): {OUT_DB_PATH} · table={table}  (production US_data.db untouched)")

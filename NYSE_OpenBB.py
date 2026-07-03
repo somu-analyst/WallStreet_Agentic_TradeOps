@@ -55,13 +55,58 @@ STRIKE_PCT = 0.0               # 0 = FULL chain (fetch is one call regardless); 
 TEST_TABLE = "options_openbb"
 PERMANENT_FAIL = set()         # names with no listed options anywhere (CBOE + yahoo) — never retried
 
-# NYSE full-day holidays 2026 (fixed list — update yearly; half-days don't matter for EOD)
-_NYSE_HOLIDAYS_2026 = {"2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
-                       "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"}
+_NYSE_HOL_CACHE = {}
+
+
+def _nyse_holidays(year):
+    """Full-day NYSE holidays for ANY year — computed from the exchange rules
+    (no yearly upkeep): New Year, MLK, Washington's Bday, Good Friday, Memorial,
+    Juneteenth, Independence, Labor, Thanksgiving, Christmas, with Sat->Fri /
+    Sun->Mon observance shifts (NYSE skips New Year observance when Jan 1 is Sat)."""
+    if year in _NYSE_HOL_CACHE:
+        return _NYSE_HOL_CACHE[year]
+    from datetime import date as _d
+
+    def obs(d):                                  # weekend observance shift
+        if d.weekday() == 5:
+            return d - timedelta(days=1)
+        if d.weekday() == 6:
+            return d + timedelta(days=1)
+        return d
+
+    def nth_weekday(month, weekday, n):          # e.g. 3rd Monday of Jan
+        d = _d(year, month, 1)
+        return d + timedelta(days=(weekday - d.weekday()) % 7 + (n - 1) * 7)
+
+    # Easter Sunday (Anonymous Gregorian computus) -> Good Friday = Easter - 2
+    a = year % 19; b, c = divmod(year, 100)
+    dd, e = divmod(b, 4); f = (b + 8) // 25; g = (b - f + 1) // 3
+    h = (19 * a + b - dd - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    easter = _d(year, (h + l - 7 * m + 114) // 31, ((h + l - 7 * m + 114) % 31) + 1)
+
+    hs = {nth_weekday(1, 0, 3),                  # MLK — 3rd Mon Jan
+          nth_weekday(2, 0, 3),                  # Washington — 3rd Mon Feb
+          easter - timedelta(days=2),            # Good Friday
+          _d(year, 5, 31) - timedelta(days=_d(year, 5, 31).weekday()),  # Memorial — last Mon May
+          obs(_d(year, 6, 19)),                  # Juneteenth
+          obs(_d(year, 7, 4)),                   # Independence Day
+          nth_weekday(9, 0, 1),                  # Labor — 1st Mon Sep
+          nth_weekday(11, 3, 4),                 # Thanksgiving — 4th Thu Nov
+          obs(_d(year, 12, 25))}                 # Christmas
+    ny = _d(year, 1, 1)                          # New Year: Sat -> NOT observed (NYSE rule)
+    if ny.weekday() == 6:
+        hs.add(ny + timedelta(days=1))
+    elif ny.weekday() != 5:
+        hs.add(ny)
+    _NYSE_HOL_CACHE[year] = hs
+    return hs
 
 
 def _is_trading_day(d):
-    return d.weekday() < 5 and d.strftime("%Y-%m-%d") not in _NYSE_HOLIDAYS_2026
+    return d.weekday() < 5 and d not in _nyse_holidays(d.year)
 
 
 def _effective_trade_date():

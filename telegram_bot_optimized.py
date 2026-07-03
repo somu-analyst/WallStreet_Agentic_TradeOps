@@ -12527,19 +12527,72 @@ def _load_ai_key() -> str:
     return os.environ.get("ANTHROPIC_API_KEY", "")
 
 
+# ── DB-aware AI: the model can query US_data.db (read-only) before answering ──
+_AI_DB_SCHEMA = """
+You can look up REAL data by writing one SQLite SELECT inside a ```sql fenced block.
+The query runs read-only against the bot's DB and the result comes back to you; then answer.
+Tables (only these):
+- options_change(ticker, strike, expiry_date, trade_date_now [MM-DD-YYYY str], change_OI_Call,
+  change_OI_Put, openInt_Call_now, openInt_Put_now, pct_change_OI_Call, pct_change_OI_Put,
+  vol_Call_now, vol_Put_now, lastPrice_Call_now, lastPrice_Put_now)  -- daily OI deltas per contract
+- options_daily(ticker, strike, expiry_date, trade_date [YYYY-MM-DD], openInt_Call, openInt_Put,
+  vol_Call, vol_Put, lastPrice_Call, lastPrice_Put)                  -- raw daily chain snapshot
+- stock_daily(ticker, trade_date, close, high, low, volume, pcr_oi)   -- ~6mo daily
+- stock_history(ticker, trade_date, open, high, low, close, volume)   -- multi-year daily
+- trades(trade_id, ticker, strategy, entry_date, expiry [YYYY-MM-DD], status OPEN/CLOSED,
+  strike, option_type, quantity [neg=short], entry_price, pnl, notes)             -- user's positions
+- signal_accuracy(model, ticker, fire_date, direction, horizon_days, outcome, fwd_ret)
+- us_analytics_daily(trade_date, call_notional_oi, put_notional_oi, bull_score, bear_score, avg_spot)
+RULES: date formats vary by table (YYYY-MM-DD sorts naturally; MM-DD-YYYY sorts ONLY via
+substr(d,7,4)||substr(d,1,2)||substr(d,4,2)) — if unsure, SELECT a sample date first.
+Always add LIMIT (<=50). One SELECT per block, no other statements. NEVER use columns
+vol_rank_* or money_coi_* (NULL). SPY PCR spikes >10 on expiry days = mechanical, not signal.
+Uppercase tickers. If the result answers the question, reply with the final answer (no more SQL).
+""".strip()
+
+
+def _ai_run_sql(sql: str) -> str:
+    """Validate + execute ONE read-only SELECT against US_data.db; compact text result."""
+    s = (sql or "").strip().rstrip(";").strip()
+    low = s.lower()
+    if not (low.startswith("select") or low.startswith("with")):
+        return "ERROR: only SELECT/WITH queries are allowed"
+    for bad in (";", "pragma", "attach", "insert ", "update ", "delete ", "drop ",
+                "alter ", "create ", "vacuum", "reindex"):
+        if bad in low:
+            return f"ERROR: forbidden token in query: {bad.strip()}"
+    if " limit " not in low:
+        s += " LIMIT 50"
+    try:
+        c = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=10)
+        try:
+            df = pd.read_sql_query(s, c)
+        finally:
+            c.close()
+    except Exception as e:
+        return f"ERROR: {e}"
+    if df.empty:
+        return "(no rows)"
+    return df.head(50).to_string(index=False)[:3500]
+
+
 async def ai_chat_menu(query):
     """Show AI chat instructions."""
     kb = InlineKeyboardMarkup([[BACK_BTN]])
     await query.message.reply_text(
         f"{hdr('🤖 AI TRADING ASSISTANT')}\n\n"
         "Just <b>type any question</b> in the chat and I'll reply!\n\n"
-        "<b>Examples:</b>\n"
-        "• What is delta hedging?\n"
-        "• Should I roll my NVDA call to next month?\n"
-        "• Explain IV crush after earnings\n"
-        "• What is a good stop loss for a 30 DTE option?\n"
-        "• How does theta decay accelerate near expiry?\n\n"
-        "<i>I have context of your current positions and can give personalised advice.</i>",
+        "<b>Concepts:</b>\n"
+        "• What is delta hedging? / Explain IV crush\n"
+        "• Should I roll my NVDA call to next month?\n\n"
+        "<b>Your DATA (I query the DB live):</b>\n"
+        "• Which tickers had the biggest call OI build this week?\n"
+        "• What's my open P&L by strategy?\n"
+        "• Show SPY put/call ratio over the last 10 days\n"
+        "• Which of my positions expire within 7 days?\n"
+        "• Which scanner has the best hit-rate so far?\n\n"
+        "<i>I have your positions + live signals as context, and I answer data "
+        "questions with real numbers from the DB — not from memory.</i>",
         parse_mode=H, reply_markup=kb
     )
 
@@ -12592,8 +12645,10 @@ async def ai_chat_handler(update, context):
         "Format for Telegram HTML: use <b>bold</b> for key terms. No markdown, only HTML tags. "
         "If the user asks about their positions or the bot's current signals, use the context provided. "
         "When asked why a ticker is bullish/bearish, explain using the WAN-streamer signal context "
-        "(confidence, prob, vote counts, agreeing models) — do not invent numbers not in the context.\n\n"
-        + pos_ctx + ("\n\n" + wan_ctx if wan_ctx else "")
+        "(confidence, prob, vote counts, agreeing models) — do not invent numbers not in the context. "
+        "For questions about stored data (OI, prices, history, positions, P&L, signal accuracy), "
+        "query the DB instead of guessing — never fabricate numbers.\n\n"
+        + _AI_DB_SCHEMA + "\n\n" + pos_ctx + ("\n\n" + wan_ctx if wan_ctx else "")
     )
 
     typing_msg = await update.message.reply_text("🤖 Thinking…")
@@ -12601,13 +12656,29 @@ async def ai_chat_handler(update, context):
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=600,
-            system=system_prompt,
-            messages=[{"role": "user", "content": text}]
-        )
-        answer = resp.content[0].text.strip()
+        msgs = [{"role": "user", "content": text}]
+        answer = None
+        for _round in range(3):                      # up to 2 SQL lookups, then final answer
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=800,
+                system=system_prompt,
+                messages=msgs,
+            )
+            out = "".join(b.text for b in resp.content if b.type == "text").strip()
+            m = re.search(r"```sql\s*(.*?)```", out, re.S | re.I)
+            if not m:                                # no query -> that's the answer
+                answer = out
+                break
+            sql = m.group(1).strip()
+            result = _ai_run_sql(sql)
+            log.info(f"AI chat SQL: {sql[:100]} -> {result[:60]}")
+            msgs += [{"role": "assistant", "content": out},
+                     {"role": "user", "content":
+                      f"Query result:\n{result}\n\nNow answer the original question for Telegram "
+                      "(HTML, concise). If you truly need ONE more lookup, emit exactly one ```sql block."}]
+        if answer is None:                           # still asking for SQL after limit
+            answer = "⚠️ Couldn't finish the data lookup — try asking more specifically."
         log.info(f"AI chat: Q='{text[:60]}' → {len(answer)} chars")
     except Exception as e:
         log.warning(f"AI chat error: {e}")
@@ -22935,6 +23006,15 @@ async def riskoff_alert(ctx: ContextTypes.DEFAULT_TYPE):
     gate = bool(getattr(getattr(ctx, "job", None), "data", None) or {})  # daily job passes {'gate':True}
     if gate and res["turbulence"]["level"] == "NORMAL":
         return
+    # once-per-day dedup so frequent restarts don't spam the same readout
+    today_str = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
+    dconn = get_conn()
+    try:
+        _ensure_alert_dedup_table(dconn)
+        if _alert_already_sent(dconn, today_str, "market_radar", "riskoff"):
+            return
+    finally:
+        dconn.close()
     _, chat_id = load_creds()
     try:
         await ctx.bot.send_message(chat_id=int(chat_id), text=_riskoff_message(res)[:4090], parse_mode=H)
@@ -26146,6 +26226,8 @@ async def _post_init(app):
             BotCommand("vanna", "Vanna exposure"),
             BotCommand("opex", "OPEX / max pain"),
             BotCommand("regime", "Market regime (VIX term)"),
+            BotCommand("riskoff", "Market Radar — big-move risk + lean"),
+            BotCommand("rovalidate", "Backtest the Market Radar"),
             BotCommand("squeeze", "Squeeze scan"),
             BotCommand("macro", "Macro (BLS + yields)"),
             BotCommand("earnings", "Earnings & news"),

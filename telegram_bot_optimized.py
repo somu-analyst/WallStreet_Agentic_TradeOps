@@ -12520,11 +12520,16 @@ async def aftermarket_predict(query, ticker: str = None):
 #  AI CHAT — Claude API
 # ═══════════════════════════════════════════════════════════
 def _load_ai_key() -> str:
-    """Load Anthropic API key from file or env."""
+    """Anthropic key — single source: ANTHROPIC_API_KEY in the encrypted vault api_keys.enc
+    (loaded into os.environ at startup, same file as all other keys).
+    anthropic_key.txt kept only as a legacy fallback."""
+    k = os.environ.get("ANTHROPIC_API_KEY", "")
+    if k:
+        return k
     key_file = os.path.join(os.path.dirname(__file__), "anthropic_key.txt")
     if os.path.exists(key_file):
         return open(key_file).read().strip()
-    return os.environ.get("ANTHROPIC_API_KEY", "")
+    return ""
 
 
 # ── DB-aware AI: the model can query US_data.db (read-only) before answering ──
@@ -12611,7 +12616,8 @@ async def ai_chat_handler(update, context):
     if not api_key:
         await update.message.reply_text(
             "⚠️ AI key not configured.\n"
-            "Create <code>anthropic_key.txt</code> with your Anthropic API key.",
+            "Add <code>ANTHROPIC_API_KEY=...</code> to <code>api_keys.env</code> (one keys file — "
+            "it auto-encrypts into api_keys.enc on next start).",
             parse_mode=H)
         return
 

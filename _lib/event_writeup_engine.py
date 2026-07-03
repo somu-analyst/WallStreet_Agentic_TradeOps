@@ -973,14 +973,18 @@ class EventWriteupEngine:
 
     def _llm_enhance(self, draft: str, ctx: Dict[str, Any]) -> Optional[str]:
         """Optional Anthropic polish — keeps data, improves flow."""
+        # single keys file: ANTHROPIC_API_KEY comes from the encrypted vault api_keys.enc
+        # (bot loads it into os.environ at startup); anthropic_key.txt = legacy fallback
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         key_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "anthropic_key.txt"
         )
-        if not os.path.exists(key_path):
-            return None
-        try:
+        if not api_key and os.path.exists(key_path):
             with open(key_path) as f:
                 api_key = f.read().strip()
+        if not api_key:
+            return None
+        try:
             import anthropic
             client = anthropic.Anthropic(api_key=api_key)
             prompt = (

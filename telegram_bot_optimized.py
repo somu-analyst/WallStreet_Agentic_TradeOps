@@ -23024,15 +23024,18 @@ async def riskoff_alert(ctx: ContextTypes.DEFAULT_TYPE):
     gate = bool(getattr(getattr(ctx, "job", None), "data", None) or {})  # daily job passes {'gate':True}
     if gate and res["turbulence"]["level"] == "NORMAL":
         return
-    # once-per-day dedup so frequent restarts don't spam the same readout
+    # Dedup ONLY the startup (non-gated) push so frequent restarts don't spam. The
+    # daily post-close run (gate=True) is scheduled once/day and must always fire —
+    # a separate key so an earlier startup push can't suppress the fresh-EOD readout.
     today_str = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
-    dconn = get_conn()
-    try:
-        _ensure_alert_dedup_table(dconn)
-        if _alert_already_sent(dconn, today_str, "market_radar", "riskoff"):
-            return
-    finally:
-        dconn.close()
+    if not gate:
+        dconn = get_conn()
+        try:
+            _ensure_alert_dedup_table(dconn)
+            if _alert_already_sent(dconn, today_str, "market_radar_startup", "riskoff"):
+                return
+        finally:
+            dconn.close()
     _, chat_id = load_creds()
     try:
         await ctx.bot.send_message(chat_id=int(chat_id), text=_riskoff_message(res)[:4090], parse_mode=H)

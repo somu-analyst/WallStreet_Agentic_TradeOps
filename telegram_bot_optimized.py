@@ -21192,13 +21192,15 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
                 pop = _pa(spot, K - cr, T, iv)
                 if pop is None or pop < min_pop:
                     continue
-                out.append((pop, cr / max(K - cr, 0.01) * 100,
-                            f"{tk} SELL {K:g}P · {dte}d · POP {pop*100:.0f}% · +${cr:.2f} · BE {K-cr:.0f}"))
+                out.append({"tk": tk, "kind": "CSP", "setup": f"{K:g}P", "credit": cr,
+                            "risk": None, "be": K - cr, "pop": pop, "dte": dte,
+                            "ret": cr / max(K - cr, 0.01) * 100})
                 if i + 2 < len(pl):
                     Kl = float(pl.loc[i + 2, "strike"]); cl = float(pl.loc[i + 2, "mid"]); net = cr - cl; width = K - Kl
-                    if net > 0.03 and width > 0:
-                        out.append((pop, net / max(width - net, 0.01) * 100,
-                                    f"{tk} put-spread {K:g}/{Kl:g} · {dte}d · POP {pop*100:.0f}% · +${net:.2f} · risk ${(width-net)*100:.0f}"))
+                    if 0.03 < net < width:                # credit can't exceed width (drops bad mids)
+                        out.append({"tk": tk, "kind": "PS", "setup": f"{K:g}/{Kl:g}P", "credit": net,
+                                    "risk": (width - net) * 100, "be": None, "pop": pop, "dte": dte,
+                                    "ret": net / max(width - net, 0.01) * 100})
                 break
             cu = calls[(calls["strike"] > spot) & (calls["mid"] > 0.05)].sort_values("strike").reset_index(drop=True)
             for i in range(len(cu)):
@@ -21213,14 +21215,15 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
                     continue
                 if i + 2 < len(cu):
                     Kl = float(cu.loc[i + 2, "strike"]); cl = float(cu.loc[i + 2, "mid"]); net = cr - cl; width = Kl - K
-                    if net > 0.03 and width > 0:
-                        out.append((pop, net / max(width - net, 0.01) * 100,
-                                    f"{tk} call-spread {K:g}/{Kl:g} · {dte}d · POP {pop*100:.0f}% · +${net:.2f} · risk ${(width-net)*100:.0f}"))
+                    if 0.03 < net < width:                # credit can't exceed width (drops bad mids)
+                        out.append({"tk": tk, "kind": "CS", "setup": f"{K:g}/{Kl:g}C", "credit": net,
+                                    "risk": (width - net) * 100, "be": None, "pop": pop, "dte": dte,
+                                    "ret": net / max(width - net, 0.01) * 100})
                 break
         except Exception:
             continue
-    out.sort(key=lambda z: (-z[0], -z[1]))
-    return [s for _, _, s in out]
+    out.sort(key=lambda d: (-d["pop"], -d["ret"]))
+    return out
 
 
 def _hiprob_default_tickers():
@@ -21232,6 +21235,29 @@ def _hiprob_default_tickers():
     return list(dict.fromkeys(tks + ["SPY", "QQQ", "IWM"]))
 
 
+def _fmt_hiprob(rows):
+    """Render /hiprob as compact, mobile-safe <pre> tables (aligned columns, no wrap).
+    DTE + POP hoisted to the header; spreads and cash-secured puts split into two
+    narrow tables (~≤36 chars). Bias encoded as a P/C suffix (no emoji column)."""
+    spreads = [r for r in rows if r["kind"] in ("PS", "CS")][:12]
+    csps = [r for r in rows if r["kind"] == "CSP"][:8]
+    dtes = [r["dte"] for r in rows]
+    dte_lbl = (f"{min(dtes)}d" if len(set(dtes)) == 1 else f"{min(dtes)}-{max(dtes)}d") if dtes else ""
+    parts = ["🎯 <b>High-Prob Options — ≥80% POP</b>",
+             f"<i>premium selling · defined/cash-secured risk · {dte_lbl} · not advice</i>"]
+    if spreads:
+        rd = [(r["tk"], r["setup"], f"{r['credit']:.2f}", f"{r['risk']:.0f}") for r in spreads]
+        parts.append(_pipe_table(("Tkr", "Setup", "Cr", "Rsk$"), rd, right_cols={2, 3},
+                                 title="Spreads · defined risk",
+                                 legend="Setup=short/long+P(put)/C(call) · Cr=credit · Rsk$=max loss"))
+    if csps:
+        rc = [(r["tk"], r["setup"], f"{r['credit']:.2f}", f"{r['be']:.0f}") for r in csps]
+        parts.append(_pipe_table(("Tkr", "Sell", "Cr", "BE"), rc, right_cols={2, 3},
+                                 title="Cash-secured puts",
+                                 legend="Sell=put strike · Cr=credit · BE=breakeven"))
+    return "\n\n".join(parts)
+
+
 async def hiprob_command(update, ctx):
     """/hiprob [TICKERS] — high-probability (>=80% POP) option setups: premium selling + spreads."""
     args = list(getattr(ctx, "args", []) or [])
@@ -21241,9 +21267,7 @@ async def hiprob_command(update, ctx):
     if not rows:
         await update.message.reply_text("No ≥80% POP setups right now. Try <code>/hiprob SPY QQQ IWM</code>.", parse_mode=H)
         return
-    txt = ("🎯 <b>High-Prob Options (≥80% POP)</b>\n<i>sells = collect premium, defined/cash-secured risk · "
-           "not advice</i>\n\n" + "\n".join("• " + r for r in rows[:15]))
-    await update.message.reply_text(txt[:4000], parse_mode=H,
+    await update.message.reply_text(_fmt_hiprob(rows)[:4000], parse_mode=H,
                                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="hiprob_view"),
                                                                         InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
 
@@ -21253,9 +21277,7 @@ async def hiprob_view(query):
     if not rows:
         await query.message.reply_text("No ≥80% POP setups right now. Try /hiprob SPY QQQ IWM.", parse_mode=H)
         return
-    txt = ("🎯 <b>High-Prob Options (≥80% POP)</b>\n<i>sells = collect premium, defined/cash-secured risk · "
-           "not advice</i>\n\n" + "\n".join("• " + r for r in rows[:15]))
-    await query.message.reply_text(txt[:4000], parse_mode=H,
+    await query.message.reply_text(_fmt_hiprob(rows)[:4000], parse_mode=H,
                                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="hiprob_view"),
                                                                        InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
 

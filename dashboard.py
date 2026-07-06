@@ -4760,6 +4760,7 @@ def advanced_oi_analysis(df, ticker, spot, td_now, td_prev):
 # ──  SIDEBAR
 # ===================================================================
 _PAGE_HELP = {
+    "🫧 Anti-Bubble Radar":      "Khoo-style 'great repricing' screen for ANY tickers — flags 🔴 cyclical traps (crowded, vertical, peak-earnings names like memory/semis) to avoid, and 🟢 anti-bubble quality (wide moat, durable earnings, below intrinsic value, not overextended) to accumulate. Picks are auto-tracked so you can see whether quality is beating cyclicals over time.",
     "🎛️ Command Center":         "Your whole system on ONE screen — market weather (Radar turbulence + direction + next-session SPY levels), your open book (live P&L, expiring soon), the top ⭐ consensus trade ideas, and what fired today. Start here; drill into other pages only when needed.",
     "🌍 Market Overview":        "Big-picture market snapshot. VIX, sector rotation, Fear & Greed, macro correlations, and top OI movers. Start here every morning.",
     "🔬 OI Comparison Charts":   "Deep-dive OI analysis per ticker and expiry. Compare Open Interest changes between two dates to spot institutional positioning, gamma walls, and money flow direction.",
@@ -4802,6 +4803,7 @@ with st.sidebar:
         ],
         "💡 Trade Ideas": [
             "💡 Action Board",
+            "🫧 Anti-Bubble Radar",
             "🎯 High-Prob Options",
             "📐 Spreads Scanner",
             "🎡 Wheel / CSP",
@@ -7504,6 +7506,64 @@ elif page == "🎛️ Command Center":
             st.caption("No scanner fires logged yet.")
     except Exception as _e:
         st.caption(f"Fires unavailable: {_e}")
+
+# ===================================================================
+elif page == "🫧 Anti-Bubble Radar":
+    _page_header("🫧 Anti-Bubble Radar", _PAGE_HELP["🫧 Anti-Bubble Radar"])
+    import telegram_bot_optimized as _ab_tbo
+    _ab_in = st.text_input("Tickers (space/comma separated · blank = default ~80-name universe)",
+                           "", key="ab_tks")
+    if st.button("▶️ Run screen", type="primary", key="ab_run"):
+        _tks = [x.strip().upper() for x in re.split(r"[ ,]+", _ab_in) if x.strip()] or None
+        with st.spinner("Screening (first run today pulls fundamentals, ~1 min; cached after)…"):
+            _ac = _ab_tbo.get_conn()
+            try:
+                _res = _ab_tbo._antibubble_scan(_ac, _tks)
+                _ab_tbo._antibubble_track(_ac, _res)
+                _sb = _ab_tbo._antibubble_scoreboard(_ac)
+            finally:
+                _ac.close()
+            st.session_state["_ab_res"] = _res
+            st.session_state["_ab_sb"] = _sb
+    _res = st.session_state.get("_ab_res"); _sb = st.session_state.get("_ab_sb")
+    if _res:
+        _ct1, _ct2 = st.columns(2)
+        with _ct1:
+            st.markdown("#### 🔴 Cyclical traps · avoid / trim")
+            if _res["traps"]:
+                st.dataframe(pd.DataFrame([{"Ticker": r["tk"], "1yr %": round(r["ret1y"] * 100),
+                    "vs 200d %": round(r["ext200"] * 100), "Trap": r["T"],
+                    "fwd PE": (round(r["fpe"], 1) if r["fpe"] else None),
+                    "beta": (round(r["beta"], 1) if r["beta"] else None), "Sector": r["sector"]}
+                    for r in _res["traps"]]), hide_index=True, use_container_width=True)
+            else:
+                st.caption("None flagged.")
+        with _ct2:
+            st.markdown("#### 🟢 Anti-bubble · accumulate")
+            if _res["anti"]:
+                st.dataframe(pd.DataFrame([{"Ticker": r["tk"], "Quality": r["Q"], "Value": r["V"],
+                    "Upside %": round((r["up"] or 0) * 100),
+                    "fwd PE": (round(r["fpe"], 1) if r["fpe"] else None),
+                    "beta": (round(r["beta"], 1) if r["beta"] else None), "Sector": r["sector"]}
+                    for r in _res["anti"]]), hide_index=True, use_container_width=True)
+            else:
+                st.caption("None flagged.")
+        if _res["quality"]:
+            st.caption("🟡 **Quality but pricey:** " + ", ".join(r["tk"] for r in _res["quality"]))
+        if _sb and (_sb["anti_n"] or _sb["trap_n"]):
+            st.markdown("#### 📊 Tracking scoreboard")
+            _m1, _m2, _m3 = st.columns(3)
+            _m1.metric("🟢 Anti-bubble avg", f"{(_sb['anti_ret'] or 0)*100:+.1f}%", f"n={_sb['anti_n']}")
+            _m2.metric("🔴 Traps avg", f"{(_sb['trap_ret'] or 0)*100:+.1f}%", f"n={_sb['trap_n']}", delta_color="inverse")
+            if _sb["spread"] is not None:
+                _m3.metric("Spread (anti − traps)", f"{_sb['spread']*100:+.1f}%")
+            st.caption(f"Since {_sb['since']} · positive spread = thesis working (quality beating cyclicals). "
+                       "Auto-logged once/day per ticker.")
+            _det = _sb["detail"].copy(); _det["ret %"] = (_det["ret"] * 100).round(1)
+            st.dataframe(_det[["ticker", "cls", "add_date", "ret %"]], hide_index=True, use_container_width=True)
+    else:
+        st.info("Enter tickers (or leave blank for the default universe) and click **Run screen**. "
+                "Works for any ticker — pulls live fundamentals, not limited to the options DB.")
 
 # ===================================================================
 elif page == "💼 Portfolio & Suggestions":

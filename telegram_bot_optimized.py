@@ -261,8 +261,9 @@ def _keyvault_decrypt(blob):
 
 def _load_api_keys():
     """Load API keys into os.environ from the encrypted vault api_keys.enc (machine-bound).
-    If only the plaintext api_keys.env exists, load it, encrypt it to api_keys.enc, and delete
-    the plaintext — so keys live encrypted at rest."""
+    A plaintext api_keys.env, if present, is MERGED into the vault (new/changed keys win,
+    existing keys preserved), re-encrypted, and the plaintext deleted — so dropping a file
+    with ONE new key (e.g. ANTHROPIC_API_KEY=...) adds it without touching the others."""
     try:
         _dir = os.path.dirname(os.path.abspath(__file__))
         _enc = os.path.join(_dir, "api_keys.enc")
@@ -273,9 +274,20 @@ def _load_api_keys():
                 text = _keyvault_decrypt(open(_enc, encoding="utf-8").read())
             except Exception:
                 text = None
-        if text is None and os.path.exists(_plain):
-            text = open(_plain, encoding="utf-8").read()
+        if os.path.exists(_plain):
             try:
+                def _parse(t):
+                    d = {}
+                    for ln in (t or "").splitlines():
+                        ln = ln.strip()
+                        if ln and not ln.startswith("#") and "=" in ln:
+                            k, v = ln.split("=", 1)
+                            if k.strip() and v.strip():
+                                d[k.strip()] = v.strip().strip('"').strip("'")
+                    return d
+                _all = _parse(text)
+                _all.update(_parse(open(_plain, encoding="utf-8").read()))   # plaintext wins → key rotation works
+                text = "\n".join(f"{k}={v}" for k, v in _all.items())
                 with open(_enc, "w", encoding="utf-8") as _f:
                     _f.write(_keyvault_encrypt(text))
                 os.remove(_plain)
@@ -26136,6 +26148,67 @@ def _wan_table(rows):
                        legend="🟢 bull · 🔴 bear · Cf H=high/M=med")
 
 
+_AI_RISK_CACHE = {}
+
+
+def _ai_risk_check(conn, sig):
+    """Debate-gate (TradingAgents-style, ONE cheap call): bull case vs bear case built ONLY
+    from our DB evidence + the ensemble's own votes, then a PROCEED/CAUTION verdict.
+    The LLM is the reviewer, never the signal source. Fail-soft: any problem -> None and
+    the alert goes out unchanged. Cached per ticker|side|day so repeats cost nothing."""
+    tk = str(sig["ticker"]).upper(); side = sig["signal"]
+    key = f"{tk}|{side}|{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+    if key in _AI_RISK_CACHE:
+        return _AI_RISK_CACHE[key]
+    api_key = _load_ai_key()
+    if not api_key:
+        return None
+    try:
+        srt = "substr(trade_date_now,7,4)||substr(trade_date_now,1,2)||substr(trade_date_now,4,2)"
+        oi = pd.read_sql(
+            f"SELECT SUM(change_OI_Call) cc, SUM(change_OI_Put) cp FROM options_change "
+            f"WHERE UPPER(ticker)=? AND {srt}=(SELECT MAX({srt}) FROM options_change)",
+            conn, params=(tk,))
+        sd = pd.read_sql(
+            "SELECT close, pcr_oi FROM stock_daily WHERE UPPER(ticker)=? ORDER BY "
+            "substr(trade_date,7,4)||substr(trade_date,1,2)||substr(trade_date,4,2) DESC LIMIT 6",
+            conn, params=(tk,))
+        ev = [f"Ensemble: {side} conf {sig.get('conf')} prob {float(sig.get('prob', 0)):.0f}% "
+              f"(bull votes {sig.get('bull_v', '?')}/{sig.get('total_m', '?')}, bear {sig.get('bear_v', '?')})",
+              f"Suggested strategy: {str(sig.get('strategy', ''))[:80]}"]
+        if len(oi) and oi.iloc[0]["cc"] is not None:
+            ev.append(f"Today's OI delta: calls {oi.iloc[0]['cc']:+,.0f}, puts {oi.iloc[0]['cp']:+,.0f}")
+        if len(sd):
+            px = pd.to_numeric(sd["close"], errors="coerce")
+            if len(px) >= 6 and px.iloc[5]:
+                ev.append(f"5-day price change: {(px.iloc[0] / px.iloc[5] - 1) * 100:+.1f}%")
+            _pcr = sd.iloc[0]["pcr_oi"]
+            if _pcr is not None and not pd.isna(_pcr):
+                ev.append(f"PCR(OI): {float(_pcr):.2f}")
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=160,
+            system=("You are the risk manager reviewing a quant signal before it is traded. "
+                    "Using ONLY the evidence given (never invent numbers), reply in EXACTLY 3 lines:\n"
+                    "BULL: <strongest bullish point, <=15 words>\n"
+                    "BEAR: <strongest bearish point, <=15 words>\n"
+                    "VERDICT: PROCEED or CAUTION - <reason, <=12 words>"),
+            messages=[{"role": "user", "content": f"Signal on {tk} ({side}).\n" + "\n".join(ev)}])
+        out = "".join(b.text for b in resp.content if b.type == "text").strip()
+        if "VERDICT:" not in out.upper():
+            return None
+        out = (out.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                  .replace("VERDICT: PROCEED", "✅ PROCEED").replace("VERDICT: CAUTION", "⚠️ CAUTION"))
+        _AI_RISK_CACHE[key] = out
+        if len(_AI_RISK_CACHE) > 400:
+            _AI_RISK_CACHE.clear()
+        return out
+    except Exception:
+        log.debug("ai risk-check failed", exc_info=True)
+        return None
+
+
 async def wan_streamer_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """Streamer job: push newly-fired actionable ensemble signals to Telegram.
     Market-hours / weekday gated. One alert per TICKER|SIGNAL|CONF per day."""
@@ -26158,6 +26231,14 @@ async def wan_streamer_alert(ctx: ContextTypes.DEFAULT_TYPE):
         fresh = [r for r in signals
                  if not _alert_already_sent(
                      conn, today_str, f"{r['ticker']}|{r['signal']}|{r['conf']}", "wan_stream")]
+        # 🤖 debate-gate: AI second opinion on the top fresh signals (cap 3 = cost control;
+        # cached per ticker/side/day; fail-soft so alerts never depend on the API)
+        risk_notes = []
+        for r in fresh[:3]:
+            v = _ai_risk_check(conn, r)
+            if v:
+                emoji = "🟢" if r["signal"] == "BULL" else "🔴"
+                risk_notes.append(f"{emoji} <b>{r['ticker']}</b>\n<i>{v}</i>")
     except Exception as e:
         log.warning(f"wan_streamer scan failed: {e}")
         conn.close(); return
@@ -26171,6 +26252,8 @@ async def wan_streamer_alert(ctx: ContextTypes.DEFAULT_TYPE):
     parts = [hdr(f"📡 WAN-STREAMER · {now_et.strftime('%H:%M ET')}"),
              f"<i>{len(fresh)} new signal(s)</i>",
              _wan_table(fresh)]
+    if risk_notes:
+        parts.append("🤖 <b>AI risk-check</b> <i>(reviewer, not signal)</i>\n" + "\n".join(risk_notes))
     try:
         await ctx.bot.send_message(chat_id=int(chat_id), text="\n".join(parts), parse_mode=H)
     except Exception as e:

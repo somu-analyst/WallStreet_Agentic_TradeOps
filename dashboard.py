@@ -4760,6 +4760,7 @@ def advanced_oi_analysis(df, ticker, spot, td_now, td_prev):
 # ──  SIDEBAR
 # ===================================================================
 _PAGE_HELP = {
+    "🎛️ Command Center":         "Your whole system on ONE screen — market weather (Radar turbulence + direction + next-session SPY levels), your open book (live P&L, expiring soon), the top ⭐ consensus trade ideas, and what fired today. Start here; drill into other pages only when needed.",
     "🌍 Market Overview":        "Big-picture market snapshot. VIX, sector rotation, Fear & Greed, macro correlations, and top OI movers. Start here every morning.",
     "🔬 OI Comparison Charts":   "Deep-dive OI analysis per ticker and expiry. Compare Open Interest changes between two dates to spot institutional positioning, gamma walls, and money flow direction.",
     "🔥 OI Analytics & Prediction": "AI-style OI signal engine. Runs 5-factor composite scoring (OI bias, PCR, volume, flow pattern, GEX) to generate BULLISH/BEARISH/NEUTRAL signals with next-day backtest.",
@@ -4791,6 +4792,9 @@ with st.sidebar:
     st.markdown("---")
 
     _NAV_GROUPS = {
+        "🎛️ Command Center": [
+            "🎛️ Command Center",
+        ],
         "📈 Markets & OI": [
             "🌍 Market Overview",
             "🔬 OI Comparison Charts",
@@ -7361,6 +7365,146 @@ elif page == "🎯 Prop Trading Screen":
 
 # ===================================================================
 # ──  PAGE 4: PORTFOLIO & SUGGESTIONS
+# ===================================================================
+elif page == "🎛️ Command Center":
+    _page_header("🎛️ Command Center", _PAGE_HELP["🎛️ Command Center"])
+    import telegram_bot_optimized as _cc_tbo
+    if st.button("↻ Refresh", key="cc_refresh"):
+        st.cache_data.clear(); st.rerun()
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _cc_radar():
+        _c = _cc_tbo.get_conn()
+        try:
+            return _cc_tbo._riskoff_scan(_c)
+        finally:
+            _c.close()
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _cc_weather():
+        _c = get_conn()
+        try:
+            def _last2(tk):
+                r = pd.read_sql("SELECT close FROM stock_daily WHERE ticker=? "
+                                "ORDER BY trade_date DESC LIMIT 2", _c, params=(tk,))
+                return (float(r.close.iloc[0]), float(r.close.iloc[1])) if len(r) >= 2 else (None, None)
+            return {"spy": _last2("SPY"), "qqq": _last2("QQQ"), "vix": _last2("^VIX")}
+        finally:
+            _c.close()
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _cc_ideas():
+        return _ab_ideas()
+
+    # ── 1. MARKET WEATHER ──────────────────────────────────────────
+    st.markdown("#### 🌦️ Market Weather")
+    try:
+        _r = _cc_radar(); _w = _cc_weather()
+        _t = _r["turbulence"]; _d = _r["direction"]; _nd = _r.get("nextday")
+        _c1, _c2, _c3, _c4 = st.columns(4)
+        _sp, _spp = _w["spy"]
+        if _sp:
+            _c1.metric("SPY", f"{_sp:.2f}", f"{(_sp/_spp-1)*100:+.2f}%")
+        _vx, _vxp = _w["vix"]
+        if _vx:
+            _vlab = "calm" if _vx < 18 else ("elevated" if _vx < 25 else "high")
+            _c2.metric("VIX", f"{_vx:.1f}", f"{_vx-_vxp:+.1f} · {_vlab}", delta_color="inverse")
+        _brd = next((p["reading"] for p in _r["pillars"] if p["label"] == "Broad weakness"), "n/a")
+        _c3.metric("Breadth (soft)", _brd)
+        _c4.metric("Big-move risk", _t["level"])
+        _rfn = st.error if _t["level"] == "HIGH" else (st.warning if _t["level"] == "ELEVATED" else st.success)
+        _rfn(f"{_r['remoji']} **{_r['headline']}** · 🌪️ Big-move: **{_t['level']}** · 🧭 Direction: **{_d['lean']}** _(low conf)_")
+        st.caption(f"{_t['text']}")
+        if _nd:
+            st.caption(f"📅 **Next session:** {_nd['text']}")
+    except Exception as _e:
+        st.caption(f"Weather unavailable: {_e}")
+
+    # ── 2. MY BOOK ─────────────────────────────────────────────────
+    st.markdown("#### 💼 My Book")
+    try:
+        _bc = get_conn()
+        try:
+            _tr = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", _bc)
+        finally:
+            _bc.close()
+        if _tr.empty:
+            st.caption("No open positions. Add trades on the Portfolio page.")
+        else:
+            _rows = []; _total = 0.0; _exp5 = 0
+            for _, _t2 in _tr.iterrows():
+                _tk = str(_t2.get("ticker", "")).upper(); _k = float(_t2.get("strike", 0))
+                _exp = str(_t2.get("expiry", "")); _opt = str(_t2.get("option_type", "CALL")).upper()
+                _qty = int(_t2.get("quantity", 1)); _ep = float(_t2.get("entry_price", 0))
+                _spot = _db_spot(_tk) or (_cached_price(_tk) or 0.0)
+                try:
+                    _dte = max((datetime.strptime(_exp, "%Y-%m-%d").date() - datetime.now().date()).days, 0)
+                except Exception:
+                    _dte = None
+                _cp = None
+                try:
+                    _mid, _ = _fetch_option_mid(_tk, _exp, _k, _opt)
+                    if _mid:
+                        _cp = _mid
+                    elif _dte and _spot:
+                        _cp = bs_greeks(_spot, _k, _dte / 365, 0.045, _historical_vol(_tk), _opt.lower())["price"]
+                except Exception:
+                    _cp = None
+                _pnl = (_cp - _ep) * _qty * 100 if _cp is not None else None
+                if _pnl is not None:
+                    _total += _pnl
+                if _dte is not None and _dte <= 5:
+                    _exp5 += 1
+                _rows.append({"": "⏳" if (_dte is not None and _dte <= 5) else "",
+                              "Ticker": _tk, "Opt": f"{_k:g}{_opt[0]}", "Qty": _qty, "DTE": _dte,
+                              "Entry": round(_ep, 2), "Now": round(_cp, 2) if _cp else None,
+                              "P&L $": round(_pnl) if _pnl is not None else None})
+            _k1, _k2, _k3 = st.columns(3)
+            _k1.metric("Open P&L", f"${_total:,.0f}")
+            _k2.metric("Positions", len(_tr))
+            _k3.metric("Expiring ≤5d", _exp5)
+            _bdf = pd.DataFrame(_rows)
+            st.dataframe(_bdf.sort_values("DTE", na_position="last"), hide_index=True, use_container_width=True)
+    except Exception as _e:
+        st.caption(f"Book unavailable: {_e}")
+
+    # ── 3. TOP IDEAS (⭐ consensus) ─────────────────────────────────
+    st.markdown("#### 💡 Top Ideas")
+    try:
+        _ideas, _d0 = _cc_ideas()
+        if _ideas:
+            _star = [i for i in _ideas if i.get("⭐")]
+            _show = (_star or _ideas)[:8]
+            st.dataframe(pd.DataFrame([{"⭐": i.get("⭐", ""), "Ticker": i["Ticker"], "Bias": i["Bias"],
+                                        "Source": i["Source"], "Trade": i["Trade"]} for i in _show]),
+                         hide_index=True, use_container_width=True)
+            st.caption(f"{len(_star)} consensus (⭐) of {len(_ideas)} ideas · snapshot {_d0} · full list on 💡 Action Board")
+        else:
+            st.caption("No actionable ideas in the latest snapshot.")
+    except Exception as _e:
+        st.caption(f"Ideas unavailable: {_e}")
+
+    # ── 4. FIRED TODAY ─────────────────────────────────────────────
+    st.markdown("#### 🔔 Fired Today")
+    try:
+        _fc = get_conn()
+        try:
+            _md = pd.read_sql("SELECT MAX(trade_date) d FROM signal_accuracy", _fc)["d"].iloc[0]
+            _fr = (pd.read_sql("SELECT model_name,ticker,signal FROM signal_accuracy WHERE trade_date=?",
+                               _fc, params=(_md,)) if _md else pd.DataFrame())
+        finally:
+            _fc.close()
+        if _fr is not None and not _fr.empty:
+            _bull = int((_fr.signal == "BULL").sum()); _bear = int((_fr.signal == "BEAR").sum())
+            st.caption(f"**{_md}** — {len(_fr)} scanner fires · 🟢 {_bull} bull · 🔴 {_bear} bear")
+            _top = (_fr[_fr.signal.isin(["BULL", "BEAR"])].groupby(["ticker", "signal"]).size()
+                    .reset_index(name="fires").sort_values("fires", ascending=False).head(10))
+            st.dataframe(_top, hide_index=True, use_container_width=True)
+        else:
+            st.caption("No scanner fires logged yet.")
+    except Exception as _e:
+        st.caption(f"Fires unavailable: {_e}")
+
 # ===================================================================
 elif page == "💼 Portfolio & Suggestions":
     _page_header("💼 Portfolio & Suggestions", _PAGE_HELP["💼 Portfolio & Suggestions"])

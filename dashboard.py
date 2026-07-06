@@ -17963,9 +17963,10 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
                     continue
                 ror = cr / max(K - cr, 0.01) * 100
                 out.append({"Ticker": tk, "Strategy": "Cash-secured put (sell)", "DTE": dte,
-                            "Legs": f"Sell {K:g}P", "POP %": round(pop * 100, 1), "Credit/Debit": f"+${cr:.2f}",
+                            "Expiry": exp, "Legs": f"Sell {K:g}P", "POP %": round(pop * 100, 1), "Credit/Debit": f"+${cr:.2f}",
                             "Max profit": f"${cr*100:,.0f}", "Max loss": f"${(K-cr)*100:,.0f}",
-                            "Ret/risk": f"{ror:.1f}%", "Breakeven": f"${K-cr:.2f}", "_pop": pop, "_ror": ror})
+                            "Ret/risk": f"{ror:.1f}%", "Breakeven": f"${K-cr:.2f}", "_pop": pop, "_ror": ror,
+                            "_exp": exp, "_spot0": spot, "_k1": K, "_k2": 0.0, "_net": cr})
                 # put credit spread off the same short strike
                 if i + 2 < len(pl):
                     Kl = float(pl.loc[i + 2, "strike"]); cl = float(pl.loc[i + 2, "mid"])
@@ -17973,10 +17974,11 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
                     if net > 0.03 and width > 0:
                         ror2 = net / max(width - net, 0.01) * 100
                         out.append({"Ticker": tk, "Strategy": "Put credit spread (sell)", "DTE": dte,
-                                    "Legs": f"Sell {K:g}P / Buy {Kl:g}P", "POP %": round(pop * 100, 1),
+                                    "Expiry": exp, "Legs": f"Sell {K:g}P / Buy {Kl:g}P", "POP %": round(pop * 100, 1),
                                     "Credit/Debit": f"+${net:.2f}", "Max profit": f"${net*100:,.0f}",
                                     "Max loss": f"${(width-net)*100:,.0f}", "Ret/risk": f"{ror2:.1f}%",
-                                    "Breakeven": f"${K-net:.2f}", "_pop": pop, "_ror": ror2})
+                                    "Breakeven": f"${K-net:.2f}", "_pop": pop, "_ror": ror2,
+                                    "_exp": exp, "_spot0": spot, "_k1": K, "_k2": Kl, "_net": net})
                 break
 
             # ── call credit spread (sell) ──
@@ -17997,10 +17999,11 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
                     if net > 0.03 and width > 0:
                         ror = net / max(width - net, 0.01) * 100
                         out.append({"Ticker": tk, "Strategy": "Call credit spread (sell)", "DTE": dte,
-                                    "Legs": f"Sell {K:g}C / Buy {Kl:g}C", "POP %": round(pop * 100, 1),
+                                    "Expiry": exp, "Legs": f"Sell {K:g}C / Buy {Kl:g}C", "POP %": round(pop * 100, 1),
                                     "Credit/Debit": f"+${net:.2f}", "Max profit": f"${net*100:,.0f}",
                                     "Max loss": f"${(width-net)*100:,.0f}", "Ret/risk": f"{ror:.1f}%",
-                                    "Breakeven": f"${K+net:.2f}", "_pop": pop, "_ror": ror})
+                                    "Breakeven": f"${K+net:.2f}", "_pop": pop, "_ror": ror,
+                                    "_exp": exp, "_spot0": spot, "_k1": K, "_k2": Kl, "_net": net})
                 break
 
             # ── deep-ITM call debit spread (buying, high POP) ──
@@ -18015,14 +18018,123 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
                     if pop and pop >= min_pop:
                         ror = (width - net) / net * 100
                         out.append({"Ticker": tk, "Strategy": "ITM call debit spread (buy)", "DTE": dte,
-                                    "Legs": f"Buy {Kb:g}C / Sell {Ks:g}C", "POP %": round(pop * 100, 1),
+                                    "Expiry": exp, "Legs": f"Buy {Kb:g}C / Sell {Ks:g}C", "POP %": round(pop * 100, 1),
                                     "Credit/Debit": f"-${net:.2f}", "Max profit": f"${(width-net)*100:,.0f}",
                                     "Max loss": f"${net*100:,.0f}", "Ret/risk": f"{ror:.1f}%",
-                                    "Breakeven": f"${be:.2f}", "_pop": pop, "_ror": ror})
+                                    "Breakeven": f"${be:.2f}", "_pop": pop, "_ror": ror,
+                                    "_exp": exp, "_spot0": spot, "_k1": Kb, "_k2": Ks, "_net": net})
         except Exception:
             continue
     out.sort(key=lambda d: (-d["_pop"], -d["_ror"]))
     return out
+
+
+# ── High-Prob RECOMMENDATION TRACKER: every scan result auto-logged as a paper trade,
+#    settled at expiry from DB closes, scored win/loss + P&L on the same page ──────────
+def _hiprob_ensure(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS hiprob_recs(
+        rec_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rec_date TEXT, ticker TEXT, strategy TEXT, legs TEXT,
+        expiry TEXT, dte INTEGER, pop REAL, ror REAL,
+        k1 REAL, k2 REAL, net REAL, spot0 REAL, capital REAL,
+        status TEXT DEFAULT 'OPEN', settle_px REAL, pnl REAL,
+        UNIQUE(rec_date, ticker, strategy, legs, expiry))""")
+    c.commit()
+
+
+def _hiprob_capital(strategy, k1, k2, net):
+    """Capital at risk per 1 lot = the max loss (collateral for CSP)."""
+    if "Cash-secured" in strategy:
+        return (k1 - net) * 100
+    if "Put credit" in strategy:
+        return (k1 - k2 - net) * 100
+    if "Call credit" in strategy:
+        return (k2 - k1 - net) * 100
+    return net * 100                       # debit spread: risk = debit paid
+
+
+def _hiprob_pnl(strategy, k1, k2, net, S):
+    """P&L per 1 lot held to expiry, settled at underlying close S."""
+    if "Cash-secured" in strategy:
+        return (net if S >= k1 else S - k1 + net) * 100
+    if "Put credit" in strategy:
+        w = k1 - k2
+        return (net if S >= k1 else (-(w - net) if S <= k2 else S - k1 + net)) * 100
+    if "Call credit" in strategy:
+        w = k2 - k1
+        return (net if S <= k1 else (-(w - net) if S >= k2 else k1 - S + net)) * 100
+    if "debit" in strategy:
+        w = k2 - k1
+        return (min(max(S - k1, 0.0), w) - net) * 100
+    return None
+
+
+def _hiprob_persist(res):
+    """Log today's scan results (INSERT OR IGNORE → same rec counted once per day)."""
+    if not res:
+        return 0
+    today = datetime.now().strftime("%Y-%m-%d")
+    n = 0
+    with get_conn() as c:
+        _hiprob_ensure(c)
+        for d in res:
+            try:
+                cap = _hiprob_capital(d["Strategy"], d["_k1"], d["_k2"], d["_net"])
+                c.execute("INSERT OR IGNORE INTO hiprob_recs(rec_date,ticker,strategy,legs,expiry,"
+                          "dte,pop,ror,k1,k2,net,spot0,capital) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (today, d["Ticker"], d["Strategy"], d["Legs"], d["_exp"], int(d["DTE"]),
+                           float(d["_pop"]) * 100, float(d["_ror"]), float(d["_k1"]),
+                           float(d["_k2"]), float(d["_net"]), float(d["_spot0"]), float(cap)))
+                n += c.execute("SELECT changes()").fetchone()[0]
+            except Exception:
+                continue
+        c.commit()
+    return n
+
+
+def _hiprob_settle_px(c, tk, expiry):
+    """Underlying close ON (or last session before) expiry — DB-first (stock_history
+    then stock_daily; both MM-DD-YYYY), yfinance only if the DB has nothing usable."""
+    ek = str(expiry).replace("-", "")           # YYYY-MM-DD -> YYYYMMDD sort key
+    srt = "substr(trade_date,7,4)||substr(trade_date,1,2)||substr(trade_date,4,2)"
+    for tbl in ("stock_history", "stock_daily"):
+        try:
+            r = c.execute(f"SELECT close, {srt} FROM {tbl} WHERE UPPER(ticker)=? AND {srt}<=? "
+                          f"ORDER BY {srt} DESC LIMIT 1", (tk.upper(), ek)).fetchone()
+            if r and r[0] and r[1] >= (pd.Timestamp(expiry) - pd.Timedelta(days=7)).strftime("%Y%m%d"):
+                return float(r[0])
+        except Exception:
+            continue
+    try:                                        # last resort: yfinance daily bar at expiry
+        h = yf.Ticker(tk).history(start=pd.Timestamp(expiry) - pd.Timedelta(days=7),
+                                  end=pd.Timestamp(expiry) + pd.Timedelta(days=1))
+        if len(h):
+            return float(h["Close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def _hiprob_settle():
+    """Settle every OPEN rec whose expiry has passed: WIN/LOSS + realized P&L."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    n = 0
+    with get_conn() as c:
+        _hiprob_ensure(c)
+        rows = c.execute("SELECT rec_id, ticker, strategy, k1, k2, net, expiry FROM hiprob_recs "
+                         "WHERE status='OPEN' AND expiry < ?", (today,)).fetchall()
+        for rid, tk, strat, k1, k2, net, expiry in rows:
+            S = _hiprob_settle_px(c, tk, expiry)
+            if S is None:
+                continue                          # no close yet — try again next load
+            pnl = _hiprob_pnl(strat, float(k1), float(k2), float(net), S)
+            if pnl is None:
+                continue
+            c.execute("UPDATE hiprob_recs SET status=?, settle_px=?, pnl=? WHERE rec_id=?",
+                      ("WIN" if pnl >= 0 else "LOSS", S, round(pnl, 2), rid))
+            n += 1
+        c.commit()
+    return n
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -18864,16 +18976,34 @@ if page == "🎯 High-Prob Options":
     except Exception:
         pass
     _hc1, _hc2, _hc3 = st.columns([3, 1, 1])
-    _tks = _hc1.text_input("Tickers (comma-separated)", value=", ".join(_defu)).upper()
+    _tks = _hc1.text_input("Tickers (comma-separated, or ALL = whole DB universe)",
+                           value=", ".join(_defu)).upper()
     _minpop = _hc2.slider("Min POP %", 70, 95, 80, 1)
     _dtew = _hc3.select_slider("Target DTE", options=["7-21", "20-45", "30-60", "45-90"], value="20-45")
     _lo, _hi = (int(x) for x in _dtew.split("-"))
     if st.button("🔎 Scan for setups", type="primary"):
-        _tickers = tuple([t.strip() for t in _tks.split(",") if t.strip()][:12])
-        with st.spinner("Scanning option chains…"):
+        _tlist = [t.strip() for t in _tks.split(",") if t.strip()]
+        if "ALL" in _tlist:                      # full universe from the DB (~92 names)
+            try:
+                with get_conn() as _c:
+                    _tlist = [r[0].upper() for r in _c.execute(
+                        "SELECT DISTINCT ticker FROM stock_daily").fetchall()]
+                st.caption(f"Scanning the full universe: {len(_tlist)} tickers (~1-2s each — grab a coffee).")
+            except Exception:
+                _tlist = _defu
+            _tickers = tuple(_tlist[:100])
+        else:
+            _tickers = tuple(_tlist[:20])
+        with st.spinner(f"Scanning option chains ({len(_tickers)} tickers)…"):
             _res = _hiprob_scan(_tickers, _lo, _hi, _minpop / 100.0)
         st.session_state["_hiprob_res"] = _res
         st.session_state["_hiprob_meta"] = (_minpop, _dtew)
+        try:                                     # 📒 auto-log every suggestion as a paper trade
+            _new_n = _hiprob_persist(_res)
+            if _new_n:
+                st.toast(f"📒 {_new_n} new recommendation(s) logged to the tracker below")
+        except Exception as _e:
+            st.caption(f"(tracker logging failed: {_e})")
     _res = st.session_state.get("_hiprob_res")
     if _res is not None:
         if not _res:
@@ -18889,6 +19019,117 @@ if page == "🎯 High-Prob Options":
                        "trade is profitable at expiry under the IV-implied distribution; it is not a guarantee.")
     else:
         st.info("Pick tickers + min POP, then **Scan for setups**.")
+
+    # ═══════════ 📒 RECOMMENDATION TRACKER — every past suggestion, scored ═══════════
+    st.markdown("---")
+    st.markdown("### 📒 Recommendation Tracker — as if you took every trade")
+    st.caption("Every scan's suggestions are auto-logged (once per rec/day, 1 lot each) and settled at "
+               "expiry against the underlying's DB close: sells win if the short strike holds, spreads "
+               "settle at intrinsic. Paper results — assumes exact mid fills, held to expiry.")
+    try:
+        _stl = _hiprob_settle()
+        if _stl:
+            st.caption(f"⚖️ settled {_stl} newly-expired recommendation(s)")
+        with get_conn() as _c:
+            _hiprob_ensure(_c)
+            _tr = pd.read_sql("SELECT * FROM hiprob_recs ORDER BY rec_date DESC, rec_id DESC", _c)
+    except Exception as _e:
+        _tr = pd.DataFrame()
+        st.caption(f"(tracker unavailable: {_e})")
+
+    if _tr.empty:
+        st.info("No recommendations logged yet — run a scan above and they'll start accumulating here.")
+    else:
+        # ── filters (each one lets you trace P&L for that slice) ──
+        _f1, _f2, _f3, _f4, _f5 = st.columns([2, 2, 1.4, 1.4, 1.6])
+        _ftk = _f1.multiselect("Ticker", sorted(_tr["ticker"].unique()), default=[],
+                               placeholder="All tickers")
+        _fst = _f2.multiselect("Strategy", sorted(_tr["strategy"].unique()), default=[],
+                               placeholder="All strategies")
+        _fss = _f3.multiselect("Status", ["OPEN", "WIN", "LOSS"], default=[],
+                               placeholder="All")
+        _fpop = _f4.slider("POP ≥", 70, 99, 70, 1, key="hp_trk_pop")
+        _fdays = _f5.selectbox("Recommended within", ["All time", "Last 7 days", "Last 30 days", "Last 90 days"])
+        _v = _tr.copy()
+        if _ftk:
+            _v = _v[_v["ticker"].isin(_ftk)]
+        if _fst:
+            _v = _v[_v["strategy"].isin(_fst)]
+        if _fss:
+            _v = _v[_v["status"].isin(_fss)]
+        _v = _v[pd.to_numeric(_v["pop"], errors="coerce") >= _fpop]
+        if _fdays != "All time":
+            _nd = {"Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90}[_fdays]
+            _v = _v[pd.to_datetime(_v["rec_date"]) >= pd.Timestamp.now() - pd.Timedelta(days=_nd)]
+
+        # ── headline scoreboard for the filtered slice ──
+        _set = _v[_v["status"].isin(["WIN", "LOSS"])]
+        _wins = int((_set["status"] == "WIN").sum()); _loss = int((_set["status"] == "LOSS").sum())
+        _pnl = float(pd.to_numeric(_set["pnl"], errors="coerce").fillna(0).sum())
+        _cap_open = float(pd.to_numeric(_v.loc[_v["status"] == "OPEN", "capital"], errors="coerce").fillna(0).sum())
+        _cap_set = float(pd.to_numeric(_set["capital"], errors="coerce").fillna(0).sum())
+        _m1, _m2, _m3, _m4, _m5 = st.columns(5)
+        _m1.metric("Recommendations", f"{len(_v):,}", f"{int((_v['status']=='OPEN').sum())} open")
+        _m2.metric("Settled W–L", f"{_wins}–{_loss}",
+                   f"{_wins/max(_wins+_loss,1)*100:.0f}% win rate")
+        _m3.metric("Realized P&L", f"${_pnl:+,.0f}",
+                   f"{_pnl/max(_cap_set,1)*100:+.1f}% on settled capital" if _cap_set else None)
+        _m4.metric("Capital settled", f"${_cap_set:,.0f}")
+        _m5.metric("Capital at risk (open)", f"${_cap_open:,.0f}")
+
+        # ── P&L by period: daily / weekly / monthly ──
+        _tabD, _tabW, _tabM, _tabF = st.tabs(["📅 Daily", "🗓 Weekly", "📆 Monthly", "🔬 By filter"])
+        if not _set.empty:
+            _sp = _set.copy()
+            _sp["pnl"] = pd.to_numeric(_sp["pnl"], errors="coerce").fillna(0)
+            _sp["capital"] = pd.to_numeric(_sp["capital"], errors="coerce").fillna(0)
+            _sp["_d"] = pd.to_datetime(_sp["rec_date"])
+
+            def _agg(g):
+                w = int((g["status"] == "WIN").sum()); n = len(g)
+                return pd.Series({"Recs": n, "Wins": w, "Losses": n - w,
+                                  "Win %": round(w / max(n, 1) * 100, 1),
+                                  "Capital $": round(g["capital"].sum()),
+                                  "P&L $": round(g["pnl"].sum(), 2),
+                                  "Ret on cap %": round(g["pnl"].sum() / max(g["capital"].sum(), 1) * 100, 2)})
+            for _tab, _key, _fmt in ((_tabD, _sp["_d"].dt.strftime("%Y-%m-%d"), "day"),
+                                     (_tabW, _sp["_d"].dt.to_period("W").astype(str), "week"),
+                                     (_tabM, _sp["_d"].dt.strftime("%Y-%m"), "month")):
+                with _tab:
+                    _g = _sp.groupby(_key).apply(_agg, include_groups=False).reset_index(names=_fmt)
+                    st.dataframe(_g.sort_values(_fmt, ascending=False), hide_index=True,
+                                 use_container_width=True)
+        else:
+            for _tab in (_tabD, _tabW, _tabM):
+                with _tab:
+                    st.caption("Nothing settled yet in this slice — results appear once recs expire.")
+        with _tabF:
+            if _set.empty:
+                st.caption("Nothing settled yet — per-filter scores appear once recs expire.")
+            else:
+                _c1, _c2 = st.columns(2)
+                for _col, _dim in ((_c1, "strategy"), (_c2, "ticker")):
+                    with _col:
+                        st.markdown(f"**P&L by {_dim}**")
+                        _g = _sp.groupby(_dim).apply(_agg, include_groups=False).reset_index()
+                        st.dataframe(_g.sort_values("P&L $", ascending=False), hide_index=True,
+                                     use_container_width=True)
+
+        # ── the full ledger (filtered) ──
+        st.markdown("**All recommendations (newest first)**")
+        _disp = _v[["rec_date", "ticker", "strategy", "legs", "expiry", "dte", "pop", "net",
+                    "spot0", "capital", "status", "settle_px", "pnl"]].rename(columns={
+            "rec_date": "Rec date", "ticker": "Ticker", "strategy": "Strategy", "legs": "Legs",
+            "expiry": "Expiry", "dte": "DTE", "pop": "POP %", "net": "Cr/Db $",
+            "spot0": "Spot @rec", "capital": "Capital $", "status": "Status",
+            "settle_px": "Settle px", "pnl": "P&L $"})
+        _disp["Status"] = _disp["Status"].map({"OPEN": "⏳ OPEN", "WIN": "🟢 WIN", "LOSS": "🔴 LOSS"}).fillna(_disp["Status"])
+        st.dataframe(_disp, hide_index=True, use_container_width=True,
+                     column_config={"POP %": st.column_config.NumberColumn(format="%.0f%%"),
+                                    "Capital $": st.column_config.NumberColumn(format="$%.0f"),
+                                    "P&L $": st.column_config.NumberColumn(format="$%.0f")})
+        st.caption("💡 Trace any slice: pick a ticker/strategy/status/POP filter above — the scoreboard, "
+                   "period tables and ledger all follow the filter. WIN = P&L ≥ 0 at expiry settle.")
 
 
 def _spread_default_tickers():

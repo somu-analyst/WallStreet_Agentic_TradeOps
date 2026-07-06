@@ -23274,6 +23274,22 @@ async def rotate_alert(ctx: ContextTypes.DEFAULT_TYPE):
         log.warning(f"rotate_alert send failed: {e}")
 
 
+async def antibubble_daily(ctx: ContextTypes.DEFAULT_TYPE):
+    """Silent daily job — scan the default universe and log traps/anti-bubble picks to
+    antibubble_watch so the /antibubble tracker scoreboard builds without manual runs.
+    No Telegram push (keeps it quiet); just accrues the forward-tracking baskets."""
+    conn = get_conn()
+    try:
+        res = _antibubble_scan(conn)
+        n = _antibubble_track(conn, res)
+        log.info(f"antibubble_daily: logged {n} new picks "
+                 f"({len(res['traps'])} traps, {len(res['anti'])} anti-bubble)")
+    except Exception as e:
+        log.warning(f"antibubble_daily failed: {e}")
+    finally:
+        conn.close()
+
+
 async def riskoff_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """Auto Market Radar push — fires once on bot startup and daily post-close.
     Two gauges: TURBULENCE (index put-flow → move size; the backtested signal) +
@@ -26681,6 +26697,7 @@ def main():
         job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # weekly sector rotation, Mondays
         job_queue.run_once(riskoff_alert, when=25)                    # Risk-Off Radar readout ~on startup
         job_queue.run_daily(riskoff_alert, time=dt_time(21, 20, 0), data={"gate": True})  # post-close ~4:20 PM ET, only if caution+
+        job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # ~4:35 PM ET — silently log anti-bubble baskets for tracking
         log.info("Scheduled Risk-Off Radar (startup + post-close)")
         log.info("Scheduled morning alert at 9:00 AM ET daily")
         # 15-min intraday alert (fires every 15 min; function checks market hours internally)

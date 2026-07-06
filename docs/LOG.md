@@ -2,6 +2,30 @@
 
 > Append newest at top. Recap here every ~10–20 messages and before any context reset.
 
+## 2026-07-06 — Market Radar: built, backtested, redesigned (turbulence gauge)
+- **Investigated the Jul-2 tech/semis selloff** (SMH −5.4%, QQQ −2.1%, SPY −0.36%, VIX flat 16.7 =
+  narrow flush, not broad). Found the bot's own scanners had logged BEAR fires on the index/semis
+  complex from 07-01 EOD (`scn_uoa` SPY/QQQ/IWM/SMH, `scn_building` QQQ) — so the signal was there.
+- **Done (feature, bot + dashboard):** `/riskoff` **Market Radar** — plain-English readout + a
+  next-session SPY game plan (gamma walls: hold 740→755 / lose 740→729). Auto-push on startup
+  (once/day `alert_dedup` grp `market_radar`) + daily post-close gated on turbulence≥ELEVATED.
+  Menu entries added. `/rovalidate` = on-demand backtest (no scipy; rank corr via numpy).
+- **Done (validation — the important part):** backtested all 5 pillars vs ~6mo DB history (104 days,
+  fwd SPY/QQQ t+3/t+5). **Old composite 0-100 score = decoration** (Spearman +0.017, p=0.86).
+  Per-pillar: **index put-flow predicts move SIZE** (|QQQ| t+5 corr **+0.37, p<0.001**) — the one
+  real signal; **dealer-gamma+breadth** give a weak, correctly-signed (−0.15) but insignificant
+  DIRECTION lean; **froth/overbought is MOMENTUM here (+0.15), not reversal**; vol-underpriced is
+  contrarian. Scripts in scratchpad (`backtest_pillars.py`, `backtest_v2.py`).
+- **Decision:** rebuilt `_riskoff_scan` into a **two-gauge** model — Turbulence (proven, primary) +
+  soft low-confidence Direction lean; froth/VRP demoted to "context (not proven)". Honest framing:
+  "big move brewing, direction unreliable" beats a fake "71/100 RISK-OFF".
+- **Decision:** **OpenBB stays a PARALLEL test lane only** — removed `_fetch_openbb_history` from the
+  live `_daily_history` backfill (yfinance-only in bot); OpenBB isolated in `NYSE_OpenBB*.py`. Added
+  `NYSE_OpenBB_EOD.py` (EOD price puller → `stock_history`, run manually). CLAUDE.md note updated.
+- **Git note:** my commits (7e90743→a0f1ad8) are ancestors of current HEAD e3fa26d; parallel work
+  layered on top — all Market Radar content verified present in HEAD, tree clean, both files parse.
+- **Pending (user actions):** restart bot + rerun Streamlit to deploy; `git push` if using a remote.
+
 ## 2026-07-03 — First stringent DB compare (Jul 2): OpenBB VALIDATED, yahoo OI exposed
 - **Contract-level audit** (17,615 shared contracts, 87 tickers): coverage 100% (0 yfinance
   contracts missing from openbb; openbb adds 646 extra tickers); lastPrice 98% within 2%;

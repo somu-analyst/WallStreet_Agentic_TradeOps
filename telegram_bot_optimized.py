@@ -10995,6 +10995,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await zrev_view(query)
         elif data == "riskoff_view":
             await riskoff_view(query)
+        elif data == "antibubble_view":
+            await antibubble_view(query)
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -21282,6 +21284,249 @@ async def hiprob_view(query):
                                                                        InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
 
 
+# ── ANTI-BUBBLE RADAR — cyclical traps vs quality-below-intrinsic (UNIVERSAL) ──
+# Works for ANY ticker (yfinance price + fundamentals), not just the DB universe.
+# Thesis (Khoo "great repricing"): crowded/vertical/peak-earnings cyclicals crack
+# first; rotate into wide-moat, durable-earnings names trading below intrinsic value.
+_AB_UNIVERSE = [
+    # mega-cap quality / tech
+    "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "NVDA", "AVGO", "ORCL", "CRM",
+    "ADBE", "CSCO", "ACN", "TXN", "QCOM", "AMD", "INTC", "IBM", "NOW", "INTU",
+    # financials
+    "JPM", "BAC", "WFC", "GS", "MS", "V", "MA", "AXP", "BRK-B", "BLK", "SPGI",
+    # health
+    "UNH", "JNJ", "LLY", "MRK", "ABBV", "PFE", "TMO", "ABT", "DHR", "AMGN", "ISRG",
+    # consumer
+    "WMT", "COST", "PG", "KO", "PEP", "MCD", "HD", "LOW", "NKE", "SBUX", "DIS",
+    # industrial / energy / materials
+    "CAT", "DE", "HON", "UNP", "GE", "XOM", "CVX", "COP", "FCX", "NEM", "LIN",
+    # crowded / cyclical / momentum suspects (the "trap" candidates)
+    "MU", "STX", "WDC", "MRVL", "SMCI", "MSTR", "COIN", "MARA", "IREN", "NBIS",
+    "SOXL", "SMH", "ARM", "PLTR",
+]
+
+
+def _ab_fundamentals(tk, conn):
+    """yfinance .info fundamentals for ANY ticker, cached daily in fundamentals_cache."""
+    import json as _json, datetime as _dt
+    today = _dt.date.today().isoformat()
+    conn.execute("CREATE TABLE IF NOT EXISTS fundamentals_cache "
+                 "(ticker TEXT PRIMARY KEY, asof TEXT, data TEXT)")
+    row = conn.execute("SELECT asof, data FROM fundamentals_cache WHERE ticker=?", (tk,)).fetchone()
+    if row and row[0] == today:
+        try:
+            return _json.loads(row[1])
+        except Exception:
+            pass
+    try:
+        import yfinance as yf
+        i = yf.Ticker(tk).info or {}
+    except Exception:
+        return None
+    if not i or not (i.get("currentPrice") or i.get("regularMarketPrice")):
+        return None
+    price = i.get("currentPrice") or i.get("regularMarketPrice")
+    tgt = i.get("targetMeanPrice")
+    sec = i.get("sector") or ""; ind = (i.get("industry") or "").lower()
+    cyc = (sec in ("Technology", "Energy", "Basic Materials")) or any(
+        k in ind for k in ("semiconductor", "memory", "hardware", "equipment", "oil", "gas",
+                            "copper", "steel", "mining", "materials", "crypto", "coal", "uranium"))
+    d = {"fpe": i.get("forwardPE"), "tpe": i.get("trailingPE"), "peg": i.get("pegRatio"),
+         "roe": i.get("returnOnEquity"), "margin": i.get("profitMargins"), "de": i.get("debtToEquity"),
+         "fcf": i.get("freeCashflow"), "rev": i.get("revenueGrowth"), "beta": i.get("beta"),
+         "target": tgt, "price": price, "sector": sec,
+         "upside": (tgt / price - 1) if (tgt and price) else None, "cyclical": cyc}
+    try:
+        conn.execute("INSERT OR REPLACE INTO fundamentals_cache (ticker, asof, data) VALUES (?,?,?)",
+                     (tk, today, _json.dumps(d)))
+        conn.commit()
+    except Exception:
+        pass
+    return d
+
+
+def _ab_price_metrics(tk, conn):
+    """Momentum/extension for ANY ticker — DB-first via _daily_history, yfinance backfill."""
+    import numpy as _np
+    h = _daily_history(tk, 2, conn)
+    if h is None or len(h) < 60:
+        return None
+    s = list(h)
+    px = float(s[-1]); ma200 = float(_np.mean(s[-200:])); hi = float(max(s[-252:]))
+    ago = float(s[-253] if len(s) >= 253 else s[0])
+    if ma200 <= 0 or hi <= 0 or ago <= 0:
+        return None
+    return {"px": px, "ret1y": px / ago - 1, "ext200": px / ma200 - 1, "from_hi": px / hi - 1}
+
+
+def _ab_score(m, f):
+    """Quality + Value + Trap scores (0-100) and a class, from validated rubric."""
+    clip = lambda x, lo, hi: max(lo, min(hi, x))
+    mean = lambda xs: sum(xs) / len(xs)
+    roe, mgn, de = f.get("roe"), f.get("margin"), f.get("de")
+    fcf, rev, beta = f.get("fcf"), f.get("rev"), f.get("beta")
+    fpe, tpe, peg, up = f.get("fpe"), f.get("tpe"), f.get("peg"), f.get("upside")
+    Q = mean([clip((roe or 0) / 0.25, 0, 1), clip((mgn or 0) / 0.22, 0, 1),
+              clip((150 - (de if de is not None else 150)) / 150, 0, 1),
+              1.0 if (fcf or 0) > 0 else 0.0, clip(((rev or 0) + 0.05) / 0.25, 0, 1)]) * 100
+    V = mean([clip((28 - (fpe if fpe else 40)) / 20, 0, 1),
+              clip((2.5 - (peg if peg else 3)) / 2.0, 0, 1),
+              clip((up if up is not None else 0) / 0.25, 0, 1)]) * 100
+    peak = 1.0 if (fpe and tpe and fpe < 0.6 * tpe) else 0.0     # fwd<<trailing = peak-earnings extrapolation
+    T = mean([clip((m["ext200"] - 0.10) / 0.40, 0, 1), clip((m["ret1y"] - 0.30) / 1.20, 0, 1),
+              clip(((beta or 1) - 1.0) / 1.2, 0, 1), 1.0 if f.get("cyclical") else 0.0, peak]) * 100
+    extended = (m["ext200"] >= 0.20) or (m["ret1y"] >= 0.60)     # must be a vertical chart to be a trap
+    if extended and T >= 55:
+        cls = "TRAP"
+    elif Q >= 60 and V >= 50 and not extended and T < 50:
+        cls = "ANTIBUBBLE"
+    elif Q >= 60:
+        cls = "QUALITY"
+    else:
+        cls = "NEUTRAL"
+    return round(Q), round(V), round(T), cls
+
+
+def _antibubble_scan(conn, tickers=None):
+    """Screen ANY tickers into cyclical traps vs anti-bubble quality. Universal."""
+    tks = list(dict.fromkeys([t.upper() for t in (tickers or _AB_UNIVERSE)]))
+    rows = []
+    for tk in tks:
+        try:
+            m = _ab_price_metrics(tk, conn)
+            f = _ab_fundamentals(tk, conn)
+            if not m or not f:
+                continue
+            Q, V, T, cls = _ab_score(m, f)
+            rows.append({"tk": tk, "Q": Q, "V": V, "T": T, "cls": cls, "px": m["px"],
+                         "ret1y": m["ret1y"], "ext200": m["ext200"], "up": f.get("upside"),
+                         "fpe": f.get("fpe"), "beta": f.get("beta"), "sector": f.get("sector")})
+        except Exception:
+            continue
+    return {"traps": sorted([r for r in rows if r["cls"] == "TRAP"], key=lambda r: -r["T"]),
+            "anti": sorted([r for r in rows if r["cls"] == "ANTIBUBBLE"], key=lambda r: -(r["Q"] + r["V"])),
+            "quality": sorted([r for r in rows if r["cls"] == "QUALITY"], key=lambda r: -r["Q"]),
+            "all": rows}
+
+
+def _ensure_ab_watch(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS antibubble_watch (
+        add_date TEXT, ticker TEXT, cls TEXT, add_price REAL, q REAL, v REAL, t REAL,
+        PRIMARY KEY (add_date, ticker))""")
+    conn.commit()
+
+
+def _antibubble_track(conn, res):
+    """Log today's traps + anti-bubble picks once/day (PK dedup) for forward tracking."""
+    import datetime as _dt
+    _ensure_ab_watch(conn)
+    today = _dt.date.today().isoformat(); n = 0
+    for r in res["traps"] + res["anti"]:
+        try:
+            c = conn.execute("INSERT OR IGNORE INTO antibubble_watch "
+                             "(add_date, ticker, cls, add_price, q, v, t) VALUES (?,?,?,?,?,?,?)",
+                             (today, r["tk"], r["cls"], r["px"], r["Q"], r["V"], r["T"]))
+            n += c.rowcount
+        except Exception:
+            pass
+    conn.commit()
+    return n
+
+
+def _antibubble_scoreboard(conn):
+    """Since-added performance per class (first entry per ticker) — validates the thesis over time."""
+    _ensure_ab_watch(conn)
+    df = pd.read_sql("SELECT add_date, ticker, cls, add_price FROM antibubble_watch", conn)
+    if df.empty:
+        return None
+    df = df.sort_values("add_date").groupby(["ticker", "cls"], as_index=False).first()
+    px_cache, recs = {}, []
+    for _, r in df.iterrows():
+        tk = r["ticker"]
+        if tk not in px_cache:
+            px_cache[tk] = _last_price(tk) or 0
+        cur = px_cache[tk]
+        if not cur or not r["add_price"]:
+            continue
+        recs.append({"ticker": tk, "cls": r["cls"], "add_date": r["add_date"], "ret": cur / r["add_price"] - 1})
+    if not recs:
+        return None
+    rd = pd.DataFrame(recs)
+
+    def _agg(c):
+        s = rd[rd.cls == c]
+        return (len(s), float(s.ret.mean()) if len(s) else None)
+    tn, tr = _agg("TRAP"); an, ar = _agg("ANTIBUBBLE")
+    return {"trap_n": tn, "trap_ret": tr, "anti_n": an, "anti_ret": ar,
+            "spread": (ar - tr) if (ar is not None and tr is not None) else None,
+            "since": rd.add_date.min(), "detail": rd.sort_values("ret")}
+
+
+def _fmt_antibubble(res, sb=None):
+    """Mobile-safe <pre> tables: cyclical traps + anti-bubble quality + tracker line."""
+    parts = ["🫧 <b>Anti-Bubble Radar</b>",
+             "<i>rotate from crowded cyclicals → quality below intrinsic value · not advice</i>"]
+    if res["traps"]:
+        rd = [(r["tk"], f"{r['ret1y']*100:+.0f}", f"{r['ext200']*100:+.0f}", f"{r['T']:.0f}")
+              for r in res["traps"][:10]]
+        parts.append(_pipe_table(("Tkr", "1yr%", "v200", "Trap"), rd, right_cols={1, 2, 3},
+                                 title="🔴 Cyclical traps · avoid / trim",
+                                 legend="1yr%=12mo return · v200=% above 200-day · Trap=froth score"))
+    if res["anti"]:
+        rd = [(r["tk"], f"{r['Q']:.0f}", f"{r['V']:.0f}", f"{(r['up'] or 0)*100:+.0f}")
+              for r in res["anti"][:10]]
+        parts.append(_pipe_table(("Tkr", "Qual", "Val", "Up%"), rd, right_cols={1, 2, 3},
+                                 title="🟢 Anti-bubble · accumulate",
+                                 legend="Qual=moat/earnings · Val=cheapness · Up%=analyst upside"))
+    if res["quality"]:
+        parts.append("🟡 <b>Quality but pricey:</b> " + ", ".join(r["tk"] for r in res["quality"][:12]))
+    if sb and (sb["anti_n"] or sb["trap_n"]):
+        bits = []
+        if sb["anti_ret"] is not None:
+            bits.append(f"🟢 anti {sb['anti_ret']*100:+.1f}% (n{sb['anti_n']})")
+        if sb["trap_ret"] is not None:
+            bits.append(f"🔴 traps {sb['trap_ret']*100:+.1f}% (n{sb['trap_n']})")
+        if sb["spread"] is not None:
+            bits.append(f"spread {sb['spread']*100:+.1f}%")
+        parts.append(f"📊 <b>Tracking since {sb['since']}:</b> " + " · ".join(bits))
+    return "\n\n".join(parts)
+
+
+async def antibubble_command(update, ctx):
+    """/antibubble [TICKERS] — cyclical traps vs anti-bubble quality (any tickers, universal)."""
+    args = list(getattr(ctx, "args", []) or [])
+    tks = [a.upper() for a in args] or None
+    await update.message.reply_text(
+        "🫧 Screening cyclical traps vs anti-bubble quality…\n"
+        "<i>(first run today pulls fundamentals — can take ~1 min; cached after)</i>", parse_mode=H)
+    conn = get_conn()
+    try:
+        res = _antibubble_scan(conn, tks)
+        _antibubble_track(conn, res)
+        sb = _antibubble_scoreboard(conn)
+    finally:
+        conn.close()
+    if not res["all"]:
+        await update.message.reply_text("No data — try <code>/antibubble AAPL NVDA MU</code>", parse_mode=H)
+        return
+    await update.message.reply_text(_fmt_antibubble(res, sb)[:4000], parse_mode=H,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="antibubble_view"),
+                                            InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def antibubble_view(query):
+    conn = get_conn()
+    try:
+        res = _antibubble_scan(conn)
+        _antibubble_track(conn, res)
+        sb = _antibubble_scoreboard(conn)
+    finally:
+        conn.close()
+    await query.message.reply_text(_fmt_antibubble(res, sb)[:4000], parse_mode=H,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="antibubble_view"),
+                                            InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
 # ── Spreads scanner (Bull Call · Bear Call · Bear Put), composite-scored ──────
 def _spreads_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=4):
     """Ranked vertical spreads. Returns list of compact mobile lines."""
@@ -26342,6 +26587,7 @@ async def _post_init(app):
             BotCommand("regime", "Market regime (VIX term)"),
             BotCommand("riskoff", "Market Radar — big-move risk + lean"),
             BotCommand("rovalidate", "Backtest the Market Radar"),
+            BotCommand("antibubble", "Cyclical traps vs anti-bubble quality"),
             BotCommand("squeeze", "Squeeze scan"),
             BotCommand("macro", "Macro (BLS + yields)"),
             BotCommand("earnings", "Earnings & news"),
@@ -26401,6 +26647,7 @@ def main():
     app.add_handler(CommandHandler("zrev", zrev_command))
     app.add_handler(CommandHandler("riskoff", riskoff_command))
     app.add_handler(CommandHandler("rovalidate", rovalidate_command))
+    app.add_handler(CommandHandler("antibubble", antibubble_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))

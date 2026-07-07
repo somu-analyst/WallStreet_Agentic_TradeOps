@@ -2,6 +2,21 @@
 
 > Append newest at top. Recap here every ~10–20 messages and before any context reset.
 
+## 2026-07-06 — Rotation Tracker built & VALIDATED (first signal that works)
+- **Built** `/rotation` (bot) + 🔄 Rotation Tracker (dashboard) — RRG money-flow, hierarchical
+  high→low: **Macro (CROSS-ASSET: eq/intl/bonds/credit/gold/commodities/crypto/$)** → Sectors →
+  Themes → Stocks. Axes vs SPY: strength (63d excess) × momentum (21d excess − strength/3) →
+  Leading/Weakening(out)/Improving(in)/Lagging. `rotation_watch` logs quadrants daily + flags
+  transitions; macro adds a risk-on/off tilt. Universal (DB-first + yfinance). Plotly RRG scatter.
+- **VALIDATED (backtests/rotation_backtest.py, 1,542 name-date obs):** momentum axis rank IC
+  **+0.138, p=5.5e-08**. 🟡 **Weakening (fading leaders = money leaving) underperforms −1.56%/10d
+  excess, only 33% beat SPY**; Improving−Weakening spread grows +1.7/+4.1/+6.6% at 5/10/20d.
+  **First clearly-validated signal of the session** (vs the rejected risk-off composite, vulnerability
+  score, pcp_dev). Caveat: ~6mo momentum regime — edge is momentum-driven, would fade in a sharp
+  mean-reversion/crash. Live read: cross-asset RISK-OFF; Semis/Tech rotating OUT → Fins/Indust/Health.
+- Note: this is the *proper* build of the "leader rolling over" idea that failed as a naive standalone —
+  as an RS-momentum quadrant tested on EXCESS returns, it works. See [[market-radar-backtest]].
+
 ## 2026-07-06 — "Vulnerability score" investigated & REJECTED (validation win)
 - **Trigger:** UNH −1.7% (07-02→07-06) rotational pullback. Ran UNH through the full battery
   (OI, GEX, 24-model ensemble, mean-rev, PCR): positioning read **complacent/bullish** into it

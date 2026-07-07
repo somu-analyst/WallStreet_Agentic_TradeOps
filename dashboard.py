@@ -4760,6 +4760,7 @@ def advanced_oi_analysis(df, ticker, spot, td_now, td_prev):
 # ──  SIDEBAR
 # ===================================================================
 _PAGE_HELP = {
+    "🔄 Rotation Tracker":       "Where money is rotating, high→low: Macro (CROSS-ASSET — equities vs bonds, gold, commodities, crypto, $) → Sectors → Themes/Industries → Stocks. RRG logic vs SPY on two axes — leadership (3mo excess) and momentum (improving vs fading) — placing each into Leading / Weakening (money leaving) / Improving (money entering) / Lagging. Visual rotation map + IN/OUT calls + a risk-on/off tilt, with daily transition tracking.",
     "🫧 Anti-Bubble Radar":      "Khoo-style 'great repricing' screen for ANY tickers — flags 🔴 cyclical traps (crowded, vertical, peak-earnings names like memory/semis) to avoid, and 🟢 anti-bubble quality (wide moat, durable earnings, below intrinsic value, not overextended) to accumulate. Picks are auto-tracked so you can see whether quality is beating cyclicals over time.",
     "🎛️ Command Center":         "Your whole system on ONE screen — market weather (Radar turbulence + direction + next-session SPY levels), your open book (live P&L, expiring soon), the top ⭐ consensus trade ideas, and what fired today. Start here; drill into other pages only when needed.",
     "🌍 Market Overview":        "Big-picture market snapshot. VIX, sector rotation, Fear & Greed, macro correlations, and top OI movers. Start here every morning.",
@@ -4798,6 +4799,7 @@ with st.sidebar:
         ],
         "📈 Markets & OI": [
             "🌍 Market Overview",
+            "🔄 Rotation Tracker",
             "🔬 OI Comparison Charts",
             "🔥 OI Analytics & Prediction",
         ],
@@ -7506,6 +7508,76 @@ elif page == "🎛️ Command Center":
             st.caption("No scanner fires logged yet.")
     except Exception as _e:
         st.caption(f"Fires unavailable: {_e}")
+
+# ===================================================================
+elif page == "🔄 Rotation Tracker":
+    _page_header("🔄 Rotation Tracker", _PAGE_HELP["🔄 Rotation Tracker"])
+    import telegram_bot_optimized as _rt_tbo
+    _rlvl = st.radio("Level", ["🌐 Macro (cross-asset)", "🏭 Sectors", "🎯 Themes / Industries", "📊 Stocks"],
+                     horizontal=True, key="rot_lvl")
+    _level = "sector"; _rtks = None
+    if "Macro" in _rlvl:
+        _level = "macro"
+    elif "Themes" in _rlvl:
+        _level = "theme"
+    elif "Stocks" in _rlvl:
+        _rin = st.text_input("Tickers (space/comma)", "AAPL MSFT NVDA GOOGL META AMZN TSLA AVGO JPM UNH XOM LLY",
+                             key="rot_tks")
+        _rtks = [x.strip().upper() for x in re.split(r"[ ,]+", _rin) if x.strip()] or None
+    _rc = _rt_tbo.get_conn()
+    try:
+        _title, _rows = _rt_tbo._rotation_scan(_rc, _level, _rtks)
+        _ch = _rt_tbo._rotation_track(_rc, _level if not _rtks else "stocks", _rows) if _rows else []
+    finally:
+        _rc.close()
+    if not _rows:
+        st.info("Not enough price history to compute rotation.")
+    else:
+        if _title.startswith("Asset"):
+            _dfn = [r["short_exc"] for r in _rows if r["tk"] in ("TLT", "GLD", "UUP")]
+            _off = [r["short_exc"] for r in _rows if r["tk"] in ("QQQ", "IWM", "EEM", "HYG", "IBIT")]
+            if _dfn and _off:
+                if sum(_dfn) / len(_dfn) > sum(_off) / len(_off):
+                    st.error("⚖️ **Cross-asset tilt: RISK-OFF** — defensives (bonds / gold / dollar) leading")
+                else:
+                    st.success("⚖️ **Cross-asset tilt: RISK-ON** — growth / credit / crypto leading")
+        _q1, _q2 = st.columns(2)
+        _q1.markdown("🔵 **Rotating IN** (money entering): " +
+                     (", ".join(r["name"] for r in _rows if r["quad"] == "Improving") or "—"))
+        _q2.markdown("🟡 **Rotating OUT** (leaders fading): " +
+                     (", ".join(r["name"] for r in _rows if r["quad"] == "Weakening") or "—"))
+        if _ch:
+            st.caption("↪️ **Just shifted quadrant:** " + " · ".join(f"{n} {a}→{b}" for n, a, b in _ch[:8]))
+        # RRG rotation map
+        try:
+            import plotly.graph_objects as go
+            _col = {"Leading": "#16a34a", "Weakening": "#eab308", "Improving": "#2563eb", "Lagging": "#dc2626"}
+            _fig = go.Figure()
+            _xr = max(abs(r["strength"]) for r in _rows) * 100 * 1.25 + 1
+            _yr = max(abs(r["momentum"]) for r in _rows) * 100 * 1.25 + 1
+            _fig.add_shape(type="rect", x0=0, y0=0, x1=_xr, y1=_yr, fillcolor="#16a34a", opacity=0.06, line_width=0)
+            _fig.add_shape(type="rect", x0=0, y0=-_yr, x1=_xr, y1=0, fillcolor="#eab308", opacity=0.06, line_width=0)
+            _fig.add_shape(type="rect", x0=-_xr, y0=0, x1=0, y1=_yr, fillcolor="#2563eb", opacity=0.06, line_width=0)
+            _fig.add_shape(type="rect", x0=-_xr, y0=-_yr, x1=0, y1=0, fillcolor="#dc2626", opacity=0.06, line_width=0)
+            _fig.add_hline(y=0, line_color="gray"); _fig.add_vline(x=0, line_color="gray")
+            for r in _rows:
+                _fig.add_trace(go.Scatter(x=[r["strength"] * 100], y=[r["momentum"] * 100], mode="markers+text",
+                    text=[r["name"]], textposition="top center", marker=dict(size=13, color=_col[r["quad"]]),
+                    hovertext=f"{r['name']} · {r['quad']}", showlegend=False))
+            _fig.add_annotation(x=_xr*0.6, y=_yr*0.9, text="🟢 LEADING", showarrow=False, opacity=0.7)
+            _fig.add_annotation(x=_xr*0.6, y=-_yr*0.9, text="🟡 WEAKENING (out)", showarrow=False, opacity=0.7)
+            _fig.add_annotation(x=-_xr*0.6, y=_yr*0.9, text="🔵 IMPROVING (in)", showarrow=False, opacity=0.7)
+            _fig.add_annotation(x=-_xr*0.6, y=-_yr*0.9, text="🔴 LAGGING", showarrow=False, opacity=0.7)
+            _fig.update_layout(height=520, xaxis_title="Leadership → (3mo excess vs SPY, %)",
+                               yaxis_title="Momentum ↑ (improving)", title="Rotation map (RRG vs SPY)")
+            st.plotly_chart(_fig, use_container_width=True)
+        except Exception as _pe:
+            st.caption(f"(chart unavailable: {_pe})")
+        st.dataframe(pd.DataFrame([{"": r["emoji"], "Name": r["name"], "Quadrant": r["quad"],
+            "3mo vs SPY %": round(r["strength"] * 100, 1), "1mo vs SPY %": round(r["short_exc"] * 100, 1)}
+            for r in _rows]), hide_index=True, use_container_width=True)
+        st.caption("RRG vs SPY · 🔵 Improving = money entering · 🟢 Leading · 🟡 Weakening = money leaving · "
+                   "🔴 Lagging. Logged daily to rotation_watch so transitions accrue.")
 
 # ===================================================================
 elif page == "🫧 Anti-Bubble Radar":

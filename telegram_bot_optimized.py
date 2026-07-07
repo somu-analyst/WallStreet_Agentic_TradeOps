@@ -10997,6 +10997,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await riskoff_view(query)
         elif data == "antibubble_view":
             await antibubble_view(query)
+        elif data == "rot_macro":
+            await rotation_view(query, "macro")
+        elif data == "rot_sector":
+            await rotation_view(query, "sector")
+        elif data == "rot_theme":
+            await rotation_view(query, "theme")
         elif data.startswith("tvc_"):
             await tv_view(query, data.split("tvc_", 1)[1])
         elif data == "plan_port_chart":
@@ -21527,6 +21533,161 @@ async def antibubble_view(query):
                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
 
 
+# ── ROTATION TRACKER — where money is rotating (RRG logic), high→low levels ────
+# RRG: two axes vs a benchmark (SPY) — STRENGTH (leadership, 3mo excess) and
+# MOMENTUM (is that leadership improving/fading, recent vs trailing pace). Quadrants:
+#   Leading 🟢 (strong+improving) · Weakening 🟡 (strong but fading = money leaving) ·
+#   Improving 🔵 (weak but gaining = money entering) · Lagging 🔴 (weak+fading).
+_ROT_LEVELS = {
+    "macro": ("Asset classes", {
+        "SPY": "US Large", "QQQ": "US Growth", "IWM": "US Small", "EFA": "Dev Intl",
+        "EEM": "Emerging", "TLT": "Long Bonds", "HYG": "HY Credit", "GLD": "Gold",
+        "DBC": "Commodities", "IBIT": "Bitcoin", "UUP": "US Dollar"}),
+    "sector": ("Sectors", {
+        "XLK": "Tech", "XLC": "Comm", "XLY": "Discret", "XLF": "Fins", "XLV": "Health",
+        "XLI": "Indust", "XLP": "Staples", "XLE": "Energy", "XLU": "Utils",
+        "XLB": "Materials", "XLRE": "REITs", "SMH": "Semis"}),
+    "theme": ("Themes / industries", {
+        "SMH": "Semis", "IGV": "Software", "XBI": "Biotech", "KBE": "Banks", "XRT": "Retail",
+        "XHB": "Homebld", "OIH": "OilSvcs", "GDX": "GoldMinr", "ITA": "Defense", "TAN": "Solar",
+        "KWEB": "China", "ARKK": "Innov", "JETS": "Airlines", "XME": "Metals", "IYT": "Transport"}),
+}
+
+
+def _rotation_scan(conn, level="sector", tickers=None, bench="SPY", long_win=63, short_win=21):
+    """RRG-style rotation for any level. Universal (DB-first history, yfinance backfill).
+    Returns list of dicts sorted by quadrant then strength."""
+    if tickers:
+        items = {t.upper(): t.upper() for t in tickers}
+        title = "Stocks"
+    else:
+        title, items = _ROT_LEVELS.get(level, _ROT_LEVELS["sector"])
+    bh = _daily_history(bench, 1, conn)
+    if bh is None or len(bh) <= long_win + 1:
+        return title, []
+    bl = list(bh)
+    bL = bl[-1] / bl[-long_win - 1] - 1
+    bS = bl[-1] / bl[-short_win - 1] - 1
+    rows = []
+    for tk, name in items.items():
+        h = _daily_history(tk, 1, conn)
+        if h is None or len(h) <= long_win + 1:
+            continue
+        s = list(h)
+        strength = (s[-1] / s[-long_win - 1] - 1) - bL          # 3mo excess vs benchmark
+        short_exc = (s[-1] / s[-short_win - 1] - 1) - bS         # 1mo excess
+        momentum = short_exc - strength / (long_win / short_win)  # recent pace vs trailing → improving?
+        if strength >= 0 and momentum >= 0:
+            quad, emoji = "Leading", "🟢"
+        elif strength >= 0 and momentum < 0:
+            quad, emoji = "Weakening", "🟡"
+        elif strength < 0 and momentum >= 0:
+            quad, emoji = "Improving", "🔵"
+        else:
+            quad, emoji = "Lagging", "🔴"
+        rows.append({"tk": tk, "name": name, "strength": strength, "momentum": momentum,
+                     "short_exc": short_exc, "quad": quad, "emoji": emoji})
+    order = {"Improving": 0, "Leading": 1, "Weakening": 2, "Lagging": 3}
+    rows.sort(key=lambda r: (order[r["quad"]], -r["strength"]))
+    return title, rows
+
+
+def _ensure_rotation_watch(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS rotation_watch (
+        trade_date TEXT, level TEXT, item TEXT, quad TEXT, strength REAL, momentum REAL,
+        PRIMARY KEY (trade_date, level, item))""")
+    conn.commit()
+
+
+def _rotation_track(conn, level, rows):
+    """Log today's quadrants once/day; return items that just CHANGED quadrant (fresh rotation)."""
+    import datetime as _dt
+    _ensure_rotation_watch(conn)
+    today = _dt.date.today().isoformat()
+    prev = conn.execute("SELECT MAX(trade_date) FROM rotation_watch WHERE level=? AND trade_date<?",
+                        (level, today)).fetchone()[0]
+    prevq = {}
+    if prev:
+        prevq = {r[0]: r[1] for r in conn.execute(
+            "SELECT item, quad FROM rotation_watch WHERE level=? AND trade_date=?", (level, prev)).fetchall()}
+    changes = []
+    for r in rows:
+        if prevq.get(r["tk"]) and prevq[r["tk"]] != r["quad"]:
+            changes.append((r["name"], prevq[r["tk"]], r["quad"]))
+        try:
+            conn.execute("INSERT OR REPLACE INTO rotation_watch "
+                         "(trade_date, level, item, quad, strength, momentum) VALUES (?,?,?,?,?,?)",
+                         (today, level, r["tk"], r["quad"], r["strength"], r["momentum"]))
+        except Exception:
+            pass
+    conn.commit()
+    return changes
+
+
+def _fmt_rotation(title, rows, changes=None):
+    """Mobile-safe rotation readout: IN/OUT calls + quadrant table."""
+    if not rows:
+        return f"🔄 <b>Rotation — {title}</b>\nNot enough history to compute."
+    inn = [r for r in rows if r["quad"] == "Improving"]
+    out = [r for r in rows if r["quad"] == "Weakening"]
+    lead = [r for r in rows if r["quad"] == "Leading"]
+    lag = [r for r in rows if r["quad"] == "Lagging"]
+    rd = [(r["emoji"], r["name"], f"{r['strength']*100:+.0f}", f"{r['short_exc']*100:+.0f}") for r in rows]
+    table = _pipe_table(("", "Name", "3mo", "1mo"), rd, right_cols={2, 3},
+                        legend="vs SPY · 3mo=leadership · 1mo=recent · 🔵in 🟢lead 🟡out 🔴lag")
+    parts = [f"🔄 <b>Rotation — {title}</b>  <i>(money flow vs SPY)</i>"]
+    if title.startswith("Asset"):        # cross-asset risk-on/off tilt
+        dfn = [r["short_exc"] for r in rows if r["tk"] in ("TLT", "GLD", "UUP")]
+        off = [r["short_exc"] for r in rows if r["tk"] in ("QQQ", "IWM", "EEM", "HYG", "IBIT")]
+        if dfn and off:
+            tilt = ("🔴 RISK-OFF — defensives (bonds/gold/$) leading"
+                    if sum(dfn) / len(dfn) > sum(off) / len(off)
+                    else "🟢 RISK-ON — growth/credit/crypto leading")
+            parts.append(f"⚖️ <b>Cross-asset tilt:</b> {tilt}")
+    parts += [f"🔵 <b>Rotating IN</b> (gaining): {', '.join(r['name'] for r in inn) or '—'}",
+              f"🟡 <b>Rotating OUT</b> (fading leaders): {', '.join(r['name'] for r in out) or '—'}",
+              table]
+    if changes:
+        parts.append("↪️ <b>Just shifted:</b> " + " · ".join(f"{n} {a}→{b}" for n, a, b in changes[:6]))
+    parts.append("<i>🔵 Improving=money entering · 🟡 Weakening=money leaving · not advice</i>")
+    return "\n\n".join(parts)
+
+
+async def _do_rotation(msg, level, tickers=None):
+    conn = get_conn()
+    try:
+        title, rows = _rotation_scan(conn, level, tickers)
+        changes = _rotation_track(conn, level if not tickers else "stocks", rows) if rows else []
+    finally:
+        conn.close()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌐 Macro", callback_data="rot_macro"),
+         InlineKeyboardButton("🏭 Sectors", callback_data="rot_sector"),
+         InlineKeyboardButton("🎯 Themes", callback_data="rot_theme")],
+        [InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]])
+    await msg.reply_text(_fmt_rotation(title, rows, changes)[:4000], parse_mode=H, reply_markup=kb)
+
+
+async def rotation_command(update, ctx):
+    """/rotation [macro|sector|theme|TICKERS] — where money is rotating (RRG, high→low)."""
+    args = [a for a in (getattr(ctx, "args", []) or [])]
+    level = "sector"; tickers = None
+    if args:
+        a0 = args[0].lower()
+        if a0 in _ROT_LEVELS:
+            level = a0
+        elif a0 in ("stock", "stocks"):
+            tickers = [a.upper() for a in args[1:]] or _AB_UNIVERSE[:30]
+        else:
+            tickers = [a.upper() for a in args]
+    await update.message.reply_text(f"🔄 Mapping rotation…", parse_mode=H)
+    await _do_rotation(update.message, level, tickers)
+
+
+async def rotation_view(query, level="sector"):
+    await _do_rotation(query.message, level)
+
+
 # ── Spreads scanner (Bull Call · Bear Call · Bear Put), composite-scored ──────
 def _spreads_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=4):
     """Ranked vertical spreads. Returns list of compact mobile lines."""
@@ -26604,6 +26765,7 @@ async def _post_init(app):
             BotCommand("riskoff", "Market Radar — big-move risk + lean"),
             BotCommand("rovalidate", "Backtest the Market Radar"),
             BotCommand("antibubble", "Cyclical traps vs anti-bubble quality"),
+            BotCommand("rotation", "Money rotation — macro/sector/theme/stocks"),
             BotCommand("squeeze", "Squeeze scan"),
             BotCommand("macro", "Macro (BLS + yields)"),
             BotCommand("earnings", "Earnings & news"),
@@ -26664,6 +26826,7 @@ def main():
     app.add_handler(CommandHandler("riskoff", riskoff_command))
     app.add_handler(CommandHandler("rovalidate", rovalidate_command))
     app.add_handler(CommandHandler("antibubble", antibubble_command))
+    app.add_handler(CommandHandler("rotation", rotation_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))

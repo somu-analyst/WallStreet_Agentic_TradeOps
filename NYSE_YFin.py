@@ -19,6 +19,47 @@ import sqlite3
 # ============= RUNTIME START =============
 SCRIPT_START_TIME = time.time()
 
+# ---- Per-stage timing (find where the ~4 hrs go) --------------------
+from contextlib import contextmanager
+STAGE_TIMES = []          # list of (label, seconds), in completion order
+
+
+@contextmanager
+def stage_timer(label):
+    """Time a pipeline stage; record + print. Nestable (append order = completion)."""
+    _t0 = time.time()
+    print(f"\n[timing] >> {label} ...")
+    try:
+        yield
+    finally:
+        _dt = time.time() - _t0
+        STAGE_TIMES.append((label, _dt))
+        print(f"[timing] << {label}: {_dt:7.1f}s ({_dt/60:5.1f} min)")
+
+
+def finalize_timing():
+    """Print a stage-time summary (longest first) and append a row to a timing log CSV."""
+    total = time.time() - SCRIPT_START_TIME
+    print("\n" + "=" * 46 + "\n[timing] STAGE SUMMARY (longest first)\n" + "=" * 46)
+    print(f"  {'stage':<34}{'min':>6}  {'%':>5}")
+    for label, dt in sorted(STAGE_TIMES, key=lambda x: -x[1]):
+        pct = (dt / total * 100) if total else 0
+        print(f"  {label[:34]:<34}{dt/60:>6.1f}  {pct:>4.0f}%")
+    print(f"  {'TOTAL':<34}{total/60:>6.1f}  {'100':>4}%")
+    try:
+        log_csv = os.path.join(LOG_DIR, "yfin_stage_timings.csv")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        new = not os.path.exists(log_csv)
+        with open(log_csv, "a", encoding="utf-8") as f:
+            if new:
+                f.write("run_ts,stage,seconds\n")
+            for label, dt in STAGE_TIMES:
+                f.write(f'{ts},"{label}",{dt:.1f}\n')
+            f.write(f'{ts},"TOTAL",{total:.1f}\n')
+        print(f"[timing] appended to {log_csv}")
+    except Exception as _e:
+        print(f"[timing] could not write timing log: {_e}")
+
 
 # ================== CONFIG ==================
 DATA_DIR = r"C:\Users\srini\Options_chain_data"
@@ -681,6 +722,7 @@ def merge_calls_puts_per_strike_parallel(trade_day, company_name_map, all_ticker
     SECS_BETWEEN_TICKERS = 1
 
     print(f"Starting options chain collection (Yahoo, 1 ticker at a time) for {trade_day.strftime('%Y-%m-%d')}")
+    _fetch_t0 = time.time()                              # [timing] chain-fetch loop start
     trade_day_str_file = trade_day.strftime('%d%b%Y')   # for filenames
     trade_day_str_db = trade_day.strftime('%Y-%m-%d')   # for DB/CSV
 
@@ -760,6 +802,8 @@ def merge_calls_puts_per_strike_parallel(trade_day, company_name_map, all_ticker
             print(f"Waiting {SECS_BETWEEN_TICKERS} seconds before next ticker...")
             time.sleep(SECS_BETWEEN_TICKERS)
 
+    STAGE_TIMES.append(("Phase 4a: option-chain fetch loop", time.time() - _fetch_t0))
+    print(f"[timing] << option-chain fetch loop: {(time.time()-_fetch_t0)/60:.1f} min")
     print("\nAll tickers processed. Saving file ...")
     if not all_rows:
         print("No call/put pairs to merge.")
@@ -772,7 +816,8 @@ def merge_calls_puts_per_strike_parallel(trade_day, company_name_map, all_ticker
     print(f"Removed {before - after} exact duplicate rows")
 
     print("Enriching options data with per-contract OHLC via yfinance.info ...")
-    df_final = enrich_with_option_ohlc_parallel(df_final, trade_day=trade_day)
+    with stage_timer("Phase 4b: per-contract OHLC enrichment"):
+        df_final = enrich_with_option_ohlc_parallel(df_final, trade_day=trade_day)
 
     # expiry_date already MM-DD-YYYY from fetch_option_chain; ensure consistent format
     df_final["expiry_date"] = pd.to_datetime(
@@ -812,11 +857,13 @@ def merge_calls_puts_per_strike_parallel(trade_day, company_name_map, all_ticker
         conn.commit()
 
     # options_raw retired: it was a strict subset of options_daily (no analytics consumer).
-    df_daily.to_sql(TABLE_OPTIONS, conn, if_exists="append", index=False)
+    with stage_timer("Phase 4c: options_daily DB write"):
+        df_daily.to_sql(TABLE_OPTIONS, conn, if_exists="append", index=False)
     print(f"Appended {len(df_daily)} rows to {TABLE_OPTIONS}")
 
-    refresh_weekly_tables(conn)
-    refresh_monthly_tables(conn)
+    with stage_timer("Phase 4d: weekly/monthly table refresh"):
+        refresh_weekly_tables(conn)
+        refresh_monthly_tables(conn)
 
     conn.close()
     print(f"DB write and weekly/monthly refresh completed for {trade_day_str_file}")
@@ -1185,35 +1232,44 @@ if __name__ == "__main__":
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
     print("\nPhase 1: Cleanup old files under DATA_DIR")
-    cleanup_old_files(DATA_DIR, 90)
+    with stage_timer("Phase 1: cleanup old files"):
+        cleanup_old_files(DATA_DIR, 90)
 
     # print("\nPhase 1b: Archive old US_CHARTS Excel/CSV")
     # archive_old_excels(US_CHARTS_DIR, ARCHIVE_DIR, keep_days=1)
 
     print("\nPhase 2: Universe & name map")
-    company_name_map, all_tickers = prepare_universe_and_name_map()
+    with stage_timer("Phase 2: universe & name map"):
+        company_name_map, all_tickers = prepare_universe_and_name_map()
 
     print("\nPhase 3: Determine trading day")
-    eod_day = get_eod_trading_day()
+    with stage_timer("Phase 3: determine trading day"):
+        eod_day = get_eod_trading_day()
 
-    print("\nPhase 4: Collect options data (Yahoo)")
+    print("\nPhase 4: Collect options data (Yahoo)")   # internally timed 4a-4d
     df, today_file = merge_calls_puts_per_strike_parallel(eod_day, company_name_map, all_tickers)
 
     trade_day_str_file = eod_day.strftime('%d%b%Y')
 
     if df is not None:
-        print("\nPhase 4b: Audit empty option rows")
-        audit_empty_option_rows(df, trade_day_str_file)
+        print("\nPhase 4e: Audit empty option rows")
+        with stage_timer("Phase 4e: audit empty rows"):
+            audit_empty_option_rows(df, trade_day_str_file)
 
         print("\nPhase 5: Compute changes")
-        compute_oi_vol_change(eod_day)
+        with stage_timer("Phase 5: compute OI/vol changes"):
+            compute_oi_vol_change(eod_day)
 
         print("\nPhase 6: Build stock_daily")
-        build_stock_daily(eod_day, all_tickers)
+        with stage_timer("Phase 6: build stock_daily"):
+            build_stock_daily(eod_day, all_tickers)
 
         print("\nPhase 7: Archive old US_CHARTS Excel/CSV")
-        archive_old_excels(US_CHARTS_DIR, ARCHIVE_DIR, keep_days=1)
+        with stage_timer("Phase 7: archive old excels"):
+            archive_old_excels(US_CHARTS_DIR, ARCHIVE_DIR, keep_days=1)
 
         print("\nScript completed successfully!")
     else:
         print("\nScript ended - no data to process")
+
+    finalize_timing()

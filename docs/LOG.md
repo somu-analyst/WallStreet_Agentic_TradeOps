@@ -2,6 +2,23 @@
 
 > Append newest at top. Recap here every ~10–20 messages and before any context reset.
 
+## 2026-07-06 — "Vulnerability score" investigated & REJECTED (validation win)
+- **Trigger:** UNH −1.7% (07-02→07-06) rotational pullback. Ran UNH through the full battery
+  (OI, GEX, 24-model ensemble, mean-rev, PCR): positioning read **complacent/bullish** into it
+  (low PCR, call-heavy flow, ensemble 7-BULL/2-BEAR, positive/pinning GEX). NOT foreshadowed;
+  only soft tells = extension + `pcp_dev` BEAR. Backtested `pcp_dev`: n too small, BEAR t+3 hit 50%
+  = **luck** (signal_accuracy only ~2mo/23 dates old).
+- **Built + cross-sectional backtested a Vulnerability Score** (extended + complacent → fade) over
+  2,339 obs. **REJECTED — do NOT build:** extension/momentum IC is significantly **POSITIVE**
+  (t=+3.3 at t+20) → this regime **rewards** stretched names (same lesson as the Market Radar froth
+  pillar). Six formulations × 3 horizons tested (scratchpad `vuln_backtest.py`/`vuln_battery.py`).
+- **Only significant fade = cross-sectional low-PCR complacency** (IC −0.06..−0.07, t≈−2.9; feared
+  Q5 beats complacent Q1 by ~3%/10d) — BUT the **time-series control (PCR vs own history) is null
+  (t=−0.19)** → the effect is **structural (name fixed-effects), not a timing signal.** Not shippable.
+- **Conclusion:** no shippable "find-the-next-UNH" signal in current data. The research-backed edge
+  (put/IV **skew**) needs clean bid/ask/IV → **gated on the OpenBB capture** (`options_daily` only
+  stores lastPrice). Skew = first thing to test once OpenBB is live. See [[market-radar-backtest]].
+
 ## 2026-07-06 — Market Radar: built, backtested, redesigned (turbulence gauge)
 - **Investigated the Jul-2 tech/semis selloff** (SMH −5.4%, QQQ −2.1%, SPY −0.36%, VIX flat 16.7 =
   narrow flush, not broad). Found the bot's own scanners had logged BEAR fires on the index/semis

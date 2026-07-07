@@ -10993,6 +10993,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await breakout_view(query)
         elif data == "board_view":
             await board_view(query)
+        elif data == "skew_view":
+            await skew_view(query)
         elif data == "zrev_view":
             await zrev_view(query)
         elif data == "riskoff_view":
@@ -23890,6 +23892,125 @@ async def action_board_alert(ctx: ContextTypes.DEFAULT_TYPE):
         log.warning(f"action_board_alert send failed: {e}")
 
 
+# ── DOWNSIDE SKEW & EXPECTED MOVE (live IV — direction + size + range) ─
+_SKEW_DEFAULT = ["SPY", "QQQ", "SMH", "SOXX", "NVDA", "AMD", "MU", "LRCX"]
+
+
+def _skew_analyze(tk, r=0.045):
+    """Live IV-implied downside map for ONE ticker (yfinance chain, front ~30-DTE expiry).
+    DIRECTION = 25Δ put−call IV skew (put skew = downside fear priced); SIZE = 1σ expected
+    move; RANGE = 1σ/2σ down targets; plus P(≥5% down) to expiry. Universal / any optionable
+    ticker. yfinance-only (OpenBB stays a parallel lane). Returns dict or None."""
+    try:
+        t = _yf_ticker(tk)
+        h = t.history(period="1d")
+        spot = float(h["Close"].iloc[-1]) if len(h) else None
+        exps = list(t.options or [])
+        if not spot or not exps:
+            return None
+        today = datetime.now().date()
+        dted = [(e, (datetime.strptime(e, "%Y-%m-%d").date() - today).days) for e in exps]
+        dted = [(e, d) for e, d in dted if d >= 7]            # skip 0DTE/weekly churn
+        if not dted:
+            return None
+        exp, dte = min(dted, key=lambda x: abs(x[1] - 30))    # nearest to ~30 DTE
+        T = max(dte, 1) / 365.0
+        ch = t.option_chain(exp)
+        calls = ch.calls.dropna(subset=["impliedVolatility"]).copy()
+        puts = ch.puts.dropna(subset=["impliedVolatility"]).copy()
+        calls = calls[calls.impliedVolatility > 0.01]
+        puts = puts[puts.impliedVolatility > 0.01]
+        if len(calls) < 3 or len(puts) < 3:
+            return None
+        ivc_atm = float(calls.iloc[(calls.strike - spot).abs().argmin()].impliedVolatility)
+        ivp_atm = float(puts.iloc[(puts.strike - spot).abs().argmin()].impliedVolatility)
+        atm_iv = (ivc_atm + ivp_atm) / 2.0
+
+        def _iv_at_delta(df, opt, target):                    # true BS |delta| nearest target
+            best, bestd = None, 1e9
+            for _, row in df.iterrows():
+                iv = float(row.impliedVolatility)
+                if iv <= 0:
+                    continue
+                try:
+                    dl = bs_greeks(spot, float(row.strike), T, r, iv, opt)["delta"]
+                except Exception:
+                    continue
+                if abs(abs(dl) - target) < bestd:
+                    bestd, best = abs(abs(dl) - target), iv
+            return best
+        ivp25 = _iv_at_delta(puts[puts.strike <= spot], "put", 0.25)
+        ivc25 = _iv_at_delta(calls[calls.strike >= spot], "call", 0.25)
+        skew = (ivp25 - ivc25) if (ivp25 and ivc25) else (ivp_atm - ivc_atm)
+        sig1 = spot * atm_iv * np.sqrt(T)                     # 1σ expected move ($)
+        em_pct = sig1 / spot * 100
+        p_dn5 = float(norm.cdf(np.log(0.95) / (atm_iv * np.sqrt(T) + 1e-9))) * 100
+        ed = _earnings_days(tk)
+        earn_in = ed if (ed is not None and 0 <= ed <= dte) else None
+        if skew >= 0.04:
+            lean, emoji = "DOWN-skew", "🔴"
+        elif skew <= -0.02:
+            lean, emoji = "UP-skew", "🟢"
+        else:
+            lean, emoji = "two-sided", "🟡"
+        return {"tk": tk.upper(), "spot": spot, "dte": dte, "atm_iv": atm_iv, "skew": skew,
+                "em_pct": em_pct, "d1": spot - sig1, "d2": spot - 2 * sig1, "u1": spot + sig1,
+                "p_dn5": p_dn5, "earn_in": earn_in, "lean": lean, "emoji": emoji}
+    except Exception:
+        log.debug(f"_skew_analyze {tk} failed", exc_info=True)
+        return None
+
+
+def _skew_scan(tickers):
+    out = [r for r in (_skew_analyze(t) for t in tickers) if r]
+    out.sort(key=lambda x: -x["skew"])                        # most downside-skewed first
+    return out
+
+
+def _fmt_skew(rows):
+    if not rows:
+        return None
+    data = [(r["emoji"], r["tk"], f"{r['atm_iv']*100:.0f}", f"±{r['em_pct']:.0f}",
+             f"{r['skew']*100:+.0f}") for r in rows]
+    tbl = _pipe_table(("ST", "Tkr", "IV%", "EM%", "Skew"), data, right_cols={2, 3, 4})
+    lines = []
+    for r in rows:
+        e = f" ⚠️earn{r['earn_in']}d" if r["earn_in"] is not None else ""
+        lines.append(f"<b>{r['tk']}</b> {r['spot']:.0f} → 1σ↓ <b>{r['d1']:.0f}</b> "
+                     f"({(r['d1']/r['spot']-1)*100:+.0f}%) · 2σ↓ {r['d2']:.0f} "
+                     f"({(r['d2']/r['spot']-1)*100:+.0f}%) · P(≥5%↓) {r['p_dn5']:.0f}% · {r['dte']}DTE{e}")
+    return tbl, "\n".join(lines)
+
+
+async def _send_skew(msg, rows):
+    fm = _fmt_skew(rows)
+    if not fm:
+        await msg.reply_text("No live option chains for those tickers.", parse_mode=H)
+        return
+    tbl, detail = fm
+    txt = ("🎯 <b>Downside Skew &amp; Expected Move</b>\n"
+           "<i>Live IV · direction = 25Δ put−call skew · size = 1σ move · range = 1σ/2σ down "
+           "targets to the front ~30-DTE expiry · not advice</i>\n\n"
+           + tbl + "\n\n" + detail +
+           "\n\n<i>🔴 downside-skewed · 🟡 two-sided · 🟢 upside-skewed · IV%=ATM implied vol · "
+           "EM%=±1σ move · post-crash IV runs hot, so ranges are wide</i>")
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="skew_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def skew_command(update, ctx):
+    """/skew [TICKERS] — live IV-implied downside: direction (skew) + size (1σ) + range (1σ/2σ)."""
+    args = [a.upper() for a in (ctx.args or [])][:8]
+    tickers = args or _SKEW_DEFAULT
+    await update.message.reply_text("🎯 Computing IV-implied downside range…", parse_mode=H)
+    await _send_skew(update.message, _skew_scan(tickers))
+
+
+async def skew_view(query):
+    await _send_skew(query.message, _skew_scan(_SKEW_DEFAULT))
+
+
 # ── UNUSUAL OPTIONS ACTIVITY (volume >> open interest = fresh flow) ─
 def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15):
     """Unusual options activity: contracts where today's volume >> standing OI
@@ -26912,6 +27033,7 @@ async def _post_init(app):
             BotCommand("antibubble", "Cyclical traps vs anti-bubble quality"),
             BotCommand("rotation", "Money rotation — macro/sector/theme/stocks"),
             BotCommand("board", "Action Board — consensus scanner ideas"),
+            BotCommand("skew", "Downside skew + expected move (any ticker)"),
             BotCommand("squeeze", "Squeeze scan"),
             BotCommand("macro", "Macro (BLS + yields)"),
             BotCommand("earnings", "Earnings & news"),
@@ -26974,6 +27096,7 @@ def main():
     app.add_handler(CommandHandler("antibubble", antibubble_command))
     app.add_handler(CommandHandler("rotation", rotation_command))
     app.add_handler(CommandHandler("board", board_command))
+    app.add_handler(CommandHandler("skew", skew_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))

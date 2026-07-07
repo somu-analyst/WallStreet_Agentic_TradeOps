@@ -26,6 +26,21 @@
   skew caught LRCX/KLAC that rotation still had as "Leading." Equipment (AMAT/LRCX/KLAC) fell hardest
   (−8 to −10%) on a fresh WFE/capex catalyst.
 
+## 2026-07-07 (later) — /skew downside-risk command (live IV, respects OpenBB-parallel rule)
+- User asked for a semis-style downside-fear scan with "how much downside, direction + size/range."
+  Building it on the OpenBB DB would wire the parallel lane into the bot (locked constraint) → built
+  `/skew [TICKERS]` on the **live yfinance chain** instead (allowed, universal). Same capability.
+- `_skew_analyze(tk)`: front ~30-DTE expiry → ATM IV, **25Δ put−call skew via true `bs_greeks` delta**
+  (DIRECTION), 1σ expected move (SIZE), 1σ/2σ down price targets (RANGE), P(≥5%↓) lognormal, earnings-
+  in-window flag. `_skew_scan` sorts by skew; `_fmt_skew` = one _pipe_table (ST·Tkr·IV%·EM%·Skew) +
+  per-ticker downside-target lines. `/skew`, `skew_view` callback, BotCommand registered.
+- **Gotcha found:** two `_iv_rank` defs exist — `_iv_rank(sym)`@932 shadowed by `_iv_rank(conn,tk)`
+  @19771; module-level name resolves to the 2-arg one. Dropped the unused `_iv_rank` call in `_skew`.
+  (Left the collision itself alone — pre-existing, out of scope.)
+- Verified live on semis: SMH/SOXX 🔴 skew +5, EM ±17/18%, 1σ↓ −17/−18%, 2σ↓ −33/−37%. Post-crash IV
+  runs hot so ranges are wide; MU/AMD skew compressed to +2 (everything bid = put skew flattens).
+- Committed bb69f9b (Action Board + profiling) earlier this session; /skew in the next commit.
+
 ## 2026-07-06 — Rotation Tracker built & VALIDATED (first signal that works)
 - **Built** `/rotation` (bot) + 🔄 Rotation Tracker (dashboard) — RRG money-flow, hierarchical
   high→low: **Macro (CROSS-ASSET: eq/intl/bonds/credit/gold/commodities/crypto/$)** → Sectors →

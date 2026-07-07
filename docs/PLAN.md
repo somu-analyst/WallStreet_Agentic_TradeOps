@@ -14,7 +14,8 @@ Options-trading edge system: Telegram bot + dashboard + our own capture-forward 
 - [x] Profile remaining `NYSE_YFin.py` stages — `stage_timer()` + `finalize_timing()` instrument phases 1-7 (4a fetch loop / 4b OHLC enrich / 4c DB write / 4d weekly-monthly refresh split out); prints longest-first summary + appends `yfin_stage_timings.csv`. Read the CSV after the next EOD run to see where the 4 hrs go.
 - [x] Action Board daily Telegram digest — `/board` + `action_board_alert` (8:35 AM ET, weekday-gated) aggregate today's `scn_*` fires across 5 DB-first scanners (reversal/z-rev/52wk/OI-build/UOA); consensus = ≥2 scanners agree on direction; mobile-safe _pipe_tables. Bot-side mirror of the dashboard `_ab_ideas()` Action Board.
 - [ ] (gated: ~2 wks of scn_* fires with t+5 outcomes) First scanner backtest read — hit-rate + avg fwd vs baseline for uoa/building/breakout/zrev/revert, persist to `signal_accuracy`, flag thin N
-- [ ] (gated: ~1 mo of OpenBB bid/ask captures) Revive `/skew` + dispersion (#14) on real bid/ask instead of lastPrice
+- [x] `/skew [TICKERS]` shipped on **live yfinance IV** (not OpenBB — kept parallel): direction (25Δ put−call skew via true BS delta) + size (1σ EM) + range (1σ/2σ down targets) + P(≥5%↓), earnings-in-window flag. Universal. `_skew_analyze/_skew_scan/_fmt_skew`.
+- [ ] (gated: ~1 mo of OpenBB bid/ask captures) Dispersion (#14) + a skew *backtest* on the OpenBB `skew_snapshot` panel (does high 25Δ skew / put-flow predict fwd downside? need ~15-20 dates)
 - [ ] Action Board daily Telegram digest — reuse `_ab_ideas()` sources bot-side; push top ⭐ consensus ideas each morning like the Earnings Radar job
 
 ## Constraints / decisions locked in

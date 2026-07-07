@@ -10991,6 +10991,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await rs_view(query)
         elif data == "breakout_view":
             await breakout_view(query)
+        elif data == "board_view":
+            await board_view(query)
         elif data == "zrev_view":
             await zrev_view(query)
         elif data == "riskoff_view":
@@ -23746,6 +23748,148 @@ def _update_scanner_outcomes(conn, horizon=5):
         return 0
 
 
+# ── ACTION BOARD (consensus across independent scanners) ───────────
+_BOARD_LABELS = {"revert": "Reversal", "zrev": "Z-Rev", "breakout": "52wk",
+                 "building": "OI-Build", "uoa": "UOA", "riskoff": "Radar"}
+
+
+def _action_board(conn, min_agree=2, freshen=True):
+    """Consensus trade board: tally today's scn_* fires per ticker across INDEPENDENT
+    DB-first scanners. LONG = net BULL votes, SHORT = net BEAR; a name only makes the
+    board if ≥min_agree scanners agree on the winning side (net direction non-zero).
+    freshen=True runs the cheap scanners first so the board is self-sufficient (and it
+    refreshes the scn_* fires for later hit-rate scoring). Returns list of dicts."""
+    if freshen:
+        for fn in (_revert_scan, _zrev_scan, _breakout_scan, _positioning_scan, _uoa_scan):
+            try:
+                fn(conn)
+            except Exception:
+                log.debug(f"action_board freshen {getattr(fn,'__name__','?')} failed", exc_info=True)
+    tod = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
+    try:
+        df = pd.read_sql("SELECT ticker, model_name, signal, prob FROM signal_accuracy "
+                         "WHERE model_name LIKE 'scn_%' AND trade_date=?", conn, params=(tod,))
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    board = {}
+    for _, r in df.iterrows():
+        tk = str(r["ticker"]).upper()
+        model = str(r["model_name"]).replace("scn_", "")
+        d = board.setdefault(tk, {"bull": set(), "bear": set(), "prob": []})
+        (d["bull"] if str(r["signal"]) == "BULL" else d["bear"]).add(model)
+        try:
+            d["prob"].append(float(r["prob"]))
+        except (TypeError, ValueError):
+            pass
+    rows = []
+    for tk, d in board.items():
+        nb, ns = len(d["bull"]), len(d["bear"])
+        net = nb - ns
+        if net == 0:
+            continue                                    # split/tie → no consensus direction
+        win = nb if net > 0 else ns                     # scanners on the winning side
+        if win < min_agree:
+            continue
+        srcs = sorted(d["bull"] if net > 0 else d["bear"])
+        rows.append({"tk": tk, "side": "LONG" if net > 0 else "SHORT", "net": net,
+                     "win": win, "bull": nb, "bear": ns, "srcs": srcs,
+                     "conf": (sum(d["prob"]) / len(d["prob"])) if d["prob"] else 0.0})
+    rows.sort(key=lambda r: (-r["win"], -abs(r["net"]), -r["conf"]))
+    return rows
+
+
+def _fmt_action_board(rows, top=8):
+    """Two mobile-safe _pipe_tables (longs/shorts). Narrow: ST·Tkr·#·Conf; sources listed
+    compactly beneath each side (not in the table, to keep <pre> width ≤ mobile)."""
+    if not rows:
+        return None
+    longs = [r for r in rows if r["side"] == "LONG"][:top]
+    shorts = [r for r in rows if r["side"] == "SHORT"][:top]
+
+    def _block(rs, emoji, title):
+        data = [(emoji, r["tk"], str(r["win"]), f"{r['conf']:.0f}") for r in rs]
+        tbl = _pipe_table(("ST", "Tkr", "#", "Conf"), data, right_cols={2, 3})
+        src = " · ".join(f"{r['tk']}:{'+'.join(_BOARD_LABELS.get(s, s) for s in r['srcs'])}"
+                         for r in rs[:5])
+        return f"<b>{title}</b>\n{tbl}\n<i>{src}</i>"
+
+    parts = []
+    if longs:
+        parts.append(_block(longs, "🟢", "🟢 CONSENSUS LONGS"))
+    if shorts:
+        parts.append(_block(shorts, "🔴", "🔴 CONSENSUS SHORTS"))
+    return "\n\n".join(parts) if parts else None
+
+
+async def _send_action_board(msg, rows):
+    body = _fmt_action_board(rows)
+    if not body:
+        await msg.reply_text("No consensus ideas right now (need 2+ scanners agreeing).",
+                             parse_mode=H)
+        return
+    n_l = sum(1 for r in rows if r["side"] == "LONG")
+    n_s = sum(1 for r in rows if r["side"] == "SHORT")
+    txt = ("🎯 <b>Action Board — Consensus Ideas</b>\n"
+           "<i>Names where ≥2 independent DB-first scanners agree on direction · not advice</i>\n\n"
+           + body + f"\n\n<i>{n_l} longs · {n_s} shorts · #=scanners agreeing · Conf=avg fire prob</i>")
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="board_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def board_command(update, ctx):
+    """/board — consensus trade ideas across 5 independent DB-first scanners."""
+    await update.message.reply_text("🎯 Tallying scanner consensus…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _action_board(conn)
+    finally:
+        conn.close()
+    await _send_action_board(update.message, rows)
+
+
+async def board_view(query):
+    conn = get_conn()
+    try:
+        rows = _action_board(conn)
+    finally:
+        conn.close()
+    await _send_action_board(query.message, rows)
+
+
+async def action_board_alert(ctx: ContextTypes.DEFAULT_TYPE):
+    """Daily pre-market Action Board (~8:35 AM ET): consensus trade ideas where ≥2
+    independent DB-first scanners (reversal, z-rev, 52wk, OI-build, UOA) agree on
+    direction. Weekday gated; freshens the scn_* fires as a side effect."""
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    if now_utc.weekday() >= 5:
+        return
+    _, chat_id = load_creds()
+    conn = get_conn()
+    try:
+        rows = _action_board(conn)
+    except Exception as e:
+        log.warning(f"action_board_alert scan failed: {e}")
+        rows = []
+    finally:
+        conn.close()
+    body = _fmt_action_board(rows)
+    if not body:
+        return
+    n_l = sum(1 for r in rows if r["side"] == "LONG")
+    n_s = sum(1 for r in rows if r["side"] == "SHORT")
+    msg = (hdr("🎯 ACTION BOARD") + "\n"
+           "<i>Consensus ideas — where ≥2 independent scanners agree · not advice</i>\n\n"
+           + body + f"\n\n<i>{n_l} longs · {n_s} shorts from 5 DB-first scanners "
+           "(reversal · z-rev · 52wk · OI-build · UOA)</i>")
+    try:
+        await ctx.bot.send_message(chat_id=int(chat_id), text=msg[:4090], parse_mode=H)
+    except Exception as e:
+        log.warning(f"action_board_alert send failed: {e}")
+
+
 # ── UNUSUAL OPTIONS ACTIVITY (volume >> open interest = fresh flow) ─
 def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15):
     """Unusual options activity: contracts where today's volume >> standing OI
@@ -26767,6 +26911,7 @@ async def _post_init(app):
             BotCommand("rovalidate", "Backtest the Market Radar"),
             BotCommand("antibubble", "Cyclical traps vs anti-bubble quality"),
             BotCommand("rotation", "Money rotation — macro/sector/theme/stocks"),
+            BotCommand("board", "Action Board — consensus scanner ideas"),
             BotCommand("squeeze", "Squeeze scan"),
             BotCommand("macro", "Macro (BLS + yields)"),
             BotCommand("earnings", "Earnings & news"),
@@ -26828,6 +26973,7 @@ def main():
     app.add_handler(CommandHandler("rovalidate", rovalidate_command))
     app.add_handler(CommandHandler("antibubble", antibubble_command))
     app.add_handler(CommandHandler("rotation", rotation_command))
+    app.add_handler(CommandHandler("board", board_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
@@ -26857,6 +27003,7 @@ def main():
         job_queue.run_daily(briefing_alert, time=dt_time(14, 5, 0))  # daily brief 9:05 AM ET
         job_queue.run_daily(plan_alert, time=dt_time(13, 30, 0))     # next-day game plan ~8:30 AM ET pre-market
         job_queue.run_daily(wrap_alert, time=dt_time(21, 15, 0))     # daily market wrap ~4:15 PM ET post-close
+        job_queue.run_daily(action_board_alert, time=dt_time(13, 35, 0)) # Action Board ~8:35 AM ET pre-market
         job_queue.run_daily(earnings_alert, time=dt_time(13, 45, 0)) # Earnings Radar ~8:45 AM ET pre-market
         job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # weekly sector rotation, Mondays
         job_queue.run_once(riskoff_alert, when=25)                    # Risk-Off Radar readout ~on startup

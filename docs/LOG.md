@@ -2,6 +2,30 @@
 
 > Append newest at top. Recap here every ~10–20 messages and before any context reset.
 
+## 2026-07-07 — Action Board digest + NYSE_YFin profiling + SEMIS rout confirmation
+- **Action Board** (`/board` + `action_board_alert` 8:35 AM ET): bot-side consensus digest.
+  `_action_board(conn)` freshens 5 DB-first scanners (revert/zrev/breakout/building/uoa — each
+  already persists `scn_*` fires) then tallies today's fires per ticker; a name makes the board
+  only if ≥2 scanners agree on direction (net≠0). Two mobile-safe _pipe_tables (longs/shorts) with
+  #scanners + avg conf; sources listed beneath. Mirrors the dashboard `_ab_ideas()` Action Board
+  (bot can't import dashboard → parallel impl on the same `scn_*` substrate). Consensus BACKTEST
+  still gated on ~2wk of matured scn_* outcomes (PLAN). Verified live: 9 consensus names, SPY top
+  (3 scanners), all longs (momentum-up regime).
+- **NYSE_YFin.py profiling**: `stage_timer()` ctx-mgr + `finalize_timing()`. Times phases 1-7 and
+  splits Phase 4 into 4a option-chain fetch loop / 4b OHLC enrichment / 4c options_daily write /
+  4d weekly-monthly refresh. Prints longest-first summary + appends `yfin_stage_timings.csv`
+  (DATA_DIR). Read that CSV after the next EOD run to attribute the ~4 hrs (suspects: 4a's per-ticker
+  SECS_BETWEEN_TICKERS=1 loop over ~740 names, and 4b per-contract .info enrichment). Smoke-tested.
+- **SEMIS rout (07-07, live −5.6% avg vs SPY −0.29%) — flagged in advance by our data:**
+  Rotation Tracker had **Semis = 🟡 Weakening on 07-06** (strength +39%, momentum −18%) — the
+  validated "money leaving" quadrant (−1.6%/10d); 8/12 semi names Weakening (MU −60/ARM −53/AMD −44
+  momentum). **OpenBB skew_snapshot 07-06 (real IV) nailed the ETFs/equipment**: SMH pcvol 7.2×/pcoi
+  3.4×/skew +0.070, SOXX pcvol 2.7×/pcoi 2.5×, LRCX pcvol 4.4×, KLAC skew +0.073 (highest) — heavy
+  put hedging + downside skew priced the day before. US_data.db OI confirmed SMH/SOXX standing
+  PCR_OI >5. **Takeaway:** rotation (price momentum) + OpenBB skew (options fear) are complementary —
+  skew caught LRCX/KLAC that rotation still had as "Leading." Equipment (AMAT/LRCX/KLAC) fell hardest
+  (−8 to −10%) on a fresh WFE/capex catalyst.
+
 ## 2026-07-06 — Rotation Tracker built & VALIDATED (first signal that works)
 - **Built** `/rotation` (bot) + 🔄 Rotation Tracker (dashboard) — RRG money-flow, hierarchical
   high→low: **Macro (CROSS-ASSET: eq/intl/bonds/credit/gold/commodities/crypto/$)** → Sectors →

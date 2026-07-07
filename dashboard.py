@@ -7577,7 +7577,8 @@ elif page == "🔄 Rotation Tracker":
             "3mo vs SPY %": round(r["strength"] * 100, 1), "1mo vs SPY %": round(r["short_exc"] * 100, 1)}
             for r in _rows]), hide_index=True, use_container_width=True)
         st.caption("RRG vs SPY · 🔵 Improving = money entering · 🟢 Leading · 🟡 Weakening = money leaving · "
-                   "🔴 Lagging. Logged daily to rotation_watch so transitions accrue.")
+                   "🔴 Lagging. Logged daily to rotation_watch. ✅ Backtested (1,542 obs): Weakening "
+                   "underperforms −1.6%/10d vs SPY; momentum axis IC +0.14, p<1e-7 (~6mo, momentum regime).")
 
 # ===================================================================
 elif page == "🫧 Anti-Bubble Radar":

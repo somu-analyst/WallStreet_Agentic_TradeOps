@@ -918,16 +918,22 @@ def ensure_columns(df, required):
             df[c] = np.nan
     return df
 
-def compute_oi_vol_change(trade_day):
+def compute_oi_vol_change(trade_day, db_path=None):
     """
     Compute OI/volume changes using data in the DB (options_daily),
     not from CSV files.
+
+    db_path: target DB (defaults to the Yahoo DB_PATH). Passing US_data_OpenBB.db lets the
+    OpenBB parallel lane produce the SAME options_change schema from the SAME code — so a
+    later DB switch needs no bot/dashboard changes.
     """
-    print(f"Computing open interest and volume changes for {trade_day.strftime('%Y-%m-%d')}...")
+    db_path = db_path or DB_PATH
+    print(f"Computing open interest and volume changes for {trade_day.strftime('%Y-%m-%d')} "
+          f"[{os.path.basename(db_path)}]...")
 
     trade_date_now_db = trade_day.strftime("%Y-%m-%d")  # matches trade_date in options_daily
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
 
     # 1) Find last previous trade_date in options_daily
     q_prev_date = """
@@ -1093,9 +1099,10 @@ def compute_oi_vol_change(trade_day):
     return out_file
 
 # ============= STOCK_DAILY (OHLC + PCR) =============
-def build_stock_daily(trade_day, all_tickers):
+def build_stock_daily(trade_day, all_tickers, db_path=None):
+    db_path = db_path or DB_PATH
     trade_day_str_db = trade_day.strftime("%Y-%m-%d")
-    print(f"Building stock_daily for {trade_day_str_db}...")
+    print(f"Building stock_daily for {trade_day_str_db} [{os.path.basename(db_path)}]...")
 
     session = curl_requests.Session(impersonate="chrome")
     records = []
@@ -1119,7 +1126,7 @@ def build_stock_daily(trade_day, all_tickers):
             c = float(row.get("Close", np.nan))
             v = float(row.get("Volume", np.nan))
 
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect(db_path)
             df_opt = pd.read_sql(
                 """
                 SELECT openInt_Call, openInt_Put
@@ -1158,9 +1165,9 @@ def build_stock_daily(trade_day, all_tickers):
 
     df_stock = pd.DataFrame(records)
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     try:
-        conn.execute(f"DELETE FROM {TABLE_STOCK_DAILY} WHERE trade_date = ?", (trade_date_str_db,))
+        conn.execute(f"DELETE FROM {TABLE_STOCK_DAILY} WHERE trade_date = ?", (trade_day_str_db,))
         conn.commit()
     except Exception:
         pass

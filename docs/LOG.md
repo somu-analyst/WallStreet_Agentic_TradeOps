@@ -26,6 +26,31 @@
   skew caught LRCX/KLAC that rotation still had as "Leading." Equipment (AMAT/LRCX/KLAC) fell hardest
   (−8 to −10%) on a fresh WFE/capex catalyst.
 
+## 2026-07-08 — OpenBB migration: enrichment bridge + parallel EOD capture
+- Direction shift: user wants to EVENTUALLY RETIRE yfinance and run on OpenBB. So the BB lane is now
+  being made a self-contained drop-in (not just a research lane). See [[openbb-migration]].
+- **Parity (BB vs Yahoo, raw options):** OI corr 1.000/0.999 & **100% EXACT on 07-06/07-07** (settled
+  OCC OI is one daily number → proper EOD captures agree perfectly); lastPrice 0.995-0.998; vol 0.999
+  (75-82% exact — vol is intraday, snapshot-timing). Coverage 734 vs 88. The **07-02 divergence (OI 48%
+  exact) is NOT a systematic lag** — tested: BB 07-02 doesn't match YF 07-01 (27%) or 06-30 (22%) either;
+  it was just the first/rough OpenBB capture. Frozen one-off (OCC serves no historical OI), irrelevant
+  forward. So change_OI is exact from 07-06 onward (both baselines clean EOD).
+- **Enrichment bridge `NYSE_OpenBB_derive.py`** — SELF-CONTAINED (own copy of compute_oi_vol_change/
+  build_stock_daily, NO NYSE_YFin import, so yfinance can be deleted later). Maps options_openbb→
+  options_daily→options_change (change_OI/R1/S1/now-prev) + stock_daily (--stock). Identical Yahoo
+  schema → DB_PATH flip needs zero bot/dashboard change. VALIDATED: 07-07 change_OI corr **0.9998**,
+  R1/S1 0.9998. 07-06 change_OI degraded (0.08) purely from the 07-02 baseline seam — NOT a logic bug.
+- **NYSE_YFin.py:** parameterized `compute_oi_vol_change(day, db_path=)` + `build_stock_daily(...,db_path=)`
+  (default preserves Yahoo path); fixed a latent bug — stock_daily dedup DELETE referenced undefined
+  `trade_date_str_db` (swallowed by try/except → dedup never ran); now `trade_day_str_db`.
+- **run_all_offhours.py:** launches `NYSE_OpenBB.py` in BACKGROUND parallel to the Yahoo fetch (JOB1),
+  then runs `NYSE_OpenBB_derive.py` after. Fully NON-FATAL (success gate still `rc1==0 and rc2==0`
+  on Yahoo jobs; BB writes only US_data_OpenBB.db). This is the path to "100% going forward" — every
+  new day gets consecutive clean BB baselines so change_OI is internally exact (like 07-06→07-07).
+- **On "100% match":** two independent vendors won't be byte-identical; the historical 07-02 + Yahoo→BB
+  boundary seams can't be retro-fixed (data never captured by OpenBB pre-07-02). Cutover (flip DB_PATH)
+  is the user's call after a few days of clean parallel captures. Not committed to remote unless asked.
+
 ## 2026-07-07 (later 2) — Skew backtest: CONDITIONAL fragility signal (regime-flip)
 - `backtests/skew_backtest.py` (parallel lane): does OpenBB 25Δ skew / put-flow on day t predict
   forward downside? 2 snapshot dates (07-02, 07-06); yfinance backfills forward closes for all 720

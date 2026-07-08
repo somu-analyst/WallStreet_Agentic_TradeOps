@@ -14,6 +14,10 @@ from zoneinfo import ZoneInfo
 BASE_DIR = r"C:\Users\srini\Options_chain_data\NYSE_DATA"
 JOB1 = os.path.join(BASE_DIR, "NYSE_YFin.py")
 JOB2 = os.path.join(BASE_DIR, "NYSE_Telegram.py")
+# OpenBB parallel lane (runs alongside the Yahoo fetch; writes ONLY US_data_OpenBB.db).
+# Non-fatal: BB failure never affects the Yahoo run or JOB2. Retire once DB_PATH flips to BB.
+JOB_BB = os.path.join(BASE_DIR, "NYSE_OpenBB.py")
+JOB_BB_DERIVE = os.path.join(BASE_DIR, "NYSE_OpenBB_derive.py")
 STATE_DIR = BASE_DIR
 STATE_FILE = os.path.join(STATE_DIR, "run_all_offhours_last_ok.txt")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
@@ -197,6 +201,42 @@ def run_job_headless(path):
     return proc.returncode
 
 
+def launch_job_background(path):
+    """Start a job detached (own log file, no CMD echo) and return its Popen handle.
+    Used for the OpenBB parallel lane so it overlaps the long Yahoo fetch."""
+    job_name = os.path.splitext(os.path.basename(path))[0]
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    log_file = os.path.join(LOG_DIR, f"{job_name}_{ts}.log")
+    log_msg(f"Launching {job_name} in background -> {log_file}")
+    lf = open(log_file, "a", encoding="utf-8")
+    lf.write("=" * 80 + f"\n[{datetime.now().isoformat()}] Started (bg): {path}\n\n")
+    proc = subprocess.Popen(
+        [sys.executable, "-u", path], cwd=os.path.dirname(path),
+        stdout=lf, stderr=subprocess.STDOUT, text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    return proc, lf
+
+
+def run_openbb_parallel_lane(bb_proc, bb_log):
+    """After the Yahoo fetch, wait for the background OpenBB capture, then derive the same-schema
+    tables into US_data_OpenBB.db. Fully non-fatal — logs and swallows any failure."""
+    try:
+        if bb_proc is not None:
+            log_msg("Waiting for OpenBB capture to finish...")
+            bb_rc = bb_proc.wait()
+            try:
+                bb_log.close()
+            except Exception:
+                pass
+            log_msg(f"OpenBB capture finished rc={bb_rc}")
+        log_msg("Running OpenBB derive (options_daily/options_change)...")
+        rc = run_job_headless(JOB_BB_DERIVE)   # reuse the streaming runner (no --stock: options only)
+        log_msg(f"OpenBB derive finished rc={rc}")
+    except Exception as e:
+        log_msg(f"OpenBB parallel lane error (non-fatal): {e}")
+
+
 # --- Main scheduler ---
 
 
@@ -241,13 +281,26 @@ if __name__ == "__main__":
 
         # 4. Run the two jobs (output visible in CMD and in log files)
         if DRY_RUN:
+            log_msg(f"[DRY-RUN] Would launch (parallel): {JOB_BB}")
             log_msg(f"[DRY-RUN] Would run: {JOB1}")
+            log_msg(f"[DRY-RUN] Would run: {JOB_BB_DERIVE} (after BB capture)")
             log_msg(f"[DRY-RUN] Would run: {JOB2}")
             log_msg("[DRY-RUN] State file would be written — skipping.")
             success = True
             exit_code = 0
         else:
+            # Kick off the OpenBB capture in parallel with the long Yahoo fetch (non-fatal).
+            bb_proc = bb_log = None
+            try:
+                bb_proc, bb_log = launch_job_background(JOB_BB)
+            except Exception as e:
+                log_msg(f"Could not launch OpenBB capture (non-fatal): {e}")
+
             rc1 = run_job_headless(JOB1)
+
+            # BB capture should be done by now (Yahoo fetch is the long pole); derive its tables.
+            run_openbb_parallel_lane(bb_proc, bb_log)
+
             rc2 = run_job_headless(JOB2)
 
             success = (rc1 == 0 and rc2 == 0)

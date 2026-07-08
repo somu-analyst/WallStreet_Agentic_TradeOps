@@ -230,9 +230,17 @@ def run_openbb_parallel_lane(bb_proc, bb_log):
             except Exception:
                 pass
             log_msg(f"OpenBB capture finished rc={bb_rc}")
-        log_msg("Running OpenBB derive (options_daily/options_change)...")
-        rc = run_job_headless(JOB_BB_DERIVE)   # reuse the streaming runner (no --stock: options only)
-        log_msg(f"OpenBB derive finished rc={rc}")
+        log_msg("Running OpenBB derive (options_daily/options_change/stock_daily)...")
+        job_dir = os.path.dirname(JOB_BB_DERIVE)
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        dlog = os.path.join(LOG_DIR, f"NYSE_OpenBB_derive_{ts}.log")
+        with open(dlog, "a", encoding="utf-8") as lf:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", JOB_BB_DERIVE, "--stock"],   # --stock: also rebuild stock_daily
+                cwd=job_dir, stdout=lf, stderr=subprocess.STDOUT, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            rc = proc.wait()
+        log_msg(f"OpenBB derive finished rc={rc} -> {dlog}")
     except Exception as e:
         log_msg(f"OpenBB parallel lane error (non-fatal): {e}")
 

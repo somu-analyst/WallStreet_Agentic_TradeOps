@@ -10999,6 +10999,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await board_view(query)
         elif data == "skew_view":
             await skew_view(query)
+        elif data == "catalysts_view":
+            await catalysts_view(query)
         elif data == "zrev_view":
             await zrev_view(query)
         elif data == "riskoff_view":
@@ -23387,6 +23389,142 @@ async def _send_positioning(msg, rows):
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
 
 
+# ── CATALYST RADAR (earnings + macro events ahead — the one intraday-ish nudge) ──
+# Hardcoded high-vol macro releases (8:30am ET). VERIFY/refresh yearly vs BLS/BEA schedules.
+# FOMC reuses _FOMC_DATES (defined elsewhere). Jobs/NFP is computed (first Friday).
+_CPI_DATES = ["2026-07-15", "2026-08-12", "2026-09-11", "2026-10-13", "2026-11-12", "2026-12-10"]
+_PCE_DATES = ["2026-07-31", "2026-08-28", "2026-09-25", "2026-10-30", "2026-11-25", "2026-12-23"]
+
+
+def _first_friday(year, month):
+    import datetime as _dt
+    d = _dt.date(year, month, 1)
+    return d + _dt.timedelta(days=(4 - d.weekday()) % 7)   # Friday = weekday 4
+
+
+def _macro_events(days=7):
+    """Upcoming major macro catalysts within `days`: (n_days, date, label), soonest first."""
+    today = datetime.now().date()
+    evs = [(d, "FOMC decision") for d in _FOMC_DATES]
+    evs += [(d, "CPI · inflation") for d in _CPI_DATES]
+    evs += [(d, "PCE · Fed gauge") for d in _PCE_DATES]
+    for m_off in range(0, 3):                               # Jobs report = first Friday, next 3 months
+        y, m = today.year, today.month + m_off
+        while m > 12:
+            m -= 12; y += 1
+        evs.append((_first_friday(y, m).strftime("%Y-%m-%d"), "Jobs · NFP"))
+    out = set()
+    for ds, label in evs:
+        try:
+            n = (datetime.strptime(ds, "%Y-%m-%d").date() - today).days
+        except Exception:
+            continue
+        if 0 <= n <= days:
+            out.add((n, ds, label))
+    return sorted(out)
+
+
+def _catalyst_watchlist(conn, extra=None):
+    """Open-position tickers + a few indices (+ any explicitly passed)."""
+    tks = list(extra or [])
+    try:
+        tks += [r[0] for r in conn.execute(
+            "SELECT DISTINCT UPPER(ticker) FROM trades WHERE status='OPEN'").fetchall()]
+    except Exception:
+        pass
+    tks += ["SPY", "QQQ"]
+    seen, out = set(), []
+    for t in tks:
+        t = str(t).upper()
+        if t and t not in seen:
+            seen.add(t); out.append(t)
+    return out
+
+
+def _upcoming_catalysts(tickers, days=7):
+    macro = _macro_events(days)
+    earn = []
+    for tk in tickers:
+        try:
+            ne = _next_earnings(tk)
+            d = ne.get("days") if ne else None
+            if d is not None and 0 <= d <= days:
+                earn.append((d, tk, ne.get("date")))
+        except Exception:
+            continue
+    earn.sort()
+    return macro, earn
+
+
+def _fmt_catalysts(macro, earn, days=7):
+    if not macro and not earn:
+        return None
+    parts = [f"⚡ <b>Catalyst Radar — next {days}d</b>",
+             "<i>IV inflates into these; expect gaps — size down / don't fade blindly · not advice</i>"]
+    if macro:
+        lines = [f"📅 <b>{lbl}</b> — {datetime.strptime(ds,'%Y-%m-%d').strftime('%a %b %d')} "
+                 f"({'today' if n==0 else str(n)+'d'})" for n, ds, lbl in macro]
+        parts.append("<b>🌍 MACRO</b>\n" + "\n".join(lines))
+    if earn:
+        lines = [f"📊 <b>{tk}</b> earnings — {('today' if n==0 else str(n)+'d')}"
+                 f"{(' · '+str(dt)) if dt else ''}" for n, tk, dt in earn]
+        parts.append("<b>🏢 EARNINGS (your book)</b>\n" + "\n".join(lines))
+    return "\n\n".join(parts)
+
+
+async def _send_catalysts(msg, tickers, days=7):
+    macro, earn = _upcoming_catalysts(tickers, days)
+    body = _fmt_catalysts(macro, earn, days)
+    if not body:
+        await msg.reply_text(f"No major catalysts (earnings/Fed/CPI) in the next {days} days.", parse_mode=H)
+        return
+    await msg.reply_text(body[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="catalysts_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def catalysts_command(update, ctx):
+    """/catalysts [TICKERS] — earnings + macro (Fed/CPI/PCE/Jobs) coming up on your book."""
+    args = [a.upper() for a in (ctx.args or [])][:12]
+    conn = get_conn()
+    try:
+        tickers = args or _catalyst_watchlist(conn)
+    finally:
+        conn.close()
+    await _send_catalysts(update.message, tickers, days=10)
+
+
+async def catalysts_view(query):
+    conn = get_conn()
+    try:
+        tickers = _catalyst_watchlist(conn)
+    finally:
+        conn.close()
+    await _send_catalysts(query.message, tickers, days=10)
+
+
+async def catalyst_alert(ctx: ContextTypes.DEFAULT_TYPE):
+    """Daily pre-market (~8:20 AM ET) nudge: earnings + macro catalysts within 3 days on the book.
+    Weekday gated; the one intraday-ish heads-up so EOD signals aren't blindsided by a scheduled event."""
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    if now_utc.weekday() >= 5:
+        return
+    _, chat_id = load_creds()
+    conn = get_conn()
+    try:
+        tickers = _catalyst_watchlist(conn)
+    finally:
+        conn.close()
+    macro, earn = _upcoming_catalysts(tickers, days=3)      # only fire on imminent (≤3d) events
+    body = _fmt_catalysts(macro, earn, days=3)
+    if not body:
+        return
+    try:
+        await ctx.bot.send_message(chat_id=int(chat_id), text=body[:4090], parse_mode=H)
+    except Exception as e:
+        log.warning(f"catalyst_alert send failed: {e}")
+
+
 async def earnings_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """Daily pre-market Earnings Radar: upcoming IV-crush candidates (/earnvol)
     + post-earnings drift (/pead). Weekday gated; run once daily."""
@@ -27038,6 +27176,7 @@ async def _post_init(app):
             BotCommand("rotation", "Money rotation — macro/sector/theme/stocks"),
             BotCommand("board", "Action Board — consensus scanner ideas"),
             BotCommand("skew", "Downside skew + expected move (any ticker)"),
+            BotCommand("catalysts", "Catalyst radar — earnings + Fed/CPI ahead"),
             BotCommand("squeeze", "Squeeze scan"),
             BotCommand("macro", "Macro (BLS + yields)"),
             BotCommand("earnings", "Earnings & news"),
@@ -27101,6 +27240,7 @@ def main():
     app.add_handler(CommandHandler("rotation", rotation_command))
     app.add_handler(CommandHandler("board", board_command))
     app.add_handler(CommandHandler("skew", skew_command))
+    app.add_handler(CommandHandler("catalysts", catalysts_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
@@ -27130,6 +27270,7 @@ def main():
         job_queue.run_daily(briefing_alert, time=dt_time(14, 5, 0))  # daily brief 9:05 AM ET
         job_queue.run_daily(plan_alert, time=dt_time(13, 30, 0))     # next-day game plan ~8:30 AM ET pre-market
         job_queue.run_daily(wrap_alert, time=dt_time(21, 15, 0))     # daily market wrap ~4:15 PM ET post-close
+        job_queue.run_daily(catalyst_alert, time=dt_time(13, 20, 0))  # Catalyst Radar ~8:20 AM ET pre-market
         job_queue.run_daily(action_board_alert, time=dt_time(13, 35, 0)) # Action Board ~8:35 AM ET pre-market
         job_queue.run_daily(earnings_alert, time=dt_time(13, 45, 0)) # Earnings Radar ~8:45 AM ET pre-market
         job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # weekly sector rotation, Mondays

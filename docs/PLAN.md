@@ -20,7 +20,7 @@ Options-trading edge system: Telegram bot + dashboard + our own capture-forward 
 - [ ] (gated: ~2 wks of scn_* fires with t+5 outcomes) First scanner backtest read — hit-rate + avg fwd vs baseline for uoa/building/breakout/zrev/revert, persist to `signal_accuracy`, flag thin N
 - [x] `/skew [TICKERS]` shipped on **live yfinance IV** (not OpenBB — kept parallel): direction (25Δ put−call skew via true BS delta) + size (1σ EM) + range (1σ/2σ down targets) + P(≥5%↓), earnings-in-window flag. Universal. `_skew_analyze/_skew_scan/_fmt_skew`.
 - [ ] (gated: ~1 mo of OpenBB bid/ask captures) Dispersion (#14) + a skew *backtest* on the OpenBB `skew_snapshot` panel (does high 25Δ skew / put-flow predict fwd downside? need ~15-20 dates)
-- [ ] Action Board daily Telegram digest — reuse `_ab_ideas()` sources bot-side; push top ⭐ consensus ideas each morning like the Earnings Radar job
+- [x] Catalyst Radar — `/catalysts [TICKERS]` + `catalyst_alert` (8:20 AM ET, ≤3d): earnings (per-ticker yfinance) + macro (FOMC in-code · CPI/PCE hardcoded 2026 · Jobs/NFP computed first-Friday) on the open book. The one intraday-ish nudge so EOD signals aren't blindsided by scheduled events. `_macro_events/_upcoming_catalysts/_fmt_catalysts`.
 
 ## Constraints / decisions locked in
 - CLAUDE.md rules win: edit `telegram_bot_optimized.py`/`dashboard.py` directly (no patch scripts), single-engine (dashboard imports the bot), dates MM-DD-YYYY sort trick, secrets never committed/printed, `US_data.db` never written by NYSE_OpenBB.py.

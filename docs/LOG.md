@@ -26,6 +26,24 @@
   skew caught LRCX/KLAC that rotation still had as "Leading." Equipment (AMAT/LRCX/KLAC) fell hardest
   (−8 to −10%) on a fresh WFE/capex catalyst.
 
+## 2026-07-08 (later) — Catalyst Radar + env-switchable DB, both apps tested on BB
+- **Catalyst Radar** (`/catalysts` + `catalyst_alert` 8:20 AM ET, ≤3d gate): the one intraday-ish nudge
+  from the EOD-vs-intraday discussion. Earnings via `_next_earnings` (per open-position ticker + SPY/QQQ);
+  macro via FOMC (`_FOMC_DATES`) + hardcoded `_CPI_DATES`/`_PCE_DATES` 2026 (VERIFY yearly) + Jobs/NFP
+  computed as first-Friday. Verified live: CPI Jul 15 (7d) + UNH earnings Jul 16 (8d) surfaced. ETF
+  earnings lookups 404 harmlessly (return None).
+- **Env-switchable DB (`NYSE_DB_PATH`)**: telegram_bot_optimized.py + dashboard.py DB_PATH now honor the
+  env var (default = Yahoo). Set to US_data_OpenBB.db to run both apps on OpenBB, zero code edit, revert
+  by unsetting. Dashboard caption shows active DB. Scheduler derive now `--stock` (BB stock_daily current).
+- **Tested both apps on BB DB (via override):** building/rotation/GEX read correctly. GEX richer on BB
+  (full chain vs Yahoo ±20 strikes → larger magnitude, more walls; NVDA got walls where Yahoo gave none).
+  GEX=0 only when spot not passed — same on both DBs (harness, not migration). Dashboard delegates DB
+  reads to the same engine + is env-aware → covered.
+- **EOD-vs-intraday advice (user asked):** EOD is the CORRECT native frequency here — OI is EOD by nature
+  (OCC settles overnight), and the validated edges (rotation/skew/positioning) are daily-frequency. EOD =
+  screening/setup/direction+size layer; execute + manage risk with live data. Don't chase intraday. The
+  semis call (flagged day before −5.6%) is the proof of what EOD does well. Catalyst Radar = the thin live nudge.
+
 ## 2026-07-08 — OpenBB migration: enrichment bridge + parallel EOD capture
 - Direction shift: user wants to EVENTUALLY RETIRE yfinance and run on OpenBB. So the BB lane is now
   being made a self-contained drop-in (not just a research lane). See [[openbb-migration]].

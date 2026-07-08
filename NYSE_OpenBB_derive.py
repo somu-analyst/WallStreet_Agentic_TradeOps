@@ -149,17 +149,16 @@ def compute_oi_vol_change(trade_day, db_path=OB_DB):
     merged['pct_change_vol_Call'] = pct(merged['vol_Call_now'], merged['vol_Call_prev'])
     merged['pct_change_vol_Put'] = pct(merged['vol_Put_now'], merged['vol_Put_prev'])
 
-    merged["lastPrice_Call_now"] = merged["lastPrice_Call_now"].fillna(0)
-    merged["lastPrice_Put_now"] = merged["lastPrice_Put_now"].fillna(0)
-    merged["call_high_now"] = merged.get("call_high_now", merged.get("call_high")).fillna(0)
-    merged["put_high_now"] = merged.get("put_high_now", merged.get("put_high")).fillna(0)
-    merged["R1"] = merged["strike"] + merged["lastPrice_Call_now"]
-    merged["S1"] = merged["strike"] - merged["lastPrice_Put_now"]
-    merged["R12"] = merged["strike"] + merged["call_high_now"]
-    merged["S12"] = merged["strike"] - merged["put_high_now"]
-    for side in ("call", "put"):
-        for f in ("open", "low", "close"):
-            merged[f"{side}_{f}_now"] = merged.get(f"{side}_{f}_now", merged.get(f"{side}_{f}"))
+    lc = merged["lastPrice_Call_now"] = merged["lastPrice_Call_now"].fillna(0)
+    lp = merged["lastPrice_Put_now"] = merged["lastPrice_Put_now"].fillna(0)
+    # OpenBB captures an EOD SNAPSHOT (no intraday bars): EOD close == last price, and open/high/low
+    # collapse to last for these (thin) contracts — identical to what Yahoo effectively stored
+    # (its per-contract OHLC = last for illiquid options). Populate all 8 OHLC cols from last.
+    for f in ("open", "high", "low", "close"):
+        merged[f"call_{f}_now"] = lc
+        merged[f"put_{f}_now"] = lp
+    merged["R1"] = merged["R12"] = merged["strike"] + lc      # no separate high -> R12 == R1
+    merged["S1"] = merged["S12"] = merged["strike"] - lp
 
     cols_out = [
         'ticker', 'company_name_now', 'asset_type_now', 'strike', 'expiry_date', 'trade_date_now',

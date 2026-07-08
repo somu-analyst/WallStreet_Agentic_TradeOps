@@ -26,6 +26,19 @@
   skew caught LRCX/KLAC that rotation still had as "Leading." Equipment (AMAT/LRCX/KLAC) fell hardest
   (−8 to −10%) on a fresh WFE/capex catalyst.
 
+## 2026-07-07 (later 2) — Skew backtest: CONDITIONAL fragility signal (regime-flip)
+- `backtests/skew_backtest.py` (parallel lane): does OpenBB 25Δ skew / put-flow on day t predict
+  forward downside? 2 snapshot dates (07-02, 07-06); yfinance backfills forward closes for all 720
+  names so the crash window isn't starved. 1,440 name-window obs.
+- **skew25 rank IC FLIPS by regime:** +0.10 (p=0.007) in the calm 07-02→07-06 up-window (high skew
+  → bounce, buy-the-fear) vs **−0.14 (p=1.7e-4) in the 07-06→07-07 semi crash** (high-skew names —
+  SMH/SOXX/LRCX/KLAC — underperformed exactly as the /skew flag said). Pooled ≈0 (they cancel).
+- **Conclusion:** skew is a CONDITIONAL FRAGILITY signal — predicts cross-sectional downside only
+  when a catalyst hits, not a standalone direction bet. Same shape as the earlier put-flow finding
+  (predicts move SIZE, not unconditional direction). Cross-sectionally VALIDATES the semis call in
+  the crash window. Still preliminary (2 windows); need ~15-20 dates for a time-series test. Do NOT
+  ship as a directional bot signal yet — pair with a regime/trigger.
+
 ## 2026-07-07 (later) — /skew downside-risk command (live IV, respects OpenBB-parallel rule)
 - User asked for a semis-style downside-fear scan with "how much downside, direction + size/range."
   Building it on the OpenBB DB would wire the parallel lane into the bot (locked constraint) → built

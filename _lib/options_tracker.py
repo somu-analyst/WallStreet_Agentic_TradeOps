@@ -9,7 +9,8 @@ from datetime import datetime
 import yfinance as yf
 from scipy.stats import norm
 
-DB_PATH = r"C:\Users\srini\Options_chain_data\US_data.db"
+import os as _os  # PRIMARY DB = OpenBB (matches the bot); override via env NYSE_DB_PATH
+DB_PATH = _os.environ.get("NYSE_DB_PATH") or r"C:\Users\srini\Options_chain_data\US_data_OpenBB.db"
 
 # ============================================================================
 # GREEKS CALCULATION (Black-Scholes)

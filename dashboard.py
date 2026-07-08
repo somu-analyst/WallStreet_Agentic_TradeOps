@@ -189,9 +189,9 @@ _cleanup_dashboard_source()
 # ---------------------------------------------------------------------------
 # PATHS
 # ---------------------------------------------------------------------------
-# DB source overridable via env NYSE_DB_PATH (default = Yahoo US_data.db); set to US_data_OpenBB.db
-# to run the dashboard on the OpenBB feed — matches telegram_bot_optimized.py, fully reversible.
-DB_PATH = os.environ.get("NYSE_DB_PATH") or r"C:\Users\srini\Options_chain_data\US_data.db"
+# PRIMARY DB = OpenBB (US_data_OpenBB.db): 734 tickers + real IV/greeks. Matches the bot.
+# Override via env NYSE_DB_PATH (point to US_data.db to revert to the Yahoo feed).
+DB_PATH = os.environ.get("NYSE_DB_PATH") or r"C:\Users\srini\Options_chain_data\US_data_OpenBB.db"
 LIB_DIR = os.path.join(os.path.dirname(__file__), "_lib")
 if LIB_DIR not in sys.path:
     sys.path.insert(0, LIB_DIR)

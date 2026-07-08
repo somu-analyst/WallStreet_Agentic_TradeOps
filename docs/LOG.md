@@ -44,6 +44,27 @@
   screening/setup/direction+size layer; execute + manage risk with live data. Don't chase intraday. The
   semis call (flagged day before −5.6%) is the proof of what EOD does well. Catalyst Radar = the thin live nudge.
 
+## 2026-07-08 (cutover) — OpenBB is now the PRIMARY DB
+- User: "use BB as we have more tickers." Executed the cutover.
+- **State sync** (one-time, scratchpad migrate_state_to_bb.py): copied bot-state tables US_data.db → BB
+  (trades/positions, event_journal, bookmarks, signal_accuracy, signal_weights, momentum_ranks, alert_dedup,
+  gamma_wall_trades, antibubble_watch, rotation_watch, hiprob_recs, fundamentals_cache) preserving schema/PKs.
+  The 4 "missing" tables (antibubble_watch/rotation_watch/hiprob_recs/fundamentals_cache) were missing only
+  because the bot never ran vs BB (auto-created via CREATE IF NOT EXISTS); migrating preserves tracking history.
+- **DB_PATH flipped to BB** (default US_data_OpenBB.db, env NYSE_DB_PATH overrides) in telegram_bot_optimized.py,
+  dashboard.py, and _lib/{options_tracker,news_and_earnings,market_news_aggregator,event_writeup_bot_hooks,
+  event_writeup_engine}. Verified: bot reads BB, positions intact (GOOGL×2/UNH), 736-ticker universe, rotation/
+  GEX/building work. Reversible: `set NYSE_DB_PATH=...US_data.db`.
+- **Empty columns explained** (user asked): option OHLC (call_open/high/low/close, R12/S12) NULL because OpenBB
+  captures a snapshot (last/bid/ask/vol/OI/IV/delta), no per-contract bars; bot uses NONE of them (grep=0);
+  money_coi_*/vol_rank_* dead in Yahoo too. Gained IV/greeks. R1/S1 (from lastPrice) 100% populated.
+- **Signal-pattern backtest (5y SPY/VIX, 1234 days):** MAGNITUDE predictable — VIX rank-IC +0.365 vs |next-day|,
+  P(>1% move) 11%→50% across VIX quintiles. DIRECTION not — all features IC≈0 (p>0.3), "yday up→today up" 51%.
+  Advice: turbulence/size engine (= Market Radar, now validated); don't chase index direction; direction edge
+  is cross-sectional (Rotation). "Redo until perfect" on direction = overfitting; iteration 1 was conclusive.
+- **Watch:** BB freshness depends on nightly OpenBB derive (non-fatal, no auto-fallback yet). NYSE_Telegram.py
+  still on US_data.db. See docs/NEXT.md.
+
 ## 2026-07-08 — OpenBB migration: enrichment bridge + parallel EOD capture
 - Direction shift: user wants to EVENTUALLY RETIRE yfinance and run on OpenBB. So the BB lane is now
   being made a self-contained drop-in (not just a research lane). See [[openbb-migration]].

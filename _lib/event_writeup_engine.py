@@ -27,9 +27,9 @@ from zoneinfo import ZoneInfo
 
 import yfinance as yf
 
-DB_PATH = os.environ.get(
-    "US_DATA_DB", r"C:\Users\srini\Options_chain_data\US_data.db"
-)
+# PRIMARY DB = OpenBB (matches the bot); NYSE_DB_PATH wins, then legacy US_DATA_DB.
+DB_PATH = (os.environ.get("NYSE_DB_PATH") or os.environ.get("US_DATA_DB")
+           or r"C:\Users\srini\Options_chain_data\US_data_OpenBB.db")
 ET = ZoneInfo("America/New_York")
 
 # ── Event taxonomy ────────────────────────────────────────────────────────────

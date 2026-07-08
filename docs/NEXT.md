@@ -2,29 +2,26 @@
 
 > The single most useful thing for whoever (or whatever model) picks this up next. Overwrite each handoff.
 
-**Right now:** OpenBB migration is in **parallel-validation**. The BB lane is self-contained and wired:
-`NYSE_OpenBB.py` (capture) + `NYSE_OpenBB_derive.py` (self-contained bridge → options_daily/options_change/
-stock_daily, same Yahoo schema) run each EOD via `run_all_offhours.py` **parallel to the Yahoo fetch,
-non-fatal**. Bot + dashboard read `DB_PATH` which honors **env `NYSE_DB_PATH`** (default = Yahoo). Parity:
-OI matches Yahoo **100% exact on clean EOD days** (07-06/07-07); derived change_OI/R1/S1 corr 0.9998.
-Only 07-02 (first rough capture) diverges — one-off, rolls off.
+**Right now:** **CUTOVER DONE — OpenBB is the PRIMARY DB.** `telegram_bot_optimized.py`, `dashboard.py`,
+and the 5 `_lib` modules all default `DB_PATH` → `US_data_OpenBB.db` (734 tickers + real IV/greeks),
+overridable via env `NYSE_DB_PATH` (point to `US_data.db` to revert to Yahoo). Bot-state tables
+(trades/positions, journals, bookmarks, signal_accuracy, momentum_ranks, watch tables, fundamentals_cache)
+were **synced US_data.db → BB** so positions/history are correct. Verified: bot reads BB, positions intact
+(GOOGL×2, UNH), 736-ticker universe, rotation/GEX/building all work.
 
-**Do next (in order):**
-1. Let the scheduler run BB in parallel a few nights (accrue clean consecutive captures).
-2. Trial the bot on BB: `set NYSE_DB_PATH=C:\Users\srini\Options_chain_data\US_data_OpenBB.db` then launch;
-   eyeball GEX/scanners/rotation. Unset to revert.
-3. When confident → make BB primary (leave the env var set, or hardcode later).
+**Operational dependency (important):** BB market data (options_change/stock_daily) is refreshed nightly by
+`NYSE_OpenBB.py` + `NYSE_OpenBB_derive.py --stock` in `run_all_offhours.py` (parallel to Yahoo, non-fatal).
+If the OpenBB capture fails a night, BB market data is stale with **no auto-fallback** — Yahoo's US_data.db
+still updates but isn't read. Watch the derive log; if BB goes stale, revert with `set NYSE_DB_PATH=...US_data.db`.
 
-**⚠️ Pending at cutover — the `_lib` split (DON'T forget):** bot + dashboard are fully BB-switchable, but
-these still hardcode `US_data.db` and must be handled when BB becomes primary:
-- `_lib/options_tracker.py`, `_lib/news_and_earnings.py`, `_lib/market_news_aggregator.py`,
-  `_lib/event_writeup_bot_hooks.py` (+ `event_writeup_engine.py` uses a different env `US_DATA_DB`),
-  and `NYSE_Telegram.py`.
-- **Split rule:** MARKET-DATA reads (options_change/stock_daily) → follow `NYSE_DB_PATH`; but pin
-  **USER STATE** (`trades`/positions, `event_journal`, `bookmarks`, news cache) to `US_data.db` — the BB
-  DB holds STALE mirror copies of those, so a blanket flip would read stale positions/P&L. NOT a blanket
-  find-replace.
+**Known/benign:** option OHLC columns (call_open/high/low/close, R12/S12, money_coi_*, vol_rank_*) are NULL in
+BB — OpenBB has no per-contract OHLC bars; the bot uses NONE of them (R1/S1 from lastPrice are 100% populated).
 
-**Watch out for:** `stock_daily` in BB needs the derive's `--stock` step (now in the scheduler) — without it,
-spot/GEX read stale. Two vendors won't be byte-identical (vol differs on snapshot timing); don't chase
-literal 100%. Cutover is the USER'S call — don't flip autonomously.
+**Do next (optional):**
+- Restart the bot + rerun Streamlit to load the cutover.
+- `NYSE_Telegram.py` (EOD report) still reads US_data.db — flip to env-aware if you want the daily report on BB too.
+- Consider a freshness auto-fallback (if BB's latest options_change < Yahoo's, use Yahoo) for robustness.
+
+**Signal research finding (5y backtest):** MAGNITUDE of >1% index moves is predictable (VIX rank-IC +0.365;
+P(>1% move) 11%→50% across VIX quintiles); DIRECTION is not (all IC≈0, 51% coin-flip). Build/keep the
+turbulence(size) engine; don't chase index direction. Directional edge is cross-sectional (Rotation, validated).

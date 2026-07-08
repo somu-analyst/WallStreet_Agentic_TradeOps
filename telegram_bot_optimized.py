@@ -398,11 +398,10 @@ async def _safe_reply(message, text, parse_mode="HTML", reply_markup=None):
 # ─── Config ───
 DATA_DIR  = r"C:\Users\srini\Options_chain_data"
 NYSE_DIR  = os.path.join(DATA_DIR, "NYSE_DATA")
-# DB source is overridable via env NYSE_DB_PATH (default = Yahoo US_data.db). Set it to
-# US_data_OpenBB.db to run the bot/dashboard on the OpenBB feed — fully reversible, no code edit.
-DB_PATH   = os.environ.get("NYSE_DB_PATH") or os.path.join(DATA_DIR, "US_data.db")
-if DB_PATH != os.path.join(DATA_DIR, "US_data.db"):
-    logging.getLogger(__name__).info(f"NYSE_DB_PATH override → reading {os.path.basename(DB_PATH)}")
+# PRIMARY DB = OpenBB (US_data_OpenBB.db): 734 tickers + real IV/greeks, state synced from Yahoo.
+# Override via env NYSE_DB_PATH (e.g. point to US_data.db to revert to the Yahoo feed).
+DB_PATH   = os.environ.get("NYSE_DB_PATH") or os.path.join(DATA_DIR, "US_data_OpenBB.db")
+logging.getLogger(__name__).info(f"DB source: {os.path.basename(DB_PATH)}")
 
 TOKEN_FILE  = os.path.join(NYSE_DIR, "token.txt")
 CHATID_FILE = os.path.join(NYSE_DIR, "us_bot_id.txt")

@@ -181,6 +181,12 @@ def compute_oi_vol_change(trade_day, db_path=OB_DB):
     except Exception:
         pass
     df_out.to_sql(TABLE_OPTIONS_CHANGE, conn, if_exists="append", index=False)
+    # date-leading indexes so dashboard date-snapshot queries don't skip-scan the ticker index
+    # (BB has ~9x Yahoo's rows/day). Idempotent; ANALYZE refreshes the planner stats.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_oc_date ON options_change(trade_date_now)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_od_date ON options_daily(trade_date)")
+    conn.execute("ANALYZE")
+    conn.commit()
     conn.close()
     print(f"  appended {len(df_out)} rows -> {TABLE_OPTIONS_CHANGE}")
     return len(df_out)

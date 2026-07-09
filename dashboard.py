@@ -289,7 +289,14 @@ def _oi_intent_algo(df, spot):
 
 # ---------------------------------------------------------------------------
 def get_conn():
-    return sqlite3.connect(DB_PATH)
+    c = sqlite3.connect(DB_PATH)
+    try:                                             # faster reads on the larger BB DB (every page)
+        c.execute("PRAGMA mmap_size=268435456")      # 256MB memory-mapped reads
+        c.execute("PRAGMA cache_size=-64000")        # 64MB page cache
+        c.execute("PRAGMA temp_store=MEMORY")
+    except Exception:
+        pass
+    return c
 
 def q(sql, params=None):
     """Quick query → DataFrame"""

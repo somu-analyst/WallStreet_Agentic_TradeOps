@@ -348,6 +348,29 @@ def _cached_info(ticker: str) -> dict:
     except Exception:
         return {}
 
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _next_events(ticker: str):
+    """(next earnings date, next ex-dividend date) as YYYY-MM-DD strings ('—' if unknown).
+    Cached 6h — used to annotate position/leg tables. Earnings via the bot helper, ex-div via .info."""
+    earn = div = "—"
+    try:
+        import telegram_bot_optimized as _tb
+        ne = _tb._next_earnings(ticker)
+        if ne and ne.get("date"):
+            earn = str(ne["date"])[:10]
+    except Exception:
+        pass
+    try:
+        ed = (_cached_info(ticker) or {}).get("exDividendDate")
+        if ed:
+            import datetime as _dt
+            div = (_dt.datetime.utcfromtimestamp(int(ed)).strftime("%Y-%m-%d")
+                   if isinstance(ed, (int, float)) else str(ed)[:10])
+    except Exception:
+        pass
+    return earn, div
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_option_chain(ticker: str, expiry: str):
     """yfinance option_chain — cached 5 min. Returns an object with .calls/.puts (or None),
@@ -7618,6 +7641,7 @@ elif page == "🎛️ Command Center":
                     _exp5 += 1
                 _rows.append({"": "⏳" if (_dte is not None and _dte <= 5) else "",
                               "Ticker": _tk, "Opt": f"{_k:g}{_opt[0]}", "Qty": _qty, "DTE": _dte,
+                              "Expiry": _exp[:10],
                               "Entry": round(_ep, 2), "Now": round(_cp, 2) if _cp else None,
                               "P&L $": round(_pnl) if _pnl is not None else None})
             _k1, _k2, _k3 = st.columns(3)
@@ -13565,10 +13589,11 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     _fpa = _pos_analytics([l], l["spot"])
                     _fwin = (f"{'🟢' if _fpa['pop'] >= 60 else '🟡' if _fpa['pop'] >= 40 else '🔴'} "
                              f"{_fpa['pop']:.0f}%") if _fpa else "—"
+                    _fearn, _fdiv = _next_events(_ftk)
                     _flat.append({
                         "Ticker": _ftk, "Spot": round(l["spot"], 2),
                         "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
-                        "Exp": l["exp"][:10], "DTE": l["dte"], "Money": _fm,
+                        "Exp": l["exp"][:10], "DTE": l["dte"], "Earnings": _fearn, "Ex-Div": _fdiv, "Money": _fm,
                         "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
                         "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
                         "Est Open": _ftopen_disp, "Day L–H": f"${_folo:.2f}–${_fohi:.2f}",
@@ -18655,7 +18680,7 @@ def _spreads_scan(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=6):
                 score = 100 * (0.40 * pop + 0.25 * min(rr, 2) / 2
                                + 0.20 * min(cushion, 0.10) / 0.10
                                + 0.15 * min(oi_min, 500) / 500)
-                cand.append({"Ticker": tk, "Strategy": strat, "DTE": dte, "Legs": legs,
+                cand.append({"Ticker": tk, "Strategy": strat, "DTE": dte, "Expiry": str(exp)[:10], "Legs": legs,
                              "Score": round(score, 1), "POP %": round(pop * 100, 1),
                              "Net": (f"-${net:.2f}" if direction == "debit" else f"+${net:.2f}"),
                              "Max profit": f"${maxp*100:,.0f}", "Max loss": f"${maxl*100:,.0f}",
@@ -18732,7 +18757,7 @@ def _wheel_scan(tickers, dte_lo=20, dte_hi=45, r=0.045, otm_max=0.18):
                 ann = yld * (365.0 / max(dte, 1))
                 be = K - cr
                 score = 100 * (0.45 * pop + 0.35 * min(ann, 1.0) + 0.20 * min(cr / spot, 0.05) / 0.05)
-                out.append({"Ticker": tk, "DTE": dte, "Strike": f"{K:g}", "Premium": f"${cr:.2f}",
+                out.append({"Ticker": tk, "DTE": dte, "Expiry": str(exp)[:10], "Strike": f"{K:g}", "Premium": f"${cr:.2f}",
                             "Yield": f"{yld*100:.2f}%", "Annualized": f"{ann*100:.0f}%",
                             "POP %": round(pop * 100, 1), "P(assign) %": round(p_assign * 100, 1),
                             "Breakeven": f"${be:.2f}", "Discount": f"{(spot-be)/spot*100:.1f}%",
@@ -18775,7 +18800,7 @@ def _covered_call_scan(tickers, dte_lo=20, dte_hi=45, r=0.045, otm_max=0.18):
                 ann = yld * (365.0 / max(dte, 1))
                 upside = (K - spot + cr) / spot   # total return if called away
                 score = 100 * (0.40 * pop_keep + 0.35 * min(ann, 1.0) + 0.25 * min(upside, 0.12) / 0.12)
-                out.append({"Ticker": tk, "DTE": dte, "Strike": f"{K:g}", "Premium": f"${cr:.2f}",
+                out.append({"Ticker": tk, "DTE": dte, "Expiry": str(exp)[:10], "Strike": f"{K:g}", "Premium": f"${cr:.2f}",
                             "Yield": f"{yld*100:.2f}%", "Annualized": f"{ann*100:.0f}%",
                             "P(keep shares) %": round(pop_keep * 100, 1),
                             "Upside if called": f"{upside*100:.1f}%", "Score": round(score, 1), "_score": score})
@@ -19700,7 +19725,7 @@ def _ss_dataframe(_tbo, conn, choice, tks):
                               "Z": round(r["z"], 2), "Side": r["side"]} for r in rows])
     if choice.startswith("🦅"):                                   # Iron condor
         rows = _tbo._condor_scan(tuple(tks) if tks else tuple(default), conn=conn)
-        return pd.DataFrame([{"Ticker": r["ticker"], "DTE": r["dte"],
+        return pd.DataFrame([{"Ticker": r["ticker"], "DTE": r["dte"], "Expiry": str(r.get("expiry", ""))[:10],
                               "Short P/C": f"{r['sp']:g}/{r['sc']:g}", "Long P/C": f"{r['lp']:g}/{r['lc']:g}",
                               "Credit": round(r["credit"], 2), "POP %": round(r["pop"] * 100, 0),
                               "RoR": round(r["ror"], 2), "Range": f"{r['lo_be']:.0f}-{r['hi_be']:.0f}"} for r in rows])
@@ -19726,6 +19751,7 @@ def _ss_dataframe(_tbo, conn, choice, tks):
     if choice.startswith("🎡"):                                   # Wheel / CSP (shared bot code — dicts)
         rows = _tbo._wheel_scan_bot(tuple(tks) or tuple(_tbo._hiprob_default_tickers()))
         return pd.DataFrame([{"Ticker": r["ticker"], "Put": f"{r['strike']:g}P", "DTE": r["dte"],
+                              "Expiry": str(r.get("expiry", ""))[:10],
                               "Yr %": round(r["ann"] * 100, 0), "POP %": round(r["pop"] * 100, 0),
                               "Breakeven": round(r["be"], 2), "Cushion %": round(r["cushion"] * 100, 1),
                               "Capital": r.get("capital"),
@@ -19733,6 +19759,7 @@ def _ss_dataframe(_tbo, conn, choice, tks):
     if choice.startswith("📞"):                                   # Covered call (shared bot code)
         rows = _tbo._cc_scan_bot(tuple(tks) or tuple(_tbo._hiprob_default_tickers()), conn=conn)
         return pd.DataFrame([{"Ticker": r["ticker"], "Call": f"{r['strike']:g}C", "DTE": r["dte"],
+                              "Expiry": str(r.get("expiry", ""))[:10],
                               "Yr %": round(r["ann"] * 100, 0), "POP %": round(r["pop"] * 100, 0),
                               "If-called %": round(r["if_called"] * 100, 1),
                               "IVR": (round(r["ivr"], 0) if r.get("ivr") is not None else None)} for r in rows])

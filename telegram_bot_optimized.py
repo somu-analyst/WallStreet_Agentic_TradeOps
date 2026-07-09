@@ -10001,7 +10001,8 @@ async def position_monitor_adhoc(query, ctx):
 # ── LIVE MOMENTUM SCANNER ENGINE
 # ═══════════════════════════════════════════════════════════════════
 
-SCAN_UNIVERSE = [
+# Hardcoded liquid core — always included, and the fallback if the DB isn't reachable at import.
+_SCAN_CORE = [
     "AAPL","MSFT","NVDA","AMZN","GOOGL","META","AVGO","ORCL",
     "AMD","MRVL","MU","QCOM","INTC","ARM","SMCI","ON","TXN","AMAT","LRCX","KLAC",
     "PLTR","SNOW","NET","CRWD","ZS","DDOG","PANW","NOW","OKTA","FTNT",
@@ -10012,6 +10013,33 @@ SCAN_UNIVERSE = [
     "MSTR","RKLB","SOFI","IBIT","SQQQ","TQQQ",
     "SPY","QQQ","IWM","XLK","XLE","GLD","SLV","USO",
 ]
+
+
+def _liquid_scan_universe(min_oi=10000, max_names=500):
+    """Scanner universe = every ticker on the latest date clearing a LIQUIDITY FLOOR (total OI ≥
+    min_oi), unioned with the hardcoded core. This scales the scanners across the full DB (734
+    tickers) WITHOUT the thin-name noise that would skew z-scores/rankings. Falls back to the core
+    if the DB isn't reachable at import. Computed once per process (refresh = restart)."""
+    try:
+        conn = get_conn()
+        try:
+            d = conn.execute("SELECT MAX(trade_date_now) FROM options_change").fetchone()[0]
+            rows = conn.execute(
+                "SELECT UPPER(ticker) t, SUM(COALESCE(openInt_Call_now,0)+COALESCE(openInt_Put_now,0)) oi "
+                "FROM options_change WHERE trade_date_now=? GROUP BY UPPER(ticker) "
+                "HAVING oi>=? ORDER BY oi DESC LIMIT ?", (d, min_oi, max_names)).fetchall()
+        finally:
+            conn.close()
+        liq = [r[0] for r in rows if r[0] and not r[0].startswith("^")]
+        seen = set(liq)
+        uni = liq + [t for t in _SCAN_CORE if t not in seen]
+        return uni if len(uni) >= len(_SCAN_CORE) else list(_SCAN_CORE)
+    except Exception:
+        log.debug("liquid_scan_universe failed; using core", exc_info=True)
+        return list(_SCAN_CORE)
+
+
+SCAN_UNIVERSE = _liquid_scan_universe()
 
 
 def _live_momentum_scanner(top_n: int = 5):

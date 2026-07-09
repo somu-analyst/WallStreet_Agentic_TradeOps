@@ -1609,6 +1609,26 @@ def load_oi_for_date(td):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def load_oi_for_ticker_date(ticker, td):
+    """One ticker's option chain for a date (~1ms, uses the ticker index) — for pages that only
+    need a single selected ticker, instead of scanning the whole ~150k-row date snapshot."""
+    return q("SELECT * FROM options_change WHERE ticker=? AND trade_date_now=?", [str(ticker).upper(), td])
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def tickers_for_date(td):
+    """Just the ticker list for a date (cheap) — for dropdowns, instead of pulling every option row."""
+    try:
+        d = q("SELECT ticker FROM daily_ticker_summary WHERE trade_date=? ORDER BY ticker", [td])
+        if not d.empty:
+            return d["ticker"].astype(str).tolist()
+    except Exception:
+        pass
+    d = q("SELECT DISTINCT ticker FROM options_change WHERE trade_date_now=? ORDER BY ticker", [td])
+    return d["ticker"].astype(str).tolist() if not d.empty else []
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_ticker_summary(td=None):
     """SERVING LAYER: per-ticker daily aggregates (OI/PCR/OI-change/notional/spot/IV/skew) in
     ~15ms instead of scanning ~150k raw rows (~2s). Reads the precomputed daily_ticker_summary;

@@ -239,6 +239,64 @@ def build_stock_daily(trade_day, all_tickers, db_path=OB_DB):
     return df_stock
 
 
+# ── SERVING LAYER: precompute per-ticker daily summary (page-ready, ~2ms reads) ──
+def build_serving_layer(conn, dates=None):
+    """Materialize `daily_ticker_summary` — one row per ticker/date with the aggregates the
+    dashboard/bot overview pages need, so they read ~736 rows (2ms) instead of scanning ~150k
+    raw rows (2s). 0 accuracy loss: same sums over the frozen EOD snapshot, computed once.
+    Rebuilt each EOD (idempotent per date)."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS daily_ticker_summary (
+        trade_date TEXT, ticker TEXT, n_strikes INTEGER,
+        call_oi REAL, put_oi REAL, pcr_oi REAL,
+        call_oi_chg REAL, put_oi_chg REAL, net_oi_chg REAL,
+        call_vol REAL, put_vol REAL, call_notional REAL, put_notional REAL,
+        spot REAL, atm_iv REAL, skew25 REAL, pcvol REAL,
+        PRIMARY KEY (trade_date, ticker))""")
+    if dates is None:
+        dates = [r[0] for r in conn.execute(
+            "SELECT DISTINCT trade_date_now FROM options_change").fetchall()]
+    for d in dates:
+        agg = pd.read_sql("""SELECT UPPER(ticker) ticker, COUNT(*) n_strikes,
+            SUM(COALESCE(openInt_Call_now,0)) call_oi, SUM(COALESCE(openInt_Put_now,0)) put_oi,
+            SUM(COALESCE(change_OI_Call,0)) call_oi_chg, SUM(COALESCE(change_OI_Put,0)) put_oi_chg,
+            SUM(COALESCE(vol_Call_now,0)) call_vol, SUM(COALESCE(vol_Put_now,0)) put_vol,
+            SUM(COALESCE(lastPrice_Call_now,0)*COALESCE(openInt_Call_now,0)*100) call_notional,
+            SUM(COALESCE(lastPrice_Put_now,0)*COALESCE(openInt_Put_now,0)*100) put_notional
+            FROM options_change WHERE trade_date_now=? GROUP BY UPPER(ticker)""", conn, params=(d,))
+        if agg.empty:
+            continue
+        agg = agg.drop_duplicates(subset=["ticker"])
+        agg["pcr_oi"] = agg.put_oi / agg.call_oi.replace(0, np.nan)
+        agg["net_oi_chg"] = agg.call_oi_chg - agg.put_oi_chg
+        # spot from stock_daily (dedupe to avoid row multiplication on merge)
+        sd = pd.read_sql("SELECT UPPER(ticker) ticker, close spot FROM stock_daily WHERE trade_date=?",
+                         conn, params=(d,)).drop_duplicates("ticker")
+        agg = agg.merge(sd, on="ticker", how="left")
+        # options-IV metrics from skew_snapshot (if present for this date)
+        try:
+            sk = pd.read_sql("SELECT UPPER(ticker) ticker, atm_iv, skew25, pcvol FROM skew_snapshot "
+                             "WHERE trade_date=?", conn, params=(d,)).drop_duplicates("ticker")
+            agg = agg.merge(sk, on="ticker", how="left")
+        except Exception:
+            agg["atm_iv"] = agg["skew25"] = agg["pcvol"] = np.nan
+        agg = agg.drop_duplicates(subset=["ticker"])
+        agg["trade_date"] = d
+        cols = ["trade_date", "ticker", "n_strikes", "call_oi", "put_oi", "pcr_oi",
+                "call_oi_chg", "put_oi_chg", "net_oi_chg", "call_vol", "put_vol",
+                "call_notional", "put_notional", "spot", "atm_iv", "skew25", "pcvol"]
+        for c in cols:
+            if c not in agg.columns:
+                agg[c] = np.nan
+        try:
+            conn.execute("DELETE FROM daily_ticker_summary WHERE trade_date=?", (d,))
+            agg[cols].to_sql("daily_ticker_summary", conn, if_exists="append", index=False)
+            print(f"  serving layer {d}: {len(agg)} tickers")
+        except Exception as e:
+            print(f"  serving layer {d} failed: {e}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dts_date ON daily_ticker_summary(trade_date)")
+    conn.commit()
+
+
 def derive(dates=None, do_stock=False):
     conn = sqlite3.connect(OB_DB)
     all_dates = [r[0] for r in conn.execute(
@@ -266,6 +324,15 @@ def derive(dates=None, do_stock=False):
                 build_stock_daily(datetime.strptime(d, "%Y-%m-%d"), tickers)
             except Exception as e:
                 print(f"  {d}: build_stock_daily failed: {e}")
+
+    print("\nSTEP 4: build serving layer (daily_ticker_summary)")
+    c = sqlite3.connect(OB_DB)
+    try:
+        build_serving_layer(c, dates=dates)
+    except Exception as e:
+        print(f"  build_serving_layer failed: {e}")
+    finally:
+        c.close()
 
 
 if __name__ == "__main__":

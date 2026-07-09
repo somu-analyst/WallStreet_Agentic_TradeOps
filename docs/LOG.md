@@ -44,6 +44,23 @@
   screening/setup/direction+size layer; execute + manage risk with live data. Don't chase intraday. The
   semis call (flagged day before −5.6%) is the proof of what EOD does well. Catalyst Radar = the thin live nudge.
 
+## 2026-07-08 (perf) — Serving layer (Tier 2/3) + option-OHLC fix
+- **Dashboard slow after cutover** — root cause: BB has ~9x Yahoo's option rows/day (736 vs 88 tickers);
+  `load_oi_for_date` did `SELECT *` pulling ~151k raw rows (~1937ms). Not fragmentation (freelist 0),
+  not index (added date-leading idx), not pragmas (CPU-bound row materialization). Ladder measured:
+  raw SELECT* 1937ms → aggregate-in-SQL 158ms (12x) → precomputed serving table 2-15ms (~130-780x) →
+  RAM-resident ~µs. DuckDB (columnar) benched but not installed; not needed (no migration, ~0 extra space
+  if used over sqlite_scan — it's an engine not a store).
+- **Serving layer** `daily_ticker_summary` (NYSE_OpenBB_derive.build_serving_layer): per-ticker/date
+  aggregates (call/put OI, PCR, OI-change, vol, notional, spot, atm_iv, skew25) — 734 rows/day, read in
+  ~7-15ms vs ~1937ms. 0 accuracy loss (same sums over frozen EOD snapshot). Runs nightly via derive STEP 4.
+- **Dashboard** `load_ticker_summary(td)` accessor (cached, with live-GROUP BY fallback for Yahoo DB / pre-build).
+  Repointed the market-wrap OI aggregate to it. Other pages can adopt incrementally.
+- **Option OHLC fix** (user: "columns not coming, not fixed"): Yahoo's per-contract OHLC was degenerate
+  (open=high=low=close=lastPrice for thin options). OpenBB = EOD snapshot (no bars) → set close=lastPrice
+  (exact), open/high/low=last. Now ~70% non-zero, MATCHING Yahoo's rate; R1/R12/S12 populated. money_coi_*/
+  vol_rank_* stay NULL (dead in Yahoo too).
+
 ## 2026-07-08 (cutover) — OpenBB is now the PRIMARY DB
 - User: "use BB as we have more tickers." Executed the cutover.
 - **State sync** (one-time, scratchpad migrate_state_to_bb.py): copied bot-state tables US_data.db → BB

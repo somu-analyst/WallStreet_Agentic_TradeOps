@@ -250,8 +250,12 @@ def build_serving_layer(conn, dates=None):
         call_oi REAL, put_oi REAL, pcr_oi REAL,
         call_oi_chg REAL, put_oi_chg REAL, net_oi_chg REAL,
         call_vol REAL, put_vol REAL, call_notional REAL, put_notional REAL,
-        spot REAL, atm_iv REAL, skew25 REAL, pcvol REAL,
+        spot REAL, atm_iv REAL, skew25 REAL, pcvol REAL, gex_notional REAL,
         PRIMARY KEY (trade_date, ticker))""")
+    try:                                             # add column to a pre-existing table
+        conn.execute("ALTER TABLE daily_ticker_summary ADD COLUMN gex_notional REAL")
+    except Exception:
+        pass
     if dates is None:
         dates = [r[0] for r in conn.execute(
             "SELECT DISTINCT trade_date_now FROM options_change").fetchall()]
@@ -261,13 +265,15 @@ def build_serving_layer(conn, dates=None):
             SUM(COALESCE(change_OI_Call,0)) call_oi_chg, SUM(COALESCE(change_OI_Put,0)) put_oi_chg,
             SUM(COALESCE(vol_Call_now,0)) call_vol, SUM(COALESCE(vol_Put_now,0)) put_vol,
             SUM(COALESCE(lastPrice_Call_now,0)*COALESCE(openInt_Call_now,0)*100) call_notional,
-            SUM(COALESCE(lastPrice_Put_now,0)*COALESCE(openInt_Put_now,0)*100) put_notional
+            SUM(COALESCE(lastPrice_Put_now,0)*COALESCE(openInt_Put_now,0)*100) put_notional,
+            SUM(COALESCE(openInt_Call_now,0)*strike) _c_oi_k, SUM(COALESCE(openInt_Put_now,0)*strike) _p_oi_k
             FROM options_change WHERE trade_date_now=? GROUP BY UPPER(ticker)""", conn, params=(d,))
         if agg.empty:
             continue
         agg = agg.drop_duplicates(subset=["ticker"])
         agg["pcr_oi"] = agg.put_oi / agg.call_oi.replace(0, np.nan)
         agg["net_oi_chg"] = agg.call_oi_chg - agg.put_oi_chg
+        agg["gex_notional"] = agg["_c_oi_k"] - agg["_p_oi_k"]   # Σ(callOI·K) − Σ(putOI·K)
         # spot from stock_daily (dedupe to avoid row multiplication on merge)
         sd = pd.read_sql("SELECT UPPER(ticker) ticker, close spot FROM stock_daily WHERE trade_date=?",
                          conn, params=(d,)).drop_duplicates("ticker")
@@ -283,7 +289,7 @@ def build_serving_layer(conn, dates=None):
         agg["trade_date"] = d
         cols = ["trade_date", "ticker", "n_strikes", "call_oi", "put_oi", "pcr_oi",
                 "call_oi_chg", "put_oi_chg", "net_oi_chg", "call_vol", "put_vol",
-                "call_notional", "put_notional", "spot", "atm_iv", "skew25", "pcvol"]
+                "call_notional", "put_notional", "spot", "atm_iv", "skew25", "pcvol", "gex_notional"]
         for c in cols:
             if c not in agg.columns:
                 agg[c] = np.nan

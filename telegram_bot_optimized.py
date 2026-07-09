@@ -21377,7 +21377,7 @@ def _ab_fundamentals(tk, conn):
     d = {"fpe": i.get("forwardPE"), "tpe": i.get("trailingPE"), "peg": i.get("pegRatio"),
          "roe": i.get("returnOnEquity"), "margin": i.get("profitMargins"), "de": i.get("debtToEquity"),
          "fcf": i.get("freeCashflow"), "rev": i.get("revenueGrowth"), "beta": i.get("beta"),
-         "target": tgt, "price": price, "sector": sec,
+         "mcap": i.get("marketCap"), "target": tgt, "price": price, "sector": sec,
          "upside": (tgt / price - 1) if (tgt and price) else None, "cyclical": cyc}
     try:
         conn.execute("INSERT OR REPLACE INTO fundamentals_cache (ticker, asof, data) VALUES (?,?,?)",

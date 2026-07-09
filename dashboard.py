@@ -1657,6 +1657,85 @@ def load_ticker_summary(td=None):
     return df
 
 
+# ── SCAN-UNIVERSE FILTERS (OI floor = instant; beta / market-cap = fundamentals) ──
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_fundamentals_flat():
+    """Flat (ticker, beta, mcap, sector) from fundamentals_cache (JSON) — for the beta / market-cap
+    sliders. Only covers tickers whose fundamentals have been fetched (via Anti-Bubble or the
+    'Load fundamentals' button); unknown tickers pass the filters by default."""
+    import json as _json
+    try:
+        raw = q("SELECT ticker, data FROM fundamentals_cache")
+    except Exception:
+        return pd.DataFrame(columns=["ticker", "beta", "mcap", "sector"])
+    rows = []
+    for _, r in raw.iterrows():
+        try:
+            d = _json.loads(r["data"])
+            rows.append({"ticker": str(r["ticker"]).upper(), "beta": d.get("beta"),
+                         "mcap": d.get("mcap"), "sector": d.get("sector")})
+        except Exception:
+            pass
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["ticker", "beta", "mcap", "sector"])
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_scan_universe(min_oi=10000, beta_lo=0.0, beta_hi=3.0, min_mcap_b=0.0, td=None):
+    """Filtered scan universe: OI floor (serving layer, instant) + optional beta / market-cap
+    (fundamentals; tickers without fundamentals are kept so the filter never empties the list)."""
+    if td is None:
+        _d = available_trade_dates()
+        td = _d[0] if _d else None
+    sm = load_ticker_summary(td)
+    if sm.empty:
+        return []
+    sm = sm.copy()
+    sm["_toi"] = sm["call_oi"].fillna(0) + sm["put_oi"].fillna(0)
+    tks = set(sm[sm["_toi"] >= min_oi]["ticker"].astype(str).str.upper())
+    if beta_lo > 0.0 or beta_hi < 3.0 or min_mcap_b > 0.0:      # a fundamentals filter is active
+        f = load_fundamentals_flat()
+        if not f.empty:
+            known = set(f["ticker"])
+            keep = set()
+            for _, r in f.iterrows():
+                if r["ticker"] not in tks:
+                    continue
+                ok = True
+                if (beta_lo > 0.0 or beta_hi < 3.0) and pd.notna(r["beta"]):
+                    ok = ok and (beta_lo <= float(r["beta"]) <= beta_hi)
+                if min_mcap_b > 0.0 and pd.notna(r["mcap"]):
+                    ok = ok and (float(r["mcap"]) >= min_mcap_b * 1e9)
+                if ok:
+                    keep.add(r["ticker"])
+            tks = (tks & keep) | (tks - known)                 # known-pass ∪ unknown (kept)
+    return sorted(tks)
+
+
+def _ensure_fundamentals_for_universe(min_oi):
+    """Fetch+cache fundamentals for the OI universe (slow first time; then daily-cached)."""
+    import telegram_bot_optimized as _tb
+    conn = get_conn()
+    try:
+        sm = load_ticker_summary()
+        if sm.empty:
+            return 0
+        sm = sm.copy()
+        sm["_toi"] = sm["call_oi"].fillna(0) + sm["put_oi"].fillna(0)
+        tks = sm[sm["_toi"] >= min_oi]["ticker"].astype(str).str.upper().tolist()
+        prog = st.progress(0.0, text=f"Fetching fundamentals for {len(tks)} tickers…")
+        for i, tk in enumerate(tks):
+            try:
+                _tb._ab_fundamentals(tk, conn)
+            except Exception:
+                pass
+            if i % 15 == 0:
+                prog.progress(min(1.0, (i + 1) / max(len(tks), 1)))
+        prog.progress(1.0)
+        return len(tks)
+    finally:
+        conn.close()
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def load_stock_daily(ticker):
     df = q("SELECT * FROM stock_daily WHERE ticker=?", [ticker])
@@ -4902,6 +4981,34 @@ with st.sidebar:
                 value=st.session_state.get("use_ah", True), key="use_ah",
                 help="ON (default): live prices while the market is open, after-hours/pre-market (AH/PM) "
                      "when it's closed. UNCHECK to freeze on the last EOD close instead.")
+
+    # ── Scan-universe filters — applies to scanner pages via st.session_state['scan_universe'] ──
+    with st.expander("🎚️ Scan Universe", expanded=False):
+        _oi_floor = st.slider("Min total OI (liquidity)", 500, 100000,
+                              st.session_state.get("scan_min_oi", 10000), 500,
+                              help="Excludes thin/illiquid names that add noise to rankings. "
+                                   "Default 10,000 ≈ 450 liquid names.")
+        _beta_rng = st.slider("Beta range", 0.0, 3.0, st.session_state.get("scan_beta", (0.0, 3.0)), 0.1,
+                              help="Volatility vs the market. Needs fundamentals loaded (button below).")
+        _mcap_min = st.slider("Min market cap ($B)", 0, 500, st.session_state.get("scan_mcap", 0), 5,
+                              help="Company-size floor. Needs fundamentals loaded (button below).")
+        st.session_state["scan_min_oi"] = _oi_floor
+        st.session_state["scan_beta"] = _beta_rng
+        st.session_state["scan_mcap"] = _mcap_min
+        try:
+            _uni = get_scan_universe(_oi_floor, _beta_rng[0], _beta_rng[1], _mcap_min)
+        except Exception:
+            _uni = []
+        st.session_state["scan_universe"] = _uni
+        st.caption(f"Universe: **{len(_uni)}** tickers")
+        if (_beta_rng != (0.0, 3.0) or _mcap_min > 0) and load_fundamentals_flat().empty:
+            st.warning("Beta/market-cap need fundamentals — click below (one-time, ~1-2 min).")
+        if st.button("↻ Load fundamentals (beta / market cap)",
+                     help="Fetch fundamentals for the OI universe. Slow first time, then daily-cached."):
+            _n = _ensure_fundamentals_for_universe(_oi_floor)
+            st.cache_data.clear()
+            st.success(f"Loaded fundamentals for {_n} tickers.")
+            st.rerun()
 
     # ── Global live auto-refresh (in-place, no page reload) — applies to every page ──
     _gms_badge = {"OPEN": "🟢 Market OPEN", "PRE": "🌅 Pre-market", "AFTER": "🌙 After-hours",
@@ -17289,7 +17396,8 @@ if page == "🚀 Live Momentum Scanner":
             st.cache_data.clear()
 
     with st.spinner("Scanning universe (~20s first load, cached after)..."):
-        scan_results = _run_scanner_dash(tuple(SCAN_UNIVERSE_DASH))
+        _scan_uni = st.session_state.get("scan_universe") or SCAN_UNIVERSE_DASH   # sidebar filter
+        scan_results = _run_scanner_dash(tuple(_scan_uni))
 
     if not scan_results:
         st.error("Scanner failed to fetch data. Check internet connection.")

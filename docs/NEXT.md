@@ -1,27 +1,31 @@
 # NEXT — one-glance switch-over note
 
-> The single most useful thing for whoever (or whatever model) picks this up next. Overwrite each handoff.
+> The single most useful thing for whoever picks this up next. Overwrite each handoff.
 
-**Right now:** **CUTOVER DONE — OpenBB is the PRIMARY DB.** `telegram_bot_optimized.py`, `dashboard.py`,
-and the 5 `_lib` modules all default `DB_PATH` → `US_data_OpenBB.db` (734 tickers + real IV/greeks),
-overridable via env `NYSE_DB_PATH` (point to `US_data.db` to revert to Yahoo). Bot-state tables
-(trades/positions, journals, bookmarks, signal_accuracy, momentum_ranks, watch tables, fundamentals_cache)
-were **synced US_data.db → BB** so positions/history are correct. Verified: bot reads BB, positions intact
-(GOOGL×2, UNH), 736-ticker universe, rotation/GEX/building all work.
+**Right now:** **OpenBB is the PRIMARY DB and the perf/UX overhaul is shipped.** Everything below is on
+`main` (pushed 2026-07-09).
 
-**Operational dependency (important):** BB market data (options_change/stock_daily) is refreshed nightly by
-`NYSE_OpenBB.py` + `NYSE_OpenBB_derive.py --stock` in `run_all_offhours.py` (parallel to Yahoo, non-fatal).
-If the OpenBB capture fails a night, BB market data is stale with **no auto-fallback** — Yahoo's US_data.db
-still updates but isn't read. Watch the derive log; if BB goes stale, revert with `set NYSE_DB_PATH=...US_data.db`.
+**Live state:**
+- **DB cutover done** — bot + dashboard + 5 `_lib` modules default `DB_PATH` → `US_data_OpenBB.db`
+  (734 tickers + IV/greeks); reversible via env `NYSE_DB_PATH` → `US_data.db`. State synced (positions intact).
+- **Serving layer** `daily_ticker_summary` (built nightly by `NYSE_OpenBB_derive.build_serving_layer`, incl.
+  `gex_notional`) → overview/scanner reads ~2–50ms (was ~2s). Accessors in dashboard: `load_ticker_summary`,
+  `load_oi_for_ticker_date`, `tickers_for_date`. Speed sweep repointed 8 heavy sites (backtest loops 40s→20ms).
+- **Scanners** cover ~453 liquid names — `SCAN_UNIVERSE` is DB-derived (total OI ≥ 10k) + core, at bot import.
+- **Sidebar 🎚️ Scan Universe sliders**: OI floor (instant), beta, market cap (fundamentals via
+  `fundamentals_cache`; one-time "Load fundamentals" button). Universe in `st.session_state['scan_universe']`;
+  wired into the strategy scanner. **TODO:** wire into more scanner pages if wanted.
+- **Columns**: option OHLC populated (=lastPrice, matches Yahoo); every DTE table column now shows the expiry
+  date; per-leg detail has Earnings + Ex-Div (`_next_events`).
 
-**Known/benign:** option OHLC columns (call_open/high/low/close, R12/S12, money_coi_*, vol_rank_*) are NULL in
-BB — OpenBB has no per-contract OHLC bars; the bot uses NONE of them (R1/S1 from lastPrice are 100% populated).
+**Deploy:** restart the bot (`python telegram_bot_optimized.py`) + rerun Streamlit.
 
-**Do next (optional):**
-- Restart the bot + rerun Streamlit to load the cutover.
-- `NYSE_Telegram.py` (EOD report) still reads US_data.db — flip to env-aware if you want the daily report on BB too.
-- Consider a freshness auto-fallback (if BB's latest options_change < Yahoo's, use Yahoo) for robustness.
+**Watch out:**
+- BB market data depends on the nightly OpenBB derive (`run_all_offhours.py`, non-fatal, no auto-fallback).
+  If a capture fails, BB is stale — the derive log shows it; revert with `set NYSE_DB_PATH=...US_data.db`.
+- `NYSE_Telegram.py` (EOD report) still reads `US_data.db` — flip to env-aware if you want it on BB too.
+- Two DTE-heavy pages (6192/8874 in dashboard) intentionally still full-load — they need `oi_anomalies`
+  across all tickers.
 
-**Signal research finding (5y backtest):** MAGNITUDE of >1% index moves is predictable (VIX rank-IC +0.365;
-P(>1% move) 11%→50% across VIX quintiles); DIRECTION is not (all IC≈0, 51% coin-flip). Build/keep the
-turbulence(size) engine; don't chase index direction. Directional edge is cross-sectional (Rotation, validated).
+**Validated finding (5y):** >1% index-move MAGNITUDE is predictable (VIX rank-IC +0.365; P(>1%) 11%→50%
+across VIX quintiles); DIRECTION is not (IC≈0). Build the turbulence/size engine; don't chase index direction.

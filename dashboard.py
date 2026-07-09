@@ -14379,8 +14379,7 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
         try:
             _ep_oi_td = available_trade_dates()
             if _ep_oi_td:
-                _ep_oi_df = load_oi_for_date(_ep_oi_td[0])
-                _ep_oi_tk = _ep_oi_df[_ep_oi_df["ticker"] == _ep_sel_tk]
+                _ep_oi_tk = load_oi_for_ticker_date(_ep_sel_tk, _ep_oi_td[0])  # per-ticker (~1ms)
                 if not _ep_oi_tk.empty:
                     _ep_cc  = pd.to_numeric(_ep_oi_tk["change_OI_Call"], errors="coerce").sum()
                     _ep_pc  = pd.to_numeric(_ep_oi_tk["change_OI_Put"],  errors="coerce").sum()
@@ -16099,8 +16098,7 @@ if page == "🔬 OI Comparison Charts":
     st.markdown("<div>🧠 OI Signal Recommendation for " + sel_ticker + "</div>", unsafe_allow_html=True)
     try:
         # Run 6-factor signal on current date
-        _sig_data = load_oi_for_date(td_now)
-        _sig_tk = _sig_data[_sig_data["ticker"] == sel_ticker]
+        _sig_tk = load_oi_for_ticker_date(sel_ticker, td_now)  # per-ticker (~1ms)
         if not _sig_tk.empty:
             _c_chg = pd.to_numeric(_sig_tk["change_OI_Call"], errors="coerce").sum()
             _p_chg = pd.to_numeric(_sig_tk["change_OI_Put"], errors="coerce").sum()
@@ -16141,8 +16139,7 @@ if page == "🔬 OI Comparison Charts":
             _bt_dates = available_trade_dates()
             _bt_wins, _bt_total, _bt_bull, _bt_bear = 0, 0, 0, 0
             for _bd in _bt_dates[:20]:
-                _bd_data = load_oi_for_date(_bd)
-                _bd_tk = _bd_data[_bd_data["ticker"] == sel_ticker]
+                _bd_tk = load_oi_for_ticker_date(sel_ticker, _bd)  # per-ticker (~1ms, was full scan/date)
                 if _bd_tk.empty:
                     continue
                 _b_cc = pd.to_numeric(_bd_tk["change_OI_Call"], errors="coerce").sum()
@@ -16812,8 +16809,7 @@ reveals where smart money is building or liquidating positions.
     max_bt = st.slider("Backtest span (days)", min_value=5, max_value=len(bt_dates), value=min(len(bt_dates), 50), step=5)
     bt_results = []
     for d in bt_dates[:max_bt]:
-        day_data = load_oi_for_date(d)
-        tk_data = day_data[day_data["ticker"] == sel_ticker]
+        tk_data = load_oi_for_ticker_date(sel_ticker, d)  # per-ticker (~1ms, was full scan/date)
         if tk_data.empty:
             continue
 

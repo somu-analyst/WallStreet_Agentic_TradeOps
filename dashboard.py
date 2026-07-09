@@ -6151,12 +6151,12 @@ if page == "🌍 Market Overview":
         dates = available_trade_dates()
         if dates:
             latest = dates[0]
-            day_df = load_oi_for_date(latest)
+            _sm = load_ticker_summary(latest)   # serving layer (~7ms) instead of full scan
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Latest OI Date", latest)
-            c2.metric("Tickers Tracked", day_df["ticker"].nunique())
-            c3.metric("Total Call OI Chg", f"{day_df['change_OI_Call'].sum():+,.0f}")
-            c4.metric("Total Put OI Chg", f"{day_df['change_OI_Put'].sum():+,.0f}")
+            c2.metric("Tickers Tracked", len(_sm))
+            c3.metric("Total Call OI Chg", f"{_sm['call_oi_chg'].sum():+,.0f}" if not _sm.empty else "0")
+            c4.metric("Total Put OI Chg", f"{_sm['put_oi_chg'].sum():+,.0f}" if not _sm.empty else "0")
     except Exception:
         st.info("No OI data loaded in DB yet.")
 
@@ -8613,8 +8613,7 @@ This creates a self-reinforcing ceiling — the wall repels price.
             st.warning("No data.")
             st.stop()
 
-        day_df = load_oi_for_date(dates[0])
-        tickers = sorted(day_df["ticker"].unique()) if not day_df.empty else []
+        tickers = tickers_for_date(dates[0])   # ticker list only — no full scan
 
         c1, c2 = st.columns(2)
         bt_ticker = c1.selectbox("Ticker", tickers, index=0 if tickers else None)
@@ -15892,8 +15891,7 @@ if page == "🔬 OI Comparison Charts":
     prev_options = [d for d in dates if d != td_now]
     td_prev = col_d2.selectbox("📅 Compare To (prev)", prev_options, index=0 if prev_options else None)
 
-    day_df = load_oi_for_date(td_now)
-    tickers_avail = sorted(day_df["ticker"].unique()) if not day_df.empty else []
+    tickers_avail = tickers_for_date(td_now)   # ticker list only — no full scan
     default_tk = tickers_avail.index("SPY") if "SPY" in tickers_avail else 0
     sel_ticker = col_tk.selectbox("🎯 Ticker", tickers_avail, index=default_tk if tickers_avail else None)
 

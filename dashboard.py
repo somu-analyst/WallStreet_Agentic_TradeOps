@@ -1683,10 +1683,17 @@ def load_ticker_summary(td=None):
 # ── SCAN-UNIVERSE FILTERS (OI floor = instant; beta / market-cap = fundamentals) ──
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_fundamentals_flat():
-    """Flat (ticker, beta, mcap, sector) from fundamentals_cache (JSON) — for the beta / market-cap
-    sliders. Only covers tickers whose fundamentals have been fetched (via Anti-Bubble or the
-    'Load fundamentals' button); unknown tickers pass the filters by default."""
-    import json as _json
+    """Flat (ticker, beta, mcap, sector) for the beta / market-cap sliders. Prefers the nightly
+    `daily_fundamentals` table (fast, whole liquid universe); falls back to `fundamentals_cache`
+    (JSON, from Anti-Bubble / the manual button). Unknown tickers pass the filters by default."""
+    try:                                             # nightly flat table (instant, full universe)
+        flat = q("SELECT ticker, beta, market_cap AS mcap, sector FROM daily_fundamentals")
+        if not flat.empty:
+            flat["ticker"] = flat["ticker"].astype(str).str.upper()
+            return flat
+    except Exception:
+        pass
+    import json as _json                             # fallback: JSON cache
     try:
         raw = q("SELECT ticker, data FROM fundamentals_cache")
     except Exception:

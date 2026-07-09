@@ -303,6 +303,41 @@ def build_serving_layer(conn, dates=None):
     conn.commit()
 
 
+def build_fundamentals(conn, min_oi=10000, max_names=500):
+    """Nightly flat fundamentals (ticker → beta, market_cap, sector) for the liquid universe, so the
+    dashboard beta / market-cap sliders filter INSTANTLY with no manual load. yfinance .info per
+    ticker (slow, but off-hours); only refetches names not already stored today. Self-contained."""
+    if yf is None:
+        print("  yfinance unavailable — skip fundamentals"); return 0
+    import datetime as _dt
+    today = _dt.date.today().isoformat()
+    conn.execute("""CREATE TABLE IF NOT EXISTS daily_fundamentals (
+        ticker TEXT PRIMARY KEY, asof TEXT, beta REAL, market_cap REAL, sector TEXT)""")
+    d = conn.execute("SELECT MAX(trade_date_now) FROM options_change").fetchone()[0]
+    liq = [r[0] for r in conn.execute(
+        "SELECT UPPER(ticker) FROM options_change WHERE trade_date_now=? GROUP BY UPPER(ticker) "
+        "HAVING SUM(COALESCE(openInt_Call_now,0)+COALESCE(openInt_Put_now,0))>=? "
+        "ORDER BY 1 LIMIT ?", (d, min_oi, max_names)).fetchall() if not r[0].startswith("^")]
+    done = {r[0] for r in conn.execute("SELECT ticker FROM daily_fundamentals WHERE asof=?", (today,))}
+    todo = [t for t in liq if t not in done]
+    print(f"  fundamentals: {len(liq)} liquid names, {len(todo)} to fetch")
+    n = 0
+    for tk in todo:
+        try:
+            i = yf.Ticker(tk).info or {}
+            conn.execute("INSERT OR REPLACE INTO daily_fundamentals (ticker, asof, beta, market_cap, sector) "
+                         "VALUES (?,?,?,?,?)", (tk, today, i.get("beta"), i.get("marketCap"),
+                                                i.get("sector") or ""))
+            n += 1
+            if n % 25 == 0:
+                conn.commit()
+        except Exception:
+            continue
+    conn.commit()
+    print(f"  fundamentals: wrote {n} tickers")
+    return n
+
+
 def derive(dates=None, do_stock=False):
     conn = sqlite3.connect(OB_DB)
     all_dates = [r[0] for r in conn.execute(
@@ -337,6 +372,15 @@ def derive(dates=None, do_stock=False):
         build_serving_layer(c, dates=dates)
     except Exception as e:
         print(f"  build_serving_layer failed: {e}")
+    finally:
+        c.close()
+
+    print("\nSTEP 5: build fundamentals (beta / market cap for sliders)")
+    c = sqlite3.connect(OB_DB)
+    try:
+        build_fundamentals(c)
+    except Exception as e:
+        print(f"  build_fundamentals failed: {e}")
     finally:
         c.close()
 

@@ -16022,25 +16022,25 @@ if page == "🔬 OI Comparison Charts":
     if _mkt_regime_txt:
         st.markdown(f"**Market Regime:** {_mkt_regime_txt}")
 
-    _scan_data = load_oi_for_date(td_now)
+    _summ = load_ticker_summary(td_now)   # serving layer: precomputed per-ticker aggregates (~7ms)
     _scan_rows = []
-    for _stk in sorted(_scan_data["ticker"].unique()):
-        _stk_df = _scan_data[_scan_data["ticker"] == _stk]
-        _s_cc = pd.to_numeric(_stk_df["change_OI_Call"], errors="coerce").sum()
-        _s_pc = pd.to_numeric(_stk_df["change_OI_Put"], errors="coerce").sum()
+
+    def _sv(_row, _k):
+        _v = _row.get(_k)
+        return float(_v) if pd.notna(_v) else 0.0
+    for _, _r in _summ.iterrows():
+        _stk = _r["ticker"]
+        _s_cc = _sv(_r, "call_oi_chg"); _s_pc = _sv(_r, "put_oi_chg")
         _s_nb = _s_cc - _s_pc
         _s_os = 1 if _s_nb > 0 else -1
-        _s_coi = pd.to_numeric(_stk_df["openInt_Call_now"], errors="coerce").sum()
-        _s_poi = pd.to_numeric(_stk_df["openInt_Put_now"], errors="coerce").sum()
+        _s_coi = _sv(_r, "call_oi"); _s_poi = _sv(_r, "put_oi")
         _s_pcr = _s_poi / _s_coi if _s_coi > 0 else 0
         _s_ps = 1 if _s_pcr > 1.3 else (-1 if _s_pcr < 0.7 else 0)
-        _s_cv = pd.to_numeric(_stk_df.get("vol_Call_now", pd.Series([0])), errors="coerce").sum()
-        _s_pv = pd.to_numeric(_stk_df.get("vol_Put_now", pd.Series([0])), errors="coerce").sum()
+        _s_cv = _sv(_r, "call_vol"); _s_pv = _sv(_r, "put_vol")
         _s_vp = _s_pv / _s_cv if _s_cv > 0 else 0
         _s_vs = 1 if _s_vp > 1.3 else (-1 if _s_vp < 0.7 else 0)
         _s_fs = 1 if _s_cc > 0 and _s_pc < 0 else (-1 if _s_cc < 0 and _s_pc > 0 else 0)
-        _s_sk = pd.to_numeric(_stk_df.get("strike", pd.Series([0])), errors="coerce")
-        _s_gn = (_s_coi * _s_sk).sum() - (_s_poi * _s_sk).sum()
+        _s_gn = _sv(_r, "gex_notional")   # Σ(callOI·K)−Σ(putOI·K), correct per-strike
         _s_gs = 1 if _s_gn > 0 and _s_os > 0 else (-1 if _s_gn < 0 and _s_os < 0 else 0)
         _s_oi_only = _s_os + _s_ps + _s_vs + _s_fs + _s_gs
         _s_comp = _s_oi_only + _mkt_regime_sig

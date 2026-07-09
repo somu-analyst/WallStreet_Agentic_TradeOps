@@ -21915,7 +21915,7 @@ def _wheel_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, otm_max=0.18, conn=N
                 if earn_flag:
                     sc *= 0.85     # haircut: earnings before expiry = gap/assignment risk
                 rows.append({
-                    "score": sc, "ticker": tk, "strike": K, "dte": dte,
+                    "score": sc, "ticker": tk, "strike": K, "dte": dte, "expiry": exp,
                     "credit": cr, "ann": ann, "pop": pop, "be": be,
                     "cushion": (spot - be) / spot, "capital": K * 100,
                     "ivr": ivr, "earn_days": earn_days, "earn_flag": earn_flag,
@@ -22049,7 +22049,7 @@ def _cc_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, otm_max=0.15, conn=None
                 if earn_flag:
                     sc *= 0.85     # earnings before expiry = gap risk to the cap
                 rows.append({
-                    "score": sc, "ticker": tk, "strike": K, "dte": dte,
+                    "score": sc, "ticker": tk, "strike": K, "dte": dte, "expiry": exp,
                     "credit": cr, "ann": ann, "pop": pop, "upside": upside,
                     "if_called": if_called, "spot": round(spot, 2),
                     "ivr": ivr, "earn_days": earn_days, "earn_flag": earn_flag,
@@ -22586,7 +22586,7 @@ def _condor_scan(tickers, dte_lo=20, dte_hi=45, r=0.045, wing_pct=0.03, conn=Non
             if earn_flag:
                 score *= 0.85
             rows.append({
-                "score": score, "ticker": tk, "dte": dte, "spot": round(spot, 2),
+                "score": score, "ticker": tk, "dte": dte, "expiry": exp, "spot": round(spot, 2),
                 "sp": float(sp["strike"]), "sc": float(sc["strike"]),
                 "lp": float(lp["strike"]), "lc": float(lc["strike"]),
                 "credit": credit, "ror": ror, "pop": pop,

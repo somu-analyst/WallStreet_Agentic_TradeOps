@@ -1645,35 +1645,53 @@ def load_oi_for_ticker_date(ticker, td):
     return q("SELECT * FROM options_change WHERE ticker=? AND trade_date_now=?", [str(ticker).upper(), td])
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def tickers_for_date(td):
-    """Just the ticker list for a date (cheap) — for dropdowns, instead of pulling every option row."""
+# ── TIER 3: RAM-resident serving layer (shared across sessions/reruns, ~µs reads) ──
+@st.cache_resource(ttl=1800, show_spinner=False)
+def _serving_ram():
+    """The whole `daily_ticker_summary` held ONCE in process RAM, shared across every session and
+    rerun (no per-call DB read). {trade_date: DataFrame}. READ-ONLY — callers .copy() before
+    mutating. Refreshes every 30 min (nightly rebuild appears on the next refresh)."""
     try:
-        d = q("SELECT ticker FROM daily_ticker_summary WHERE trade_date=? ORDER BY ticker", [td])
-        if not d.empty:
-            return d["ticker"].astype(str).tolist()
+        df = q("SELECT * FROM daily_ticker_summary")
     except Exception:
-        pass
+        return {}
+    if df.empty:
+        return {}
+    return {d: g.reset_index(drop=True) for d, g in df.groupby("trade_date")}
+
+
+@st.cache_resource(ttl=1800, show_spinner=False)
+def _serving_index():
+    """{trade_date: {TICKER: metrics-dict}} for O(1) per-ticker lookups (instant, no filtering)."""
+    return {d: {str(r["ticker"]).upper(): r.to_dict() for _, r in df.iterrows()}
+            for d, df in _serving_ram().items()}
+
+
+def ticker_metrics(ticker, td):
+    """Instant per-ticker summary dict from RAM (O(1)), or None."""
+    return _serving_index().get(td, {}).get(str(ticker).upper())
+
+
+def tickers_for_date(td):
+    """Ticker list for a date — instant from the RAM serving layer, else DISTINCT scan."""
+    ram = _serving_ram().get(td)
+    if ram is not None and not ram.empty:
+        return ram["ticker"].astype(str).tolist()
     d = q("SELECT DISTINCT ticker FROM options_change WHERE trade_date_now=? ORDER BY ticker", [td])
     return d["ticker"].astype(str).tolist() if not d.empty else []
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def load_ticker_summary(td=None):
-    """SERVING LAYER: per-ticker daily aggregates (OI/PCR/OI-change/notional/spot/IV/skew) in
-    ~15ms instead of scanning ~150k raw rows (~2s). Reads the precomputed daily_ticker_summary;
-    falls back to a live GROUP BY if the table is absent (Yahoo DB / not yet built) — same numbers."""
+    """SERVING LAYER (Tier 3, RAM-resident): per-ticker daily aggregates in ~microseconds from the
+    shared in-RAM store; falls back to a live GROUP BY if the table is absent (Yahoo DB / pre-build)."""
     if td is None:
         _d = available_trade_dates()
         td = _d[0] if _d else None
     if not td:
         return pd.DataFrame()
-    try:
-        df = q("SELECT * FROM daily_ticker_summary WHERE trade_date=?", [td])
-        if not df.empty:
-            return df
-    except Exception:
-        pass
+    ram = _serving_ram().get(td)
+    if ram is not None and not ram.empty:
+        return ram.copy()                                # copy so callers may mutate safely
     df = q("""SELECT UPPER(ticker) ticker, COUNT(*) n_strikes,
         SUM(COALESCE(openInt_Call_now,0)) call_oi, SUM(COALESCE(openInt_Put_now,0)) put_oi,
         SUM(COALESCE(change_OI_Call,0)) call_oi_chg, SUM(COALESCE(change_OI_Put,0)) put_oi_chg,

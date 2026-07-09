@@ -4469,6 +4469,7 @@ def oi_weekly_strike_analysis(ticker, td1, td2):
 # ===================================================================
 # ──  LOSS PREDICTION ENGINE
 # ===================================================================
+@st.cache_data(ttl=180, show_spinner=False)
 def predict_trade_risk(ticker, option_type, strike, expiry_str, entry_price, qty=1):
     """
     Before-trade risk analysis: predict max loss scenarios,

@@ -4,7 +4,7 @@
 - **Canonical files:** `telegram_bot_optimized.py` (~23k lines, THE running bot) · `dashboard.py` (Streamlit). Edit these directly — no patch/helper scripts.
 - **NEVER read whole big files.** `telegram_bot_optimized.py`/`dashboard.py` are huge → use `Grep` to locate, then `Read` with `offset`/`limit`. Don't re-read a file you just edited.
 - `telegram_bot_optimized.py` = THE single source (bot runtime + engine). `dashboard.py` imports IT at runtime (hub + 24-model engine + macro pages) — no more root `telegram_bot.py` (archived 2026-07-02; `build_optimized.py` retired too, both under `archive/`).
-- Dates are `MM-DD-YYYY` strings → sort with `substr(d,7,4)||substr(d,1,2)||substr(d,4,2)`.
+- Dates: ALL DB tables are ISO `YYYY-MM-DD` now (censused 07-14-2026: options_change/options_daily/stock_daily/stock_history 100% ISO) → plain string sort/`MAX()` works. The old `MM-DD-YYYY` substr sort trick is RETIRED — don't reintroduce it.
 - `datetime.utcnow()` → `datetime.now(timezone.utc).replace(tzinfo=None)` (3.12+).
 - Dead/NULL cols: `vol_rank_call/put`, `money_coi_*`. SPY PCR can spike 11+ on expiry (not signal).
 - Secrets: `token.txt`, `us_bot_*.txt`, `api_keys.env/.enc` are gitignored — never commit/print. `*.db`, `logs/`, `*.log` ignored too.
@@ -34,7 +34,7 @@
 - **Entrypoints (root):** `telegram_bot_optimized.py` (bot) · `dashboard.py` (Streamlit, launched by bot) · `run_all_offhours.py` (EOD scheduler → `NYSE_YFin.py` + `NYSE_Telegram.py`).
 - **Data layer:** `NYSE_YFin.py` (fetch/enrich → DB) · `NYSE_Telegram.py` (daily report + charts).
 - **Shared engine:** `telegram_bot_optimized.py` — `dashboard.py` imports it everywhere (hub, 24-model engine, macro pages). One file, no sync needed. (`archive/telegram_bot.py` = old source, unused.)
-- **`archive/`** (not wired into the running bot): `build_optimized.py`; duplicates/standalone `bot_optimized.py`, `streamlit_dashboard.py`, `send_organized_report.py`, `run_event_writeups.py`, `run_eod_pipeline.py`+`eod_pipeline/`, `NSE.py`; tools `core/`, `tests/`, `migrations/`; and `_lib/{abnormal_activity_detector,market_events_db,options_flow_detector,telegram_rich_formatter}`.
+- **`archive/`** (not wired into the running bot): `build_optimized.py`; duplicates/standalone `bot_optimized.py`, `streamlit_dashboard.py`, `send_organized_report.py`, `run_event_writeups.py`, `run_eod_pipeline.py`+`eod_pipeline/`, `NSE.py`; manual utilities `NYSE_OpenBB_EOD.py` (multi-year stock_history backfill) + `_rewrite_portfolio.py` (one-off, moved 2026-07-14); tools `core/`, `tests/`, `migrations/`; and `_lib/{abnormal_activity_detector,market_events_db,options_flow_detector,telegram_rich_formatter}`.
 
 ### `_lib/` modules (root — the 7 the bot actually loads)
 - `event_writeup_engine` — automated pre/post-market event narratives (macro releases, earnings, intraday regime breaks). `event_writeup_bot_hooks` — Telegram scheduling hooks (ET times) for those writeups.
@@ -48,6 +48,7 @@
 - Narratives/data: `/wrap` market wrap · `/briefing` daily briefing · `/macro` macro (BLS+yields) · `/earnings` earnings/news · `/event` event writeup · `/logevent` add event.
 - RelStr/MeanRev: `/rs` single-stock relative strength vs SPY (3M/6M excess) · `/breakout` 52-week highs/lows · `/zrev` single-name price z-score vs 20d mean. All DB-first `stock_history`, in dashboard hub.
 - Vol: `/vrp` variance risk premium — ATM IV (`_iv_rank`) vs jump-robust realized vol (MAD estimator, so earnings gaps don't inflate RV); high VRP→sell premium (🔴), negative→buy vol (🟢). Also in dashboard hub.
+- Ratings: `/ratings [TICKERS]` — analyst upgrades/downgrades + price-target raises/cuts, last 45d (keyless `yf.Ticker().upgrades_downgrades`, Benzinga-sourced via Yahoo — no paid Benzinga API). Net = ups−downs + ½·(PT raises−cuts); median PT; defaults to open positions else skew universe. Also in dashboard Strategy Scanners hub. Benzinga markets RSS also feeds the briefing headlines + dashboard News page.
 - Flow: `/uoa` unusual options activity — contracts with today's volume ≫ standing OI (vol/OI ≥2), DTE≥7 to skip 0DTE index churn; calls=bullish/puts=bearish; ranked by $ notional; `options_change` only. Also in dashboard hub.
 - Positioning: `/building` positioning-builder — new/increasing call OI (LONG) or put OI (SHORT) vs standing OI, staged S(tarting)/I(ncreasing)/C(onfirmed, price already moving) from `options_change` + `stock_daily`. Finds bets forming before/as the move starts. Also in dashboard hub.
 - Portfolio: `/allocate [sharpe|minvar|rp] [TICKERS]` — Aladdin-style risk optimizer: long-only weights from the `stock_history` covariance (max-Sharpe tangency / min-variance / risk-parity), weight-capped; reports ann μ/σ/Sharpe. Native (numpy, no dep). Defaults to open-position tickers. Also in dashboard hub.
@@ -67,7 +68,8 @@
 - `trades`: trade_id, ticker, strategy, entry_date, expiry, status (OPEN/CLOSED), strike, option_type, quantity, entry_price, pnl
 - `us_analytics_daily`: call_notional_oi, put_notional_oi, bull_score, bear_score, avg_spot
 - self-managed: `signal_accuracy`, `signal_weights`, `momentum_ranks`, `gamma_wall_trades`, `event_journal`, `bookmarks`, `alert_dedup`
-- `stock_history`: ticker, trade_date, open, high, low, close, volume (multi-year daily; DB-first history layer). Read via `_daily_history(tk, years)` (single) / `_history_matrix(tickers, years)` (universe) — DB-first; backfill = `_fetch_yf_history` (yfinance only in the live bot — OpenBB is a **parallel test lane**, `NYSE_OpenBB*.py`, never wired into bot/dashboard); write-through; maintained FREE by `_sync_history_from_daily()` folding in `stock_daily`. Powers `/ic`, `/season`, `/rotate`, `/pwindex` with years of history instead of the ~6mo `stock_daily` window. Reduces per-call API dependence.
+- `stock_history`: ticker, trade_date, open, high, low, close, volume (multi-year daily; DB-first history layer). Read via `_daily_history(tk, years)` (single) / `_history_matrix(tickers, years)` (universe) — DB-first; backfill = `_fetch_yf_history`; write-through; maintained FREE by `_sync_history_from_daily()` folding in `stock_daily`. Powers `/ic`, `/season`, `/rotate`, `/pwindex` with years of history instead of the ~6mo `stock_daily` window.
+- **PRIMARY DB = `US_data_OpenBB.db`** (cutover 2026-07-14 after 6/6 compare PASS): bot+dashboard default `DB_PATH` to it (734 tickers, real IV/bid-ask/delta in `options_openbb`, `skew_snapshot` IV panel; full history seeded back to 2025-12). Revert switch: env `NYSE_DB_PATH` → `US_data.db`. Yahoo lane (`NYSE_YFin.py` → `US_data.db` + `NYSE_Telegram.py` report) keeps running nightly as the BACKUP feed. BB lane in scheduler: `NYSE_OpenBB.py` capture ∥ Yahoo fetch → `NYSE_OpenBB_derive.py` → `skew_snapshot.py`.
 
 ## Key functions
 - `_oi_signal_light(call_chg, put_chg, pcr)` — hedge-aware aggregate OI signal
@@ -85,7 +87,7 @@
 
 ## 🔬 Signal validation ("test" = prove it would've been right)
 Running ≠ tested. To validate a signal, backtest it against DB history and report hit-rate + avg forward return, not just "no crash."
-1. **Pull historical fires** of the signal from `options_change`/`stock_daily` (or recompute it per past `trade_date`). Date sort key: `substr(d,7,4)||substr(d,1,2)||substr(d,4,2)` (dates are `MM-DD-YYYY`).
+1. **Pull historical fires** of the signal from `options_change`/`stock_daily` (or recompute it per past `trade_date`). Dates are ISO `YYYY-MM-DD` — plain string sort works.
 2. **Join forward return:** for each fire on day *t*, get `stock_daily.close` at *t+N* (N≈3/5/10) for the same ticker → `fwd_ret = close_{t+N}/close_t - 1`.
 3. **Score by bucket:** hit-rate = % of fires where `sign(fwd_ret)` matches the call (LONG→up); also avg `fwd_ret`. Compare vs the unconditional baseline over the same window.
 4. **Persist** results to `signal_accuracy` and let adaptive weights flow to `signal_weights` (the ensemble reads these).

@@ -95,14 +95,45 @@ def get_marketwatch_rss(limit=5):
         print(f"MarketWatch error: {e}")
         return []
 
+def get_benzinga_rss(limit=5):
+    """Get Benzinga markets RSS feed (free public feed; /markets is the clean section)"""
+    try:
+        url = "https://www.benzinga.com/markets/feed"
+
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(response.content)
+
+            news = []
+            for item in root.findall('.//item')[:limit]:
+                title = item.find('title').text if item.find('title') is not None else ""
+                link = item.find('link').text if item.find('link') is not None else ""
+
+                if len(title) > 80:
+                    title = title[:77] + "..."
+
+                news.append({
+                    'headline': title,
+                    'url': link,
+                    'source': 'Benzinga',
+                    'datetime': ''
+                })
+
+            return news
+    except Exception as e:
+        print(f"Benzinga error: {e}")
+        return []
+
 def get_aggregated_news(limit=5):
     """Get news from multiple sources"""
     all_news = []
-    
+
     # Try multiple sources
     all_news.extend(get_yahoo_finance_news(3))
     all_news.extend(get_google_finance_news(3))
     all_news.extend(get_marketwatch_rss(2))
+    all_news.extend(get_benzinga_rss(2))
     
     # Remove duplicates by headline similarity
     unique_news = []

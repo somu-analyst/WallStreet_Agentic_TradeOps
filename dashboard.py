@@ -510,6 +510,15 @@ def _fetch_option_mid(ticker: str, expiry_str: str, strike: float, opt_type: str
     """Fetch real option mid-price and IV from yfinance options chain.
     Returns (mid_price, implied_vol) — both None when unavailable (market closed
     or expiry not listed)."""
+    # Fast path: when the market is fully CLOSED there is no live bid/ask, so this
+    # would fetch the whole option chain over the network only to return (None, ...).
+    # Skip the round-trip — the caller already falls back to the EOD DB premium, and
+    # it ignores the IV when the mid is None, so the result is identical but instant.
+    try:
+        if _market_state() == "CLOSED":
+            return None, None
+    except Exception:
+        pass
     try:
         chain = yf.Ticker(ticker).option_chain(expiry_str)
         df = chain.calls if opt_type.upper() == "CALL" else chain.puts
@@ -556,8 +565,7 @@ def _db_option_price(ticker: str, expiry_iso: str, strike: float, opt_type: str)
         pass
     return None
 
-@st.cache_data(ttl=180, show_spinner=False)
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def _get_ah_price(ticker: str) -> dict:
     """Fetch after-hours / pre-market / live price via yfinance fast_info. Returns dict with
     spot_reg, spot_ah, ah_chg_pct, is_extended, label ('AH'/'PM'/'Live'/'EOD').
@@ -575,9 +583,13 @@ def _get_ah_price(ticker: str) -> dict:
         # When the market is OPEN, fast_info.last_price IS the live price — skip the slow .info.
         # Any other time (pre/after/closed/unknown) fetch .info so we show the latest pre/post
         # (after-hours) price rather than the stale regular close.
-        if _market_state() != "OPEN":
+        # Only extended sessions carry a live pre/post price. When fully CLOSED, the
+        # stale postMarketPrice is just the last session's — skip the slow .info entirely
+        # (EOD close below is the correct anchor). Reuse the shared 15-min .info cache so
+        # a page with several tickers doesn't refetch the heavy .info per rerun.
+        if _market_state() in ("PRE", "AFTER"):
             try:
-                _di = yf.Ticker(ticker).info
+                _di = _cached_info(ticker)
                 post = float(_di.get("postMarketPrice") or 0)
                 pre  = float(_di.get("preMarketPrice") or 0)
             except Exception:
@@ -12585,6 +12597,7 @@ elif page == "📰 News & Calendar":
                 "Yahoo Finance": "https://finance.yahoo.com/news/rssindex",
                 "MarketWatch": "https://feeds.marketwatch.com/marketwatch/topstories/",
                 "CNBC": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
+                "Benzinga": "https://www.benzinga.com/markets/feed",
             }
             all_news = []
             for source, url in feeds.items():
@@ -18581,14 +18594,13 @@ def _hiprob_persist(res):
 
 def _hiprob_settle_px(c, tk, expiry):
     """Underlying close ON (or last session before) expiry — DB-first (stock_history
-    then stock_daily; both MM-DD-YYYY), yfinance only if the DB has nothing usable."""
-    ek = str(expiry).replace("-", "")           # YYYY-MM-DD -> YYYYMMDD sort key
-    srt = "substr(trade_date,7,4)||substr(trade_date,1,2)||substr(trade_date,4,2)"
+    then stock_daily; both ISO YYYY-MM-DD), yfinance only if the DB has nothing usable."""
+    ei = str(expiry)[:10]                       # ISO date string sorts naturally
     for tbl in ("stock_history", "stock_daily"):
         try:
-            r = c.execute(f"SELECT close, {srt} FROM {tbl} WHERE UPPER(ticker)=? AND {srt}<=? "
-                          f"ORDER BY {srt} DESC LIMIT 1", (tk.upper(), ek)).fetchone()
-            if r and r[0] and r[1] >= (pd.Timestamp(expiry) - pd.Timedelta(days=7)).strftime("%Y%m%d"):
+            r = c.execute(f"SELECT close, trade_date FROM {tbl} WHERE UPPER(ticker)=? AND trade_date<=? "
+                          f"ORDER BY trade_date DESC LIMIT 1", (tk.upper(), ei)).fetchone()
+            if r and r[0] and r[1] >= (pd.Timestamp(expiry) - pd.Timedelta(days=7)).strftime("%Y-%m-%d"):
                 return float(r[0])
         except Exception:
             continue
@@ -19036,25 +19048,41 @@ def _smartmoney_screen():
 
 @st.cache_data(ttl=600, show_spinner=False)
 def _accumulation_screen():
-    """Delivery-style accumulation proxy from stock_daily: latest volume vs 20d avg + 5d/20d return."""
-    sk = "trade_date"
+    """Volume+price proxy from stock_daily (US has no delivery %): latest volume vs 20d avg,
+    1d/5d/20d returns. Split-aware: stock_daily rows are never back-adjusted, so a >40%
+    overnight 'move' whose ratio is ~integer (2:1..10:1, forward or reverse) is treated as an
+    unadjusted split and older closes/volumes are rescaled (CRWD 4:1 on 07-02-2026 read as −74%)."""
     rows = []
     with get_conn() as c:
         tks = [r[0] for r in c.execute("SELECT DISTINCT ticker FROM stock_daily").fetchall()]
         for t in tks:
             try:
-                df = pd.read_sql(f"SELECT close,volume FROM stock_daily WHERE ticker=? ORDER BY {sk} DESC LIMIT 25",
-                                 c, params=(t,))
-                cl = pd.to_numeric(df["close"], errors="coerce").dropna()
-                vol = pd.to_numeric(df["volume"], errors="coerce").dropna()
-                if len(cl) < 10 or len(vol) < 10:
+                df = pd.read_sql("SELECT close,volume FROM stock_daily WHERE ticker=? "
+                                 "ORDER BY trade_date DESC LIMIT 25", c, params=(t,))
+                cl = pd.to_numeric(df["close"], errors="coerce")
+                vol = pd.to_numeric(df["volume"], errors="coerce")
+                keep = cl.notna() & (cl > 0) & vol.notna()
+                cl = cl[keep].to_numpy(dtype=float); vol = vol[keep].to_numpy(dtype=float)  # newest→oldest
+                if len(cl) < 10:
                     continue
-                vavg = vol.iloc[1:21].mean()
-                if not vavg:
+                split = False
+                for i in range(len(cl) - 1):                     # i = newer day, i+1 = older
+                    ratio = cl[i + 1] / cl[i]
+                    if not (0.6 < ratio < 1.67):                 # >40% overnight jump
+                        k = ratio if ratio > 1 else 1.0 / ratio
+                        kr = round(k)
+                        if kr >= 2 and abs(k - kr) <= 0.1 * kr:  # ~integer ratio → split, not a crash
+                            f = float(kr) if ratio > 1 else 1.0 / kr
+                            cl[i + 1:] /= f                      # bring pre-split closes to post-split scale
+                            vol[i + 1:] *= f                     # …and share-count-scaled volume
+                            split = True
+                vavg = vol[1:21].mean()
+                if not vavg or len(cl) < 6:
                     continue
-                rows.append({"ticker": t, "vol_x": vol.iloc[0] / vavg,
-                             "r5": (cl.iloc[0] / cl.iloc[4] - 1) * 100 if len(cl) > 4 else 0.0,
-                             "r20": (cl.iloc[0] / cl.iloc[-1] - 1) * 100})
+                rows.append({"ticker": t, "vol_x": vol[0] / vavg, "split": split,
+                             "r1": (cl[0] / cl[1] - 1) * 100,
+                             "r5": (cl[0] / cl[5] - 1) * 100,
+                             "r20": (cl[0] / cl[min(len(cl) - 1, 20)] - 1) * 100})
             except Exception:
                 continue
     return pd.DataFrame(rows)
@@ -19102,23 +19130,25 @@ def _sm_strike_map(d0):
     (conviction build) and by volume (speculation), each with expiry + last price, plus spot."""
     with get_conn() as c:
         df = pd.read_sql(
-            "SELECT ticker, strike, expiry_date, change_OI_Call, vol_Call_now, lastPrice_Call_now "
+            "SELECT ticker, strike, expiry_date, change_OI_Call, vol_Call_now, lastPrice_Call_now, "
+            "change_OI_Put, lastPrice_Put_now "
             "FROM options_change WHERE trade_date_now=?", c, params=(d0,))
         sp = pd.read_sql(
             "SELECT s.ticker, s.close FROM stock_daily s JOIN ("
-            " SELECT ticker, MAX(substr(trade_date,7,4)||substr(trade_date,1,2)||substr(trade_date,4,2)) mk"
-            " FROM stock_daily GROUP BY ticker) m ON s.ticker=m.ticker AND"
-            " substr(s.trade_date,7,4)||substr(s.trade_date,1,2)||substr(s.trade_date,4,2)=m.mk", c)
-    out = {"doi": {}, "vol": {}, "spot": {}}
+            " SELECT ticker, MAX(trade_date) mk FROM stock_daily GROUP BY ticker) m"
+            " ON s.ticker=m.ticker AND s.trade_date=m.mk", c)
+    out = {"doi": {}, "vol": {}, "doi_p": {}, "spot": {}}
     if df.empty:
         return out
     df["ticker"] = df["ticker"].astype(str).str.upper()
-    for col in ("strike", "change_OI_Call", "vol_Call_now", "lastPrice_Call_now"):
+    for col in ("strike", "change_OI_Call", "vol_Call_now", "lastPrice_Call_now",
+                "change_OI_Put", "lastPrice_Put_now"):
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    def _lbl(r):
-        px = f" @ ${r['lastPrice_Call_now']:.2f}" if r["lastPrice_Call_now"] > 0 else ""
-        return f"${r['strike']:g}C {str(r['expiry_date'])[:10]}{px}"
+    def _lbl(r, cp="C"):
+        lp = r["lastPrice_Call_now"] if cp == "C" else r["lastPrice_Put_now"]
+        px = f" @ ${lp:.2f}" if lp > 0 else ""
+        return f"${r['strike']:g}{cp} {str(r['expiry_date'])[:10]}{px}"
 
     for tk, gg in df.groupby("ticker"):
         r1 = gg.loc[gg["change_OI_Call"].idxmax()]
@@ -19127,6 +19157,9 @@ def _sm_strike_map(d0):
         r2 = gg.loc[gg["vol_Call_now"].idxmax()]
         if r2["vol_Call_now"] > 0:
             out["vol"][tk] = _lbl(r2)
+        r3 = gg.loc[gg["change_OI_Put"].idxmax()]
+        if r3["change_OI_Put"] > 0:
+            out["doi_p"][tk] = _lbl(r3, "P")
     if not sp.empty:
         out["spot"] = {str(t).upper(): float(v) for t, v in zip(sp["ticker"], sp["close"]) if v}
     return out
@@ -19195,20 +19228,54 @@ if page == "🔎 Smart-Money Flow":
         with _t4:
             _acc = _accumulation_screen()
             if _acc is not None and not _acc.empty:
-                _a = _acc[(_acc["vol_x"] > 1.3) & (_acc["r5"] > 0) & (_acc["r20"] > 0)].sort_values(
-                    "vol_x", ascending=False).head(20).copy()
-                _a["Spot"] = _a["ticker"].str.upper().map(_sk["spot"])
-                _a["Option to ride it"] = _a["ticker"].str.upper().map(_sk["doi"]).fillna("—")
-                st.markdown("**Volume-backed accumulation — above-average volume + rising price (real buying)**")
-                st.dataframe(_a.rename(columns={"ticker": "Ticker", "vol_x": "Vol vs 20d×",
-                                                "r5": "5d %", "r20": "20d %"}),
-                             hide_index=True, use_container_width=True,
-                             column_config={"Vol vs 20d×": st.column_config.NumberColumn(format="%.2f"),
-                                            "Spot": st.column_config.NumberColumn(format="$%.2f"),
-                                            "5d %": st.column_config.NumberColumn(format="%.1f%%"),
-                                            "20d %": st.column_config.NumberColumn(format="%.1f%%")})
-                st.caption("**Option to ride it** = the call strike/expiry gaining the most new OI on that "
-                           "name — where option buyers agree with the stock accumulation (— = no snapshot).")
+                def _acc_tier(cand):
+                    """Strict → relaxed → context tier so the tab never goes silently empty."""
+                    for vx, tier in ((1.3, "strong — volume >1.3× its 20d average"),
+                                     (1.1, "moderate — volume >1.1× (relaxed: nothing passed strict)")):
+                        hit = cand[cand["vol_x"] > vx]
+                        if len(hit):
+                            return hit.sort_values("vol_x", ascending=False).head(15), tier
+                    return (cand.sort_values("vol_x", ascending=False).head(10),
+                            "no volume confirmation today — quiet movers, price trend only")
+
+                def _acc_table(fr, opt_col, opt_map):
+                    fr = fr.copy()
+                    fr["Spot"] = fr["ticker"].str.upper().map(_sk["spot"])
+                    fr[opt_col] = fr["ticker"].str.upper().map(opt_map).fillna("—")
+                    fr["ticker"] = fr["ticker"] + np.where(fr["split"], " ⚡", "")
+                    st.dataframe(fr[["ticker", "Spot", opt_col, "vol_x", "r1", "r5", "r20"]].rename(
+                        columns={"ticker": "Ticker", "vol_x": "Vol vs 20d×", "r1": "1d %",
+                                 "r5": "5d %", "r20": "20d %"}),
+                        hide_index=True, use_container_width=True,
+                        column_config={"Vol vs 20d×": st.column_config.NumberColumn(format="%.2f"),
+                                       "Spot": st.column_config.NumberColumn(format="$%.2f"),
+                                       "1d %": st.column_config.NumberColumn(format="%.1f%%"),
+                                       "5d %": st.column_config.NumberColumn(format="%.1f%%"),
+                                       "20d %": st.column_config.NumberColumn(format="%.1f%%")})
+
+                st.markdown("**🟢 BUY — volume-backed accumulation (rising 5d & 20d)**")
+                _buy = _acc[(_acc["r5"] > 0) & (_acc["r20"] > 0)]
+                if len(_buy):
+                    _b, _bt = _acc_tier(_buy)
+                    st.caption(f"Tier: {_bt}")
+                    _acc_table(_b, "Option to ride it (top ΔOI call)", _sk["doi"])
+                else:
+                    st.caption("Nothing rising on both 5d and 20d right now.")
+
+                st.markdown("**🔴 SHORT — volume-backed distribution (falling 5d & 20d)**")
+                _sell = _acc[(_acc["r5"] < 0) & (_acc["r20"] < 0)]
+                if len(_sell):
+                    _s2, _st2 = _acc_tier(_sell)
+                    st.caption(f"Tier: {_st2}")
+                    _acc_table(_s2, "Option to ride it (top ΔOI put)", _sk.get("doi_p", {}))
+                else:
+                    st.caption("Nothing falling on both 5d and 20d right now.")
+
+                st.caption("**Option to ride it** = strike/expiry gaining the most new OI on that name — "
+                           "calls for the BUY side, puts for the SHORT side (— = no snapshot). "
+                           "⚡ = returns split-adjusted (unadjusted split found in stock_daily). "
+                           "Tiers relax automatically (1.3× → 1.1× → quiet movers) so this tab shows "
+                           "what's happening instead of a blank table.")
             else:
                 st.caption("No accumulation data.")
         st.caption("⚠️ OI/volume reflect positioning, not certainty of direction. LEAPS need ≥300 DTE in the "
@@ -19234,9 +19301,7 @@ def _ab_ideas():
     import telegram_bot_optimized as _tb
     ideas = []
     with get_conn() as c:
-        row = c.execute("SELECT trade_date_now FROM options_change ORDER BY "
-                        "substr(trade_date_now,7,4)||substr(trade_date_now,1,2)||substr(trade_date_now,4,2) "
-                        "DESC LIMIT 1").fetchone()
+        row = c.execute("SELECT MAX(trade_date_now) FROM options_change").fetchone()
         d0 = row[0] if row else None
         snap = pd.DataFrame()
         if d0:
@@ -19718,6 +19783,13 @@ def _ss_dataframe(_tbo, conn, choice, tks):
     """Reuse telegram_bot_optimized scanner functions → clean DataFrame (one engine,
     two front-ends). tks is a tuple of upper-case tickers (may be empty for defaults)."""
     default = _tbo._hiprob_default_tickers()
+    if choice.startswith("⭐"):                                   # Analyst ratings (keyless yfinance)
+        rows = _tbo._ratings_scan(list(tks) or _tbo._ratings_default_tickers())
+        _strip = lambda s: re.sub("<[^>]+>", "", s)
+        return pd.DataFrame([{"Ticker": r["tk"], "Upgrades": r["ups"], "Downgrades": r["dns"],
+                              "PT raises": r["ptu"], "PT cuts": r["ptd"], "Net": r["score"],
+                              "Median PT": r["med_pt"], "Actions (45d)": r["n"],
+                              "Latest": " | ".join(_strip(x) for x in r["latest"])} for r in rows])
     if choice.startswith("📡"):                                   # WAN ensemble
         rows = _tbo._wan_scan(conn, _tbo._wan_spy_ret(conn))
         return pd.DataFrame([{"Ticker": r["ticker"], "Signal": r["signal"], "Conf": r["conf"],
@@ -19884,7 +19956,7 @@ if page == "⚙️ Strategy Scanners":
                 "🎡 Wheel (CSP)", "📞 Covered call",
                 "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar",
                 "💪 Relative strength", "🚀 52-week breakout", "↕️ Mean reversion (z)", "📈 Put-write index",
-                "🔬 Factor IC validation", "🧪 Reversal sweep (vectorbt)"]
+                "⭐ Analyst ratings", "🔬 Factor IC validation", "🧪 Reversal sweep (vectorbt)"]
     _c1, _c2 = st.columns([2, 3])
     _ss_choice = _c1.selectbox("Scanner", _ss_opts, key="ss_choice")
     _ss_tk_in = _c2.text_input("Tickers (optional; blank = sensible defaults)", "", key="ss_tks")

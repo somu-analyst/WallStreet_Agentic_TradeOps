@@ -134,10 +134,10 @@ async def group_stock_detail(query, ticker):
                                  callback_data=f"exitmc|{ticker}|{ot.lower()}|{st}|{entry}|{exp}|{qty}")
         ]
 
-        parts.append(
+        par.append(
             f"{em} <b>L{leg_idx+1}: {side_label} {ot} ${st:.0f}  exp {exp}  ×{abs_qty}</b>  DTE:{dte}\n"
             f"   {em} P&L <b>{pnl_s}</b>\n"
-            f"   📌 {price_context}\n"
+         f"   📌 {price_context}\n"
             f"   💡 {advice}"
             + (f"\n{greek_line}" if greek_line else "")
         )
@@ -9381,10 +9381,12 @@ async def market_analytics_report(query):
         _pos = ["rise","gain","rally","bull","up","beat","surge","strong","record",
                 "high","boost","upgrade","growth","jump","soar"]
         news_items = []
-        for feed_sym in ["SPY", "^VIX", "^TNX", "AAPL", "NVDA"]:
+        _feed_urls = (["https://www.benzinga.com/markets/feed"] +
+                      [f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={s}&region=US&lang=en-US"
+                       for s in ["SPY", "^VIX", "^TNX", "AAPL", "NVDA"]])
+        for feed_url in _feed_urls:
             try:
-                feed = feedparser.parse(
-                    f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={feed_sym}&region=US&lang=en-US")
+                feed = feedparser.parse(feed_url)
                 for entry in feed.entries[:4]:
                     title = html_mod.unescape(entry.get("title", "")).strip()
                     link  = entry.get("link", "")
@@ -11026,6 +11028,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await board_view(query)
         elif data == "skew_view":
             await skew_view(query)
+        elif data == "ratings_view":
+            await ratings_view(query)
         elif data == "catalysts_view":
             await catalysts_view(query)
         elif data == "zrev_view":
@@ -23325,9 +23329,7 @@ def _positioning_scan(conn, min_build_pct=0.03):
     C(onfirmed) build + price already moving the same way. Sorted by score."""
     try:
         latest = pd.read_sql(
-            "SELECT trade_date_now FROM options_change ORDER BY "
-            "substr(trade_date_now,7,4)||substr(trade_date_now,1,2)||substr(trade_date_now,4,2) "
-            "DESC LIMIT 1", conn)
+            "SELECT trade_date_now FROM options_change ORDER BY trade_date_now DESC LIMIT 1", conn)
         if latest.empty:
             # ISO-date DBs: fall back to plain max
             latest = pd.read_sql("SELECT MAX(trade_date_now) AS trade_date_now FROM options_change", conn)
@@ -24180,6 +24182,110 @@ async def skew_view(query):
     await _send_skew(query.message, _skew_scan(_SKEW_DEFAULT))
 
 
+# ── ANALYST RATINGS (yfinance upgrades/downgrades + price targets — keyless;
+#    Yahoo-syndicated, largely Benzinga-sourced, so no paid Benzinga API needed) ─
+_RATINGS_DEFAULT = _SKEW_DEFAULT
+
+
+def _ratings_default_tickers():
+    """Open-position tickers first (what you actually hold), else the skew default universe."""
+    try:
+        with get_conn() as c:
+            tks = [str(r[0]).upper() for r in c.execute(
+                "SELECT DISTINCT ticker FROM trades WHERE status='OPEN'").fetchall()]
+        if tks:
+            return tks[:8]
+    except Exception:
+        pass
+    return _RATINGS_DEFAULT
+
+
+def _ratings_analyze(tk, days=45):
+    """Analyst actions in the last `days` for ANY ticker (live yfinance, keyless):
+    rating up/downgrades + price-target raises/cuts, median PT, latest few moves."""
+    try:
+        df = yf.Ticker(tk).upgrades_downgrades
+        if df is None or df.empty:
+            return None
+        df = df.reset_index()
+        dcol = df.columns[0]                                   # GradeDate
+        df[dcol] = pd.to_datetime(df[dcol], errors="coerce", utc=True).dt.tz_localize(None)
+        df = df[df[dcol] >= pd.Timestamp.now() - pd.Timedelta(days=days)].sort_values(dcol, ascending=False)
+        if df.empty:
+            return None
+        act = df["Action"].astype(str).str.lower() if "Action" in df else pd.Series("", index=df.index)
+        pta = (df["priceTargetAction"].astype(str).str.lower()
+               if "priceTargetAction" in df else pd.Series("", index=df.index))
+        ups, dns = int((act == "up").sum()), int((act == "down").sum())
+        ptu, ptd = int((pta == "raises").sum()), int((pta == "lowers").sum())
+        score = (ups - dns) + 0.5 * (ptu - ptd)                # PT moves count half a rating move
+        emoji = "🟢" if score > 0 else "🔴" if score < 0 else "🟡"
+        pts = pd.to_numeric(df.get("currentPriceTarget"), errors="coerce").dropna()
+        med_pt = float(pts.median()) if len(pts) else None
+        latest = []
+        for _, r in df.head(3).iterrows():
+            arrow = {"up": "⬆️", "down": "⬇️", "init": "🆕"}.get(str(r.get("Action", "")).lower(), "▪️")
+            seg = f"{arrow}{r[dcol]:%m-%d} <b>{str(r.get('Firm', ''))[:16]}</b> {str(r.get('ToGrade', '') or '—')}"
+            c0, p0 = r.get("currentPriceTarget"), r.get("priorPriceTarget")
+            if pd.notna(c0) and pd.notna(p0) and p0:
+                seg += f" · PT {p0:g}→{c0:g}"
+            elif pd.notna(c0):
+                seg += f" · PT {c0:g}"
+            latest.append(seg)
+        return {"tk": tk.upper(), "emoji": emoji, "ups": ups, "dns": dns, "ptu": ptu,
+                "ptd": ptd, "score": score, "n": len(df), "med_pt": med_pt, "latest": latest}
+    except Exception:
+        return None
+
+
+def _ratings_scan(tickers, days=45):
+    out = [r for r in (_ratings_analyze(t, days) for t in tickers) if r]
+    out.sort(key=lambda x: -x["score"])
+    return out
+
+
+def _fmt_ratings(rows):
+    if not rows:
+        return None
+    data = [(r["emoji"], r["tk"], str(r["ups"]), str(r["dns"]), f"{r['ptu']}/{r['ptd']}",
+             f"{r['score']:+.0f}") for r in rows]
+    tbl = _pipe_table(("ST", "Tkr", "Up", "Dn", "PT±", "Net"), data, right_cols={2, 3, 4, 5})
+    lines = []
+    for r in rows:
+        mp = f" · med PT <b>{r['med_pt']:.0f}</b>" if r["med_pt"] else ""
+        lines.append(f"<b>{r['tk']}</b> {r['n']} actions{mp}\n" + "\n".join("  " + x for x in r["latest"]))
+    return tbl, "\n\n".join(lines)
+
+
+async def _send_ratings(msg, rows):
+    fm = _fmt_ratings(rows)
+    if not fm:
+        await msg.reply_text("No analyst actions in the last 45 days for those tickers.", parse_mode=H)
+        return
+    tbl, detail = fm
+    txt = ("⭐ <b>Analyst Ratings — last 45d</b>\n"
+           "<i>Up/Dn = rating changes · PT± = target raises/cuts · Net = ups−downs + ½·PT moves "
+           "(keyless Yahoo feed, largely Benzinga-sourced)</i>\n\n"
+           + tbl + "\n\n" + detail +
+           "\n\n<i>🟢 net positive · 🔴 net negative · post-upgrade drift is documented but "
+           "validate vs history before trading · not advice</i>")
+    await msg.reply_text(txt[:4000], parse_mode=H,
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="ratings_view"),
+                                                             InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+async def ratings_command(update, ctx):
+    """/ratings [TICKERS] — recent analyst upgrades/downgrades + price targets (keyless)."""
+    args = [a.upper() for a in (ctx.args or [])][:8]
+    tickers = args or _ratings_default_tickers()
+    await update.message.reply_text("⭐ Fetching analyst actions…", parse_mode=H)
+    await _send_ratings(update.message, _ratings_scan(tickers))
+
+
+async def ratings_view(query):
+    await _send_ratings(query.message, _ratings_scan(_ratings_default_tickers()))
+
+
 # ── UNUSUAL OPTIONS ACTIVITY (volume >> open interest = fresh flow) ─
 def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15):
     """Unusual options activity: contracts where today's volume >> standing OI
@@ -24188,9 +24294,7 @@ def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15):
     (which is normal, not positioning). Pure options_change. Sorted by $ notional."""
     try:
         latest = pd.read_sql(
-            "SELECT trade_date_now FROM options_change ORDER BY "
-            "substr(trade_date_now,7,4)||substr(trade_date_now,1,2)||substr(trade_date_now,4,2) "
-            "DESC LIMIT 1", conn)
+            "SELECT trade_date_now FROM options_change ORDER BY trade_date_now DESC LIMIT 1", conn)
         if latest.empty:
             latest = pd.read_sql("SELECT MAX(trade_date_now) AS trade_date_now FROM options_change", conn)
         ld = latest["trade_date_now"].iloc[0]
@@ -27046,14 +27150,13 @@ def _ai_risk_check(conn, sig):
     if not api_key:
         return None
     try:
-        srt = "substr(trade_date_now,7,4)||substr(trade_date_now,1,2)||substr(trade_date_now,4,2)"
         oi = pd.read_sql(
-            f"SELECT SUM(change_OI_Call) cc, SUM(change_OI_Put) cp FROM options_change "
-            f"WHERE UPPER(ticker)=? AND {srt}=(SELECT MAX({srt}) FROM options_change)",
+            "SELECT SUM(change_OI_Call) cc, SUM(change_OI_Put) cp FROM options_change "
+            "WHERE UPPER(ticker)=? AND trade_date_now=(SELECT MAX(trade_date_now) FROM options_change)",
             conn, params=(tk,))
         sd = pd.read_sql(
-            "SELECT close, pcr_oi FROM stock_daily WHERE UPPER(ticker)=? ORDER BY "
-            "substr(trade_date,7,4)||substr(trade_date,1,2)||substr(trade_date,4,2) DESC LIMIT 6",
+            "SELECT close, pcr_oi FROM stock_daily WHERE UPPER(ticker)=? "
+            "ORDER BY trade_date DESC LIMIT 6",
             conn, params=(tk,))
         ev = [f"Ensemble: {side} conf {sig.get('conf')} prob {float(sig.get('prob', 0)):.0f}% "
               f"(bull votes {sig.get('bull_v', '?')}/{sig.get('total_m', '?')}, bear {sig.get('bear_v', '?')})",
@@ -27203,6 +27306,7 @@ async def _post_init(app):
             BotCommand("rotation", "Money rotation — macro/sector/theme/stocks"),
             BotCommand("board", "Action Board — consensus scanner ideas"),
             BotCommand("skew", "Downside skew + expected move (any ticker)"),
+            BotCommand("ratings", "Analyst upgrades/downgrades + price targets"),
             BotCommand("catalysts", "Catalyst radar — earnings + Fed/CPI ahead"),
             BotCommand("squeeze", "Squeeze scan"),
             BotCommand("macro", "Macro (BLS + yields)"),
@@ -27267,6 +27371,7 @@ def main():
     app.add_handler(CommandHandler("rotation", rotation_command))
     app.add_handler(CommandHandler("board", board_command))
     app.add_handler(CommandHandler("skew", skew_command))
+    app.add_handler(CommandHandler("ratings", ratings_command))
     app.add_handler(CommandHandler("catalysts", catalysts_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))

@@ -190,9 +190,10 @@ def compare_vs_yfinance(trade_date=None):
         # data quality, not ours. Median OI diff ~0 + prices agreeing => both capture the market.
         if oi_med is not None:
             ok = oi_med <= 0.02 and (px_agree is None or px_agree >= 0.90)
-            print("VERDICT: PASS ✔ — median OI diff ≤2% and prices agree; day counts toward the migration streak"
+            # ASCII-only: cp1252 consoles crash on check-mark glyphs (seen 2026-07-14)
+            print("VERDICT: PASS - median OI diff <=2% and prices agree; day counts toward the migration streak"
                   if ok else
-                  "VERDICT: CHECK ✖ — median OI diff >2% (or prices diverging); inspect before counting this day")
+                  "VERDICT: CHECK - median OI diff >2% (or prices diverging); inspect before counting this day")
     print("==============================")
 
 

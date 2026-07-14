@@ -18,6 +18,7 @@ JOB2 = os.path.join(BASE_DIR, "NYSE_Telegram.py")
 # Non-fatal: BB failure never affects the Yahoo run or JOB2. Retire once DB_PATH flips to BB.
 JOB_BB = os.path.join(BASE_DIR, "NYSE_OpenBB.py")
 JOB_BB_DERIVE = os.path.join(BASE_DIR, "NYSE_OpenBB_derive.py")
+JOB_BB_SKEW = os.path.join(BASE_DIR, "skew_snapshot.py")   # IV-metrics panel (idempotent, all dates)
 STATE_DIR = BASE_DIR
 STATE_FILE = os.path.join(STATE_DIR, "run_all_offhours_last_ok.txt")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
@@ -241,6 +242,17 @@ def run_openbb_parallel_lane(bb_proc, bb_log):
                 creationflags=subprocess.CREATE_NO_WINDOW)
             rc = proc.wait()
         log_msg(f"OpenBB derive finished rc={rc} -> {dlog}")
+        # IV-metrics panel (skew25/atm_iv/pcvol/...): idempotent over all capture dates, so a
+        # missed night self-heals on the next run. Was manual-only before 2026-07-14 (went stale Jul 7).
+        log_msg("Running skew_snapshot (options-IV metrics panel)...")
+        slog = os.path.join(LOG_DIR, f"skew_snapshot_{ts}.log")
+        with open(slog, "a", encoding="utf-8") as lf:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", JOB_BB_SKEW],
+                cwd=job_dir, stdout=lf, stderr=subprocess.STDOUT, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            rc = proc.wait()
+        log_msg(f"skew_snapshot finished rc={rc} -> {slog}")
     except Exception as e:
         log_msg(f"OpenBB parallel lane error (non-fatal): {e}")
 

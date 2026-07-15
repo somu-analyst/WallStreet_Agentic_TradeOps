@@ -3678,13 +3678,16 @@ def _combo_bounds(legs, spot, n=600):
     (naked short call). Works for one leg (strike level) or many (position/portfolio level)."""
     if not legs or not spot or spot <= 0:
         return None
-    ks = [float(l["K"]) for l in legs]
+    ks = [float(l["K"]) for l in legs if float(l["K"]) > 0] or [spot]
     hi = max(3.0 * spot, max(ks) * 1.5, spot + 1.0)
     grid = np.linspace(0.01, hi, n)
     pnl = np.zeros(n)
     for l in legs:
-        intr = (np.maximum(grid - l["K"], 0.0) if l["typ"] == "call"
-                else np.maximum(l["K"] - grid, 0.0))
+        if l["typ"] == "stock":                      # shares: linear value = price itself
+            intr = grid
+        else:
+            intr = (np.maximum(grid - l["K"], 0.0) if l["typ"] == "call"
+                    else np.maximum(l["K"] - grid, 0.0))
         pnl += (intr - l["entry"]) * l["m"]
     slope_top = float(pnl[-1] - pnl[-2])
     return {"max_profit": float(pnl.max()), "max_loss": float(pnl.min()),
@@ -3744,11 +3747,16 @@ def _pos_analytics(legs, spot, r=0.045):
         return None
     iv = float(np.median([max(l["iv"], 0.01) for l in legs]))
     h_dte = max(min(l["dte"] for l in legs), 0)
+    if h_dte > 400:                       # stock-only group (shares carry dte=9999) → 30d horizon
+        h_dte = 30
     T = max(h_dte, 0.5) / 365.0
     sig = max(iv * np.sqrt(T), 1e-4)
     grid = np.linspace(max(spot * np.exp(-4 * sig), 0.01), spot * np.exp(4 * sig), 501)
     pnl = np.zeros_like(grid)
     for l in legs:
+        if l["typ"] == "stock":                      # shares: value = terminal price, no decay
+            pnl += (grid - l["entry"]) * l["m"]
+            continue
         rem = max(l["dte"] - h_dte, 0) / 365.0
         if rem <= 0:
             val = np.maximum(grid - l["K"], 0.0) if l["typ"] == "call" else np.maximum(l["K"] - grid, 0.0)
@@ -7657,7 +7665,8 @@ elif page == "🎛️ Command Center":
                 return pair, yf.Ticker(_tk2).option_chain(_exp2)
             except Exception:
                 return pair, None
-        _pairs = {(str(r["ticker"]).upper(), str(r["expiry"])[:10]) for _, r in _tr.iterrows()}
+        _pairs = {(str(r["ticker"]).upper(), str(r["expiry"])[:10]) for _, r in _tr.iterrows()
+                  if not str(r.get("option_type", "")).upper().startswith("S")}   # no chains for STOCK
         _chains = {}
         with _fut.ThreadPoolExecutor(max_workers=8) as _ex:
             for _pair, _oc in _ex.map(_grab_chain, _pairs):
@@ -7668,6 +7677,16 @@ elif page == "🎛️ Command Center":
             _exp = str(_t2.get("expiry", ""))[:10]; _opt = str(_t2.get("option_type", "CALL")).upper()
             _qty = int(_t2.get("quantity", 1)); _ep = float(_t2.get("entry_price", 0))
             _spot = _db_spot(_tk) or (_cached_price(_tk) or 0.0)
+            if _opt.startswith("S"):                            # STOCK: shares at spot, mult 1
+                _cp = _spot if _spot > 0 else None
+                _pnl = (_cp - _ep) * _qty if _cp is not None else None
+                if _pnl is not None:
+                    _total += _pnl
+                _rows.append({"": "", "Ticker": _tk, "Opt": f"{abs(_qty):g} shr", "Qty": _qty,
+                              "DTE": None, "Expiry": "—", "Entry": round(_ep, 2),
+                              "Now": round(_cp, 2) if _cp else None,
+                              "P&L $": round(_pnl) if _pnl is not None else None})
+                continue
             try:
                 _dte = max((datetime.strptime(_exp, "%Y-%m-%d").date() - datetime.now().date()).days, 0)
             except Exception:
@@ -7931,7 +7950,9 @@ elif page == "💼 Portfolio & Suggestions":
 
     if not trades.empty and "expiry" in trades.columns:
         _today_str = datetime.now().strftime("%Y-%m-%d")
-        _expired = trades[trades["expiry"] < _today_str]
+        # STOCK legs have no expiry (empty string sorts < today) — never auto-close them
+        _is_stk_row = trades["option_type"].astype(str).str.upper().str.startswith("S")
+        _expired = trades[(trades["expiry"] < _today_str) & (trades["expiry"].astype(str).str.len() >= 8) & ~_is_stk_row]
         if not _expired.empty:
             try:
                 _ac = get_conn()
@@ -7940,7 +7961,7 @@ elif page == "💼 Portfolio & Suggestions":
                                 (_today_str,"Expired",datetime.now().isoformat(),int(_er["trade_id"])))
                 _ac.commit(); _ac.close()
                 st.info(f"Auto-closed {len(_expired)} expired position(s).")
-                trades = trades[trades["expiry"] >= _today_str]
+                trades = trades[~trades["trade_id"].isin(_expired["trade_id"])]
                 closed = pd.concat([closed, _expired], ignore_index=True)
             except Exception:
                 pass
@@ -7962,6 +7983,26 @@ elif page == "💼 Portfolio & Suggestions":
                 _db_s = _db_spot(_tk)
                 _spot_cache[_tk] = _db_s if _db_s > 0 else (_cached_price(_tk) or 0.0)
             _spot_eod = _spot_cache[_tk]
+            _is_stock = _opt.startswith("S")                  # STOCK leg: shares, no expiry
+            if _is_stock:
+                _cp = _spot_eod if _spot_eod > 0 else _ep
+                _pnl  = (_cp - _ep) * _qty                    # multiplier 1 (shares, not contracts)
+                _cost = _ep * abs(_qty)
+                _pp   = (_pnl / _cost * 100) if _cost > 0 else 0
+                updated_rows.append({
+                    "ID": int(_t.get("trade_id", 0)), "Ticker": _tk, "Type": "STOCK",
+                    "Strike": 0.0, "Expiry": "", "Qty": _qty,
+                    "Entry": _ep, "Current": _cp, "Stock_Px": _spot_eod,
+                    "IV": 0.0,
+                    "PnL": round(_pnl, 2), "PnL%": round(_pp, 1), "DTE": 9999,
+                    # this page's units: option leg delta = per-share Δ × contracts, so
+                    # 100 shares ≡ 1.0 (same hedge math as one deep-ITM contract)
+                    "Delta": _qty / 100.0, "Gamma": 0.0, "Theta": 0.0, "Vega": 0.0,
+                    "Account": _acct, "Notes": _nts, "Mult": 1,
+                    "Entry_Date": str(_t.get("entry_date", "")),
+                    "Strategy": str(_t.get("strategy", "") or "stock"),
+                })
+                continue
             try:
                 _edt = datetime.strptime(_exp,"%Y-%m-%d")
                 _dte = max((_edt.date()-datetime.now().date()).days,0)
@@ -7994,12 +8035,28 @@ elif page == "💼 Portfolio & Suggestions":
                 "IV": round(_iv_used, 4),
                 "PnL":round(_pnl,2), "PnL%":round(_pp,1), "DTE":_dte,
                 "Delta":_d, "Gamma":_gm, "Theta":_th, "Vega":_ve,
-                "Account":_acct, "Notes":_nts,
+                "Account":_acct, "Notes":_nts, "Mult":100,
                 "Entry_Date":str(_t.get("entry_date","")),
                 "Strategy":str(_t.get("strategy","") or ""),
             })
 
     def _detect_strategy(legs):
+        # stock-aware: shares + short calls = covered call, shares + long puts = protective put, both = collar
+        _stk  = [l for l in legs if l["Type"] == "STOCK"]
+        _opts = [l for l in legs if l["Type"] != "STOCK"]
+        if _stk and not _opts:
+            _sh = sum(l["Qty"] for l in _stk)
+            return f"Long Stock ({_sh:g} sh)" if _sh > 0 else f"Short Stock ({-_sh:g} sh)"
+        if _stk and _opts:
+            _sh = sum(l["Qty"] for l in _stk)
+            _sc = any(l["Type"] == "CALL" and l["Qty"] < 0 for l in _opts)
+            _lp = any(l["Type"] == "PUT" and l["Qty"] > 0 for l in _opts)
+            if _sh > 0 and _sc and _lp: return "Collar (hedged stock)"
+            if _sh > 0 and _sc:         return "Covered Call"
+            if _sh > 0 and _lp:         return "Protective Put"
+            if _sh < 0 and any(l["Type"] == "CALL" and l["Qty"] > 0 for l in _opts):
+                return "Short Stock + Call hedge"
+            return f"Stock + {len(_opts)} option leg(s)"
         if len(legs)==1:
             return ("Long " if legs[0]["Qty"]>0 else "Short ")+legs[0]["Type"].title()
         calls=sorted([l for l in legs if l["Type"]=="CALL"],key=lambda x:x["Strike"])
@@ -8024,7 +8081,8 @@ elif page == "💼 Portfolio & Suggestions":
         tot=np.zeros(len(sr))
         for leg in legs:
             k=float(leg["Strike"]); ep=float(leg["Entry"]); q=int(leg["Qty"])
-            if leg["Type"]=="CALL": tot+=(np.maximum(sr-k,0)-ep)*q*100
+            if leg["Type"]=="STOCK": tot+=(sr-ep)*q            # shares: linear, multiplier 1
+            elif leg["Type"]=="CALL": tot+=(np.maximum(sr-k,0)-ep)*q*100
             else:                   tot+=(np.maximum(k-sr,0)-ep)*q*100
         return tot
 
@@ -8052,16 +8110,16 @@ elif page == "💼 Portfolio & Suggestions":
             st.info("No open positions. Use **Add New Position** below.")
         else:
             _tp=sum(r["PnL"] for r in updated_rows)
-            _tc=sum(abs(r["Entry"])*abs(r["Qty"])*100 for r in updated_rows)
+            _tc=sum(abs(r["Entry"])*abs(r["Qty"])*r.get("Mult",100) for r in updated_rows)
             _nd=sum(r["Delta"] for r in updated_rows)
             _nt=sum(r["Theta"] for r in updated_rows)
             _ws=sum(1 for r in updated_rows if r["PnL"]>0)
             _tpc=(_tp/_tc*100) if _tc>0 else 0
             _ng=sum(r["Gamma"] for r in updated_rows)
             _nv=sum(r["Vega"]  for r in updated_rows)
-            _max_tk_cost=max((sum(abs(l["Entry"])*abs(l["Qty"])*100 for l in v) for v in _tg.values()),default=0)
+            _max_tk_cost=max((sum(abs(l["Entry"])*abs(l["Qty"])*l.get("Mult",100) for l in v) for v in _tg.values()),default=0)
             _conc_pct=(_max_tk_cost/_tc*100) if _tc>0 else 0
-            _conc_tk=max(_tg,key=lambda k:sum(abs(l["Entry"])*abs(l["Qty"])*100 for l in _tg[k]),default="")
+            _conc_tk=max(_tg,key=lambda k:sum(abs(l["Entry"])*abs(l["Qty"])*l.get("Mult",100) for l in _tg[k]),default="")
             m1,m2,m3,m4,m5=st.columns(5)
             m1.metric("Unrealized P&L",f"${_tp:,.2f}",f"{_tpc:+.1f}%")
             m2.metric("Legs / Tickers",f"{len(updated_rows)} / {len(_tg)}")
@@ -8081,7 +8139,7 @@ elif page == "💼 Portfolio & Suggestions":
             _grp_rows=[]
             for _stk,_legs in sorted(_tg.items()):
                 _gp=sum(l["PnL"] for l in _legs)
-                _gc=sum(abs(l["Entry"])*abs(l["Qty"])*100 for l in _legs)
+                _gc=sum(abs(l["Entry"])*abs(l["Qty"])*l.get("Mult",100) for l in _legs)
                 _gpc=(_gp/_gc*100) if _gc>0 else 0
                 _iv_r,_iv_p,_iv_cur=_iv_rank_pct(_stk)
                 _dte_earn=_days_to_earnings(_stk)
@@ -8124,7 +8182,7 @@ elif page == "💼 Portfolio & Suggestions":
             st.markdown("#### Details by Ticker")
             for _stk,_legs in sorted(_tg.items()):
                 _gp=sum(l["PnL"] for l in _legs)
-                _gc=sum(abs(l["Entry"])*abs(l["Qty"])*100 for l in _legs)
+                _gc=sum(abs(l["Entry"])*abs(l["Qty"])*l.get("Mult",100) for l in _legs)
                 _gpc=(_gp/_gc*100) if _gc>0 else 0
                 _strat=_detect_strategy(_legs)
                 _spv_ah  = _get_ah_price(_stk)
@@ -8172,7 +8230,7 @@ elif page == "💼 Portfolio & Suggestions":
                         st.markdown("<br>".join(_info_parts),unsafe_allow_html=True)
                         st.markdown("")
 
-                    _ks=[l["Strike"] for l in _legs]
+                    _ks=[l["Strike"] for l in _legs if l["Strike"] > 0] or [_spv_eod or 100.0]
                     _sr=np.linspace(min(_ks)*0.80,max(_ks)*1.20,200)
                     _comb=_group_payoff(_legs,_sr)
                     fig_g=go.Figure()
@@ -8208,10 +8266,11 @@ elif page == "💼 Portfolio & Suggestions":
                         _bg="#fff8e1" if pos["DTE"]<=5 else ("#ffebee" if pos["PnL%"]<-30 else "#fafafa")
                         # Option type colour + emoji for instant visual scan
                         _is_call = pos["Type"].upper() == "CALL"
+                        _is_stk  = pos["Type"].upper() == "STOCK"
                         _is_long = pos["Qty"] > 0
-                        _type_emoji = "📈" if _is_call else "📉"
-                        _type_badge_bg  = ("#e8f5e9" if _is_call else "#fce4ec")
-                        _type_badge_txt = ("#2e7d32" if _is_call else "#880e4f")
+                        _type_emoji = "🏦" if _is_stk else ("📈" if _is_call else "📉")
+                        _type_badge_bg  = ("#e3f2fd" if _is_stk else "#e8f5e9" if _is_call else "#fce4ec")
+                        _type_badge_txt = ("#0d47a1" if _is_stk else "#2e7d32" if _is_call else "#880e4f")
                         _dir_tag = ("Long" if _is_long else "Short")
                         _dir_tag_bg  = ("#e3f2fd" if _is_long else "#fff3e0")
                         _dir_tag_txt = ("#0d47a1" if _is_long else "#e65100")
@@ -8220,7 +8279,11 @@ elif page == "💼 Portfolio & Suggestions":
                         _ah_opt, _ah_pnl = None, None
                         _lv_lbl = _spv_ah["label"]   # "Live" / "AH" / "PM" / "EOD"
                         _pos_iv = pos.get("IV", 0.30) or 0.30
-                        if pos["DTE"] >= 0:  # include DTE=0 (expiry-day intrinsic estimate)
+                        if _is_stk:                  # shares: live value IS the live spot
+                            if _spv_has_ah:
+                                _ah_opt = _spv_ext
+                                _ah_pnl = (_spv_ext - pos["Entry"]) * pos["Qty"]
+                        elif pos["DTE"] >= 0:  # include DTE=0 (expiry-day intrinsic estimate)
                             try:
                                 _opt_T  = max(pos["DTE"], 0.5) / 365.0
                                 # Skew-adjust IV for spot move (neg spot-vol for puts)
@@ -8234,6 +8297,23 @@ elif page == "💼 Portfolio & Suggestions":
 
                         # ── Leg header ──────────────────────────────────────────
                         _dte_warn = "⚠️ " if pos["DTE"] <= 5 else ""
+                        if _is_stk:
+                            _held_txt = ""
+                            try:
+                                _hd = (datetime.now().date() - datetime.strptime(pos["Entry_Date"][:10], "%Y-%m-%d").date()).days
+                                _held_txt = (f" &nbsp; held <b>{_hd}d</b> "
+                                             + ("🟢 LT" if _hd > 365 else f"(LT in {366 - _hd}d)"))
+                            except Exception:
+                                pass
+                            _leg_mid = (f"{_type_emoji} STOCK &nbsp; <b>{abs(pos['Qty']):g} shares</b> "
+                                        f"@ ${pos['Entry']:.2f} &nbsp; since {pos['Entry_Date'][:10]}{_held_txt} &nbsp; "
+                                        f"Δ <b>{pos['Delta']:+.3f}</b>")
+                        else:
+                            _leg_mid = (f"{_type_emoji} {pos['Type']} &nbsp;"
+                                        f"<b>Strike ${pos['Strike']:.0f}</b> &nbsp; "
+                                        f"exp {pos['Expiry']} &nbsp; ×{abs(pos['Qty'])}"
+                                        f" &nbsp;&nbsp; {_dte_warn}DTE <b>{pos['DTE']}</b> &nbsp; "
+                                        f"Δ <b>{pos['Delta']:+.3f}</b> &nbsp; Θ <b>${pos['Theta']*100:.2f}/d</b>")
                         st.markdown(
                             f"<div style='border-left:5px solid {_lc};padding:6px 12px 0 12px;"
                             f"margin-top:10px;background:{_bg};border-radius:4px 4px 0 0;'>"
@@ -8241,11 +8321,7 @@ elif page == "💼 Portfolio & Suggestions":
                             f""
                             f"{_dir_tag} &nbsp;"
                             f""
-                            f"{_type_emoji} {pos['Type']} &nbsp;"
-                            f"<b>Strike ${pos['Strike']:.0f}</b> &nbsp; "
-                            f"exp {pos['Expiry']} &nbsp; ×{abs(pos['Qty'])}"
-                            f" &nbsp;&nbsp; {_dte_warn}DTE <b>{pos['DTE']}</b> &nbsp; "
-                            f"Δ <b>{pos['Delta']:+.3f}</b> &nbsp; Θ <b>${pos['Theta']*100:.2f}/d</b>"
+                            f"{_leg_mid}"
                             f"</div>", unsafe_allow_html=True)
 
                         # ── Metric row ───────────────────────────────────────────
@@ -8282,6 +8358,21 @@ elif page == "💼 Portfolio & Suggestions":
                                           delta_color="normal" if pos["PnL"]>=0 else "inverse")
                             _mc[4].metric("Stock (EOD)", f"${_spv_eod:.2f}")
 
+                        if not _is_stk:
+                            # Greeks decoded: what the option is REALLY worth and what moves it
+                            _intr = max(_spv_eod - pos["Strike"], 0.0) if _is_call else max(pos["Strike"] - _spv_eod, 0.0)
+                            _timev = max(pos["Current"] - _intr, 0.0)
+                            _dps = (pos["Delta"] / pos["Qty"]) if pos["Qty"] else 0.0   # per-share Δ
+                            _mv1 = pos["Delta"] * 100                                    # $ P&L per $1 stock move
+                            _th_d = abs(pos["Theta"]) * 100                              # $ decay per day
+                            _vg1 = abs(pos["Vega"]) * 100                                # $ per 1 IV pt
+                            st.caption(
+                                f"💡 **Plain English:** worth **${_intr:.2f} real** (intrinsic) + **${_timev:.2f} time value**"
+                                + (" — *all* time value: the stock must move or this decays to $0" if _intr <= 0 else "")
+                                + f" · stock ±$1 → position ≈ **${abs(_mv1):,.0f}** (Δ {_dps:+.2f}/sh)"
+                                  f" · decay ≈ **${_th_d:,.2f}/day** "
+                                + ("*for* you (short premium)" if pos["Qty"] < 0 else "*against* you")
+                                + f" · IV ±1pt ≈ ${_vg1:,.0f} · gamma {pos['Gamma']:.4f} (Δ speeds up near the strike)")
                         if _roll_hint:
                             st.markdown(
                                 f"<div style='border-left:5px solid {_lc};padding:4px 12px;"
@@ -8290,8 +8381,10 @@ elif page == "💼 Portfolio & Suggestions":
                                 unsafe_allow_html=True)
                         # NOTE: st.expander cannot nest inside the ticker-group expander —
                         # StreamlitAPIException killed the whole legs section (only group visible).
-                        if st.toggle(f"↳ Close/Edit L{_li+1}: {_sl} {pos['Type']} ${pos['Strike']}",
-                                     key=f"ce_{pos['ID']}"):
+                        _ce_lbl = (f"↳ Close/Edit L{_li+1}: {_sl} {abs(pos['Qty']):g} {pos['Ticker']} shares"
+                                   if _is_stk else
+                                   f"↳ Close/Edit L{_li+1}: {_sl} {pos['Type']} ${pos['Strike']}")
+                        if st.toggle(_ce_lbl, key=f"ce_{pos['ID']}"):
                             _et1, _et2 = st.tabs(["✅ Close", "✏️ Edit"])
                             with _et1:
                                 with st.form(f"close_{pos['ID']}"):
@@ -8301,8 +8394,9 @@ elif page == "💼 Portfolio & Suggestions":
                                     cr=_c.selectbox("Reason",["Target Hit","Stop Loss","Expired","Manual","Rolling"],key=f"cr_{pos['ID']}")
                                     if st.form_submit_button("✅ Close This Leg"):
                                         try:
-                                            _rp=(cp-pos["Entry"])*pos["Qty"]*100
-                                            _rpc=(_rp/(pos["Entry"]*abs(pos["Qty"])*100)*100) if pos["Entry"]>0 else 0
+                                            _mlt=pos.get("Mult",100)
+                                            _rp=(cp-pos["Entry"])*pos["Qty"]*_mlt
+                                            _rpc=(_rp/(pos["Entry"]*abs(pos["Qty"])*_mlt)*100) if pos["Entry"]>0 else 0
                                             _ed=datetime.strptime(pos["Entry_Date"],"%Y-%m-%d") if pos["Entry_Date"] else datetime.now()
                                             _dh=(cd-_ed.date()).days
                                             _cc=get_conn()
@@ -8323,30 +8417,38 @@ elif page == "💼 Portfolio & Suggestions":
                                 with st.form(f"edit_{pos['ID']}"):
                                     _e1,_e2,_e3=st.columns(3)
                                     _etk=_e1.text_input("Ticker",value=pos["Ticker"],key=f"etk_{pos['ID']}").upper().strip()
-                                    _eot=_e2.selectbox("Type",["CALL","PUT"],index=0 if pos["Type"]=="CALL" else 1,key=f"eot_{pos['ID']}")
-                                    _eqt=_e3.number_input("Qty (neg=short)",value=int(pos["Qty"]),step=1,key=f"eqt_{pos['ID']}")
+                                    _eto=["CALL","PUT","STOCK"]
+                                    _eot=_e2.selectbox("Type",_eto,index=_eto.index(pos["Type"]) if pos["Type"] in _eto else 0,key=f"eot_{pos['ID']}")
+                                    _eqt=_e3.number_input("Qty (neg=short; shares for STOCK)",value=int(pos["Qty"]),step=1,key=f"eqt_{pos['ID']}")
                                     _e4,_e5,_e6=st.columns(3)
                                     _estk=_e4.number_input("Strike",min_value=0.0,value=float(pos["Strike"]),step=0.5,key=f"estk_{pos['ID']}")
                                     _eep=_e5.number_input("Entry Price",min_value=0.0,value=float(pos["Entry"]),step=0.01,key=f"eep_{pos['ID']}")
                                     try: _eexp_def=datetime.strptime(pos["Expiry"],"%Y-%m-%d").date()
                                     except: _eexp_def=datetime.now().date()
                                     _eexp=_e6.date_input("Expiry",value=_eexp_def,key=f"eexp_{pos['ID']}")
+                                    try: _eed_def=datetime.strptime(pos["Entry_Date"][:10],"%Y-%m-%d").date()
+                                    except: _eed_def=datetime.now().date()
+                                    _eed=st.date_input("Entry Date (tax-lot purchase date)",value=_eed_def,key=f"eed_{pos['ID']}")
                                     _strat_opts=["manual","long_call","long_put","spread","iron_condor","covered_call","cash_secured_put"]
                                     _cur_strat=str(pos.get("Strategy","manual") or "manual").lower()
                                     _strat_idx=_strat_opts.index(_cur_strat) if _cur_strat in _strat_opts else 0
                                     _estrat=st.selectbox("Strategy",_strat_opts,index=_strat_idx,key=f"estrat_{pos['ID']}")
                                     if st.form_submit_button("💾 Save Changes"):
-                                        if _etk and _estk>0 and _eep>0:
+                                        _is_stk_e = _eot == "STOCK"
+                                        if _etk and _eep>0 and (_is_stk_e or _estk>0):
                                             try:
                                                 _ec=get_conn()
-                                                _ec.execute("UPDATE trades SET ticker=?,option_type=?,quantity=?,strike=?,entry_price=?,expiry=?,strategy=?,updated_at=? WHERE trade_id=?",
-                                                            (_etk,_eot.lower(),int(_eqt),float(_estk),float(_eep),_eexp.strftime("%Y-%m-%d"),_estrat,datetime.now().isoformat(),pos["ID"]))
+                                                _ec.execute("UPDATE trades SET ticker=?,option_type=?,quantity=?,strike=?,entry_price=?,expiry=?,strategy=?,entry_date=?,updated_at=? WHERE trade_id=?",
+                                                            (_etk,("STOCK" if _is_stk_e else _eot.lower()),int(_eqt),
+                                                             (0.0 if _is_stk_e else float(_estk)),float(_eep),
+                                                             ("" if _is_stk_e else _eexp.strftime("%Y-%m-%d")),
+                                                             _estrat,_eed.strftime("%Y-%m-%d"),datetime.now().isoformat(),pos["ID"]))
                                                 _ec.commit(); _ec.close()
-                                                st.success(f"Updated {_etk} {_eot} ${_estk:.0f}")
+                                                st.success(f"Updated {_etk} " + ("shares" if _is_stk_e else f"{_eot} ${_estk:.0f}"))
                                                 st.rerun()
                                             except Exception as _ee: st.error(f"{_ee}")
                                         else:
-                                            st.warning("Ticker, strike and entry price required.")
+                                            st.warning("Ticker and entry price required (strike too, unless STOCK).")
 
     # ── Add / Edit Positions ──────────────────────────────────────────
     with tab1:
@@ -8355,34 +8457,41 @@ elif page == "💼 Portfolio & Suggestions":
         with st.form("add_trade_form", clear_on_submit=True):
             _c1, _c2, _c3 = st.columns(3)
             _tk  = _c1.text_input("Ticker", placeholder="AAPL").upper().strip()
-            _ot  = _c2.selectbox("Type", ["CALL", "PUT"])
-            _qty = _c3.number_input("Qty (neg=short)", value=1, step=1)
+            _ot  = _c2.selectbox("Type", ["CALL", "PUT", "STOCK"],
+                                 help="STOCK = shares (Qty = share count, Entry = price/share; strike & expiry ignored)")
+            _qty = _c3.number_input("Qty (neg=short; SHARES for STOCK)", value=1, step=1)
             _c4, _c5, _c6 = st.columns(3)
-            _stk = _c4.number_input("Strike", min_value=0.0, step=0.5)
+            _stk = _c4.number_input("Strike (options only)", min_value=0.0, step=0.5)
             _ep  = _c5.number_input("Entry Price", min_value=0.0, step=0.01)
-            _exp = _c6.date_input("Expiry")
-            _c7, _c8 = st.columns(2)
-            _strat = _c7.selectbox("Strategy", ["manual", "long_call", "long_put", "spread", "iron_condor", "covered_call", "cash_secured_put"])
-            _notes = _c8.text_input("Notes (optional)")
+            _exp = _c6.date_input("Expiry (options only)")
+            _c7, _c8, _c9 = st.columns(3)
+            _strat = _c7.selectbox("Strategy", ["manual", "stock", "long_call", "long_put", "spread", "iron_condor", "covered_call", "cash_secured_put", "protective_put", "collar"])
+            _edate = _c8.date_input("Entry Date (backdate for tax lots)", value=datetime.now().date(),
+                                    help="Purchase date — drives the 1-year long-term capital-gains clock")
+            _notes = _c9.text_input("Notes (optional)")
             if st.form_submit_button("✅ Add Position"):
-                if _tk and _stk > 0 and _ep > 0:
+                _is_stk_a = _ot == "STOCK"
+                if _tk and _ep > 0 and (_is_stk_a or _stk > 0):
                     try:
                         _nc = get_conn()
                         _nc.execute("""INSERT INTO trades
                             (ticker, option_type, strike, entry_price, quantity, expiry,
                              strategy, notes, status, entry_date, created_at, updated_at)
                             VALUES (?,?,?,?,?,?,?,?,'OPEN',?,?,?)""",
-                            (_tk, _ot.lower(), float(_stk), float(_ep), int(_qty),
-                             _exp.strftime("%Y-%m-%d"), _strat, _notes,
-                             datetime.now().strftime("%Y-%m-%d"),
+                            (_tk, ("STOCK" if _is_stk_a else _ot.lower()),
+                             (0.0 if _is_stk_a else float(_stk)), float(_ep), int(_qty),
+                             ("" if _is_stk_a else _exp.strftime("%Y-%m-%d")),
+                             ("stock" if (_is_stk_a and _strat == "manual") else _strat), _notes,
+                             _edate.strftime("%Y-%m-%d"),
                              datetime.now().isoformat(), datetime.now().isoformat()))
                         _nc.commit(); _nc.close()
-                        st.success(f"✅ Added {_tk} {_ot} ${_stk:.0f}  entry ${_ep:.2f}")
+                        st.success(f"✅ Added {_tk} " + (f"{_qty:g} shares @ ${_ep:.2f}" if _is_stk_a
+                                                          else f"{_ot} ${_stk:.0f}  entry ${_ep:.2f}"))
                         st.rerun()
                     except Exception as _ae:
                         st.error(f"Error: {_ae}")
                 else:
-                    st.warning("Ticker, strike and entry price are required.")
+                    st.warning("Ticker and entry price are required (strike too, unless STOCK).")
 
     with tab2:
         if closed.empty:
@@ -8486,7 +8595,7 @@ elif page == "💼 Portfolio & Suggestions":
 
             for _stk2,_legs2 in sorted(_tg.items()):
                 _gp2=sum(l["PnL"] for l in _legs2)
-                _gc2b=sum(abs(l["Entry"])*abs(l["Qty"])*100 for l in _legs2)
+                _gc2b=sum(abs(l["Entry"])*abs(l["Qty"])*l.get("Mult",100) for l in _legs2)
                 _gpc2=(_gp2/_gc2b*100) if _gc2b>0 else 0
                 _str2=_detect_strategy(_legs2)
                 _spv2=_legs2[0]["Stock_Px"]
@@ -8515,14 +8624,54 @@ elif page == "💼 Portfolio & Suggestions":
                     for _li2,t2 in enumerate(_legs2):
                         _sl2="BUY" if t2["Qty"]>0 else "SELL"; _lc2=_LC[_li2%len(_LC)]
                         _lr=("🔴 EXIT" if t2["DTE"]<=3 else "🟢 TP" if t2["PnL%"]>50 else "🔴 CUT" if t2["PnL%"]<-60 else "⚪ HOLD")
+                        _desc2=(f"{abs(t2['Qty']):g} {t2['Ticker']} shares"
+                                if t2["Type"]=="STOCK" else
+                                f"{t2['Type']} ${t2['Strike']} exp {t2['Expiry']} ×{abs(t2['Qty'])}")
                         st.markdown(
                             f"<div>"
-                            f"L{_li2+1}: {_sl2} {t2['Type']} ${t2['Strike']} exp {t2['Expiry']} ×{abs(t2['Qty'])} "
+                            f"L{_li2+1}: {_sl2} {_desc2} "
                             f"&nbsp; {_lr} P&L <b>${t2['PnL']:+,.2f}</b> ({t2['PnL%']:+.1f}%) "
                             f"Δ:{t2['Delta']:+.3f} Θ:${t2['Theta']*100:.2f}/d"
                             f"</div>",unsafe_allow_html=True)
 
     with tab4:
+        st.markdown("#### 🧾 Tax Advisor — stock lots (US federal, MFJ · approximations, NOT tax advice)")
+        _tax_inc = st.number_input("Taxable income assumption ($)", value=200_000, step=10_000, key="tax_inc")
+        try:
+            import telegram_bot_optimized as _tax_tbo
+            _txc = _tax_tbo.get_conn()
+            try:
+                _txr = _tax_tbo._tax_scan(_txc, income=float(_tax_inc))
+            finally:
+                _txc.close()
+            _strip = lambda s: re.sub("<[^>]+>", "", str(s))
+            if _txr["lots"]:
+                st.dataframe(pd.DataFrame([{
+                    "Ticker": l["tk"], "Shares": l["qty"], "Entry": l["entry"],
+                    "Entry Date": l["entry_date"], "Held (d)": l["held"],
+                    "Status": "🟢 LONG-TERM" if l["is_lt"] else f"🟡 short-term · LT on {l['lt_date']}",
+                    "Unrealized $": (round(l["unreal"]) if l["unreal"] is not None else None),
+                    "Rate if sold now": f"{l['eff_rate']*100:.1f}%",
+                    "Est. tax $": round(l["est_tax"]),
+                    "LT would save $": round(l["lt_saves"]),
+                } for l in _txr["lots"]]), hide_index=True, use_container_width=True)
+                for l in _txr["lots"]:
+                    for f in l["flags"]:
+                        st.markdown(f"- **{l['tk']}**: {_strip(f)}")
+            else:
+                st.caption("No open stock lots — add shares (Type=STOCK) with their real entry date and this fills in.")
+            st.caption(f"Realized {datetime.now().year}: short-term **${_txr['realized_st']:+,.0f}** "
+                       f"(~{_txr['st_rate']*100:.0f}%) · long-term **${_txr['realized_lt']:+,.0f}** "
+                       f"(~{_txr['lt_rate']*100:.0f}%)"
+                       + (" · +3.8% NIIT applies" if _txr["niit"] else ""))
+            for _a in _txr["advice"]:
+                st.warning(_strip(_a))
+            st.caption("Rules encoded: >1 yr = long-term · protective put on a <1-yr lot RESETS the clock · "
+                       "qualified covered calls (OTM, >30 DTE) don't · wash sale = loss + rebuy within ±30 days · "
+                       "option P&L is short-term unless held >1 yr. Federal only. Same engine as the bot's /tax.")
+        except Exception as _txe:
+            st.caption(f"Tax advisor unavailable: {_txe}")
+        st.markdown("---")
         st.markdown("#### 📈 P&L Breakdown")
         if closed.empty and not updated_rows:
             st.info("No trades to analyze.")
@@ -13378,7 +13527,34 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
         _legs = []
         for _, _t in _gp_tr.iterrows():
             _tk = str(_t["ticker"]).upper()
-            _typ = "call" if str(_t["option_type"]).lower().startswith("c") else "put"
+            _ot_raw = str(_t["option_type"]).lower()
+            if _ot_raw.startswith("s"):                       # STOCK leg: shares, linear, no expiry
+                _qty = int(_t["quantity"] or 0)
+                _eod_spot = _gp_spot(_tk)
+                if _eod_spot is None or _qty == 0:
+                    continue
+                _entry = float(_t["entry_price"] or 0)
+                _ahd = _get_ah_price(_tk) if _gp_use_ah else None
+                _ah_on = bool(_gp_use_ah and _ahd and _ahd.get("is_extended") and _ahd.get("spot_ah", 0) > 0)
+                _spot = _ahd["spot_ah"] if _ah_on else _eod_spot
+                if _ah_on and not any(n.startswith(_tk + " ") for n in _ah_notes):
+                    _ah_notes.append(f"{_tk} {_ahd['label']} ${_ahd['spot_ah']:.2f} ({_ahd['ah_chg_pct']:+.1f}% vs EOD ${_eod_spot:.2f})")
+                _hv = _historical_vol(_tk) or 0.30
+                _legs.append({
+                    "ticker": _tk, "typ": "stock", "K": 0.0, "qty": _qty,
+                    "side": "short" if _qty < 0 else "long",
+                    "exp": "", "exp_mdy": None, "dte": 9999, "spot": _spot, "eod_spot": _eod_spot,
+                    "iv": _hv, "entry": _entry, "cur": _spot,
+                    "g": {"delta": 1.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "price": _spot},
+                    "m": _qty, "be": _entry,                       # mult 1: m = share count
+                    "prev_close": None, "day_hi": None, "day_lo": None,
+                    "pnl": (_spot - _entry) * _qty,
+                    "pos_delta": float(_qty), "pos_theta": 0.0,    # delta-shares, same units as options
+                    "pos_vega": 0.0, "pos_gamma": 0.0,
+                    "ddelta_1pct": _qty * _spot * 0.01,
+                })
+                continue
+            _typ = "call" if _ot_raw.startswith("c") else "put"
             _K = float(_t["strike"] or 0)
             _qty = int(_t["quantity"] or 0)
             _exp = str(_t["expiry"])
@@ -13629,7 +13805,10 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     if l["dte"] <= 21 or (l["side"] == "short" and _mny == "ITM"):
                         _rs = _roll_suggestion(_gp_conn, l)
                         if _rs: _act += f" · {_rs}"
-                    _checklist.append(f"**{_tk} ${_kf(l['K'])}{l['typ'][0].upper()}** ({l['side']}, {l['dte']}DTE): {_act}")
+                    _leg_id = (f"{_tk} {abs(l['qty']):g} sh" if l["typ"] == "stock"
+                               else f"{_tk} ${_kf(l['K'])}{l['typ'][0].upper()}")
+                    _leg_dte = "shares" if l["typ"] == "stock" else f"{l['dte']}DTE"
+                    _checklist.append(f"**{_leg_id}** ({l['side']}, {_leg_dte}): {_act}")
             for p in _gp_patterns(_tk, _ps, None, None):
                 if p["sig"] in ("BULL", "BEAR") and any(k in p["name"] for k in ("flag", "cross")):
                     _checklist.append(f"**{_tk}** {p['name']}: {p['why']}")
@@ -13647,6 +13826,34 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
             _flat = []
             for _ftk, _ftl in _by_tk.items():
                 for l in _ftl:
+                    if l["typ"] == "stock":            # shares: linear economics, no Greeks/DTE
+                        _fpp = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
+                        _fac = []
+                        if _fpp >= 50: _fac.append("up ≥50% — take profit")
+                        elif _fpp <= -50: _fac.append("down ≥50% — cut/hedge")
+                        _faction = "; ".join(_fac) if _fac else "hold & monitor"
+                        _fsig = l["cur"] * l["iv"] * (1 / 252.0) ** 0.5
+                        _fbuf = max(0.02, round(l["cur"] * 0.003, 2))
+                        _fclimit = (f"SELL ≤ ${max(l['cur'] - _fbuf, 0.01):.2f}" if l["side"] == "long"
+                                    else f"BUY ≥ ${l['cur'] + _fbuf:.2f}")
+                        _flb = _combo_bounds([l], l["spot"]); _fpa = _pos_analytics([l], l["spot"])
+                        _fwin = (f"{'🟢' if _fpa['pop'] >= 60 else '🟡' if _fpa['pop'] >= 40 else '🔴'} "
+                                 f"{_fpa['pop']:.0f}%") if _fpa else "—"
+                        _fearn, _fdiv = _next_events(_ftk)
+                        _flat.append({
+                            "Ticker": _ftk, "Spot": round(l["spot"], 2),
+                            "Leg": f"{l['side']} {abs(l['qty']):g} sh",
+                            "Exp": "—", "DTE": None, "Earnings": _fearn, "Ex-Div": _fdiv, "Money": "—",
+                            "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
+                            "Prev Cls": None,
+                            "Est Open": f"${l['spot']:.2f}",
+                            "Day L–H": f"${max(l['cur'] - _fsig, 0.01):.2f}–${l['cur'] + _fsig:.2f}",
+                            "Hi\\Lo": "—",
+                            "Close @": _fclimit, "Max P": _fmt_maxp(_flb), "Max L": _fmt_maxl(_flb),
+                            "Win %": _fwin,
+                            "P&L %": round(_fpp), "P&L $": round(l["pnl"]), "Action": _faction,
+                        })
+                        continue
                     _fm = "ITM" if ((l["spot"] > l["K"]) if l["typ"] == "call" else (l["spot"] < l["K"])) else "OTM"
                     _fpp = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
                     # action (with roll suggestion), matching the per-stock leg table
@@ -14123,6 +14330,34 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                 except Exception:
                     _dv = None
                 for l in _tl:
+                    if l["typ"] == "stock":            # shares: linear economics, no Greeks/DTE
+                        pnl_pct = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
+                        _sig = l["cur"] * l["iv"] * (1 / 252.0) ** 0.5
+                        _buf = max(0.02, round(l["cur"] * 0.003, 2))
+                        _climit = (f"SELL ≤ ${max(l['cur'] - _buf, 0.01):.2f}" if l["side"] == "long"
+                                   else f"BUY ≥ ${l['cur'] + _buf:.2f}")
+                        _lb = _combo_bounds([l], l["spot"]); _pa = _pos_analytics([l], l["spot"])
+                        _win = (f"{'🟢' if _pa['pop'] >= 60 else '🟡' if _pa['pop'] >= 40 else '🔴'} "
+                                f"{_pa['pop']:.0f}%") if _pa else "—"
+                        _ed = _earn.get("days") if _earn else None
+                        _event_s = f"📊 ER {_ed}d" if (_ed is not None and 0 <= _ed <= 14) else "—"
+                        _acts = ("up ≥50% — take profit" if pnl_pct >= 50 else
+                                 "down ≥50% — cut/hedge" if pnl_pct <= -50 else "hold & monitor")
+                        _rows.append({
+                            "Leg": f"{l['side']} {abs(l['qty']):g} sh",
+                            "Exp": "—", "DTE": None, "Money": "—", "Event": _event_s,
+                            "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
+                            "Real$": round(l["cur"], 2), "Time$": 0.0,
+                            "±$1 stk": int(l["qty"]), "Θ/day": 0,
+                            "Prev Cls": None,
+                            "Est Open": f"${l['spot']:.2f}",
+                            "Day L–H": f"${max(l['cur'] - _sig, 0.01):.2f}–${l['cur'] + _sig:.2f}",
+                            "Hi\\Lo": "—",
+                            "Close @": _climit, "Max P": _fmt_maxp(_lb), "Max L": _fmt_maxl(_lb),
+                            "Win %": _win,
+                            "P&L %": round(pnl_pct), "P&L $": round(l["pnl"]), "Action": _acts,
+                        })
+                        continue
                     money = "ITM" if ((l["spot"] > l["K"]) if l["typ"] == "call" else (l["spot"] < l["K"])) else "OTM"
                     pnl_pct = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
                     # ── Event column: earnings / ex-div landing before this leg's expiry ──
@@ -14185,10 +14420,13 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     _pa = _pos_analytics([l], l["spot"])
                     _win = (f"{'🟢' if _pa['pop'] >= 60 else '🟡' if _pa['pop'] >= 40 else '🔴'} "
                             f"{_pa['pop']:.0f}%") if _pa else "—"
+                    _intr_l = max(l["spot"] - l["K"], 0.0) if l["typ"] == "call" else max(l["K"] - l["spot"], 0.0)
                     _rows.append({
                         "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
                         "Exp": l["exp"][:10], "DTE": l["dte"], "Money": money, "Event": _event_s,
                         "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
+                        "Real$": round(_intr_l, 2), "Time$": round(max(l["cur"] - _intr_l, 0.0), 2),
+                        "±$1 stk": round(l["pos_delta"]), "Θ/day": round(l["pos_theta"]),
                         "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
                         "Est Open": _topen_disp, "Day L–H": f"${_olo:.2f}–${_ohi:.2f}",
                         "Hi/Lo": (f"${l['day_hi']:.2f}/${l['day_lo']:.2f}" if l.get("day_hi") and l.get("day_lo") else "—"),
@@ -14198,7 +14436,11 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                 st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True,
                              column_config={"P&L %": st.column_config.NumberColumn(format="%d%%")})
                 st.caption("**Now** = live option mid (bid/ask) when the market's open, else the last "
-                           "close. **Est Open** = modeled value at the next session if price is flat (one day of "
+                           "close. **Real$ / Time$** = what's intrinsic (locked in if exercised now) vs time "
+                           "value — Time$ is the part that decays to $0 unless the stock moves. "
+                           "**±$1 stk** = position P&L per $1 stock move (delta in dollars — your real "
+                           "exposure). **Θ/day** = dollars gained/lost per calendar day from decay. "
+                           "**Est Open** = modeled value at the next session if price is flat (one day of "
                            "decay). *expired* = 0DTE; *~\\$0.00* = deep-OTM. **Day L–H** = 1σ daily range. "
                            "**Close @** = marketable limit to close. **Max P / Max L** = theoretical "
                            "max profit / loss for that leg held to expiry (*Unlimited* = uncapped).")

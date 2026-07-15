@@ -21,7 +21,7 @@ async def group_stock_detail(query, ticker):
     """Show all open option positions for a stock with per-leg advice (close vs keep)."""
     conn = get_conn()
     try:
-        trades_df = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND ticker = ?", conn, params=(ticker,))
+        trades_df = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND ticker = ?", conn, params=(ticker,))
     except Exception:
         trades_df = pd.DataFrame()
     finally:
@@ -1244,7 +1244,7 @@ def _close_expired_positions() -> list:
     try:
         df = pd.read_sql(
             "SELECT trade_id, ticker, expiry, entry_price, quantity, entry_date "
-            "FROM trades WHERE status='OPEN' AND expiry IS NOT NULL AND expiry != '' AND expiry < ?",
+            "FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND expiry IS NOT NULL AND expiry != '' AND expiry < ?",
             conn, params=(today,))
         for _, tr in df.iterrows():
             tid   = int(tr["trade_id"])
@@ -2508,7 +2508,7 @@ async def market_headlines(query):
 async def exit_planner_menu(query):
     """Show mode selection: Individual / One Stock / All Positions"""
     conn = get_conn()
-    open_trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", conn)
+    open_trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
     conn.close()
 
     if open_trades.empty:
@@ -2542,7 +2542,7 @@ async def exit_planner_menu(query):
 async def exit_mode_indiv(query):
     """Show individual position list."""
     conn = get_conn()
-    open_trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", conn)
+    open_trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
     conn.close()
     if open_trades.empty:
         await query.message.reply_text("No open positions.", reply_markup=InlineKeyboardMarkup([[BACK_BTN]]))
@@ -2568,7 +2568,7 @@ async def exit_mode_indiv(query):
 async def exit_mode_stock(query):
     """Show ticker selection for one-stock summary."""
     conn = get_conn()
-    open_trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", conn)
+    open_trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
     conn.close()
     if open_trades.empty:
         await query.message.reply_text("No open positions.", reply_markup=InlineKeyboardMarkup([[BACK_BTN]]))
@@ -2872,7 +2872,7 @@ async def positions_view(query):
     _close_expired_positions()
     conn = get_conn()
     trades = pd.read_sql(
-        "SELECT * FROM trades WHERE status='OPEN' ORDER BY ticker, created_at DESC LIMIT 50", conn)
+        "SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' ORDER BY ticker, created_at DESC LIMIT 50", conn)
     conn.close()
 
     if trades.empty:
@@ -3067,7 +3067,7 @@ async def groups_menu(query):
     # Group open positions by ticker (base stock), not group_id
     conn = get_conn()
     try:
-        trades_df = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", conn)
+        trades_df = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
     except Exception:
         trades_df = pd.DataFrame()
     finally:
@@ -3747,7 +3747,7 @@ async def mirofish_menu(query):
     _loading = await query.message.reply_text("🤖 MiroFish scanning positions & OI data...", parse_mode=H)
 
     conn = get_conn()
-    open_trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", conn)
+    open_trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
     conn.close()
 
     parts = [hdr("🤖 MIROFISH SIGNAL ENGINE")]
@@ -8557,7 +8557,7 @@ async def oi_change_chart_live_view(query, ticker):
         try:
             import pandas as _pd_t
             _trades_df = _pd_t.read_sql_query(
-                "SELECT * FROM trades WHERE ticker=? AND status='OPEN'",
+                "SELECT * FROM trades WHERE ticker=? AND status='OPEN' AND UPPER(option_type)<>'STOCK'",
                 _conn_t, params=(ticker,))
         except Exception:
             _trades_df = None
@@ -9526,7 +9526,7 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
     try:
         trades = pd.read_sql(
-            "SELECT * FROM trades WHERE status='OPEN' ORDER BY trade_id", conn)
+            "SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' ORDER BY trade_id", conn)
     except Exception:
         conn.close(); return
     conn.close()
@@ -9844,7 +9844,7 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
     try:
         _ensure_alert_dedup_table(conn)
-        trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", conn)
+        trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
     except Exception:
         conn.close(); return
     if trades.empty:
@@ -10379,7 +10379,7 @@ async def intraday_alert(ctx: ContextTypes.DEFAULT_TYPE):
                 # Fetch open position trades for context (strike, qty)
                 pos_map = {}  # ticker -> list of {strike, qty, option_type}
                 try:
-                    pos_df = pd.read_sql("SELECT ticker, strike, quantity, option_type FROM trades WHERE status='OPEN'", conn)
+                    pos_df = pd.read_sql("SELECT ticker, strike, quantity, option_type FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
                     for _, pr in pos_df.iterrows():
                         pt = str(pr["ticker"]).upper()
                         pos_map.setdefault(pt, []).append({
@@ -11756,7 +11756,7 @@ async def morning_alert(ctx: ContextTypes.DEFAULT_TYPE):
 
     # Open positions check
     conn = get_conn()
-    open_trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", conn)
+    open_trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
     conn.close()
 
     if not open_trades.empty:
@@ -12187,7 +12187,7 @@ async def overnight_risk_report(query):
     _loading = await query.message.reply_text("⚠️ Calculating overnight risk…", parse_mode=H)
     conn = get_conn()
     try:
-        trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", conn)
+        trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
     except Exception:
         trades = pd.DataFrame()
     conn.close()
@@ -12332,10 +12332,10 @@ async def aftermarket_predict(query, ticker: str = None):
     try:
         if ticker:
             trades = pd.read_sql(
-                "SELECT * FROM trades WHERE status='OPEN' AND ticker=? ORDER BY ticker", conn, params=(ticker,))
+                "SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND ticker=? ORDER BY ticker", conn, params=(ticker,))
         else:
             trades = pd.read_sql(
-                "SELECT * FROM trades WHERE status='OPEN' ORDER BY ticker", conn)
+                "SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' ORDER BY ticker", conn)
     except Exception:
         trades = pd.DataFrame()
     conn.close()
@@ -12687,7 +12687,7 @@ async def ai_chat_handler(update, context):
     wan_ctx = ""
     try:
         conn = get_conn()
-        open_pos = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' LIMIT 20", conn)
+        open_pos = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' LIMIT 20", conn)
         try:
             wan_ctx = _wan_ai_context(_wan_get_snapshot(conn, _wan_spy_ret(conn)))
         except Exception:
@@ -13193,7 +13193,7 @@ async def exit_batch_all(query):
     """Compute MC for all open positions, show portfolio summary first, then offer individual cards."""
     conn = get_conn()
     open_trades = pd.read_sql(
-        "SELECT * FROM trades WHERE status='OPEN' ORDER BY ticker, expiry", conn)
+        "SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' ORDER BY ticker, expiry", conn)
     conn.close()
     if open_trades.empty:
         await query.message.reply_text('No open positions.', reply_markup=InlineKeyboardMarkup([[BACK_BTN]]))
@@ -13246,7 +13246,7 @@ async def exit_batch_all_cards(query):
     """Send individual MC leg cards for every open position (triggered after seeing portfolio summary)."""
     conn = get_conn()
     open_trades = pd.read_sql(
-        "SELECT * FROM trades WHERE status='OPEN' ORDER BY ticker, expiry", conn)
+        "SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' ORDER BY ticker, expiry", conn)
     conn.close()
     if open_trades.empty:
         await query.message.reply_text('No open positions.', reply_markup=InlineKeyboardMarkup([[BACK_BTN]]))
@@ -13279,7 +13279,7 @@ async def exit_batch_ticker(query, ticker):
     """Compute MC for a single ticker, show per-stock summary first, then offer individual cards."""
     conn = get_conn()
     open_trades = pd.read_sql(
-        "SELECT * FROM trades WHERE status='OPEN' AND ticker=? ORDER BY expiry",
+        "SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND ticker=? ORDER BY expiry",
         conn, params=(ticker,))
     conn.close()
     if open_trades.empty:
@@ -13337,7 +13337,7 @@ async def exit_ticker_cards(query, ticker):
     """Send individual MC leg cards for a single ticker (triggered after seeing ticker summary)."""
     conn = get_conn()
     open_trades = pd.read_sql(
-        "SELECT * FROM trades WHERE status='OPEN' AND ticker=? ORDER BY expiry",
+        "SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND ticker=? ORDER BY expiry",
         conn, params=(ticker,))
     conn.close()
     if open_trades.empty:
@@ -19152,7 +19152,7 @@ async def gamma_positions_view(query):
 
         # Your MAIN portfolio positions (separate ledger from gamma-wall trades)
         try:
-            _main = pd.read_sql("SELECT ticker, option_type, strike, quantity FROM trades WHERE status='OPEN'", conn)
+            _main = pd.read_sql("SELECT ticker, option_type, strike, quantity FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
         except Exception:
             _main = None
         if _main is not None and not _main.empty:
@@ -20236,7 +20236,7 @@ def _next_day_plan(conn):
         pass
     try:
         tr = pd.read_sql("SELECT ticker,option_type,strike,quantity,expiry,entry_price,entry_iv "
-                         "FROM trades WHERE status='OPEN'", conn)
+                         "FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
     except Exception:
         tr = pd.DataFrame()
     if tr is None or tr.empty:
@@ -20648,7 +20648,7 @@ def wrap_facts(conn, universe_cap=120):
         pass
 
     try:
-        tr = pd.read_sql("SELECT ticker,option_type,quantity FROM trades WHERE status='OPEN'", conn)
+        tr = pd.read_sql("SELECT ticker,option_type,quantity FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
         if not tr.empty:
             mv = {r["t"]: r["pct"] for r in rows}
             bt = {}
@@ -24288,6 +24288,200 @@ async def ratings_view(query):
     await _send_ratings(query.message, _ratings_scan(_ratings_default_tickers()))
 
 
+# ── TAX ADVISOR (US federal; approximations for PLANNING — not tax advice) ──
+# Defaults = user's situation (MFJ, ~$200K taxable income). /tax [income] overrides.
+# 2026 approx MFJ brackets (TCJA rates, thresholds ≈ inflation-adjusted). Update yearly.
+_TAX_MFJ = {
+    "st": [(0, .10), (24_800, .12), (100_800, .22), (211_400, .24),
+           (403_550, .32), (512_450, .35), (768_700, .37)],   # ordinary income marginal
+    "lt": [(0, .00), (98_700, .15), (613_000, .20)],           # long-term cap gains
+    "niit_over": 250_000,                                      # +3.8% NIIT above this MAGI
+}
+
+
+def _tax_marginal(brackets, income):
+    r = brackets[0][1]
+    for thr, rate in brackets:
+        if income >= thr:
+            r = rate
+    return r
+
+
+def _tax_scan(conn, income=200_000):
+    """Open STOCK lots: holding period, ST→LT flip date, est. tax if sold today, hedge
+    interactions (protective put = clock reset; qualified covered call = clock keeps running),
+    wash-sale flags; plus realized YTD ST/LT from closed trades. US federal, MFJ approx."""
+    st_rate = _tax_marginal(_TAX_MFJ["st"], income)
+    lt_rate = _tax_marginal(_TAX_MFJ["lt"], income)
+    niit = 0.038 if income > _TAX_MFJ["niit_over"] else 0.0
+    today = datetime.now().date()
+    out = {"lots": [], "advice": [], "realized_st": 0.0, "realized_lt": 0.0,
+           "st_rate": st_rate, "lt_rate": lt_rate, "niit": niit, "income": income}
+    tr = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", conn)   # stock INCLUDED here
+    cl = pd.read_sql("SELECT * FROM trades WHERE status='CLOSED'", conn)
+    if not tr.empty:
+        _ot = tr["option_type"].astype(str).str.upper()
+        stk, opts = tr[_ot.str.startswith("S")], tr[~_ot.str.startswith("S")]
+        for _, r in stk.iterrows():
+            tk = str(r["ticker"]).upper(); qty = int(r["quantity"] or 0)
+            ep = float(r["entry_price"] or 0)
+            try:
+                ed = datetime.strptime(str(r["entry_date"])[:10], "%Y-%m-%d").date()
+            except Exception:
+                out["advice"].append(f"⚠️ <b>{tk}</b>: missing/invalid entry_date — fix it "
+                                     "(Portfolio → Edit leg) or every tax number for it is wrong")
+                continue
+            # Pub 550 clock reset: a LONG put opened while the lot was <1y (incl. near-identical
+            # class, e.g. GOOG↔GOOGL) WIPES the holding period; the clock restarts the day
+            # after the put is GONE. Scan open AND closed puts so history is honored.
+            eff_ed, frozen, reset_note = ed, False, None
+            try:
+                _hist = pd.concat([opts, cl], ignore_index=True)
+                for _, p in _hist.iterrows():
+                    _ptk = str(p["ticker"]).upper()
+                    if not (_ptk[:4] == tk[:4] and abs(len(_ptk) - len(tk)) <= 1):
+                        continue
+                    if not str(p["option_type"]).lower().startswith("p") or int(p["quantity"] or 0) <= 0:
+                        continue
+                    try:
+                        p_open = datetime.strptime(str(p["entry_date"])[:10], "%Y-%m-%d").date()
+                    except Exception:
+                        continue
+                    if p_open < ed or (p_open - ed).days > 365:
+                        continue                    # lot was already long-term → no reset
+                    if str(p.get("status", "")).upper() == "OPEN":
+                        frozen = True               # put still on → clock stopped right now
+                        continue
+                    p_gone = None
+                    for _c in (str(p.get("exit_date") or "")[:10], str(p.get("expiry") or "")[:10]):
+                        try:
+                            p_gone = datetime.strptime(_c, "%Y-%m-%d").date(); break
+                        except Exception:
+                            continue
+                    if p_gone and p_gone + timedelta(days=1) > eff_ed:
+                        eff_ed = p_gone + timedelta(days=1)
+                        reset_note = (f"⏮️ clock was RESET by a protective put (Pub 550); "
+                                      f"restarted {eff_ed} — broker labels may be wrong")
+            except Exception:
+                pass
+            held = (today - eff_ed).days
+            is_lt = (not frozen) and held > 365    # sale must be MORE than 1 year after (restarted) start
+            lt_date = eff_ed + timedelta(days=366)
+            spot = _last_price(tk) or 0.0
+            unreal = (spot - ep) * qty if spot > 0 else None
+            eff = (lt_rate if is_lt else st_rate) + (niit if income > _TAX_MFJ["niit_over"] else 0)
+            est_tax = unreal * eff if (unreal or 0) > 0 else 0.0
+            save = (unreal * (st_rate - lt_rate)) if (unreal or 0) > 0 and not is_lt else 0.0
+            flags = []
+            h = opts[opts["ticker"].astype(str).str.upper() == tk]
+            for _, o in h.iterrows():
+                o_t = str(o["option_type"]).lower(); o_q = int(o["quantity"] or 0)
+                o_k = float(o["strike"] or 0)
+                try:
+                    o_dte = (datetime.strptime(str(o["expiry"])[:10], "%Y-%m-%d").date() - today).days
+                except Exception:
+                    o_dte = None
+                if o_t.startswith("p") and o_q > 0 and qty > 0 and not is_lt:
+                    flags.append("🛑 protective PUT on a <1y lot — LT clock RESET while the put is held "
+                                 "(straddle rules); clock restarts only after the put is gone")
+                if o_t.startswith("c") and o_q < 0 and qty > 0:
+                    if spot > 0 and o_k >= spot and (o_dte or 0) > 30:
+                        flags.append("✅ short call ≈ Qualified Covered Call (OTM, >30 DTE) — LT clock keeps running")
+                    elif spot > 0 and o_k < spot:
+                        flags.append("⚠️ short ITM call — likely NOT qualified: suspends the LT clock, straddle rules apply")
+            if reset_note:
+                flags.append(reset_note)
+            out["lots"].append({"tk": tk, "qty": qty, "entry": ep, "entry_date": str(ed),
+                                "held": held, "is_lt": is_lt,
+                                "lt_date": ("frozen (put open)" if frozen else str(lt_date)),
+                                "days_to_lt": (9999 if frozen else max((lt_date - today).days, 0)),
+                                "spot": spot, "unreal": unreal, "eff_rate": eff,
+                                "est_tax": est_tax, "lt_saves": save, "flags": flags})
+            if not is_lt and (unreal or 0) > 0 and 0 < (lt_date - today).days <= 120 and not any("RESET" in f for f in flags):
+                out["advice"].append(f"⏳ <b>{tk}</b>: hold {(lt_date - today).days} more days (→ {lt_date}) "
+                                     f"and the gain goes LT — saves ≈ <b>${save:,.0f}</b> at your bracket")
+    # realized YTD (stock: ST/LT by held days; options: ST unless held >1y)
+    if not cl.empty:
+        yr = str(today.year)
+        for _, r in cl.iterrows():
+            if not str(r.get("exit_date", "")).startswith(yr):
+                continue
+            pnl = float(pd.to_numeric(r.get("pnl"), errors="coerce") or 0)
+            try:
+                d0 = datetime.strptime(str(r["entry_date"])[:10], "%Y-%m-%d").date()
+                d1 = datetime.strptime(str(r["exit_date"])[:10], "%Y-%m-%d").date()
+                lt = (d1 - d0).days > 365
+            except Exception:
+                lt = False
+            out["realized_lt" if lt else "realized_st"] += pnl
+        # wash-sale: stock closed at a LOSS within 30d of an OPEN same-ticker lot entry
+        _cl_ot = cl["option_type"].astype(str).str.upper()
+        for _, r in cl[_cl_ot.str.startswith("S")].iterrows():
+            pnl = float(pd.to_numeric(r.get("pnl"), errors="coerce") or 0)
+            if pnl >= 0:
+                continue
+            try:
+                xd = datetime.strptime(str(r["exit_date"])[:10], "%Y-%m-%d").date()
+            except Exception:
+                continue
+            for lot in out["lots"]:
+                if lot["tk"] == str(r["ticker"]).upper():
+                    try:
+                        od = datetime.strptime(lot["entry_date"], "%Y-%m-%d").date()
+                        if abs((od - xd).days) <= 30:
+                            out["advice"].append(f"🚫 <b>{lot['tk']}</b>: WASH SALE — loss ${-pnl:,.0f} realized "
+                                                 f"{xd} within 30d of buying the open lot ({od}); loss is "
+                                                 "disallowed and added to the new lot's basis")
+                    except Exception:
+                        pass
+    return out
+
+
+def _fmt_tax(res):
+    lots = res["lots"]
+    hdr = (f"🧾 <b>Tax Advisor</b> — US federal, MFJ, income ≈ ${res['income']:,.0f}\n"
+           f"<i>ST rate {res['st_rate']*100:.0f}% · LT rate {res['lt_rate']*100:.0f}%"
+           + (f" · +3.8% NIIT" if res["niit"] else "")
+           + " · approximations, not tax advice</i>\n\n")
+    if not lots and not res["advice"]:
+        return hdr + "No open stock lots. Add shares with an entry date (Portfolio → Add, Type=STOCK)."
+    body = ""
+    if lots:
+        rows = [("🟢" if l["is_lt"] else "🟡", l["tk"], f"{l['held']}d",
+                 ("LT" if l["is_lt"] else f"{l['days_to_lt']}d"),
+                 (f"{l['unreal']:+,.0f}" if l["unreal"] is not None else "—"),
+                 f"{l['est_tax']:,.0f}") for l in lots]
+        body += _pipe_table(("ST", "Tkr", "Held", "→LT", "Unrl$", "Tax$"), rows, right_cols={2, 3, 4, 5}) + "\n"
+        for l in lots:
+            for f in l["flags"]:
+                body += f"\n{l['tk']}: {f}"
+        body += "\n"
+    body += (f"\n💰 <b>Realized {datetime.now().year}</b>: ST ${res['realized_st']:+,.0f} "
+             f"(taxed ~{res['st_rate']*100:.0f}%) · LT ${res['realized_lt']:+,.0f} "
+             f"(~{res['lt_rate']*100:.0f}%)")
+    if res["advice"]:
+        body += "\n\n" + "\n".join(res["advice"])
+    body += ("\n\n<i>Rules encoded: &gt;1y = LT · protective put on a &lt;1y lot resets the clock · "
+             "qualified covered calls (OTM, &gt;30 DTE) don't · wash sale = loss + rebuy within ±30d · "
+             "options P&amp;L is ST unless held &gt;1y. Federal only; no state tax.</i>")
+    return hdr + body
+
+
+async def tax_command(update, ctx):
+    """/tax [INCOME] — holding periods, ST→LT flip dates, est. tax, hedge/wash-sale warnings."""
+    try:
+        income = float(ctx.args[0].replace("k", "000").replace("K", "000")) if ctx.args else 200_000
+    except Exception:
+        income = 200_000
+    conn = get_conn()
+    try:
+        res = _tax_scan(conn, income=income)
+    finally:
+        conn.close()
+    await update.message.reply_text(_fmt_tax(res)[:4000], parse_mode=H,
+                                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
 # ── UNUSUAL OPTIONS ACTIVITY (volume >> open interest = fresh flow) ─
 def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15):
     """Unusual options activity: contracts where today's volume >> standing OI
@@ -25056,7 +25250,7 @@ def _plan_legs_for(conn, tk):
     R = 0.045
     try:
         tr = pd.read_sql("SELECT ticker,option_type,strike,quantity,expiry,entry_price,entry_iv "
-                         "FROM trades WHERE status='OPEN' AND UPPER(ticker)=?", conn, params=(tk.upper(),))
+                         "FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND UPPER(ticker)=?", conn, params=(tk.upper(),))
     except Exception:
         return [], None, None, None
     if tr is None or tr.empty:
@@ -25874,7 +26068,7 @@ def _gex_reports(conn, tickers=None, position_aware=True):
             try:
                 pos = pd.read_sql(
                     "SELECT option_type, strike, quantity, expiry FROM trades"
-                    " WHERE status='OPEN' AND UPPER(ticker)=?", conn, params=(tk.upper(),))
+                    " WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND UPPER(ticker)=?", conn, params=(tk.upper(),))
             except Exception:
                 pos = None
         exps = [None]
@@ -27309,6 +27503,7 @@ async def _post_init(app):
             BotCommand("board", "Action Board — consensus scanner ideas"),
             BotCommand("skew", "Downside skew + expected move (any ticker)"),
             BotCommand("ratings", "Analyst upgrades/downgrades + price targets"),
+            BotCommand("tax", "Stock tax lots — ST/LT clock, est. tax, hedge warnings"),
             BotCommand("catalysts", "Catalyst radar — earnings + Fed/CPI ahead"),
             BotCommand("squeeze", "Squeeze scan"),
             BotCommand("macro", "Macro (BLS + yields)"),
@@ -27374,6 +27569,7 @@ def main():
     app.add_handler(CommandHandler("board", board_command))
     app.add_handler(CommandHandler("skew", skew_command))
     app.add_handler(CommandHandler("ratings", ratings_command))
+    app.add_handler(CommandHandler("tax", tax_command))
     app.add_handler(CommandHandler("catalysts", catalysts_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
     app.add_handler(CommandHandler("journal", journal_command))

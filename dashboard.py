@@ -543,21 +543,34 @@ def _fetch_option_mid(ticker: str, expiry_str: str, strike: float, opt_type: str
     except Exception:
         return None, None
 
+def _exp_to_date(d):
+    """Any stored expiry/date string -> datetime.date. ISO YYYY-MM-DD first (all DB date
+    cols are ISO since the 07-2026 census), legacy MM-DD-YYYY fallback. None if unparseable.
+    Use this instead of positional split('-') hacks — those parsed ISO as month=2026 and
+    silently produced DTE=-1 / wrong sort orders."""
+    s = str(d)[:10]
+    for _fmt in ("%Y-%m-%d", "%m-%d-%Y"):
+        try:
+            return datetime.strptime(s, _fmt).date()
+        except Exception:
+            continue
+    return None
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _db_option_price(ticker: str, expiry_iso: str, strike: float, opt_type: str) -> float | None:
     """EOD option last-price from options_change DB (most recent trade_date_now).
-    Converts expiry from YYYY-MM-DD to MM-DD-YYYY for DB lookup.
+    expiry_date in the DB is ISO — query it directly (the old ISO->MM-DD-YYYY
+    conversion matched nothing once the DB went ISO, so this always returned None).
     Returns float price or None if not found."""
     try:
-        parts = expiry_iso.split("-")
-        db_exp = f"{parts[1]}-{parts[2]}-{parts[0]}"
         col = "lastPrice_Call_now" if opt_type.upper() == "CALL" else "lastPrice_Put_now"
         with get_conn() as _c:
             row = pd.read_sql(
                 f"SELECT {col} AS price, trade_date_now FROM options_change "
                 "WHERE ticker=? AND strike=? AND expiry_date=? "
                 "ORDER BY trade_date_now DESC LIMIT 1",
-                _c, params=[ticker, float(strike), db_exp]
+                _c, params=[ticker, float(strike), str(expiry_iso)[:10]]
             )
         if not row.empty and row["price"].iloc[0] is not None:
             return float(row["price"].iloc[0])
@@ -6398,20 +6411,12 @@ elif page == "🔥 OI Analytics & Prediction":
             except Exception:
                 pass
             def _oa_exp_sort(d):
-                try:
-                    p = d.split("-")
-                    return (int(p[2]), int(p[0]), int(p[1]))
-                except Exception:
-                    return (9999, 99, 99)
+                return _exp_to_date(d) or _dt_mod.date(9999, 12, 31)
             def _oa_is_future(d):
                 if _today_dt is None:
                     return True
-                try:
-                    p = d.split("-")
-                    edt = _dt_mod.date(int(p[2]), int(p[0]), int(p[1]))
-                    return edt >= _today_dt
-                except Exception:
-                    return True
+                edt = _exp_to_date(d)
+                return True if edt is None else edt >= _today_dt
             _future_exps = sorted([e for e in _tk_exp if _oa_is_future(e)], key=_oa_exp_sort)
             _past_exps   = sorted([e for e in _tk_exp if not _oa_is_future(e)], key=_oa_exp_sort, reverse=True)
             _oa_exp_raw  = _future_exps + _past_exps
@@ -6653,10 +6658,9 @@ elif page == "🔥 OI Analytics & Prediction":
     # Sort expiries chronologically and compute DTE
     def _dte_from_exp(exp_str, ref=sel_date):
         try:
-            ep = exp_str.split("-"); rp = ref.split("-")
-            import datetime as _dmod
-            ed = _dmod.date(int(ep[2]), int(ep[0]), int(ep[1]))
-            rd = _dmod.date(int(rp[2]), int(rp[0]), int(rp[1]))
+            ed = _exp_to_date(exp_str); rd = _exp_to_date(ref)
+            if ed is None or rd is None:
+                raise ValueError(f"bad date {exp_str}/{ref}")
             return (ed - rd).days
         except Exception:
             return 9999
@@ -7145,13 +7149,10 @@ elif page == "🔥 OI Analytics & Prediction":
                 [sel_ticker, _latest_date]
             )["expiry_date"].tolist() if sel_ticker else []
 
-            # Sort expiry dates chronologically (stored as MM-DD-YYYY)
+            # Sort expiry dates chronologically (ISO or legacy format)
+            import datetime as _esk_dmod
             def _exp_sort_key(d):
-                try:
-                    p = d.split("-")
-                    return (int(p[2]), int(p[0]), int(p[1]))
-                except Exception:
-                    return (9999, 99, 99)
+                return _exp_to_date(d) or _esk_dmod.date(9999, 12, 31)
 
             _expiry_sorted = sorted(_expiry_raw, key=_exp_sort_key)
             _expiry_opts = ["All Expiries"] + _expiry_sorted
@@ -7243,18 +7244,12 @@ elif page == "🎯 Prop Trading Screen":
             "SELECT DISTINCT expiry_date FROM options_change WHERE trade_date_now=?",
             [prop_date]
         )["expiry_date"].tolist() if prop_date else []
+        import datetime as _pex_dmod
         def _prop_exp_sort(d):
-            try:
-                p = d.split("-"); return (int(p[2]),int(p[0]),int(p[1]))
-            except Exception:
-                return (9999,99,99)
+            return _exp_to_date(d) or _pex_dmod.date(9999, 12, 31)
         def _prop_is_future(d, ref=prop_date):
-            try:
-                import datetime as _dmod
-                ep = d.split("-"); rp = ref.split("-")
-                return _dmod.date(int(ep[2]),int(ep[0]),int(ep[1])) >= _dmod.date(int(rp[2]),int(rp[0]),int(rp[1]))
-            except Exception:
-                return True
+            ed = _exp_to_date(d); rd = _exp_to_date(ref)
+            return True if (ed is None or rd is None) else ed >= rd
         _prop_future = sorted([e for e in _prop_exp_raw if _prop_is_future(e)], key=_prop_exp_sort)
         _prop_past   = sorted([e for e in _prop_exp_raw if not _prop_is_future(e)], key=_prop_exp_sort, reverse=True)
         _prop_exp_labels = [f"🟢 {e}" for e in _prop_future] + [f"🔴 {e} (past)" for e in _prop_past]
@@ -10867,17 +10862,14 @@ Professional options desk — dealer GEX analysis, expiry-level walls, position 
             "SELECT DISTINCT expiry_date FROM options_change "
             "WHERE ticker=? AND trade_date_now=? AND (openInt_Call_now>0 OR openInt_Put_now>0)",
             _ga_conn, params=(_ga_sel, _ga_today))
+        import datetime as _dmod_ga
         def _ga_exp_sort(d):
-            try:
-                p = str(d).split("-"); return (int(p[2]), int(p[0]), int(p[1]))
-            except Exception:
-                return (9999, 99, 99)
+            return _exp_to_date(d) or _dmod_ga.date(9999, 12, 31)
         _all_ga_exps = sorted(_ga_oi_meta["expiry_date"].tolist(), key=_ga_exp_sort)
         try:
-            import datetime as _dmod_ga
             _ref_ga = _dmod_ga.datetime.strptime(_ga_today, "%Y-%m-%d").date()
             _fut_ga = [e for e in _all_ga_exps
-                       if _dmod_ga.date(int(e.split("-")[2]),int(e.split("-")[0]),int(e.split("-")[1])) >= _ref_ga]
+                       if (_exp_to_date(e) or _ref_ga) >= _ref_ga]
             _pst_ga = [e for e in _all_ga_exps if e not in _fut_ga]
         except Exception:
             _fut_ga = _all_ga_exps; _pst_ga = []
@@ -11012,12 +11004,8 @@ Professional options desk — dealer GEX analysis, expiry-level walls, position 
                         _cw_str_ex = _ex_walls["call_wall_strength"]
                         _pw_str_ex = _ex_walls["put_wall_strength"]
 
-                        try:
-                            _ep = _ex.split("-")
-                            _ed = _dmod_ga.date(int(_ep[2]), int(_ep[0]), int(_ep[1]))
-                            _dte_ex = (_ed - _ref_ga).days
-                        except Exception:
-                            _dte_ex = -1
+                        _edd = _exp_to_date(_ex)
+                        _dte_ex = (_edd - _ref_ga).days if _edd else -1
 
                         _is_sel = (_ex == _sel_ga_expiry) if _sel_ga_expiry else False
                         _zone = ("✅ IDEAL" if 21 <= _dte_ex <= 50 else
@@ -12224,13 +12212,10 @@ Real edge comes from discipline and filters — not a higher strike.
             if _eoi.empty or not _espot:
                 st.warning("No data.")
             else:
-                # Sort expiries chronologically (MM-DD-YYYY format)
+                # Sort expiries chronologically (ISO or legacy format)
+                import datetime as _eck_dmod
                 def _exp_chron_key(d):
-                    try:
-                        p = str(d).split("-")
-                        return (int(p[2]), int(p[0]), int(p[1]))
-                    except Exception:
-                        return (9999, 99, 99)
+                    return _exp_to_date(d) or _eck_dmod.date(9999, 12, 31)
                 _exp_rows = []
                 _all_expiries = sorted(_eoi["expiry_date"].unique(), key=_exp_chron_key)
                 for _ex in _all_expiries:

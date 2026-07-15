@@ -18717,10 +18717,14 @@ def _ga_expiry_wall_table(ticker, conn, spot):
     if not td:
         return [], []
     today_str = td[0]
-    try:
-        tp = today_str.split("-")
-        today_dt = _date(int(tp[2]), int(tp[0]), int(tp[1]))
-    except Exception:
+    today_dt = None
+    for _fmt in ("%Y-%m-%d", "%m-%d-%Y"):           # ISO first — all DB dates are ISO now
+        try:
+            today_dt = datetime.strptime(str(today_str)[:10], _fmt).date()
+            break
+        except Exception:
+            continue
+    if today_dt is None:
         today_dt = _date.today()
 
     df = pd.read_sql(
@@ -18733,19 +18737,17 @@ def _ga_expiry_wall_table(ticker, conn, spot):
     for c in ["strike", "openInt_Call_now", "openInt_Put_now"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-    def _exp_key(d):
-        try:
-            p = str(d).split("-")
-            return (int(p[2]), int(p[0]), int(p[1]))
-        except Exception:
-            return (9999, 99, 99)
-
     def _exp_date(d):
-        try:
-            p = str(d).split("-")
-            return _date(int(p[2]), int(p[0]), int(p[1]))
-        except Exception:
-            return None
+        s = str(d)[:10]
+        for _fmt in ("%Y-%m-%d", "%m-%d-%Y"):        # ISO first — all DB dates are ISO now
+            try:
+                return datetime.strptime(s, _fmt).date()
+            except Exception:
+                continue
+        return None
+
+    def _exp_key(d):
+        return _exp_date(d) or _date(9999, 12, 31)
 
     all_exps = sorted(df["expiry_date"].dropna().unique(), key=_exp_key)
     future_exps = [e for e in all_exps if (_exp_date(e) or _date.min) >= today_dt]

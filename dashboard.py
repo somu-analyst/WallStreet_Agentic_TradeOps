@@ -8236,7 +8236,10 @@ elif page == "💼 Portfolio & Suggestions":
                                 f"margin-bottom:4px;background:{_bg};border-radius:0 0 4px 4px;"
                                 f"font-size:0.85em;color:#555;'>{_roll_hint}</div>",
                                 unsafe_allow_html=True)
-                        with st.expander(f"  ↳ Close/Edit L{_li+1}: {_sl} {pos['Type']} ${pos['Strike']}"):
+                        # NOTE: st.expander cannot nest inside the ticker-group expander —
+                        # StreamlitAPIException killed the whole legs section (only group visible).
+                        if st.toggle(f"↳ Close/Edit L{_li+1}: {_sl} {pos['Type']} ${pos['Strike']}",
+                                     key=f"ce_{pos['ID']}"):
                             _et1, _et2 = st.tabs(["✅ Close", "✏️ Edit"])
                             with _et1:
                                 with st.form(f"close_{pos['ID']}"):

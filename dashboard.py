@@ -1586,7 +1586,7 @@ SYMBOL_ICONS = {
     "10Y Yield": "📋", "30Y Yield": "📋",
 }
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)          # 300s made the 60s auto-refresh show stale quotes 4/5 times
 def fetch_market_snapshot():
     rows = []
     tickers_str = " ".join(GLOBAL_SYMBOLS.values())
@@ -1594,6 +1594,13 @@ def fetch_market_snapshot():
         data = yf.download(tickers_str, period="5d", group_by="ticker", progress=False, threads=True)
     except Exception:
         data = pd.DataFrame()
+    # Live layer: last 1-minute bar (incl. pre/post). Daily bars lag the live tick by
+    # minutes during trading, which is why cards drifted from Google's live quotes.
+    try:
+        live = yf.download(tickers_str, period="1d", interval="1m", prepost=True,
+                           group_by="ticker", progress=False, threads=True)
+    except Exception:
+        live = pd.DataFrame()
     for name, sym in GLOBAL_SYMBOLS.items():
         try:
             hist = pd.DataFrame()
@@ -1612,6 +1619,18 @@ def fetch_market_snapshot():
                     continue
                 cur = float(close_col.iloc[-1])
                 prev = float(close_col.iloc[-2])
+                # overlay the fresher 1-minute price when available
+                try:
+                    if not live.empty and sym in live.columns.get_level_values(0):
+                        lc = live[sym]["Close"].dropna()
+                        if len(lc) and float(lc.iloc[-1]) > 0:
+                            # if the live bar is a NEWER session than the last daily bar
+                            # (e.g. pre-market), yesterday's close is the daily LAST bar
+                            if lc.index[-1].date() > close_col.index[-1].date():
+                                prev = float(close_col.iloc[-1])
+                            cur = float(lc.iloc[-1])
+                except Exception:
+                    pass
                 chg = cur - prev
                 pct = chg / prev * 100 if prev else 0
                 rows.append(dict(Name=name, Symbol=sym, Price=cur, Change=chg, Pct=pct))
@@ -7598,8 +7617,7 @@ elif page == "🎯 Prop Trading Screen":
 elif page == "🎛️ Command Center":
     _page_header("🎛️ Command Center", _PAGE_HELP["🎛️ Command Center"])
     import telegram_bot_optimized as _cc_tbo
-    if st.button("↻ Refresh", key="cc_refresh"):
-        st.cache_data.clear(); st.rerun()
+    _cc_refresh = st.button("↻ Refresh", key="cc_refresh")
 
     @st.cache_data(ttl=300, show_spinner=False)
     def _cc_radar():
@@ -7624,6 +7642,78 @@ elif page == "🎛️ Command Center":
     @st.cache_data(ttl=300, show_spinner=False)
     def _cc_ideas():
         return _ab_ideas()
+
+    @st.cache_data(ttl=120, show_spinner=False)
+    def _cc_book():
+        """Open-positions book. One chain download per UNIQUE (ticker, expiry), fetched in
+        parallel — the old per-leg serial _fetch_option_mid loop took 2-3s × legs on every rerun."""
+        _bc = get_conn()
+        try:
+            _tr = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", _bc)
+        finally:
+            _bc.close()
+        if _tr.empty:
+            return [], 0.0, 0, 0
+        import concurrent.futures as _fut
+
+        def _grab_chain(pair):
+            _tk2, _exp2 = pair
+            try:
+                return pair, yf.Ticker(_tk2).option_chain(_exp2)
+            except Exception:
+                return pair, None
+        _pairs = {(str(r["ticker"]).upper(), str(r["expiry"])[:10]) for _, r in _tr.iterrows()}
+        _chains = {}
+        with _fut.ThreadPoolExecutor(max_workers=8) as _ex:
+            for _pair, _oc in _ex.map(_grab_chain, _pairs):
+                _chains[_pair] = _oc
+        _rows = []; _total = 0.0; _exp5 = 0
+        for _, _t2 in _tr.iterrows():
+            _tk = str(_t2.get("ticker", "")).upper(); _k = float(_t2.get("strike", 0))
+            _exp = str(_t2.get("expiry", ""))[:10]; _opt = str(_t2.get("option_type", "CALL")).upper()
+            _qty = int(_t2.get("quantity", 1)); _ep = float(_t2.get("entry_price", 0))
+            _spot = _db_spot(_tk) or (_cached_price(_tk) or 0.0)
+            try:
+                _dte = max((datetime.strptime(_exp, "%Y-%m-%d").date() - datetime.now().date()).days, 0)
+            except Exception:
+                _dte = None
+            _cp = None
+            _oc = _chains.get((_tk, _exp))
+            if _oc is not None:
+                try:
+                    _cdf = _oc.calls if _opt.startswith("C") else _oc.puts
+                    _m = _cdf[(_cdf["strike"] - _k).abs() < 0.01]
+                    if len(_m):
+                        _b = float(_m["bid"].iloc[0] or 0); _a = float(_m["ask"].iloc[0] or 0)
+                        _cp = (_b + _a) / 2 if (_b > 0 and _a >= _b) else (float(_m["lastPrice"].iloc[0] or 0) or None)
+                except Exception:
+                    _cp = None
+            if _cp is None and _dte and _spot:
+                try:
+                    _cp = bs_greeks(_spot, _k, _dte / 365, 0.045, _historical_vol(_tk), _opt.lower())["price"]
+                except Exception:
+                    _cp = None
+            _pnl = (_cp - _ep) * _qty * 100 if _cp is not None else None
+            if _pnl is not None:
+                _total += _pnl
+            if _dte is not None and _dte <= 5:
+                _exp5 += 1
+            _rows.append({"": "⏳" if (_dte is not None and _dte <= 5) else "",
+                          "Ticker": _tk, "Opt": f"{_k:g}{_opt[0]}", "Qty": _qty, "DTE": _dte,
+                          "Expiry": _exp,
+                          "Entry": round(_ep, 2), "Now": round(_cp, 2) if _cp else None,
+                          "P&L $": round(_pnl) if _pnl is not None else None})
+        return _rows, _total, _exp5, len(_tr)
+
+    if _cc_refresh:
+        # page-local refresh only — st.cache_data.clear() nuked EVERY cache in the app,
+        # making the next visit to any page a cold load
+        for _fn in (_cc_radar, _cc_weather, _cc_ideas, _cc_book):
+            try:
+                _fn.clear()
+            except Exception:
+                pass
+        st.rerun()
 
     # ── 1. MARKET WEATHER ──────────────────────────────────────────
     st.markdown("#### 🌦️ Market Weather")
@@ -7652,46 +7742,13 @@ elif page == "🎛️ Command Center":
     # ── 2. MY BOOK ─────────────────────────────────────────────────
     st.markdown("#### 💼 My Book")
     try:
-        _bc = get_conn()
-        try:
-            _tr = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", _bc)
-        finally:
-            _bc.close()
-        if _tr.empty:
+        _rows, _total, _exp5, _npos = _cc_book()
+        if not _npos:
             st.caption("No open positions. Add trades on the Portfolio page.")
         else:
-            _rows = []; _total = 0.0; _exp5 = 0
-            for _, _t2 in _tr.iterrows():
-                _tk = str(_t2.get("ticker", "")).upper(); _k = float(_t2.get("strike", 0))
-                _exp = str(_t2.get("expiry", "")); _opt = str(_t2.get("option_type", "CALL")).upper()
-                _qty = int(_t2.get("quantity", 1)); _ep = float(_t2.get("entry_price", 0))
-                _spot = _db_spot(_tk) or (_cached_price(_tk) or 0.0)
-                try:
-                    _dte = max((datetime.strptime(_exp, "%Y-%m-%d").date() - datetime.now().date()).days, 0)
-                except Exception:
-                    _dte = None
-                _cp = None
-                try:
-                    _mid, _ = _fetch_option_mid(_tk, _exp, _k, _opt)
-                    if _mid:
-                        _cp = _mid
-                    elif _dte and _spot:
-                        _cp = bs_greeks(_spot, _k, _dte / 365, 0.045, _historical_vol(_tk), _opt.lower())["price"]
-                except Exception:
-                    _cp = None
-                _pnl = (_cp - _ep) * _qty * 100 if _cp is not None else None
-                if _pnl is not None:
-                    _total += _pnl
-                if _dte is not None and _dte <= 5:
-                    _exp5 += 1
-                _rows.append({"": "⏳" if (_dte is not None and _dte <= 5) else "",
-                              "Ticker": _tk, "Opt": f"{_k:g}{_opt[0]}", "Qty": _qty, "DTE": _dte,
-                              "Expiry": _exp[:10],
-                              "Entry": round(_ep, 2), "Now": round(_cp, 2) if _cp else None,
-                              "P&L $": round(_pnl) if _pnl is not None else None})
             _k1, _k2, _k3 = st.columns(3)
             _k1.metric("Open P&L", f"${_total:,.0f}")
-            _k2.metric("Positions", len(_tr))
+            _k2.metric("Positions", _npos)
             _k3.metric("Expiring ≤5d", _exp5)
             _bdf = pd.DataFrame(_rows)
             st.dataframe(_bdf.sort_values("DTE", na_position="last"), hide_index=True, use_container_width=True)

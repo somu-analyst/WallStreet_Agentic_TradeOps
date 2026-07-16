@@ -20681,9 +20681,80 @@ if page == "📡 Macro/Event Hub":
 
     if _tbmod is not None:
         _hub_conn = get_conn()
-        _tb_brief, _tb_opex, _tb_sq, _tb_gex, _tb_van, _tb_mom, _tb_ev, _tb_jr, _tb_mac = st.tabs(
+        (_tb_brief, _tb_opex, _tb_sq, _tb_gex, _tb_van, _tb_mom, _tb_ev, _tb_jr, _tb_mac,
+         _tb_live, _tb_heat, _tb_skew, _tb_cat, _tb_reg) = st.tabs(
             ["☀️ Briefing", "🗓️ OpEx", "🩳 Squeeze", "📐 GEX", "🌀 Vanna", "🚀 Momentum",
-             "🌍 Events", "📓 Journal", "📊 Macro"])
+             "🌍 Events", "📓 Journal", "📊 Macro",
+             "🔴 Live", "🔥 Heat", "📉 Skew", "⚡ Catalysts", "🌡️ Regime"])
+
+        with _tb_live:
+            st.caption("Minute-level intraday writeup (bot /live) — VWAP dislocation, volume pace, "
+                       "bursts, IV drift. Needs the intraday lane (auto-starts with the bot in market hours).")
+            _lv_tk = st.text_input("Tickers (blank = positions + SPY/QQQ)", "", key="hub_live_tk")
+            _lv_tks = [x.strip().upper() for x in re.split(r"[ ,]+", _lv_tk) if x.strip()] or None
+            if st.button("🔄 Refresh", key="hub_live_btn"):
+                st.rerun()
+            try:
+                _lv_txt = _tbmod._live_writeup(_lv_tks)
+                if _lv_txt:
+                    _render_tg(_lv_txt)
+                else:
+                    st.info("No intraday data yet — the capture lane runs during market hours "
+                            "(bot supervises it; log: logs/intraday_lane.log).")
+            except Exception as e:
+                st.error(f"Live error: {e}")
+
+        with _tb_heat:
+            st.caption("Heat-seeking / reversal scan (bot /heat): z = day move ÷ ATR·√elapsed · "
+                       "🔥 HEAT trending · 🌀 FADE stretched+stalling.")
+            if st.button("🔄 Refresh", key="hub_heat_btn"):
+                st.rerun()
+            try:
+                _ht_day, _ht_rows = _tbmod._heat_scan()
+                if _ht_rows:
+                    _render_tg(_tbmod._fmt_heat(_ht_rows, _ht_day))
+                else:
+                    st.info("No intraday bars yet — lane runs market hours only.")
+            except Exception as e:
+                st.error(f"Heat error: {e}")
+
+        with _tb_skew:
+            st.caption("25Δ put−call skew (live IV): direction + 1σ expected move + P(≥5% drop) (bot /skew).")
+            _sk_tk = st.text_input("Tickers (blank = defaults)", "", key="hub_skew_tk")
+            _sk_tks = [x.strip().upper() for x in re.split(r"[ ,]+", _sk_tk) if x.strip()]
+            if st.button("▶️ Scan skew", key="hub_skew_btn"):
+                try:
+                    _sk_rows = _tbmod._skew_scan(_sk_tks or _tbmod._SKEW_DEFAULT)
+                    _sk_fmt = _tbmod._fmt_skew(_sk_rows)
+                    if _sk_fmt:
+                        _render_tg(_sk_fmt)
+                    else:
+                        st.warning("No skew data (illiquid chains?).")
+                except Exception as e:
+                    st.error(f"Skew error: {e}")
+
+        with _tb_cat:
+            st.caption("Catalyst Radar (bot /catalysts): earnings + scheduled macro (FOMC/CPI/NFP) on your book.")
+            _ct_days = st.slider("Days ahead", 3, 21, 7, key="hub_cat_days")
+            try:
+                _ct_tks = _tbmod._ratings_default_tickers()
+                _ct_m, _ct_e = _tbmod._upcoming_catalysts(_ct_tks, _ct_days)
+                _ct_fmt = _tbmod._fmt_catalysts(_ct_m, _ct_e, _ct_days)
+                if _ct_fmt:
+                    _render_tg(_ct_fmt)
+                else:
+                    st.info(f"No catalysts in the next {_ct_days}d for {', '.join(_ct_tks)}.")
+            except Exception as e:
+                st.error(f"Catalysts error: {e}")
+
+        with _tb_reg:
+            st.caption("Risk-on/off master read (bot /regime): breadth, credit, curve, VIX term structure + FOMC.")
+            if st.button("🔄 Refresh", key="hub_reg_btn"):
+                st.rerun()
+            try:
+                _render_tg(_tbmod._fmt_regime())
+            except Exception as e:
+                st.error(f"Regime error: {e}")
 
         with _tb_brief:
             st.caption("Daily macro brief — optimistic / pessimistic / balanced, with live news.")

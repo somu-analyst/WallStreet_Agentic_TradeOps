@@ -24288,6 +24288,286 @@ async def ratings_view(query):
     await _send_ratings(query.message, _ratings_scan(_ratings_default_tickers()))
 
 
+# ── INTRADAY LANE (reads US_intraday.db written by NYSE_intraday.py: 1m bars
+#    for open positions + ~30 leaders, 30-min CBOE chain snapshots for
+#    positions). /live = minute-level writeup · /heat = heat-seeking/reversal
+#    scan · heat_streamer_alert = 15-min job that pushes state CHANGES only.
+#    OI updates once daily (OCC) — intraday edge is volume-pace / IV-shift /
+#    price action ONLY. Volume pace uses a linear time-of-day norm (approx).
+INTRADAY_DB = os.path.join(DATA_DIR, "US_intraday.db")
+
+
+def _idb_conn():
+    return sqlite3.connect(INTRADAY_DB, timeout=15) if os.path.exists(INTRADAY_DB) else None
+
+
+def _intraday_frame():
+    """Latest captured day's 1m bars → (day, {ticker: df}). (None, None) if lane never ran."""
+    c = _idb_conn()
+    if c is None:
+        return None, None
+    try:
+        day = c.execute("SELECT MAX(trade_date) FROM intraday_bars").fetchone()[0]
+        if not day:
+            return None, None
+        df = pd.read_sql_query(
+            "SELECT ticker, ts, open, high, low, close, volume FROM intraday_bars "
+            "WHERE trade_date=? ORDER BY ts", c, params=(day,))
+    finally:
+        c.close()
+    if df.empty:
+        return None, None
+    return day, {tk: g.reset_index(drop=True) for tk, g in df.groupby("ticker")}
+
+
+def _intraday_ref(conn, tk, day):
+    """Daily reference from stock_daily (strictly before `day`): prev close, ATR20 as
+    a fraction of price, 20d avg volume. None if the ticker isn't in the DB."""
+    rows = conn.execute(
+        "SELECT close, high, low, volume FROM stock_daily "
+        "WHERE ticker=? AND trade_date<? ORDER BY trade_date DESC LIMIT 21",
+        (tk, day)).fetchall()
+    if not rows:
+        return None
+    rows = rows[::-1]                                # oldest → newest
+    trs, vols, prev_c = [], [], None
+    for cl, hi, lo, vol in rows:
+        if hi and lo and cl:
+            tr = hi - lo
+            if prev_c:
+                tr = max(tr, abs(hi - prev_c), abs(lo - prev_c))
+            trs.append(tr / cl)
+        if vol:
+            vols.append(float(vol))
+        prev_c = cl
+    return {"prev_close": rows[-1][0],
+            "atr_pct": sum(trs[-20:]) / len(trs[-20:]) if trs else None,
+            "avg_vol": sum(vols[-20:]) / len(vols[-20:]) if vols else None}
+
+
+def _intraday_metrics(bars, ref):
+    """Minute-level metrics for one ticker: day move, VWAP dislocation, volume pace
+    vs 20d norm, 15m burst, ATR-paced move z-score, bar age. Pure computation."""
+    px = bars["close"].astype(float)
+    v = bars["volume"].astype(float)
+    last = float(px.iloc[-1])
+    cumv = float(v.sum())
+    vwap = float((px * v).sum() / cumv) if cumv > 0 else last
+    t0 = datetime.strptime(bars["ts"].iloc[0][:10] + " 09:30", "%Y-%m-%d %H:%M")
+    tn = datetime.strptime(bars["ts"].iloc[-1], "%Y-%m-%d %H:%M")
+    elapsed = min(max((tn - t0).total_seconds() / 60.0, 5.0), 390.0) / 390.0
+    pc = (ref or {}).get("prev_close") or float(bars["open"].iloc[0])
+    day_ret = last / pc - 1 if pc else 0.0
+    atr = (ref or {}).get("atr_pct")
+    move_z = day_ret / (atr * elapsed ** 0.5) if atr else None
+    avg_v = (ref or {}).get("avg_vol")
+    pace = cumv / (avg_v * elapsed) if avg_v else None
+    burst15 = float(px.iloc[-1] / px.iloc[-16] - 1) if len(px) > 16 else day_ret
+    last30 = float(px.iloc[-1] / px.iloc[-31] - 1) if len(px) > 31 else burst15
+    # bar timestamps are exchange-local (ET); tz offset is 4h (EDT) or 5h (EST) —
+    # take whichever offset yields the smaller age so staleness works year-round
+    now_u = datetime.now(timezone.utc).replace(tzinfo=None)
+    age_min = min(abs((now_u - (tn + timedelta(hours=off))).total_seconds()) / 60.0
+                  for off in (4, 5))
+    return {"last": last, "prev_close": pc, "day_ret": day_ret, "vwap": vwap,
+            "vwap_dev": last / vwap - 1 if vwap else 0.0, "move_z": move_z,
+            "pace": pace, "burst15": burst15, "last30": last30,
+            "elapsed": elapsed, "age_min": age_min}
+
+
+def _heat_state(m):
+    """FADE = stretched (>2σ pace-adjusted) AND stalling/low-fuel → reversal candidate.
+    HEAT = strong paced move (≥1.5σ) on ≥1.5× volume, still trending. Else None."""
+    z = m.get("move_z")
+    if z is None:
+        return None
+    trending = (m.get("last30") or 0.0) * m["day_ret"] >= 0
+    if abs(z) >= 2.0 and (not trending or (m.get("pace") or 9) < 1.0):
+        return "FADE"
+    if abs(z) >= 1.5 and (m.get("pace") or 0) >= 1.5 and trending:
+        return "HEAT"
+    return None
+
+
+def _heat_scan():
+    """(day, metric rows sorted by |z|) over every ticker in today's intraday bars."""
+    day, frames = _intraday_frame()
+    if not frames:
+        return None, None
+    conn = get_conn()
+    rows = []
+    try:
+        for tk, b in frames.items():
+            try:
+                m = _intraday_metrics(b, _intraday_ref(conn, tk, day))
+            except Exception:
+                continue
+            m["tk"] = tk
+            m["state"] = _heat_state(m)
+            rows.append(m)
+    finally:
+        conn.close()
+    rows.sort(key=lambda m: -abs(m["move_z"] or 0))
+    return day, rows
+
+
+def _iv_drift(day):
+    """{ticker: {iv, first_iv, pcr}} from today's 30-min chain snapshots."""
+    c = _idb_conn()
+    if c is None:
+        return {}
+    try:
+        cur = c.execute("SELECT ticker, atm_iv, pcr_vol FROM intraday_chain "
+                        "WHERE trade_date=? ORDER BY ts_utc", (day,)).fetchall()
+    finally:
+        c.close()
+    out = {}
+    for tk, iv, pcr in cur:
+        d = out.setdefault(tk, {"first_iv": iv, "iv": iv, "pcr": pcr})
+        if iv is not None:
+            d["iv"] = iv
+            if d["first_iv"] is None:
+                d["first_iv"] = iv
+        if pcr is not None:
+            d["pcr"] = pcr
+    return out
+
+
+_HEAT_EMO = {"HEAT": "🔥", "FADE": "🌀", None: "⚪"}
+
+
+def _fmt_heat(rows, day, title="🔥 Heat-Seeker · intraday"):
+    data = [(_HEAT_EMO.get(m["state"], "⚪"), m["tk"], f"{m['day_ret']:+.1%}",
+             f"{m['move_z']:+.1f}" if m["move_z"] is not None else "—",
+             f"{m['pace']:.1f}x" if m["pace"] else "—") for m in rows[:12]]
+    return _pipe_table(("ST", "Tkr", "Day%", "z", "Pace"), data, right_cols={2, 3, 4},
+                       title=f"{title} {day}",
+                       legend="z = move ÷ ATR20·√elapsed · Pace = vol vs 20d norm · "
+                              "🔥 paced+fueled trend · 🌀 stretched >2σ + stalling (fade watch) · "
+                              "OI is daily — this is volume/price/IV only, not advice")
+
+
+def _live_writeup(tickers=None):
+    """Minute-level market writeup from the intraday lane. None if lane never ran."""
+    day, rows = _heat_scan()
+    if not rows:
+        return None
+    by = {m["tk"]: m for m in rows}
+    ivm = _iv_drift(day)
+    want = [t for t in (tickers or _ratings_default_tickers() + ["SPY", "QQQ"]) if t in by]
+    seen = set()
+    want = [t for t in want if not (t in seen or seen.add(t))][:8]
+    if not want:
+        return None
+    up_vwap = sum(1 for m in rows if m["vwap_dev"] > 0)
+    spy, qqq = by.get("SPY"), by.get("QQQ")
+    parts = [hdr(f"📶 LIVE · {day}")]
+    mk = []
+    if spy:
+        mk.append(f"SPY {spy['day_ret']:+.1%}")
+    if qqq:
+        mk.append(f"QQQ {qqq['day_ret']:+.1%}")
+    mk.append(f"breadth {up_vwap}/{len(rows)} above VWAP")
+    parts.append("<i>" + " · ".join(mk) + "</i>")
+    stale = max(by[t]["age_min"] for t in want)
+    if stale > 20:
+        parts.append(f"⚠️ <i>bars are ~{stale:.0f} min old — live only while "
+                     f"NYSE_intraday.py is running</i>")
+    for tk in want:
+        m = by[tk]
+        e = "🟢" if m["day_ret"] >= 0 else "🔴"
+        side = "above" if m["vwap_dev"] >= 0 else "below"
+        l1 = (f"{e} <b>{tk}</b> {m['last']:,.2f} ({m['day_ret']:+.1%}) · "
+              f"{side} VWAP {m['vwap_dev']:+.1%}")
+        bits = []
+        if m["pace"]:
+            bits.append(f"pace {m['pace']:.1f}x")
+        bits.append(f"15m {m['burst15']:+.1%}")
+        if m["move_z"] is not None:
+            bits.append(f"z {m['move_z']:+.1f}")
+        if m["state"]:
+            bits.append(f"{_HEAT_EMO[m['state']]} <b>{m['state']}</b>")
+        l2 = "  " + " · ".join(bits)
+        blk = l1 + "\n" + l2
+        iv = ivm.get(tk)
+        if iv and iv.get("iv"):
+            drift = ((iv["iv"] - iv["first_iv"]) * 100) if iv.get("first_iv") else 0.0
+            pcr = f" · PCR-vol {iv['pcr']:.2f}" if iv.get("pcr") is not None else ""
+            blk += f"\n  ATM IV {iv['iv']:.0%} ({drift:+.1f}pt today){pcr}"
+        parts.append(blk)
+    hot = [m for m in rows if m["state"] and m["tk"] not in want][:4]
+    if hot:
+        parts.append("<b>▸ Elsewhere</b>\n" + "\n".join(
+            f"  {_HEAT_EMO[m['state']]} {m['tk']} {m['day_ret']:+.1%} "
+            f"(z {m['move_z']:+.1f}) {m['state']}" for m in hot))
+    parts.append("<i>1m bars + 30-min chain snapshots (15-min delayed) · "
+                 "volume/price/IV only, OI is daily · not advice</i>")
+    return "\n\n".join(parts)
+
+
+async def live_command(update, ctx):
+    """/live [TICKERS] — minute-level intraday writeup (defaults: positions + SPY/QQQ)."""
+    args = [a.upper() for a in (ctx.args or [])][:8]
+    txt = _live_writeup(args or None)
+    if not txt:
+        await update.message.reply_text(
+            "📶 Intraday lane has no data yet. Start the capture loop:\n"
+            "<code>python NYSE_intraday.py</code>\n"
+            "<i>(1m bars for positions + leaders, 30-min chain snapshots; "
+            "market hours only)</i>", parse_mode=H)
+        return
+    await update.message.reply_text(txt[:4000], parse_mode=H)
+
+
+async def heat_command(update, ctx):
+    """/heat — heat-seeking / reversal scan over the intraday focus universe."""
+    day, rows = _heat_scan()
+    if not rows:
+        await update.message.reply_text(
+            "🔥 Intraday lane has no data yet. Start the capture loop:\n"
+            "<code>python NYSE_intraday.py</code>", parse_mode=H)
+        return
+    await update.message.reply_text(_fmt_heat(rows, day)[:4000], parse_mode=H)
+
+
+async def heat_streamer_alert(ctx: ContextTypes.DEFAULT_TYPE):
+    """15-min job: push heat/fade STATE CHANGES only (one alert per ticker|state per
+    day via alert_dedup). Market-hours gated; silently no-ops if the lane is off."""
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    if now_utc.weekday() >= 5:
+        return
+    hm = now_utc.hour * 60 + now_utc.minute
+    if not (13 * 60 + 40 <= hm <= 21 * 60):      # EDT/EST union session window
+        return
+    try:
+        day, rows = _heat_scan()
+    except Exception as e:
+        log.warning(f"heat streamer scan failed: {e}")
+        return
+    if not rows:
+        return
+    hot = [m for m in rows if m["state"] and m["age_min"] <= 20]   # fresh bars only
+    if not hot:
+        return
+    conn = get_conn()
+    try:
+        _ensure_alert_dedup_table(conn)
+        fresh = [m for m in hot if not _alert_already_sent(
+            conn, day, f"{m['tk']}|{m['state']}", "heat_stream")]
+    finally:
+        conn.close()
+    if not fresh:
+        return
+    _, chat_id = load_creds()
+    try:
+        await ctx.bot.send_message(
+            chat_id=chat_id, parse_mode=H,
+            text=_fmt_heat(fresh, day, title="🔥 HEAT-SEEKER · new state")[:4000])
+        log.info(f"heat streamer: pushed {len(fresh)} state change(s)")
+    except Exception as e:
+        log.warning(f"heat streamer send failed: {e}")
+
+
 # ── TAX ADVISOR (US federal; approximations for PLANNING — not tax advice) ──
 # Defaults = user's situation (MFJ, ~$200K taxable income). /tax [income] overrides.
 # 2026 approx MFJ brackets (TCJA rates, thresholds ≈ inflation-adjusted). Update yearly.
@@ -27503,6 +27783,8 @@ async def _post_init(app):
             BotCommand("board", "Action Board — consensus scanner ideas"),
             BotCommand("skew", "Downside skew + expected move (any ticker)"),
             BotCommand("ratings", "Analyst upgrades/downgrades + price targets"),
+            BotCommand("live", "Intraday minute-level writeup"),
+            BotCommand("heat", "Heat-seeking / reversal scan"),
             BotCommand("tax", "Stock tax lots — ST/LT clock, est. tax, hedge warnings"),
             BotCommand("catalysts", "Catalyst radar — earnings + Fed/CPI ahead"),
             BotCommand("squeeze", "Squeeze scan"),
@@ -27569,6 +27851,8 @@ def main():
     app.add_handler(CommandHandler("board", board_command))
     app.add_handler(CommandHandler("skew", skew_command))
     app.add_handler(CommandHandler("ratings", ratings_command))
+    app.add_handler(CommandHandler("live", live_command))
+    app.add_handler(CommandHandler("heat", heat_command))
     app.add_handler(CommandHandler("tax", tax_command))
     app.add_handler(CommandHandler("catalysts", catalysts_command))
     app.add_handler(CommandHandler("allocate", allocate_command))
@@ -27623,6 +27907,10 @@ def main():
         # Positioning-builder streamer: 30-min, market-hours gated, daily dedup
         job_queue.run_repeating(building_alert, interval=1800, first=150)
         log.info("Scheduled 30-min positioning-builder stream")
+        # Heat-seeker: 15-min intraday heat/fade stream (pushes STATE CHANGES only;
+        # no-ops unless NYSE_intraday.py is feeding US_intraday.db)
+        job_queue.run_repeating(heat_streamer_alert, interval=900, first=180)
+        log.info("Scheduled 15-min heat-seeker stream (state-change pushes)")
 
         # Event writeup system — pre/post macro briefs + anomaly scan
         try:

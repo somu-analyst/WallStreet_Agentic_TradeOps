@@ -2,6 +2,26 @@
 
 > Append newest at top. Recap here every ~10–20 messages and before any context reset.
 
+## 2026-07-15 (late) — Intraday lane SHIPPED (P1 from the queue)
+- **`NYSE_intraday.py`** (new root entrypoint): market-hours capture loop → own `US_intraday.db`
+  (no writer contention with EOD). Every 60s ONE batched `yf.download(interval="1m")` for the FOCUS
+  universe (open-position tickers from `trades` + 30 liquid leaders), full-day INSERT OR REPLACE so
+  gaps self-heal; every 30 min a CBOE CDN delayed-chain snapshot (spot/ATM-IV/call-put-vol/PCR-vol/
+  top-vol strikes) for open-position tickers only. UTC session gate = EDT∪EST window (no tzdata dep);
+  45-day retention; `--once` test mode; ASCII console. Verified: 12,086 bars (full 09:30–15:59
+  session, 31 tickers) + 2/2 chain snapshots (GOOGL IV 36.5%, PCR 0.22) on first run.
+- **Bot consumers** (telegram_bot_optimized.py, section after ratings): `/live [TICKERS]` minute
+  writeup (day% vs prev close, VWAP dislocation, volume pace vs 20d linear norm, 15m burst, ATM-IV
+  drift from snapshots, breadth, staleness banner) · `/heat` scan — z = day move ÷ (ATR20·√elapsed):
+  🔥 HEAT z≥1.5 + pace≥1.5 + still trending · 🌀 FADE z≥2 + (stalling 30m OR pace<1) →
+  reversal watch · `heat_streamer_alert` run_repeating 900s, pushes STATE CHANGES only
+  (`alert_dedup` atype `heat_stream`, age≤20min fresh-bar gate). Registered: handlers + BotCommands
+  + job. Live check: GS earnings day flagged 🔥 (+10.2%, z+3.9, pace 1.6×); JPM +3.7% correctly
+  unflagged (pace 0.8×). OI stays daily (OCC) — lane is volume/price/IV only, by design.
+- **Open follow-ups** (PLAN): launcher/scheduler for the capture loop (manual start for now — run
+  `python NYSE_intraday.py` in a spare terminal at the open); backtest heat/fade states vs forward
+  30–60m returns once ~1–2 wks of bars accrue; U-shape volume norm refinement.
+
 ## 2026-07-07 — Action Board digest + NYSE_YFin profiling + SEMIS rout confirmation
 - **Action Board** (`/board` + `action_board_alert` 8:35 AM ET): bot-side consensus digest.
   `_action_board(conn)` freshens 5 DB-first scanners (revert/zrev/breakout/building/uoa — each

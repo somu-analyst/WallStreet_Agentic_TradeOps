@@ -491,6 +491,10 @@ def ensure_streamlit_running(port: int = 8502) -> bool:
 
 
 # ── Telegram Mini App: cloudflared quick tunnel → dashboard inside Telegram ──
+# User decision 2026-07-16: NO public exposure for now → tunnel disabled.
+# To re-enable phone access: set env NYSE_MINIAPP_TUNNEL=1 (or flip the default)
+# and re-download tools\cloudflared.exe (github.com/cloudflare/cloudflared releases).
+MINIAPP_TUNNEL = os.environ.get("NYSE_MINIAPP_TUNNEL", "0") == "1"
 _TUNNEL = {"proc": None, "url": None}
 
 
@@ -569,10 +573,18 @@ def _ensure_tunnel(port: int = 8502, timeout: int = 30):
 async def terminal_command(update, ctx):
     """/terminal — open the Streamlit dashboard INSIDE Telegram (Mini App).
     Boots the dashboard + a cloudflared quick tunnel, token-gated."""
-    msg = await update.message.reply_text("📊 Starting terminal — dashboard + secure tunnel…", parse_mode=H)
+    msg = await update.message.reply_text("📊 Starting terminal…", parse_mode=H)
     ok_dash = await asyncio.to_thread(ensure_streamlit_running, 8502)
     if not ok_dash:
         await msg.edit_text("❌ Dashboard failed to start (see bot log).", parse_mode=H)
+        return
+    if not MINIAPP_TUNNEL:                          # local-only mode (no public exposure)
+        await msg.edit_text(
+            "📊 <b>RUDRARJUN Terminal</b> — running locally\n"
+            "Open on this PC: <code>http://localhost:8502</code>\n"
+            "<i>Phone access is OFF by choice (no public tunnel). "
+            "Re-enable: env NYSE_MINIAPP_TUNNEL=1 + cloudflared in tools\\.</i>",
+            parse_mode=H)
         return
     tok = await asyncio.to_thread(_dash_token)
     url = await asyncio.to_thread(_ensure_tunnel, 8502)

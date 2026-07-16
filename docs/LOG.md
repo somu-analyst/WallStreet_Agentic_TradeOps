@@ -270,3 +270,17 @@
 - **Done:** <what shipped / verified>
 - **Decision:** <choice + why>
 - **Blocker:** <what's stuck + what would unblock it>
+
+## 2026-07-15 — mega-session recap (pre-compact)
+DONE+committed: accumulation BUY/SHORT+split-guard · ISO date fixes (substr+positional, 15 sites)
+· /ratings + Benzinga news · OpenBB cutover confirmed + 6/6 compare PASS + skew_snapshot wired
+nightly + root tidy · nested-expander close fix · Market Overview 1m-live overlay · Command
+Center perf (cached parallel book, page-local refresh) · STOCK legs everywhere (CC/PP/Collar
+detect, payoff, exit planner, cmd center; bot excludes via 27 guarded queries) · /tax engine
+(Pub 550 put-reset verified vs GOOG Jul-26-2027, wash sale, 2026 MFJ) + entry-date backdating
+· plain-English Greeks (portfolio caption + planner Real$/Time$/±$1/Θd cols) · Stk±1σ scenario
+targets + honest Est Open captions (validated 4-7% err) · heatmap split-day guard (SOXS 1:10
+2026-07-15 → +974% artifact, real +9%).
+BS-model backtest artifacts: scratchpad bs_validate/bs_tune/bs_liquid.py (1.19M contract-days).
+PENDING (PLAN.md): intraday 1-min lane + heat-seeking/reversal + live writeups · NSE India lane
+(bhavcopy DELIV_PER verified) · bot stock-leg display · gated backtests (scanner fires, skew panel).

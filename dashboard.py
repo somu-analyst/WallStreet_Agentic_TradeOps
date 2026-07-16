@@ -13848,6 +13848,7 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                             "Prev Cls": None,
                             "Est Open": f"${l['spot']:.2f}",
                             "Day L–H": f"${max(l['cur'] - _fsig, 0.01):.2f}–${l['cur'] + _fsig:.2f}",
+                            "Stk ±1σ": f"{l['cur'] + _fsig:,.0f}/{max(l['cur'] - _fsig, 0):,.0f}",
                             "Hi\\Lo": "—",
                             "Close @": _fclimit, "Max P": _fmt_maxp(_flb), "Max L": _fmt_maxl(_flb),
                             "Win %": _fwin,
@@ -13895,6 +13896,7 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                         "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
                         "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
                         "Est Open": _ftopen_disp, "Day L–H": f"${_folo:.2f}–${_fohi:.2f}",
+                        "Stk ±1σ": f"{l['spot'] + _fsig:,.0f}/{max(l['spot'] - _fsig, 0):,.0f}",
                         "Hi/Lo": (f"${l['day_hi']:.2f}/${l['day_lo']:.2f}" if l.get("day_hi") and l.get("day_lo") else "—"),
                         "Close @": _fclimit, "Max P": _fmt_maxp(_flb), "Max L": _fmt_maxl(_flb), "Win %": _fwin,
                         "P&L %": round(_fpp), "P&L $": round(l["pnl"]), "Action": _faction,
@@ -13940,8 +13942,8 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
             st.caption(f"All **{len(_flat)}** legs across **{len(_by_tk)}** tickers · total open "
                        f"P&L **${_ftot:,.0f}**.  **Now** = live option mid (bid/ask) when the market's "
                        "open, else the last close.  **Prev Cls** = prior session close · **Hi/Lo** = that "
-                       "day's option high/low.  **Est Open** = value after 1 day decay (*expired*=0DTE, "
-                       "*~\\$0.00*=deep-OTM) · **Day L–H** = 1σ daily range · **Close @** = marketable limit "
+                       "day's option high/low.  **Est Open** = flat-stock decay reference — backtested: NO edge over Now, trust the scenarios instead (*expired*=0DTE, "
+                       "*~\\$0.00*=deep-OTM) · **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs) · **Close @** = marketable limit "
                        "to close · **Win %** = P(profit from entry) 🟢≥60 🟡40–60 🔴<40. "
                        "Switch to *By stock* for levels, signals, scenarios & deep analysis.")
             st.markdown("---")
@@ -14352,6 +14354,7 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                             "Prev Cls": None,
                             "Est Open": f"${l['spot']:.2f}",
                             "Day L–H": f"${max(l['cur'] - _sig, 0.01):.2f}–${l['cur'] + _sig:.2f}",
+                            "Stk ±1σ": f"{l['cur'] + _sig:,.0f}/{max(l['cur'] - _sig, 0):,.0f}",
                             "Hi\\Lo": "—",
                             "Close @": _climit, "Max P": _fmt_maxp(_lb), "Max L": _fmt_maxl(_lb),
                             "Win %": _win,
@@ -14429,6 +14432,7 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                         "±$1 stk": round(l["pos_delta"]), "Θ/day": round(l["pos_theta"]),
                         "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
                         "Est Open": _topen_disp, "Day L–H": f"${_olo:.2f}–${_ohi:.2f}",
+                        "Stk ±1σ": f"{l['spot'] + _sig:,.0f}/{max(l['spot'] - _sig, 0):,.0f}",
                         "Hi/Lo": (f"${l['day_hi']:.2f}/${l['day_lo']:.2f}" if l.get("day_hi") and l.get("day_lo") else "—"),
                         "Close @": _climit, "Max P": _fmt_maxp(_lb), "Max L": _fmt_maxl(_lb), "Win %": _win,
                         "P&L %": round(pnl_pct), "P&L $": round(l["pnl"]), "Action": action,
@@ -14440,8 +14444,8 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                            "value — Time$ is the part that decays to $0 unless the stock moves. "
                            "**±$1 stk** = position P&L per $1 stock move (delta in dollars — your real "
                            "exposure). **Θ/day** = dollars gained/lost per calendar day from decay. "
-                           "**Est Open** = modeled value at the next session if price is flat (one day of "
-                           "decay). *expired* = 0DTE; *~\\$0.00* = deep-OTM. **Day L–H** = 1σ daily range. "
+                           "**Est Open** = flat-stock decay reference — backtested: no edge over Now (one day of "
+                           "decay). *expired* = 0DTE; *~\\$0.00* = deep-OTM. **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs). "
                            "**Close @** = marketable limit to close. **Max P / Max L** = theoretical "
                            "max profit / loss for that leg held to expiry (*Unlimited* = uncapped).")
 

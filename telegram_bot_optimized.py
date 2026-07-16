@@ -499,7 +499,8 @@ def _cloudflared_exe():
     exe = _sh.which("cloudflared")
     if exe:
         return exe
-    for p in (r"C:\Program Files (x86)\cloudflared\cloudflared.exe",
+    for p in (os.path.join(NYSE_DIR, "tools", "cloudflared.exe"),   # project-local standalone (no admin)
+              r"C:\Program Files (x86)\cloudflared\cloudflared.exe",
               r"C:\Program Files\cloudflared\cloudflared.exe",
               os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\cloudflared.exe")):
         if os.path.exists(p):

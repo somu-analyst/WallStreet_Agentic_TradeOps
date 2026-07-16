@@ -21,7 +21,7 @@
 - **Multi-provider lanes:** Claude = hard/multi-file/security work; offload bulk research, summarizing, and routine mechanical edits to cheaper lanes (Gemini / local agents) when it conserves limits.
 - **Continuity files (`docs/`):** `docs/PLAN.md` = remaining work (source of truth) · `docs/LOG.md` = done/decisions/blockers · `docs/NEXT.md` = short switch-over notes. Update before a context reset or handoff to another model/session.
 - **Session hygiene:** keep this file < ~200 lines (move deep specialized rules to `.claude/rules/*.md` with `paths:` frontmatter); manual `/compact` near ~50% context; recap to `LOG.md` every ~10–20 messages; keep subtasks under half the context window.
-- **Limit lockouts:** when usage is throttled, write a fresh-start summary to `LOG.md`/`NEXT.md` and resume cold from those rather than replaying the whole thread.
+- **Limit lockouts:** when usage is throttled, BEFORE stopping: (1) write a fresh-start summary to `LOG.md`/`NEXT.md`, (2) record the **reset time** from the limit error at the TOP of `NEXT.md` (`⏰ resume after: <time>`), (3) leave PLAN.md ticked to the exact subtask. On return, `/standup` reads NEXT first and continues the task — resume cold from docs, never replay the thread. (True auto-resume during a lockout is impossible — every request is blocked — so the docs ARE the continuation mechanism; optionally set a Windows Task Scheduler reminder at the reset time.)
 
 ## ▶️ Run · build · test
 - **Bot (runtime):** `python telegram_bot_optimized.py` → `main()` (≈L23203) → `app.run_polling`; token from `token.txt`. This is the live process — edit it directly for runtime fixes.

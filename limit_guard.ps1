@@ -47,7 +47,9 @@ if (Test-Path $next) {
 
 if (-not (Get-ScheduledTask -TaskName "ClaudeResume" -ErrorAction SilentlyContinue)) {
     $when = $reset.AddMinutes(3)
-    $arg = '/c start "" cmd /k "cd /d {0} & claude --continue"' -f $repo
+    # --continue /standup: reopen the last session AND immediately run the standup
+    # skill (reads PLAN/LOG/NEXT) so the task actually continues, not just reopens.
+    $arg = '/c start "" cmd /k "cd /d {0} & claude --continue /standup"' -f $repo
     $act = New-ScheduledTaskAction -Execute "cmd.exe" -Argument $arg
     $trg = New-ScheduledTaskTrigger -Once -At $when
     Register-ScheduledTask -TaskName "ClaudeResume" -Action $act -Trigger $trg -Force | Out-Null

@@ -21,7 +21,7 @@ try {
 }
 if ($when -lt (Get-Date)) { $when = $when.AddDays(1) }   # bare time already past -> tomorrow
 
-$arg = '/c start "" cmd /k "cd /d {0} & claude --continue"' -f $repo
+$arg = '/c start "" cmd /k "cd /d {0} & claude --continue /standup"' -f $repo
 $act = New-ScheduledTaskAction -Execute "cmd.exe" -Argument $arg
 $trg = New-ScheduledTaskTrigger -Once -At $when
 try {

@@ -3676,7 +3676,10 @@ def _gp_montecarlo(legs, horizon_days=1, n=10000, rho=0.6, r=0.045):
         z = rho * zm + np.sqrt(max(1 - rho * rho, 0.0)) * zi
         st_ = l["spot"] * np.exp(-0.5 * l["iv"] ** 2 * dt + l["iv"] * np.sqrt(dt) * z)
         t2 = max(l["dte"] - horizon_days, 0) / 365.0
-        val = _bs_price_vec(st_, l["K"], t2, r, l["iv"], l["typ"])
+        if l["typ"] == "stock" or not l.get("K"):
+            val = st_                                  # shares: worth the simulated price itself
+        else:
+            val = _bs_price_vec(st_, l["K"], t2, r, l["iv"], l["typ"])
         tot += (val - l["cur"]) * l["m"]
     return {"mean": float(tot.mean()), "p_profit": float((tot > 0).mean() * 100),
             "p5": float(np.percentile(tot, 5)), "p50": float(np.percentile(tot, 50)),
@@ -3881,6 +3884,8 @@ def _gp_order_tickets(tl, spot, w, r=0.045):
     h = min(max(min(l["dte"] for l in tl), 1), 10)          # ~1–2 week working horizon
     em = spot * iv_med * np.sqrt(h / 365.0)
     for l in tl:
+        if l["typ"] == "stock" or not l.get("K"):      # shares: no strikes to roll/spread
+            continue
         K, typ, iv, dte, q, exp = l["K"], l["typ"], max(l["iv"], 0.01), l["dte"], abs(l["qty"]), l["exp"][:10]
         T, Trem = max(dte, 0) / 365.0, max(dte - h, 0) / 365.0
         if l["side"] == "long":
@@ -3921,6 +3926,14 @@ def _gp_booking_notes(tl, spot):
     notes, chk = [], []
     for l in tl:
         q = abs(l["qty"]); buf = max(0.05, round(l["cur"] * 0.05, 2))
+        if l["typ"] == "stock":                       # shares: no theta — different economics
+            pnlp = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
+            if l["pnl"] > 0 and pnlp >= 50:
+                notes.append(f"💎 **{q:g} shares (long)** — up {pnlp:+.0f}%. Shares don't decay, so there's "
+                             f"no exit pressure from time. If trimming, use a limit near the mark "
+                             f"(${l['cur']:.2f}) — and check the **tax clock first** (Portfolio → P&L tab "
+                             "or bot /tax): an early sale can flip a 15% LT gain to ordinary rates.")
+            continue
         tag = f"${_kf(l['K'])}{l['typ'][0].upper()}"
         if l["side"] == "short":
             maxp = l["entry"] * q * 100                      # premium collected = max profit (capped)

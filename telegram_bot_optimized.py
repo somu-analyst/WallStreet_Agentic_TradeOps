@@ -490,6 +490,111 @@ def ensure_streamlit_running(port: int = 8502) -> bool:
     return False
 
 
+# ── Telegram Mini App: cloudflared quick tunnel → dashboard inside Telegram ──
+_TUNNEL = {"proc": None, "url": None}
+
+
+def _cloudflared_exe():
+    import shutil as _sh
+    exe = _sh.which("cloudflared")
+    if exe:
+        return exe
+    for p in (r"C:\Program Files (x86)\cloudflared\cloudflared.exe",
+              r"C:\Program Files\cloudflared\cloudflared.exe",
+              os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\cloudflared.exe")):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _dash_token():
+    """Shared secret gating the dashboard when it's exposed via tunnel (dashboard.py
+    reads the same file). Created once, gitignored."""
+    p = os.path.join(NYSE_DIR, "dash_token.txt")
+    if not os.path.exists(p):
+        import secrets
+        with open(p, "w") as f:
+            f.write(secrets.token_urlsafe(16))
+    return open(p).read().strip()
+
+
+def _ensure_tunnel(port: int = 8502, timeout: int = 30):
+    """Start (or reuse) a cloudflared QUICK tunnel to the local dashboard; return the
+    public https URL or None. Quick tunnels get a fresh *.trycloudflare.com URL per
+    process — we keep the child alive so the Mini App button stays valid."""
+    if _TUNNEL["url"] and _TUNNEL["proc"] is not None and _TUNNEL["proc"].poll() is None:
+        return _TUNNEL["url"]
+    exe = _cloudflared_exe()
+    if not exe:
+        return None
+    logs = os.path.join(NYSE_DIR, "logs")
+    os.makedirs(logs, exist_ok=True)
+    logf = os.path.join(logs, "tunnel.log")
+    try:
+        out = open(logf, "w")                       # fresh log → URL parse is unambiguous
+        proc = subprocess.Popen(
+            [exe, "tunnel", "--url", f"http://localhost:{port}", "--no-autoupdate"],
+            cwd=NYSE_DIR, stdout=out, stderr=subprocess.STDOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception as e:
+        log.warning(f"cloudflared start failed: {e}")
+        return None
+    url = None
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            m = re.search(r"https://[A-Za-z0-9\-]+\.trycloudflare\.com",
+                          open(logf, encoding="utf-8", errors="ignore").read())
+            if m:
+                url = m.group(0)
+                break
+        except Exception:
+            pass
+        if proc.poll() is not None:
+            break
+        time.sleep(1.0)
+    if not url:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        log.warning("cloudflared tunnel URL not found (see logs/tunnel.log)")
+        return None
+    _TUNNEL.update(proc=proc, url=url)
+    log.info(f"Mini App tunnel up: {url}")
+    return url
+
+
+async def terminal_command(update, ctx):
+    """/terminal — open the Streamlit dashboard INSIDE Telegram (Mini App).
+    Boots the dashboard + a cloudflared quick tunnel, token-gated."""
+    msg = await update.message.reply_text("📊 Starting terminal — dashboard + secure tunnel…", parse_mode=H)
+    ok_dash = await asyncio.to_thread(ensure_streamlit_running, 8502)
+    if not ok_dash:
+        await msg.edit_text("❌ Dashboard failed to start (see bot log).", parse_mode=H)
+        return
+    tok = await asyncio.to_thread(_dash_token)
+    url = await asyncio.to_thread(_ensure_tunnel, 8502)
+    if not url:
+        await msg.edit_text(
+            "❌ Tunnel unavailable — <b>cloudflared</b> not installed or failed.\n"
+            "Install once: <code>winget install Cloudflare.cloudflared</code>, then /terminal again.\n"
+            f"(Local fallback: <code>http://localhost:8502/?token={tok}</code>)", parse_mode=H)
+        return
+    link = f"{url}/?token={tok}"
+    try:
+        from telegram import WebAppInfo
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Open Terminal (in Telegram)", web_app=WebAppInfo(url=link))],
+            [InlineKeyboardButton("🌐 Open in browser", url=link)]])
+    except Exception:                                # very old PTB: plain link only
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open Terminal", url=link)]])
+    await msg.edit_text(
+        "📊 <b>RUDRARJUN Terminal</b> — full dashboard as a Telegram Mini App\n"
+        "<i>token-gated · tunnel lives while the bot runs · URL rotates on restart</i>",
+        parse_mode=H, reply_markup=kb)
+
+
 def open_dashboard_on_startup() -> None:
     """Open Streamlit dashboard URL in default browser when bot starts."""
     local_url = "http://localhost:8502"
@@ -28125,6 +28230,7 @@ async def _post_init(app):
             BotCommand("briefing", "Daily briefing"),
             BotCommand("plan", "Trade game plan"),
             BotCommand("add", "One-line add position (375P / stock)"),
+            BotCommand("terminal", "Open dashboard inside Telegram (Mini App)"),
             BotCommand("journal", "Trade/event journal"),
             BotCommand("bookmarks", "Saved items"),
             BotCommand("event", "Event writeup"),
@@ -28155,6 +28261,7 @@ def main():
     app.add_handler(CommandHandler("briefing", briefing_command))
     app.add_handler(CommandHandler("plan", plan_command))
     app.add_handler(CommandHandler("add", add_command))
+    app.add_handler(CommandHandler("terminal", terminal_command))
     app.add_handler(InlineQueryHandler(inline_query_handler))   # @bot TICKER search (BotFather /setinline)
     app.add_handler(CommandHandler("wrap", wrap_command))
     app.add_handler(CommandHandler("tv", tv_command))

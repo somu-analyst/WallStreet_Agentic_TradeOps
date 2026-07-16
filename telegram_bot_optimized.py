@@ -24734,9 +24734,10 @@ def _tax_scan(conn, income=200_000):
             # Pub 550 clock reset: a LONG put opened while the lot was <1y (incl. near-identical
             # class, e.g. GOOG↔GOOGL) WIPES the holding period; the clock restarts the day
             # after the put is GONE. Scan open AND closed puts so history is honored.
-            eff_ed, frozen, reset_note = ed, False, None
+            eff_ed, frozen, reset_note, frozen_exp = ed, False, None, None
             try:
                 _hist = pd.concat([opts, cl], ignore_index=True)
+                _puts = []
                 for _, p in _hist.iterrows():
                     _ptk = str(p["ticker"]).upper()
                     if not (_ptk[:4] == tk[:4] and abs(len(_ptk) - len(tk)) <= 1):
@@ -24747,33 +24748,49 @@ def _tax_scan(conn, income=200_000):
                         p_open = datetime.strptime(str(p["entry_date"])[:10], "%Y-%m-%d").date()
                     except Exception:
                         continue
-                    if p_open < ed or (p_open - ed).days > 365:
-                        continue                    # lot was already long-term → no reset
-                    if str(p.get("status", "")).upper() == "OPEN":
-                        frozen = True               # put still on → clock stopped right now
-                        continue
                     p_gone = None
-                    for _c in (str(p.get("exit_date") or "")[:10], str(p.get("expiry") or "")[:10]):
-                        try:
-                            p_gone = datetime.strptime(_c, "%Y-%m-%d").date(); break
-                        except Exception:
+                    if str(p.get("status", "")).upper() != "OPEN":
+                        for _c in (str(p.get("exit_date") or "")[:10], str(p.get("expiry") or "")[:10]):
+                            try:
+                                p_gone = datetime.strptime(_c, "%Y-%m-%d").date(); break
+                            except Exception:
+                                continue
+                        if p_gone is None:
                             continue
-                    if p_gone and p_gone + timedelta(days=1) > eff_ed:
+                    _puts.append((p_open, p_gone, str(p.get("expiry") or "")[:10]))
+                # Chronological, and each put is judged against the RUNNING clock (eff_ed):
+                # a put bought after an earlier reset can re-wipe a still-<1y lot (Pub 550).
+                for p_open, p_gone, p_exp in sorted(_puts, key=lambda x: x[0]):
+                    if p_open < eff_ed or (p_open - eff_ed).days > 365:
+                        continue                    # lot already long-term at THIS put's purchase → no reset
+                    if p_gone is None:              # put still on → period wiped AND frozen right now
+                        frozen, frozen_exp = True, p_exp
+                    elif p_gone + timedelta(days=1) > eff_ed:
                         eff_ed = p_gone + timedelta(days=1)
                         reset_note = (f"⏮️ clock was RESET by a protective put (Pub 550); "
                                       f"restarted {eff_ed} — broker labels may be wrong")
             except Exception:
                 pass
-            held = (today - eff_ed).days
+            held = 0 if frozen else (today - eff_ed).days   # wiped + not accruing while frozen
             is_lt = (not frozen) and held > 365    # sale must be MORE than 1 year after (restarted) start
             lt_date = eff_ed + timedelta(days=366)
+            if frozen and frozen_exp:               # estimate: put held to expiry → restart next day
+                try:
+                    lt_date = datetime.strptime(frozen_exp, "%Y-%m-%d").date() + timedelta(days=367)
+                except ValueError:
+                    pass
             spot = _last_price(tk) or 0.0
             unreal = (spot - ep) * qty if spot > 0 else None
             eff = (lt_rate if is_lt else st_rate) + (niit if income > _TAX_MFJ["niit_over"] else 0)
             est_tax = unreal * eff if (unreal or 0) > 0 else 0.0
             save = (unreal * (st_rate - lt_rate)) if (unreal or 0) > 0 and not is_lt else 0.0
             flags = []
-            h = opts[opts["ticker"].astype(str).str.upper() == tk]
+            if frozen:
+                flags.append("🧊 clock FROZEN by an open protective put (Pub 550) — restarts the day "
+                             "after it's gone" + (f"; held to expiry {frozen_exp} → LT ≈ {lt_date}"
+                                                  if frozen_exp else ""))
+            _htk = opts["ticker"].astype(str).str.upper()
+            h = opts[(_htk.str[:4] == tk[:4]) & (_htk.str.len().sub(len(tk)).abs() <= 1)]   # class match (GOOG↔GOOGL)
             for _, o in h.iterrows():
                 o_t = str(o["option_type"]).lower(); o_q = int(o["quantity"] or 0)
                 o_k = float(o["strike"] or 0)
@@ -24793,7 +24810,7 @@ def _tax_scan(conn, income=200_000):
                 flags.append(reset_note)
             out["lots"].append({"tk": tk, "qty": qty, "entry": ep, "entry_date": str(ed),
                                 "held": held, "is_lt": is_lt,
-                                "lt_date": ("frozen (put open)" if frozen else str(lt_date)),
+                                "lt_date": (f"frozen → ~{lt_date}" if frozen else str(lt_date)),
                                 "days_to_lt": (9999 if frozen else max((lt_date - today).days, 0)),
                                 "spot": spot, "unreal": unreal, "eff_rate": eff,
                                 "est_tax": est_tax, "lt_saves": save, "flags": flags})
@@ -24806,7 +24823,8 @@ def _tax_scan(conn, income=200_000):
         for _, r in cl.iterrows():
             if not str(r.get("exit_date", "")).startswith(yr):
                 continue
-            pnl = float(pd.to_numeric(r.get("pnl"), errors="coerce") or 0)
+            pnl = pd.to_numeric(r.get("pnl"), errors="coerce")
+            pnl = 0.0 if pd.isna(pnl) else float(pnl)     # nan is truthy — `or 0` didn't catch it
             try:
                 d0 = datetime.strptime(str(r["entry_date"])[:10], "%Y-%m-%d").date()
                 d1 = datetime.strptime(str(r["exit_date"])[:10], "%Y-%m-%d").date()
@@ -24817,7 +24835,8 @@ def _tax_scan(conn, income=200_000):
         # wash-sale: stock closed at a LOSS within 30d of an OPEN same-ticker lot entry
         _cl_ot = cl["option_type"].astype(str).str.upper()
         for _, r in cl[_cl_ot.str.startswith("S")].iterrows():
-            pnl = float(pd.to_numeric(r.get("pnl"), errors="coerce") or 0)
+            pnl = pd.to_numeric(r.get("pnl"), errors="coerce")
+            pnl = 0.0 if pd.isna(pnl) else float(pnl)     # NaN would pass the loss check below
             if pnl >= 0:
                 continue
             try:
@@ -24848,7 +24867,7 @@ def _fmt_tax(res):
     body = ""
     if lots:
         rows = [("🟢" if l["is_lt"] else "🟡", l["tk"], f"{l['held']}d",
-                 ("LT" if l["is_lt"] else f"{l['days_to_lt']}d"),
+                 ("LT" if l["is_lt"] else "🧊" if l["days_to_lt"] >= 9999 else f"{l['days_to_lt']}d"),
                  (f"{l['unreal']:+,.0f}" if l["unreal"] is not None else "—"),
                  f"{l['est_tax']:,.0f}") for l in lots]
         body += _pipe_table(("ST", "Tkr", "Held", "→LT", "Unrl$", "Tax$"), rows, right_cols={2, 3, 4, 5}) + "\n"
@@ -26441,7 +26460,9 @@ def _fmt_squeeze_inline(sq):
     return "🩳 <b>" + " . ".join(parts) + "</b>  [" + tag + "]" + rec
 
 
-def _to_mdy(s):
+def _exp_iso(s):
+    """Normalize any expiry string to ISO YYYY-MM-DD (the DB standard), or None.
+    (Renamed from _to_mdy — it has returned ISO since the 07-14 migration.)"""
     for f in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"):
         try:
             return datetime.strptime(str(s)[:10], f).strftime("%Y-%m-%d")
@@ -26475,7 +26496,7 @@ def _gex_reports(conn, tickers=None, position_aware=True):
         if pos is not None and not pos.empty:
             _e = []
             for ev in sorted(pos["expiry"].dropna().astype(str).unique()):
-                m = _to_mdy(ev)
+                m = _exp_iso(ev)
                 if m and m not in _e:
                     _e.append(m)
             if _e:
@@ -26484,7 +26505,7 @@ def _gex_reports(conn, tickers=None, position_aware=True):
             g = _compute_gex(tk, conn, spot, expiry=exp)
             legs = pos
             if pos is not None and not pos.empty and exp is not None:
-                legs = pos[pos["expiry"].astype(str).apply(lambda x: _to_mdy(x) == exp)]
+                legs = pos[pos["expiry"].astype(str).apply(lambda x: _exp_iso(x) == exp)]
             rep = _fmt_gex_report(g, tk, spot, legs)
             try:
                 rep += chr(10) + _fmt_squeeze_inline(short_squeeze_signal(tk, conn))

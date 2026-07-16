@@ -588,15 +588,15 @@ def refresh_monthly_tables(conn):
     q = """
     WITH monthly_min AS (
         SELECT
-            substr(expiry_date, 7, 4) AS y,   -- YYYY
-            substr(expiry_date, 1, 2) AS m,   -- MM
+            substr(expiry_date, 1, 4) AS y,   -- YYYY (expiry_date is ISO YYYY-MM-DD)
+            substr(expiry_date, 6, 2) AS m,   -- MM
             MIN(expiry_date) AS month_expiry
         FROM options_daily
         GROUP BY y, m
     )
     SELECT month_expiry
     FROM monthly_min
-    ORDER BY substr(month_expiry, 7, 4), substr(month_expiry, 1, 2), substr(month_expiry, 4, 2)
+    ORDER BY month_expiry
     """
     expiries_df = pd.read_sql(q, conn)
     expiries = expiries_df["month_expiry"].tolist()

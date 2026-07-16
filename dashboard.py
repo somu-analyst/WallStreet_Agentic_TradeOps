@@ -13531,7 +13531,10 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                 except Exception: pass
             return None
 
-        def _gp_to_mdy(s):
+        def _gp_norm_date(s):
+            """Any date string → ISO YYYY-MM-DD (the DB standard), or None.
+            (Renamed from _gp_to_mdy — returns ISO since the 07-14 migration;
+            the legs' 'exp_mdy' key name is historical, its value is ISO.)"""
             d = _gp_parse_date(s)
             return d.strftime("%Y-%m-%d") if d else None
 
@@ -13601,7 +13604,7 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
             _K = float(_t["strike"] or 0)
             _qty = int(_t["quantity"] or 0)
             _exp = str(_t["expiry"])
-            _exp_mdy = _gp_to_mdy(_exp)
+            _exp_mdy = _gp_norm_date(_exp)   # ISO string despite the historical var name
             _eod_spot = _gp_spot(_tk)
             # date-only diff: an option expiring tomorrow is 1 DTE all day, not 0 in the afternoon
             _exp_date = _gp_parse_date(_exp)

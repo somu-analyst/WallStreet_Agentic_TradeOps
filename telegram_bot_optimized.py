@@ -24511,10 +24511,9 @@ async def live_command(update, ctx):
     txt = _live_writeup(args or None)
     if not txt:
         await update.message.reply_text(
-            "📶 Intraday lane has no data yet. Start the capture loop:\n"
-            "<code>python NYSE_intraday.py</code>\n"
-            "<i>(1m bars for positions + leaders, 30-min chain snapshots; "
-            "market hours only)</i>", parse_mode=H)
+            "📶 Intraday lane has no data yet — it auto-starts during market hours "
+            "(bot supervises it). Manual start anytime:\n"
+            "<code>python NYSE_intraday.py</code>", parse_mode=H)
         return
     await update.message.reply_text(txt[:4000], parse_mode=H)
 
@@ -24524,10 +24523,59 @@ async def heat_command(update, ctx):
     day, rows = _heat_scan()
     if not rows:
         await update.message.reply_text(
-            "🔥 Intraday lane has no data yet. Start the capture loop:\n"
-            "<code>python NYSE_intraday.py</code>", parse_mode=H)
+            "🔥 Intraday lane has no data yet — it auto-starts during market hours "
+            "(bot supervises it).", parse_mode=H)
         return
     await update.message.reply_text(_fmt_heat(rows, day)[:4000], parse_mode=H)
+
+
+def _lane_heartbeat_age():
+    """Seconds since the capture loop's last heartbeat; None if DB/row missing."""
+    c = _idb_conn()
+    if c is None:
+        return None
+    try:
+        row = c.execute("SELECT val FROM lane_meta WHERE key='heartbeat'").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        c.close()
+    if not row:
+        return None
+    try:
+        ts = datetime.strptime(row[0], "%Y-%m-%dT%H:%M:%S")
+    except (ValueError, TypeError):
+        return None
+    return (datetime.now(timezone.utc).replace(tzinfo=None) - ts).total_seconds()
+
+
+async def intraday_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
+    """5-min job: keep NYSE_intraday.py alive during market hours (same auto-launch
+    pattern as the dashboard). Heartbeat-gated → a manual start is never duplicated;
+    crash isolation and the bot's async loop stay untouched (separate process)."""
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    if now_utc.weekday() >= 5:
+        return
+    hm = now_utc.hour * 60 + now_utc.minute
+    if not (13 * 60 + 25 <= hm <= 20 * 60 + 55):    # EDT/EST union session window
+        return
+    age = _lane_heartbeat_age()
+    if age is not None and age < 180:
+        return                                       # lane alive (manual or spawned)
+    here = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(here, "NYSE_intraday.py")
+    if not os.path.exists(script):
+        return
+    try:
+        logs = os.path.join(here, "logs")
+        os.makedirs(logs, exist_ok=True)
+        out = open(os.path.join(logs, "intraday_lane.log"), "a")
+        subprocess.Popen([sys.executable, script], cwd=here,
+                         stdout=out, stderr=subprocess.STDOUT,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        log.info("intraday lane heartbeat stale/missing - spawned NYSE_intraday.py")
+    except Exception as e:
+        log.warning(f"intraday lane spawn failed: {e}")
 
 
 async def heat_streamer_alert(ctx: ContextTypes.DEFAULT_TYPE):
@@ -27911,6 +27959,9 @@ def main():
         # no-ops unless NYSE_intraday.py is feeding US_intraday.db)
         job_queue.run_repeating(heat_streamer_alert, interval=900, first=180)
         log.info("Scheduled 15-min heat-seeker stream (state-change pushes)")
+        # Lane supervisor: auto-(re)start NYSE_intraday.py during market hours
+        job_queue.run_repeating(intraday_lane_supervisor, interval=300, first=20)
+        log.info("Scheduled intraday-lane supervisor (auto-start during market hours)")
 
         # Event writeup system — pre/post macro briefs + anomaly scan
         try:

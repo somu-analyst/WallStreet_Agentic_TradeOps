@@ -79,9 +79,18 @@ def ensure_schema():
             PRIMARY KEY (ticker, ts_utc))""")
         c.execute("CREATE INDEX IF NOT EXISTS ix_bars_day ON intraday_bars(trade_date, ticker)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_chain_day ON intraday_chain(trade_date, ticker)")
+        c.execute("CREATE TABLE IF NOT EXISTS lane_meta (key TEXT PRIMARY KEY, val TEXT)")
         cutoff = (datetime.now(timezone.utc) - timedelta(days=KEEP_DAYS)).date().isoformat()
         c.execute("DELETE FROM intraday_bars WHERE trade_date < ?", (cutoff,))
         c.execute("DELETE FROM intraday_chain WHERE trade_date < ?", (cutoff,))
+
+
+def heartbeat():
+    """Liveness stamp read by the bot's intraday_lane_supervisor (it only spawns a
+    new copy when this goes stale, so manual starts are never duplicated)."""
+    with _conn() as c:
+        c.execute("INSERT OR REPLACE INTO lane_meta VALUES ('heartbeat', ?)",
+                  (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),))
 
 
 def focus_universe():
@@ -219,6 +228,7 @@ def main():
     last_universe = time.time()
     while True:
         now = datetime.now(timezone.utc)
+        heartbeat()
         if once or in_market_window(now):
             if time.time() - last_universe > 1800:          # refresh positions every 30 min
                 tickers, pos = focus_universe()

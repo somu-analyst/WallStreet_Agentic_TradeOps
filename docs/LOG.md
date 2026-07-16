@@ -18,9 +18,14 @@
   (`alert_dedup` atype `heat_stream`, age≤20min fresh-bar gate). Registered: handlers + BotCommands
   + job. Live check: GS earnings day flagged 🔥 (+10.2%, z+3.9, pace 1.6×); JPM +3.7% correctly
   unflagged (pace 0.8×). OI stays daily (OCC) — lane is volume/price/IV only, by design.
-- **Open follow-ups** (PLAN): launcher/scheduler for the capture loop (manual start for now — run
-  `python NYSE_intraday.py` in a spare terminal at the open); backtest heat/fade states vs forward
-  30–60m returns once ~1–2 wks of bars accrue; U-shape volume norm refinement.
+- **Lane supervisor (same night, user asked "why separate?"):** kept the separate process (bot
+  restarts must not gap unrecoverable 1m bars; sync sweeps would stall the async loop; single-writer
+  isolation) but removed the manual step — `intraday_lane_supervisor` bot job (300s) auto-spawns
+  NYSE_intraday.py during market hours (dashboard-launch pattern: CREATE_NO_WINDOW, log
+  `logs/intraday_lane.log`), gated on a `lane_meta` heartbeat the loop stamps every iteration, so a
+  manual start is never duplicated. Verified: heartbeat written + readable via `_lane_heartbeat_age()`.
+- **Open follow-ups** (PLAN): backtest heat/fade states vs forward 30–60m returns once ~1–2 wks of
+  bars accrue; U-shape volume norm refinement.
 
 ## 2026-07-07 — Action Board digest + NYSE_YFin profiling + SEMIS rout confirmation
 - **Action Board** (`/board` + `action_board_alert` 8:35 AM ET): bot-side consensus digest.

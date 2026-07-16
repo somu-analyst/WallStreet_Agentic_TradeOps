@@ -357,9 +357,10 @@ def compute_walls(df, spot=None):
         return out
     return out
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, Bot
+from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, Bot,
+                      InlineQueryResultArticle, InputTextMessageContent)
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, ContextTypes,
+    Application, CommandHandler, CallbackQueryHandler, ContextTypes, InlineQueryHandler,
 )
 from telegram.constants import ParseMode
 import re
@@ -6963,15 +6964,30 @@ async def add_command(update, ctx):
         "edit/close in dashboard Portfolio</i>", parse_mode=H)
 
 
+async def _wiz_show(query, text, kb):
+    """Morph the wizard message IN PLACE (modern single-message flow — no message
+    stacking per step). Falls back to a new message when editing isn't possible
+    (typed-text step, first entry from a non-editable message)."""
+    try:
+        await query.message.edit_text(text, parse_mode=H, reply_markup=kb)
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            return
+        try:
+            await query.message.reply_text(text, parse_mode=H, reply_markup=kb)
+        except Exception:
+            log.debug("wizard render failed", exc_info=True)
+
+
 async def posadd_ticker_menu(query, ctx, page=0, reset=False):
     if reset:
         ctx.user_data["posadd"] = {"_ts": time.time()}   # fresh wizard → typed ticker accepted
     tickers = _ticker_universe(limit=1000)
     kb = _paged_ticker_keyboard("posaddtk", tickers, page=page, per_page=12, cols=3, include_back=True, back_cb="menu_positions")
-    await query.message.reply_text(
+    await _wiz_show(query,
         f"{hdr('➕ ADD POSITION')}\n\nStep 1/8: Select ticker — <b>or just type it</b> (e.g. NVDA)\n"
         "<i>⚡ One-shot: /add GOOGL 375P 2026-08-21 -1 @4.35 · /add GOOG stock 100 @167 2025-06-24</i>",
-        parse_mode=H, reply_markup=kb)
+        kb)
 
 
 async def posadd_option_type_menu(query, ctx, ticker):
@@ -6983,7 +6999,7 @@ async def posadd_option_type_menu(query, ctx, ticker):
         [InlineKeyboardButton("CALL", callback_data="posaddot_call"), InlineKeyboardButton("PUT", callback_data="posaddot_put")],
         [InlineKeyboardButton("⬅️ Tickers", callback_data="posadd_start"), BACK_BTN],
     ])
-    await query.message.reply_text(f"{hdr('➕ ADD POSITION')}\n\nStep 2/8: {tk} · Option type", parse_mode=H, reply_markup=kb)
+    await _wiz_show(query, f"{hdr('➕ ADD POSITION')}\n\nStep 2/8: <b>{tk}</b> · Option type", kb)
 
 
 async def posadd_expiry_menu(query, ctx, page=0):
@@ -7016,11 +7032,9 @@ async def posadd_expiry_menu(query, ctx, page=0):
         nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"posaddexpg_{page + 1}"))
     rows.append(nav)
     rows.append([InlineKeyboardButton("⬅️ Type", callback_data="posadd_back_type"), BACK_BTN])
-    await query.message.reply_text(
-        f"{hdr('➕ ADD POSITION')}\n\nStep 3/8: {tk} {ot.upper()} · Expiry date",
-        parse_mode=H,
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
+    await _wiz_show(query,
+        f"{hdr('➕ ADD POSITION')}\n\nStep 3/8: <b>{tk} {ot.upper()}</b> · Expiry date",
+        InlineKeyboardMarkup(rows))
 
 
 async def posadd_strike_menu(query, ctx, page=0):
@@ -7066,11 +7080,9 @@ async def posadd_strike_menu(query, ctx, page=0):
         nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"posaddskpg_{page + 1}"))
     rows.append(nav)
     rows.append([InlineKeyboardButton("⬅️ Expiry", callback_data="posadd_back_expiry"), BACK_BTN])
-    await query.message.reply_text(
-        f"{hdr('➕ ADD POSITION')}\n\nStep 4/8: {tk} {ot.upper()} · Strike\nSpot: ${spot:.2f}",
-        parse_mode=H,
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
+    await _wiz_show(query,
+        f"{hdr('➕ ADD POSITION')}\n\nStep 4/8: <b>{tk} {ot.upper()} {exp}</b> · Strike\nSpot: ${spot:.2f}",
+        InlineKeyboardMarkup(rows))
 
 
 async def posadd_side_menu(query):
@@ -7078,7 +7090,7 @@ async def posadd_side_menu(query):
         [InlineKeyboardButton("🟢 BUY", callback_data="posaddsd_buy"), InlineKeyboardButton("🔴 SELL", callback_data="posaddsd_sell")],
         [InlineKeyboardButton("⬅️ Strike", callback_data="posadd_back_strike"), BACK_BTN],
     ])
-    await query.message.reply_text(f"{hdr('➕ ADD POSITION')}\n\nStep 5/8: Buy or Sell?", parse_mode=H, reply_markup=kb)
+    await _wiz_show(query, f"{hdr('➕ ADD POSITION')}\n\nStep 5/8: Buy or Sell?", kb)
 
 
 async def posadd_qty_menu(query):
@@ -7087,7 +7099,7 @@ async def posadd_qty_menu(query):
         [InlineKeyboardButton("x10", callback_data="posaddqty_10"), InlineKeyboardButton("x20", callback_data="posaddqty_20")],
         [InlineKeyboardButton("⬅️ Side", callback_data="posadd_back_side"), BACK_BTN],
     ])
-    await query.message.reply_text(f"{hdr('➕ ADD POSITION')}\n\nStep 6/8: Quantity", parse_mode=H, reply_markup=kb)
+    await _wiz_show(query, f"{hdr('➕ ADD POSITION')}\n\nStep 6/8: Quantity", kb)
 
 
 async def posadd_day_menu(query):
@@ -7096,7 +7108,7 @@ async def posadd_day_menu(query):
         [InlineKeyboardButton("5d Ago", callback_data="posaddday_5")],
         [InlineKeyboardButton("⬅️ Qty", callback_data="posadd_back_qty"), BACK_BTN],
     ])
-    await query.message.reply_text(f"{hdr('➕ ADD POSITION')}\n\nStep 7/8: Entry day", parse_mode=H, reply_markup=kb)
+    await _wiz_show(query, f"{hdr('➕ ADD POSITION')}\n\nStep 7/8: Entry day", kb)
 
 
 async def posadd_price_menu(query, ctx=None):
@@ -7153,10 +7165,9 @@ async def posadd_price_menu(query, ctx=None):
         kb_rows.append(adj_row)
     kb_rows.append([InlineKeyboardButton("⬅️ Day", callback_data="posadd_back_day"), BACK_BTN])
 
-    await query.message.reply_text(
+    await _wiz_show(query,
         f"{hdr('➕ ADD POSITION')}\n\nStep 8/8: Entry price\n<i>{hint}</i>",
-        parse_mode=H, reply_markup=InlineKeyboardMarkup(kb_rows)
-    )
+        InlineKeyboardMarkup(kb_rows))
 
 
 async def posadd_confirm_menu(query, ctx):
@@ -7210,7 +7221,7 @@ async def pair_ticker_menu(query, ctx, page=0):
     st = ctx.user_data.get("pairwiz", {})
     tickers = _ticker_universe(limit=1000)
     kb = _paged_ticker_keyboard("pairtk", tickers, page=page, per_page=12, cols=3, include_back=True, back_cb=f"pos_{_safe_int(st.get('parent_id', 0), 0)}")
-    await query.message.reply_text(f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 1/8: Select ticker", parse_mode=H, reply_markup=kb)
+    await _wiz_show(query, f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 1/8: Select ticker", kb)
 
 
 async def pair_option_type_menu(query):
@@ -7218,7 +7229,7 @@ async def pair_option_type_menu(query):
         [InlineKeyboardButton("CALL", callback_data="pairot_call"), InlineKeyboardButton("PUT", callback_data="pairot_put")],
         [InlineKeyboardButton("⬅️ Ticker", callback_data="pair_back_ticker"), BACK_BTN],
     ])
-    await query.message.reply_text(f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 2/8: Option type", parse_mode=H, reply_markup=kb)
+    await _wiz_show(query, f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 2/8: Option type", kb)
 
 
 async def pair_expiry_menu(query, ctx, page=0):
@@ -7249,7 +7260,7 @@ async def pair_expiry_menu(query, ctx, page=0):
         nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"pairexpg_{page + 1}"))
     rows.append(nav)
     rows.append([InlineKeyboardButton("⬅️ Type", callback_data="pair_back_type"), BACK_BTN])
-    await query.message.reply_text(f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 3/8: Expiry date", parse_mode=H, reply_markup=InlineKeyboardMarkup(rows))
+    await _wiz_show(query, f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 3/8: Expiry date", InlineKeyboardMarkup(rows))
 
 
 async def pair_strike_menu(query, ctx, page=0):
@@ -7292,11 +7303,9 @@ async def pair_strike_menu(query, ctx, page=0):
         nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"pairskpg_{page + 1}"))
     rows.append(nav)
     rows.append([InlineKeyboardButton("⬅️ Expiry", callback_data="pair_back_expiry"), BACK_BTN])
-    await query.message.reply_text(
+    await _wiz_show(query,
         f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 4/8: Strike\nSpot: ${spot:.2f}",
-        parse_mode=H,
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
+        InlineKeyboardMarkup(rows))
 
 
 async def pair_side_menu(query):
@@ -7304,7 +7313,7 @@ async def pair_side_menu(query):
         [InlineKeyboardButton("🟢 BUY", callback_data="pairside_buy"), InlineKeyboardButton("🔴 SELL", callback_data="pairside_sell")],
         [InlineKeyboardButton("⬅️ Strike", callback_data="pair_back_strike"), BACK_BTN],
     ])
-    await query.message.reply_text(f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 5/8: Pair leg side", parse_mode=H, reply_markup=kb)
+    await _wiz_show(query, f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 5/8: Pair leg side", kb)
 
 
 async def pair_qty_menu(query):
@@ -7313,7 +7322,7 @@ async def pair_qty_menu(query):
         [InlineKeyboardButton("x10", callback_data="pairqty_10")],
         [InlineKeyboardButton("⬅️ Side", callback_data="pair_back_side"), BACK_BTN],
     ])
-    await query.message.reply_text(f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 6/8: Quantity", parse_mode=H, reply_markup=kb)
+    await _wiz_show(query, f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 6/8: Quantity", kb)
 
 
 async def pair_day_menu(query):
@@ -7322,7 +7331,7 @@ async def pair_day_menu(query):
         [InlineKeyboardButton("5d Ago", callback_data="pairday_5")],
         [InlineKeyboardButton("⬅️ Qty", callback_data="pair_back_qty"), BACK_BTN],
     ])
-    await query.message.reply_text(f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 7/8: Entry day", parse_mode=H, reply_markup=kb)
+    await _wiz_show(query, f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 7/8: Entry day", kb)
 
 
 async def pair_price_menu(query):
@@ -7330,7 +7339,7 @@ async def pair_price_menu(query):
         [InlineKeyboardButton("Bid", callback_data="pairpx_bid"), InlineKeyboardButton("Mid", callback_data="pairpx_mid"), InlineKeyboardButton("Ask", callback_data="pairpx_ask")],
         [InlineKeyboardButton("⬅️ Day", callback_data="pair_back_day"), BACK_BTN],
     ])
-    await query.message.reply_text(f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 8/8: Entry price source", parse_mode=H, reply_markup=kb)
+    await _wiz_show(query, f"{hdr('🧩 PAIR LEG BUILDER')}\n\nStep 8/8: Entry price source", kb)
 
 
 async def pair_confirm_menu(query, ctx):
@@ -20553,8 +20562,11 @@ def _next_day_plan(conn):
                 f"{_kfb(r['l']['K'])}{r['l']['typ'][0].upper()} ({r['why']})" for r in _xs))
         for _t in _pl_tickets(tk_legs, spot, cw, pw)[:4]:
             ana.append("  🧾 " + _t)
-        blocks.append(head + "\n" + ("\n".join(extra) + "\n" if extra else "")
-                      + "\n".join(leglines) + ("\n" + "\n".join(ana) if ana else ""))
+        _inner = (("\n".join(extra) + "\n" if extra else "")
+                  + "\n".join(leglines) + ("\n" + "\n".join(ana) if ana else ""))
+        # collapse the detail under the headline (tap to expand) — modern, scannable
+        blocks.append(head + ("\n<blockquote expandable>" + _inner + "</blockquote>"
+                              if _inner.strip() else ""))
     L.append(f"Net Δ/+1% <b>${net_dd:,.0f}</b> · Θ/day <b>${net_th:,.0f}</b>")
     L.append(f"📊 Port MaxP <b>{'∞' if port_up else f'${port_maxp:,.0f}'}</b> · "
              f"MaxL <b>{'∞' if port_dn else f'${port_maxl:,.0f}'}</b> · EV <b>${port_ev:,.0f}</b>")
@@ -21917,7 +21929,7 @@ async def rotation_view(query, level="sector"):
 
 # ── Spreads scanner (Bull Call · Bear Call · Bear Put), composite-scored ──────
 def _spreads_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=4):
-    """Ranked vertical spreads. Returns list of compact mobile lines."""
+    """Ranked vertical spreads. Returns list of structured dicts (rendered by _send_spreads)."""
     import datetime as _dt
     from scipy.stats import norm as _nm
 
@@ -21974,8 +21986,10 @@ def _spreads_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=4):
                     return
                 cushion = abs(be - spot) / spot
                 sc = 100 * (0.40 * pop + 0.25 * min(rr, 2) / 2 + 0.20 * min(cushion, 0.10) / 0.10 + 0.15 * min(oi_min, 500) / 500)
-                sign = "-$" if direction == "debit" else "+$"
-                cand.append((sc, strat, f"{emoji} {tk} {legs} · {dte}d · POP {pop*100:.0f}% · R/R {rr:.1f} · {sign}{net:.2f} · sc{sc:.0f}"))
+                cand.append((sc, strat, {
+                    "sc": sc, "strat": strat, "emoji": emoji, "tk": tk, "legs": legs,
+                    "dte": dte, "pop": pop * 100, "rr": rr, "net": net,
+                    "dir": direction, "be": be, "maxp": maxp, "maxl": maxl}))
 
             for i in range(len(C)):
                 for j in range(i + 1, min(i + 5, len(C))):
@@ -21995,14 +22009,14 @@ def _spreads_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=4):
 
             cand.sort(key=lambda z: -z[0])
             seen = {}
-            for sc, strat, line in cand:
+            for sc, strat, row in cand:
                 seen.setdefault(strat, 0)
                 if seen[strat] < top_per:
-                    rows.append((sc, line)); seen[strat] += 1
+                    rows.append((sc, row)); seen[strat] += 1
         except Exception:
             continue
     rows.sort(key=lambda z: -z[0])
-    return [ln for _, ln in rows]
+    return [r for _, r in rows]
 
 
 async def spreads_command(update, ctx):
@@ -22020,11 +22034,22 @@ async def spreads_view(query):
 
 
 async def _send_spreads(msg, rows):
+    """/earnvol-style layout: aligned _pipe_table for scanning + per-setup detail lines."""
     if not rows:
         await msg.reply_text("No spreads passed the filters. Try <code>/spreads SPY QQQ NVDA</code>.", parse_mode=H)
         return
-    txt = ("📐 <b>Spreads Scanner</b>\n<i>🟢 Bull Call · 🔴 Bear Call · 🟣 Bear Put · score = POP·R/R·cushion·liquidity · "
-           "not advice</i>\n\n" + "\n".join("• " + r for r in rows[:16]))
+    rows = rows[:10]
+    data = [(r["emoji"], r["tk"], f"{r['dte']}d", f"{r['pop']:.0f}", f"{r['rr']:.1f}")
+            for r in rows]
+    tbl = _pipe_table(("ST", "Tkr", "DTE", "P%", "RR"), data, right_cols={2, 3, 4},
+                      legend="🟢 Bull Call · 🔴 Bear Call · 🟣 Bear Put · P% = prob of profit")
+    details = []
+    for r in rows:
+        cost = (f"debit ${r['net']:.2f}" if r["dir"] == "debit" else f"credit ${r['net']:.2f}")
+        details.append(f"{r['emoji']} <b>{r['tk']} {r['legs']}</b> {r['strat']} · {r['dte']}d\n"
+                       f"   {cost} · BE ${r['be']:.0f} · max +${r['maxp']:.2f} / −${r['maxl']:.2f}")
+    txt = (hdr("📐 SPREADS SCANNER") + "\n" + tbl + "\n\n" + "\n".join(details) +
+           "\n\n<i>score = POP·R/R·cushion·liquidity · not advice</i>")
     await msg.reply_text(txt[:4000], parse_mode=H,
                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="spreads_view"),
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
@@ -25755,6 +25780,60 @@ async def rovalidate_command(update, ctx):
     await update.message.reply_text(txt[:4000], parse_mode=H)
 
 
+async def inline_query_handler(update, ctx):
+    """@bot TICKER anywhere → instant autocomplete dropdown (needs BotFather inline
+    mode ON: /setinline). Tap a result to drop a compact snapshot into the chat.
+    DB-first (stock_daily) so results appear instantly — no network calls."""
+    q = (update.inline_query.query or "").strip().upper()
+    if not q or not re.fullmatch(r"[A-Z.\-]{1,8}", q):
+        try:
+            await update.inline_query.answer([], cache_time=5)
+        except Exception:
+            pass
+        return
+    results = []
+    conn = get_conn()
+    try:
+        matches = [r[0] for r in conn.execute(
+            "SELECT DISTINCT ticker FROM stock_daily WHERE ticker LIKE ? ORDER BY ticker LIMIT 8",
+            (q + "%",)).fetchall()]
+        for tk in matches:
+            rows = conn.execute(
+                "SELECT trade_date, close, pcr_oi FROM stock_daily WHERE ticker=? "
+                "ORDER BY trade_date DESC LIMIT 2", (tk,)).fetchall()
+            if not rows:
+                continue
+            c0 = float(rows[0][1] or 0)
+            chg = (c0 / float(rows[1][1]) - 1) * 100 if len(rows) > 1 and rows[1][1] else 0.0
+            pcr = rows[0][2]
+            em = "🟢" if chg >= 0 else "🔴"
+            txt = (f"{em} <b>{tk}</b> ${c0:,.2f} ({chg:+.2f}%) · "
+                   f"PCR {float(pcr):.2f} · " f"EOD {rows[0][0]}"
+                   if pcr is not None else
+                   f"{em} <b>{tk}</b> ${c0:,.2f} ({chg:+.2f}%) · EOD {rows[0][0]}")
+            results.append(InlineQueryResultArticle(
+                id=tk, title=f"{tk}  ${c0:,.2f}",
+                description=f"{chg:+.2f}% · PCR {float(pcr):.2f}" if pcr is not None else f"{chg:+.2f}%",
+                input_message_content=InputTextMessageContent(txt, parse_mode="HTML")))
+    except Exception:
+        log.debug("inline query failed", exc_info=True)
+    finally:
+        conn.close()
+    try:
+        await update.inline_query.answer(results, cache_time=60)
+    except Exception:
+        log.debug("inline answer failed", exc_info=True)
+
+
+async def _send_plan(msg, txt, kb):
+    """Send /plan; if the client/API rejects expandable blockquotes, strip and resend."""
+    try:
+        await msg.reply_text(txt, parse_mode=H, reply_markup=kb)
+    except Exception:
+        plain = txt.replace("<blockquote expandable>", "").replace("</blockquote>", "")
+        await msg.reply_text(plain, parse_mode=H, reply_markup=kb)
+
+
 async def plan_command(update, ctx):
     """/plan - condensed next-day game plan for your open positions."""
     conn = get_conn()
@@ -25763,7 +25842,7 @@ async def plan_command(update, ctx):
         kb = _kb_plan(conn)
     finally:
         conn.close()
-    await update.message.reply_text(txt, parse_mode=H, reply_markup=kb)
+    await _send_plan(update.message, txt, kb)
 
 async def plan_view(query):
     conn = get_conn()
@@ -25772,7 +25851,7 @@ async def plan_view(query):
         kb = _kb_plan(conn)
     finally:
         conn.close()
-    await query.message.reply_text(txt, parse_mode=H, reply_markup=kb)
+    await _send_plan(query.message, txt, kb)
 
 
 def _plan_legs_for(conn, tk):
@@ -28076,6 +28155,7 @@ def main():
     app.add_handler(CommandHandler("briefing", briefing_command))
     app.add_handler(CommandHandler("plan", plan_command))
     app.add_handler(CommandHandler("add", add_command))
+    app.add_handler(InlineQueryHandler(inline_query_handler))   # @bot TICKER search (BotFather /setinline)
     app.add_handler(CommandHandler("wrap", wrap_command))
     app.add_handler(CommandHandler("tv", tv_command))
     app.add_handler(CommandHandler("hiprob", hiprob_command))

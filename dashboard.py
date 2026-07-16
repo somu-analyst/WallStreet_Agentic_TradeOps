@@ -328,6 +328,18 @@ def _db_spot(ticker: str) -> float:
         pass
     return 0.0
 
+
+def _db_spot_date(ticker: str) -> str:
+    """trade_date (MM-DD) of the stock_daily row `_db_spot` uses — lets the UI show HOW
+    fresh 'EOD' is (the nightly pipeline can lag a session, e.g. mid-run in the evening)."""
+    try:
+        with get_conn() as _c:
+            row = _c.execute("SELECT MAX(trade_date) FROM stock_daily WHERE ticker=?",
+                             (ticker,)).fetchone()
+        return str(row[0] or "")[5:]
+    except Exception:
+        return ""
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_price(ticker: str) -> float:
     """Latest confirmed close — DB first (stock_daily), then yfinance history fallback. Cached 5 min."""
@@ -4453,6 +4465,9 @@ def _portfolio_var(legs, r=0.045, lookback=60, conf=0.05):
         for l in legs:
             s = rets[l["ticker"]][i]
             ns = l["spot"] * (1 + s); t1 = max(l["dte"] - 1, 0) / 365.0
+            if l["typ"] == "stock" or not l.get("K"):
+                tot += (ns - l["cur"]) * l["m"]      # shares: linear, no BS (K=0)
+                continue
             ivs = max(l["iv"] * (1 - 2.0 * s), 0.05)
             npx = bs_greeks(ns, l["K"], t1, r, ivs, l["typ"]).get("price", l["cur"]) if t1 > 0 \
                 else (max(ns - l["K"], 0) if l["typ"] == "call" else max(l["K"] - ns, 0))
@@ -8345,7 +8360,10 @@ elif page == "💼 Portfolio & Suggestions":
                         _mc[1].metric("☀️ EOD Premium", f"${pos['Current']:.2f}",
                                       delta=f"{pos['Current']-pos['Entry']:+.2f} vs entry",
                                       delta_color="normal" if pos["Qty"]>0 else "inverse",
-                                      help=f"BS @ EOD ${pos['Stock_Px']:.2f}, IV={_pos_iv:.0%} ({_iv_src})")
+                                      help=f"BS @ EOD ${pos['Stock_Px']:.2f} "
+                                           f"({_db_spot_date(pos['Ticker']) or 'DB'} close — can lag a "
+                                           f"session until the nightly pipeline lands), "
+                                           f"IV={_pos_iv:.0%} ({_iv_src})")
                         if _show_live:
                             _lv_help = (f"BS price at {_lv_lbl} spot ${_spv_ext:.2f} "
                                         f"({_spv_ah['ah_chg_pct']:+.1f}% vs EOD), "
@@ -8361,7 +8379,8 @@ elif page == "💼 Portfolio & Suggestions":
                                           f"{(_ah_pnl/(pos['Entry']*abs(pos['Qty'])*100)*100) if pos['Entry']>0 else 0:+.1f}%",
                                           delta_color="normal" if _ah_pnl>=0 else "inverse")
                             _mc[5].metric("Stock", f"${_spv_ext:.2f}",
-                                          f"{_spv_ah['ah_chg_pct']:+.1f}% {_lv_lbl}  (EOD ${_spv_eod:.2f})")
+                                          f"{_spv_ah['ah_chg_pct']:+.1f}% {_lv_lbl}  "
+                                          f"(EOD {_db_spot_date(pos['Ticker'])} ${_spv_eod:.2f})")
                         else:
                             _mc[2].metric("P&L $", f"${pos['PnL']:+,.0f}",
                                           delta_color="normal" if pos["PnL"]>=0 else "inverse")
@@ -13740,6 +13759,9 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
             for l in _legs:
                 ns = l["spot"] * (1 + s)
                 t1 = max(l["dte"] - 1, 0) / 365.0
+                if l["typ"] == "stock" or not l.get("K"):
+                    tot += (ns - l["cur"]) * l["m"]           # shares: linear, no BS (K=0)
+                    continue
                 iv_s = max(l["iv"] * (1 - 2.0 * s), 0.05)     # vol rises when market drops
                 np_ = bs_greeks(ns, l["K"], t1, _R, iv_s, l["typ"]).get("price", l["cur"]) if t1 > 0 else \
                     (max(ns - l["K"], 0) if l["typ"] == "call" else max(l["K"] - ns, 0))
@@ -14046,6 +14068,9 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     tot = 0.0
                     for l in _tl:
                         ns = l["spot"] * (1 + s); t1 = max(l["dte"] - 1, 0) / 365.0
+                        if l["typ"] == "stock" or not l.get("K"):
+                            tot += (ns - l["cur"]) * l["m"]    # shares: linear, no BS (K=0)
+                            continue
                         ivs = max(l["iv"] * (1 - 2.0 * s), 0.05)
                         npx = bs_greeks(ns, l["K"], t1, _R, ivs, l["typ"]).get("price", l["cur"]) if t1 > 0 \
                             else (max(ns - l["K"], 0) if l["typ"] == "call" else max(l["K"] - ns, 0))

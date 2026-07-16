@@ -3,11 +3,17 @@ description: Full working principles — Graphify, Karpathy behavior, token/usag
 paths: ["**/*"]
 ---
 
+---
+paths:
+  - "docs/**"
+  - ".claude/**"
+---
+
 # Working principles (full)
 
 > CLAUDE.md carries the condensed bullets that load every session. This file holds the full
-> detail so it's available when relevant without spending the always-loaded token budget on the
-> options/analytics work that is this repo's core.
+> detail; the `paths:` frontmatter above keeps it OUT of the per-session token budget — it
+> loads only when working the continuity docs or Claude config (token-diet 2026-07-16).
 
 ---
 

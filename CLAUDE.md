@@ -58,6 +58,12 @@
 - Tools: `/plan` trade planner · `/add` one-line position add (order-free grammar: `TICKER 375P YYYY-MM-DD ±QTY @PX [entry-date]` or `TICKER stock QTY @PX [entry-date]`; Add-Position wizard step 1 also accepts a TYPED ticker, 10-min freshness gate in `ai_chat_handler`) · `/journal` trade/event journal · `/bookmarks` saved items · `/tv` TradingView chart bridge.
 - `/wan` WAN-streamer: live snapshot of actionable 24-model ensemble signals (BULL/BEAR, conf≥MED, prob≥70). Also runs as a 15-min `run_repeating` job (market-hours, daily dedup) that pushes new fires; its cached snapshot feeds `ai_chat_handler`, so plain-text questions like "why is NVDA bullish?" are answered with the live signal context.
 
+## Telegram UX conventions (2026-07-16 modernization)
+- **Wizards morph in place:** `_wiz_show(query, text, kb)` edits the SAME message per step (no stacking) — use it for any new multi-step flow; falls back to reply when edit impossible.
+- **Inline mode:** `inline_query_handler` = `@bot TICKER` autocomplete (DB-first snapshot). Requires BotFather `/setinline` toggled ON once.
+- **Long reports:** wrap per-section detail in `<blockquote expandable>` (see `/plan`) — headline visible, detail taps open; `_send_plan`-style strip-and-resend fallback.
+- **Scanner output pattern:** `_pipe_table` rank table (≤28 chars) + per-row HTML detail lines below (see `_send_spreads`, `/ratings`) — never single crammed bullet lines.
+
 ## Tables (Telegram) — ALWAYS use the shared helper
 - `_pipe_table(headers, rows, right_cols=None, title=None, legend=None)` → Excel-style `<pre>`, **emoji/width-aware** (`_disp_w`: emoji/CJK=2) so columns align at the same index. `title` (bold+stars) and `legend` (italic key) render OUTSIDE `<pre>`.
 - Put status emoji in **column 0** only (uniform 🟢/🔴/🟡 family) so it doesn't shift columns. Numbers → `right_cols`. K/M notation (452K not 452,000). Don't hand-roll `mono()` grids — route through `_pipe_table`.

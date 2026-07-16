@@ -1378,8 +1378,10 @@ def _insert_new_trade(
     entry_date=None,
     notes=None,
     account_type="Taxable",
+    mult=100,
 ):
-    """Insert a brand new OPEN trade from Telegram Add Position flow."""
+    """Insert a brand new OPEN trade from Telegram Add Position flow.
+    mult=1 for STOCK legs (shares — no ×100 contract multiplier in entry_cost)."""
     tk = str(ticker).upper().strip()
     ot = str(opt_type).upper().strip()
     st = float(strike)
@@ -1425,7 +1427,7 @@ def _insert_new_trade(
                 exp,
                 float(entry_px),
                 qty,
-                float(abs(qty) * entry_px * 100),
+                float(abs(qty) * entry_px * mult),
                 "telegram",
                 "OPEN",
                 notes or "Added from Telegram Positions",
@@ -6870,12 +6872,106 @@ async def tech_signals_detail(query, ticker):
     await _safe_reply(query.message, "\n".join(parts), reply_markup=kb)
 
 
+def _parse_add_args(args):
+    """One-line position grammar (deterministic, order-free):
+      ticker   = first alpha token (NVDA, BRK.B)
+      option   = STRIKE+C/P combined (375P, 190c) + expiry YYYY-MM-DD
+      stock    = the word 'stock'/'shares' (strike/expiry not needed)
+      qty      = signed int (-1, +2, 100); default +1
+      price    = @-prefixed (@19.25); omitted → live/estimated mark
+      2nd date = entry date (options) / 1st date = entry date (stock)
+    Returns (dict, None) or (None, error_string)."""
+    tk = typ = strike = qty = px = None
+    dates = []
+    for a in args:
+        s = str(a).strip().rstrip(",")
+        if not s:
+            continue
+        m = re.fullmatch(r"(\d+(?:\.\d+)?)([cCpP])", s)
+        if m and strike is None:
+            strike, typ = float(m.group(1)), ("CALL" if m.group(2).lower() == "c" else "PUT")
+            continue
+        if s.lower() in ("stock", "shares", "sh", "stk") and typ is None:
+            typ = "STOCK"
+            continue
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+            dates.append(s)
+            continue
+        if s.startswith("@"):
+            try:
+                px = float(s[1:])
+                continue
+            except ValueError:
+                return None, f"bad price '{s}'"
+        if re.fullmatch(r"[+-]?\d+", s) and qty is None:
+            qty = int(s)
+            continue
+        if tk is None and re.fullmatch(r"[A-Za-z][A-Za-z.\-]{0,7}", s):
+            tk = s.upper()
+            continue
+        return None, f"can't parse '{s}' — see /add usage"
+    if not tk:
+        return None, "missing ticker"
+    if typ == "STOCK":
+        if not qty:
+            return None, "stock needs a share count (e.g. 100)"
+        return {"tk": tk, "typ": "STOCK", "strike": 0.0, "expiry": "",
+                "qty": qty, "px": px, "entry_date": (dates[0] if dates else None)}, None
+    if typ is None or strike is None:
+        return None, "missing STRIKE+C/P (e.g. 375P) — or say 'stock'"
+    if not dates:
+        return None, "missing expiry YYYY-MM-DD"
+    return {"tk": tk, "typ": typ, "strike": strike, "expiry": dates[0],
+            "qty": qty if qty is not None else 1, "px": px,
+            "entry_date": (dates[1] if len(dates) > 1 else None)}, None
+
+
+_ADD_USAGE = (f"{hdr('⚡ /add — one-line position')}\n"
+              "Option:  <code>/add GOOGL 375P 2026-08-21 -1 @4.35</code>\n"
+              "Stock:   <code>/add GOOG stock 100 @167 2025-06-24</code>\n"
+              "<i>Order-free · qty default +1 (negative = short) · omit @price for live mark · "
+              "2nd date = entry date. Buttons still available via Menu → Positions.</i>")
+
+
+async def add_command(update, ctx):
+    """/add — one-shot add position (skips the 8-step button wizard)."""
+    args = list(ctx.args or [])
+    if not args:
+        await update.message.reply_text(_ADD_USAGE, parse_mode=H)
+        return
+    p, err = _parse_add_args(args)
+    if err:
+        await update.message.reply_text(f"❌ {err}\n\n{_ADD_USAGE}", parse_mode=H)
+        return
+    if p["typ"] == "STOCK" and p["px"] is None:
+        p["px"] = _last_price(p["tk"]) or None
+    ok, new_id, msg = _insert_new_trade(
+        p["tk"], p["typ"], p["strike"], p["expiry"], p["qty"],
+        strategy="telegram_add_cmd", entry_price=p["px"], entry_date=p["entry_date"],
+        notes="Added via /add", mult=(1 if p["typ"] == "STOCK" else 100))
+    if not ok:
+        await update.message.reply_text(f"❌ {msg}", parse_mode=H)
+        return
+    if p["typ"] == "STOCK":
+        line = f"#{new_id}: {p['tk']} {p['qty']:+d} shares @ ${float(p['px'] or 0):.2f}"
+        if p["entry_date"]:
+            line += f" · entry {p['entry_date']} (tax clock)"
+    else:
+        line = msg
+    await update.message.reply_text(
+        f"✅ <b>Added</b> {line}\n<i>/plan for the game plan · /tax for tax view · "
+        "edit/close in dashboard Portfolio</i>", parse_mode=H)
+
+
 async def posadd_ticker_menu(query, ctx, page=0, reset=False):
     if reset:
-        ctx.user_data["posadd"] = {}
+        ctx.user_data["posadd"] = {"_ts": time.time()}   # fresh wizard → typed ticker accepted
     tickers = _ticker_universe(limit=1000)
     kb = _paged_ticker_keyboard("posaddtk", tickers, page=page, per_page=12, cols=3, include_back=True, back_cb="menu_positions")
-    await query.message.reply_text(f"{hdr('➕ ADD POSITION')}\n\nStep 1/8: Select ticker", parse_mode=H, reply_markup=kb)
+    await query.message.reply_text(
+        f"{hdr('➕ ADD POSITION')}\n\nStep 1/8: Select ticker — <b>or just type it</b> (e.g. NVDA)\n"
+        "<i>⚡ One-shot: /add GOOGL 375P 2026-08-21 -1 @4.35 · /add GOOG stock 100 @167 2025-06-24</i>",
+        parse_mode=H, reply_markup=kb)
 
 
 async def posadd_option_type_menu(query, ctx, ticker):
@@ -12672,6 +12768,21 @@ async def ai_chat_handler(update, context):
     text = (update.message.text or "").strip()
     if not text or text.startswith("/"):
         return
+
+    # Add-Position wizard step 1: a freshly opened wizard (<10 min) accepts a TYPED
+    # ticker instead of button paging. Unknown symbols fall through to normal AI chat.
+    try:
+        _pa = context.user_data.get("posadd")
+        if (isinstance(_pa, dict) and not _pa.get("ticker")
+                and time.time() - float(_pa.get("_ts") or 0) < 600
+                and re.fullmatch(r"[A-Za-z][A-Za-z.\-]{0,7}", text)):
+            _tk_try = text.upper()
+            if _tk_try in set(_ticker_universe(limit=2000)) or (_last_price(_tk_try) or 0) > 0:
+                from types import SimpleNamespace
+                await posadd_option_type_menu(SimpleNamespace(message=update.message), context, _tk_try)
+                return
+    except Exception:
+        log.debug("posadd typed-ticker intercept failed", exc_info=True)
 
     api_key = _load_ai_key()
     if not api_key:
@@ -27934,6 +28045,7 @@ async def _post_init(app):
             BotCommand("wrap", "Market wrap"),
             BotCommand("briefing", "Daily briefing"),
             BotCommand("plan", "Trade game plan"),
+            BotCommand("add", "One-line add position (375P / stock)"),
             BotCommand("journal", "Trade/event journal"),
             BotCommand("bookmarks", "Saved items"),
             BotCommand("event", "Event writeup"),
@@ -27963,6 +28075,7 @@ def main():
     app.add_handler(CommandHandler("event", event_command))
     app.add_handler(CommandHandler("briefing", briefing_command))
     app.add_handler(CommandHandler("plan", plan_command))
+    app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("wrap", wrap_command))
     app.add_handler(CommandHandler("tv", tv_command))
     app.add_handler(CommandHandler("hiprob", hiprob_command))

@@ -8702,11 +8702,22 @@ elif page == "💼 Portfolio & Suggestions":
 
     with tab4:
         st.markdown("#### 🧾 Tax Advisor — stock lots (US federal, MFJ · approximations, NOT tax advice)")
-        _tax_inc = st.number_input("Taxable income assumption ($)", value=200_000, step=10_000, key="tax_inc")
+        try:
+            import telegram_bot_optimized as _tax_tbo
+            _txc0 = _tax_tbo.get_conn()
+            try:   # income default lives in DB app_settings (set via /tax set 250k or here)
+                _tax_inc_def = int(float(_tax_tbo._app_setting(_txc0, "tax_income", 200_000) or 200_000))
+            finally:
+                _txc0.close()
+        except Exception:
+            _tax_inc_def = 200_000
+        _tax_inc = st.number_input("Taxable income assumption ($)", value=_tax_inc_def, step=10_000, key="tax_inc")
         try:
             import telegram_bot_optimized as _tax_tbo
             _txc = _tax_tbo.get_conn()
             try:
+                if int(_tax_inc) != _tax_inc_def:   # persist edits → bot /tax uses the same default
+                    _tax_tbo._set_app_setting(_txc, "tax_income", float(_tax_inc))
                 _txr = _tax_tbo._tax_scan(_txc, income=float(_tax_inc))
             finally:
                 _txc.close()

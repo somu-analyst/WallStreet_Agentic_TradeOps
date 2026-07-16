@@ -25140,14 +25140,45 @@ def _fmt_tax(res):
     return hdr + body
 
 
-async def tax_command(update, ctx):
-    """/tax [INCOME] — holding periods, ST→LT flip dates, est. tax, hedge/wash-sale warnings."""
+def _app_setting(conn, key, default=None):
+    """Universal key/value settings in the DB (app_settings) — user profile facts like
+    tax income live HERE, not hardcoded and not in Claude memory."""
     try:
-        income = float(ctx.args[0].replace("k", "000").replace("K", "000")) if ctx.args else 200_000
+        conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, val TEXT)")
+        row = conn.execute("SELECT val FROM app_settings WHERE key=?", (key,)).fetchone()
+        return row[0] if row else default
     except Exception:
-        income = 200_000
+        return default
+
+
+def _set_app_setting(conn, key, val):
+    conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, val TEXT)")
+    conn.execute("INSERT OR REPLACE INTO app_settings VALUES (?, ?)", (key, str(val)))
+    conn.commit()
+
+
+async def tax_command(update, ctx):
+    """/tax [INCOME] — holding periods, ST→LT flip dates, est. tax, hedge/wash-sale warnings.
+    `/tax set 250k` persists the income default to the DB (app_settings.tax_income)."""
+    args = list(ctx.args or [])
     conn = get_conn()
     try:
+        if args and args[0].lower() == "set" and len(args) > 1:
+            try:
+                inc = float(args[1].lower().replace("k", "000"))
+                _set_app_setting(conn, "tax_income", inc)
+                await update.message.reply_text(
+                    f"💾 Tax income default saved: <b>${inc:,.0f}</b> (DB app_settings — used by "
+                    "bot /tax and the dashboard tax panel).", parse_mode=H)
+                return
+            except ValueError:
+                await update.message.reply_text("Usage: /tax set 250k", parse_mode=H)
+                return
+        default_inc = float(_app_setting(conn, "tax_income", 200_000) or 200_000)
+        try:
+            income = float(args[0].lower().replace("k", "000")) if args else default_inc
+        except Exception:
+            income = default_inc
         res = _tax_scan(conn, income=income)
     finally:
         conn.close()

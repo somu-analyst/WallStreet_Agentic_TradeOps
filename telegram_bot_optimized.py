@@ -25352,6 +25352,75 @@ async def _send_vrp(msg, rows):
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
 
 
+# ── RICH-IV PREMIUM SELLER (/premium) — tastytrade mechanics on the VRP ─────
+# Theory: options systematically price MORE vol than gets realized (variance
+# risk premium — Carr & Wu 2009). The harvestable edge concentrates when vol
+# is ALSO rich vs its own history (high IV rank). Mechanics (tastytrade's
+# backtested management rules): enter ~45 DTE · short strikes ≈ ±1σ (~16Δ) ·
+# take profit at 50% of max credit · manage/exit at 21 DTE · size ≤5% of
+# buying power per name · earnings before expiry = size down or skip.
+def _premium_scan(conn, tickers=None, min_ivr=50):
+    """Short-premium candidates: IVR ≥ min_ivr AND positive VRP, ranked by VRP.
+    Adds spot, 45d 1σ expected move and suggested ±1σ short strikes."""
+    base = _vrp_scan(conn, tickers, sell_thr=0.0, buy_thr=-99.0)     # all positive-VRP names
+    rows = []
+    for r in base:
+        if r["side"] != "SELL" or (r.get("iv_rank") or 0) < min_ivr:
+            continue
+        tk = r["ticker"]
+        spot = _last_price(tk) or 0.0
+        if not spot:
+            continue
+        em45 = spot * r["iv"] * (45.0 / 365.0) ** 0.5
+        step = 5 if spot >= 100 else 1
+        ea = _next_earnings(tk)
+        rows.append({**r, "spot": spot, "em45": em45,
+                     "put_k": round((spot - em45) / step) * step,
+                     "call_k": round((spot + em45) / step) * step,
+                     "earn": (ea["days"] if ea and ea.get("days") is not None and ea["days"] <= 45 else None)})
+    if not rows and min_ivr > 35:
+        return _premium_scan(conn, tickers, min_ivr=35)              # quiet market → relax once
+    return rows
+
+
+def _fmt_premium(rows):
+    if not rows:
+        return None
+    data = [(("⚠️" if r["earn"] is not None else "🔴"), r["ticker"],
+             f"{r['iv_rank']:.0f}", f"{r['vrp']*100:+.0f}", f"{r['em45']/r['spot']*100:.0f}")
+            for r in rows[:12]]
+    tbl = _pipe_table(("ST", "Tkr", "IVR", "VRP", "EM%"), data, right_cols={2, 3, 4},
+                      legend="🔴 rich vol · ⚠️ earnings ≤45d · EM% = 1σ/45d move")
+    det = []
+    for r in rows[:8]:
+        er = f" · ⚠️ ER in {r['earn']}d — size down/skip" if r["earn"] is not None else ""
+        det.append(f"🔻 <b>{r['ticker']}</b> spot ${r['spot']:,.0f} · IV {r['iv']*100:.0f}% vs RV {r['rv']*100:.0f}%\n"
+                   f"   sell ~45DTE <b>{r['put_k']:g}P / {r['call_k']:g}C</b> strangle "
+                   f"(±1σ; buy wings for defined risk){er}")
+    return (tbl + "\n\n" + "\n".join(det) +
+            "\n\n<i>📐 Mechanics: enter ~45 DTE · take profit at 50% of credit · manage/exit at "
+            "21 DTE · ≤5% buying power per name · undefined-risk only if you accept assignment. "
+            "Edge = variance risk premium; validated concept, NOT a guarantee · not advice</i>")
+
+
+async def premium_command(update, ctx):
+    """/premium [TICKERS] — rich-IV short-premium scan (IVR≥50 + VRP>0, tastytrade mechanics)."""
+    args = [a.upper() for a in (getattr(ctx, "args", []) or [])]
+    await update.message.reply_text("💰 Scanning for rich premium…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _premium_scan(conn, args or None)
+    finally:
+        conn.close()
+    fm = _fmt_premium(rows)
+    if not fm:
+        await update.message.reply_text("No rich-IV candidates right now (IVR≥35 + VRP>0 all empty).",
+                                        parse_mode=H)
+        return
+    await update.message.reply_text((hdr("💰 PREMIUM SELLER — rich IV") + "\n" + fm)[:4000], parse_mode=H,
+                                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
 async def vrp_command(update, ctx):
     """/vrp — variance risk premium: IV vs realized vol (rich→sell premium, cheap→buy vol)."""
     args = list(getattr(ctx, "args", []) or [])
@@ -28275,6 +28344,7 @@ async def _post_init(app):
             BotCommand("plan", "Trade game plan"),
             BotCommand("add", "One-line add position (375P / stock)"),
             BotCommand("terminal", "Open dashboard inside Telegram (Mini App)"),
+            BotCommand("premium", "Rich-IV premium seller (IVR+VRP, 45DTE mechanics)"),
             BotCommand("journal", "Trade/event journal"),
             BotCommand("bookmarks", "Saved items"),
             BotCommand("event", "Event writeup"),
@@ -28306,6 +28376,7 @@ def main():
     app.add_handler(CommandHandler("plan", plan_command))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("terminal", terminal_command))
+    app.add_handler(CommandHandler("premium", premium_command))
     app.add_handler(InlineQueryHandler(inline_query_handler))   # @bot TICKER search (BotFather /setinline)
     app.add_handler(CommandHandler("wrap", wrap_command))
     app.add_handler(CommandHandler("tv", tv_command))

@@ -20160,6 +20160,15 @@ def _ss_dataframe(_tbo, conn, choice, tks):
     """Reuse telegram_bot_optimized scanner functions → clean DataFrame (one engine,
     two front-ends). tks is a tuple of upper-case tickers (may be empty for defaults)."""
     default = _tbo._hiprob_default_tickers()
+    if choice.startswith("💰"):                                   # Rich-IV premium seller (tastytrade mechanics)
+        rows = _tbo._premium_scan(conn, list(tks) or None)
+        return pd.DataFrame([{"Ticker": r["ticker"], "IV Rank": round(r["iv_rank"], 0),
+                              "IV %": round(r["iv"] * 100, 0), "RV %": round(r["rv"] * 100, 0),
+                              "VRP pts": round(r["vrp"] * 100, 1), "Spot": round(r["spot"], 2),
+                              "1σ EM % (45d)": round(r["em45"] / r["spot"] * 100, 1),
+                              "Sell strikes (±1σ)": f"{r['put_k']:g}P / {r['call_k']:g}C",
+                              "Earnings ≤45d": (f"{r['earn']}d ⚠️" if r["earn"] is not None else "—")}
+                             for r in rows])
     if choice.startswith("⭐"):                                   # Analyst ratings (keyless yfinance)
         rows = _tbo._ratings_scan(list(tks) or _tbo._ratings_default_tickers())
         _strip = lambda s: re.sub("<[^>]+>", "", s)
@@ -20328,7 +20337,7 @@ if page == "⚙️ Strategy Scanners":
     _page_header("⚙️ Strategy Scanners",
                  "Income · event · stat-arb · seasonality — the same engine as the Telegram bot. Screeners, not proven alpha.")
     import telegram_bot_optimized as _tbo
-    _ss_opts = ["🛡️ Risk-off radar", "🐋 Unusual options activity", "🌪️ Variance risk premium", "🧭 Positioning builder", "⚖️ Portfolio optimizer", "📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
+    _ss_opts = ["💰 Rich-IV premium seller", "🛡️ Risk-off radar", "🐋 Unusual options activity", "🌪️ Variance risk premium", "🧭 Positioning builder", "⚖️ Portfolio optimizer", "📡 WAN ensemble signals", "📆 Earnings IV-crush", "📊 PEAD (post-earnings drift)",
                 "🔗 Pairs mean-reversion", "📅 Seasonality", "🔄 Sector rotation", "↩️ Short-term reversal",
                 "🎡 Wheel (CSP)", "📞 Covered call",
                 "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar",

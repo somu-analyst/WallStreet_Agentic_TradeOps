@@ -5443,6 +5443,17 @@ if page == "🌍 Market Overview":
                     _px_now = float(_s.iloc[_idx_pos])
                     if _idx_pos > 0:
                         _px_prev = float(_s.iloc[_idx_pos - 1])
+                        # Split-day guard: Yahoo's batch feed lags split adjustments for hours
+                        # (SOXS 1:10 reverse on 2026-07-15 rendered as +974%). A near-common-ratio
+                        # overnight jump is a split — rescale the prior close, keep the real move.
+                        if _px_prev > 0:
+                            _r = _px_now / _px_prev
+                            _rr = _r if _r > 1 else (1 / _r if _r > 0 else 1)
+                            if _rr > 1.67:
+                                for _k in (round(_rr), int(_rr), int(_rr) + 1):
+                                    if _k in (2, 3, 4, 5, 6, 8, 10, 15, 20, 25, 50, 100) and abs(_rr - _k) / _k <= 0.12:
+                                        _px_prev = _px_prev * _k if _r > 1 else _px_prev / _k
+                                        break
                         _pct = round((_px_now - _px_prev) / _px_prev * 100, 2)
                     else:
                         _pct = 0.0

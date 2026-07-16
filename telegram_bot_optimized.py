@@ -19905,17 +19905,37 @@ def _next_earnings(tk):
 
 def _plan_prem(conn, tk, K, exp, typ):
     col = "lastPrice_Call_now" if typ == "call" else "lastPrice_Put_now"
-    mdy = _to_mdy(exp)
     try:
         pr = pd.read_sql(
             f"SELECT {col} AS last FROM options_change WHERE UPPER(ticker)=? AND strike=? AND expiry_date=? "
             "ORDER BY trade_date_now DESC LIMIT 1",
-            conn, params=(tk.upper(), float(K), mdy))
+            conn, params=(tk.upper(), float(K), str(exp)[:10]))   # expiry_date is ISO (was _to_mdy → never matched)
         if not pr.empty and pr.iloc[0]["last"] and float(pr.iloc[0]["last"]) > 0:
             return float(pr.iloc[0]["last"])
     except Exception:
         pass
     return None
+
+
+def _bb_quote(conn, tk, K, exp, typ):
+    """OpenBB capture quote for one contract (latest date): real bid/ask mid + IV + delta.
+    The EOD anchor when live yfinance quotes aren't available (evenings/weekends) —
+    a bid/ask mid beats a stale last-trade print."""
+    side = "Call" if typ == "call" else "Put"
+    try:
+        r = conn.execute(
+            f"SELECT bid_{side}, ask_{side}, lastPrice_{side}, iv_{side}, delta_{side} "
+            "FROM options_openbb WHERE UPPER(ticker)=? AND strike=? AND expiry_date=? "
+            "ORDER BY trade_date DESC LIMIT 1",
+            (tk.upper(), float(K), str(exp)[:10])).fetchone()
+        if not r:
+            return None
+        bid, ask, last, iv, dlt = (float(x or 0) for x in r)
+        mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else (last if last > 0 else 0.0)
+        return {"bid": bid, "ask": ask, "mid": mid, "last": last,
+                "iv": iv if 0.01 < iv < 5 else None, "delta": dlt if dlt else None}
+    except Exception:
+        return None
 
 def _kb_plan(conn=None):
     rows = []
@@ -20177,6 +20197,8 @@ def _pl_exit(legs, spot):
 def _pl_tickets(legs, spot, cw, pw, r=0.045):
     """Ready-to-place order ideas: sell-to-cut-cost overlays at the wall, max value, buy-to-close."""
     tips = []
+    if not legs:                                    # stock-only ticker: no option legs to work
+        return tips
     iv = float(np.median([max(l["iv"], .01) for l in legs])); h = min(max(min(l["dte"] for l in legs), 1), 10)
     em = spot * iv * np.sqrt(h / 365.0)
     for l in legs:
@@ -20239,13 +20261,25 @@ def _next_day_plan(conn):
                          "FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
     except Exception:
         tr = pd.DataFrame()
-    if tr is None or tr.empty:
+    try:
+        stk = pd.read_sql("SELECT ticker,quantity,entry_price,entry_date "
+                          "FROM trades WHERE status='OPEN' AND UPPER(option_type)='STOCK'", conn)
+    except Exception:
+        stk = pd.DataFrame()
+    if (tr is None or tr.empty) and (stk is None or stk.empty):
         L.append("No open positions.")
         return "\n".join(L)
+    tr = tr if tr is not None else pd.DataFrame()
     R = 0.045
     by = {}
     for _, t in tr.iterrows():
         by.setdefault(str(t["ticker"]).upper(), []).append(t)
+    stk_by = {}
+    if stk is not None and not stk.empty:
+        for _, s in stk.iterrows():
+            stk_by.setdefault(str(s["ticker"]).upper(), []).append(s)
+        for _stk_tk in stk_by:
+            by.setdefault(_stk_tk, [])       # stock-only tickers still get a block
     net_dd = net_th = 0.0
     port_maxp = port_maxl = port_ev = spy_dd = 0.0
     port_up = port_dn = False
@@ -20277,15 +20311,20 @@ def _next_day_plan(conn):
             T = max(dte, 0) / 365.0
             entry = float(t["entry_price"] or 0)
             prem = _plan_prem(conn, tk, K, exp, typ)
+            bb = _bb_quote(conn, tk, K, exp, typ)
+            if bb and bb["mid"] > 0:
+                prem = bb["mid"]                 # OpenBB EOD bid/ask mid beats stale last-trade
             # prefer the live option mid (yfinance bid/ask) so "Now"/P&L match the broker and the
-            # IV below is anchored to the live quote; fall back to the DB last price when unavailable.
+            # IV below is anchored to the live quote; fall back to BB mid / DB last when unavailable.
             try:
                 _lm = _option_price_by_mode(tk, typ, K, exp, mode="mid", fallback=0.0)
                 if _lm and _lm > 0:
                     prem = _lm
             except Exception:
                 log.debug("live option mid failed", exc_info=True)
-            iv = _implied_vol_hp(prem, spot, K, T, R) if (prem and T > 0) else (float(t["entry_iv"] or 0) or 0.30)
+            iv = (bb["iv"] if (bb and bb.get("iv")) else None) or (
+                _implied_vol_hp(prem, spot, K, T, R) if (prem and T > 0)
+                else (float(t["entry_iv"] or 0) or 0.30))
             ivs.append(iv)
             gg = bs_greeks(spot, K, T, R, iv, typ) if T > 0 else {"delta": 0, "theta": 0, "price": (prem or entry)}
             cur = prem if prem else gg.get("price", entry)
@@ -20309,6 +20348,39 @@ def _next_day_plan(conn):
             tk_legs.append({"K": K, "typ": typ, "entry": entry, "m": m, "iv": iv,
                             "dte": dte, "cur": cur, "side": side, "qty": qty, "exp": exp,
                             "ticker": tk, "spot": spot, "pnl": (cur - entry) * m})
+        # STOCK legs: shares shown + counted in delta/gross, kept OUT of tk_legs
+        # (the option analytics below assume K>0; shares are linear, no expiry).
+        for s_ in stk_by.get(tk, []):
+            sq = int(s_["quantity"] or 0); sep = float(s_["entry_price"] or 0)
+            if not sq:
+                continue
+            tk_dd += sq * spot * 0.01                       # 1 delta per share
+            spnl = (spot - sep) * sq
+            spct = ((spot - sep) / sep * 100 * (1 if sq > 0 else -1)) if sep else 0
+            held = ""
+            try:
+                _ed = str(s_.get("entry_date") or "")[:10]
+                if _ed:
+                    _hd = (datetime.now() - datetime.strptime(_ed, "%Y-%m-%d")).days
+                    held = f" · held {_hd}d {'🟢LT' if _hd >= 365 else 'ST'}"
+            except Exception:
+                pass
+            hedge_bits = []
+            try:                                            # class match catches GOOG↔GOOGL
+                _cls = tr[(tr["ticker"].astype(str).str.upper().str[:4] == tk[:4])
+                          & (tr["ticker"].astype(str).str.len().sub(len(tk)).abs() <= 1)]
+                if not _cls.empty:
+                    _oc_ = _cls["option_type"].astype(str).str.lower().str[0]
+                    if bool(((_oc_ == "c") & (_cls["quantity"] < 0)).any()):
+                        hedge_bits.append("covered call")
+                    if bool(((_oc_ == "p") & (_cls["quantity"] > 0)).any()):
+                        hedge_bits.append("protective put (⚠️ tax clock — /tax)")
+            except Exception:
+                pass
+            hedge = (" · 🛡 " + " + ".join(hedge_bits)) if hedge_bits else ""
+            leglines.insert(0, f"  📦 {'long' if sq > 0 else 'short'} {abs(sq)} sh @${sep:.2f} "
+                               f"{spct:+.0f}% (${spnl:,.0f}){held}{hedge}")
+            gross_by[tk] = gross_by.get(tk, 0.0) + abs(spot * sq)
         net_dd += tk_dd; net_th += tk_th
         ivm = sorted(ivs)[len(ivs) // 2] if ivs else 0.30
         em = spot * ivm * (1 / 252.0) ** 0.5

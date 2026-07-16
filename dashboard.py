@@ -1303,6 +1303,29 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Access gate (Telegram Mini App / tunnel exposure) ─────────────────────────
+# Active ONLY when dash_token.txt exists (the bot creates it when it opens a
+# public cloudflared tunnel). Token comes via ?token=… and then sticks to the
+# session, so in-app navigation never re-asks. Delete the file to disable.
+_TOK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dash_token.txt")
+if os.path.exists(_TOK_FILE):
+    try:
+        _expected_tok = open(_TOK_FILE).read().strip()
+    except Exception:
+        _expected_tok = ""
+    if _expected_tok:
+        try:
+            _got_tok = st.query_params.get("token", "")
+        except Exception:                       # older Streamlit
+            _got_tok = (st.experimental_get_query_params().get("token") or [""])[0]
+        if st.session_state.get("_dash_auth") != _expected_tok:
+            if _got_tok == _expected_tok:
+                st.session_state["_dash_auth"] = _expected_tok
+            else:
+                st.error("🔒 Access token required — open the dashboard from the bot "
+                         "(/terminal) or append ?token=… from dash_token.txt")
+                st.stop()
+
 # ---------------------------------------------------------------------------
 # DARK THEME CSS  (Bloomberg-style)
 # ---------------------------------------------------------------------------

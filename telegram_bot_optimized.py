@@ -2996,8 +2996,8 @@ async def run_exit_analysis(query, ticker, opt_type, strike, entry, expiry_str, 
             ("Metric", "Value"),
             [("ExpStk", f"${exp_stock:.2f}"), ("ExpOpt", f"${exp_val:.2f}"),
              ("Range", f"{p10:.2f}–{p90:.2f}"),
-             (f"{pnl_emoji} P&L", f"{exp_pnl:+,.0f} ({pnl_pct:+.0f}%)"),
-             (f"{tmrw_emoji} Tmrw", f"{tmrw_pnl_vs_today:+,.0f} ({tmrw_pct_vs_today:+.0f}%)"),
+             ("P&L", f"{exp_pnl:+,.0f} ({pnl_pct:+.0f}%)"),
+             ("Tmrw", f"{tmrw_pnl_vs_today:+,.0f} ({tmrw_pct_vs_today:+.0f}%)"),
              ("P(win)", f"{prob_profit:.0f}%"), ("VaR95", f"{var_95:+,.0f}")],
             right_cols={1}, title="🎲 Monte Carlo · 10K Sims")
         + "\n"
@@ -3190,7 +3190,6 @@ async def position_detail(query, trade_id, notice=None):
     note = str(tr.get("notes", "") or "")[:60]
 
     side_lbl = "SELL" if qty < 0 else "BUY"
-    _sem = "🟢" if qty >= 0 else "🔴"
     msg = [hdr(f"🛠 POSITION #{tid}")]
     if notice:
         msg.append(f"\n{notice}")
@@ -3199,17 +3198,16 @@ async def position_detail(query, trade_id, notice=None):
         _cur = _estimate_option_mark(tk, ot, st, exp, fallback=0.0) or 0.0
     except Exception:
         pass
-    _rows = [(f"{_sem} Leg", f"{side_lbl} {abs(qty)}x {st:g}{ot[:1]}"),
+    _rows = [("Leg", f"{side_lbl} {abs(qty)}x {st:g}{ot[:1]}"),
              ("Expiry", exp[:10]),
              ("Entry", f"${ep:.2f}")]
     if _cur > 0:
         _pnl = (_cur - ep) * qty * 100
-        _rows.append((("🟢" if _pnl >= 0 else "🔴") + " Now", f"${_cur:.2f} ({_pnl:+,.0f})"))
+        _rows.append(("Now", f"${_cur:.2f} ({_pnl:+,.0f})"))
     _rows.append(("Status", status + (f" · {acct}" if acct else "")))
     if note:
         _rows.append(("Notes", note[:16]))
-    msg.append(_pipe_table(("Field", "Value"), _rows, right_cols={1},
-                           legend="🟢 long/profit · 🔴 short/loss"))
+    msg.append(_pipe_table(("Field", "Value"), _rows, right_cols={1}))
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Qty -1", callback_data=f"posedit_{tid}_qty_m1"),
@@ -13381,7 +13379,6 @@ def _batch_build_leg_card(ticker, opt_type, strike, entry, expiry_str, qty,
         ah_chg_pct = (spot_ext - spot) / spot * 100
         ah_val = bs_price(spot_ext, K, max(dte - 1, 1) / 365.0, r, iv, opt=opt_type)
         ah_pnl = (ah_val - float(entry)) * 100.0 * pos_sign
-        ah_em  = "🟢" if ah_pnl >= 0 else "🔴"
         ah_row = f"\n{row2(ext_src, f'${spot_ext:.2f} ({ah_chg_pct:+.2f}%)')}"
         ah_scenario_block = (
             "\n"
@@ -13389,7 +13386,7 @@ def _batch_build_leg_card(ticker, opt_type, strike, entry, expiry_str, qty,
                 ("Metric", "Value"),
                 [(ext_src[:8], f"${spot_ext:.2f} ({ah_chg_pct:+.1f}%)"),
                  ("AH Theo", f"${ah_val:.2f}"),
-                 (f"{ah_em} AH P&L", f"{ah_pnl:+,.0f}")],
+                 ("AH P&L", f"{ah_pnl:+,.0f}")],
                 right_cols={1}, title="🌙 After-Market Scenario")
         )
 
@@ -13413,8 +13410,8 @@ def _batch_build_leg_card(ticker, opt_type, strike, entry, expiry_str, qty,
             ("Metric", "Value"),
             [("ExpStk", f"${exp_stock:.2f}"), ("ExpOpt", f"${exp_val:.2f}"),
              ("Range", f"{p10:.2f}–{p90:.2f}"),
-             (f"{pnl_emoji} P&L", f"{exp_pnl:+,.0f} ({pnl_pct:+.0f}%)"),
-             (f"{tmrw_emoji} Tmrw", f"{tmrw_pnl:+,.0f} ({tmrw_pct:+.0f}%)"),
+             ("P&L", f"{exp_pnl:+,.0f} ({pnl_pct:+.0f}%)"),
+             ("Tmrw", f"{tmrw_pnl:+,.0f} ({tmrw_pct:+.0f}%)"),
              ("P(win)", f"{prob_profit:.0f}%"), ("VaR95", f"{var_95:+,.0f}")],
             right_cols={1}, title="🎲 Monte Carlo · 10K Sims")
         + ah_scenario_block
@@ -13510,8 +13507,8 @@ def _build_portfolio_summary(all_legs, ticker_pnl_map, tickers):
             [("Legs", f"{n} ({n_calls}C/{n_puts}P)"),
              ("L/S", f"{n_long}L / {n_short}S"),
              ("Stocks", str(len(tickers))),
-             (f"{em} ExpP&L", f"{pnl:+,.0f}"),
-             ("🔴 VaR95", f"{var95:+,.0f}")],
+             ("ExpP&L", f"{pnl:+,.0f}"),
+             ("VaR95", f"{var95:+,.0f}")],
             right_cols={1})
         + "\n" + _pipe_table(
             ("ST", "Tkr", "P&L$"),
@@ -13768,8 +13765,8 @@ async def exit_batch_ticker(query, ticker):
             ("Metric", "Value"),
             [("Legs", f"{n} ({n_calls}C/{n_puts}P)"),
              ("L/S", f"{n_long}L / {n_short}S"),
-             (f"{em} ExpP&L", f"{ticker_pnl:+,.0f}"),
-             ("🔴 VaR95", f"{ticker_var95:+,.0f}")],
+             ("ExpP&L", f"{ticker_pnl:+,.0f}"),
+             ("VaR95", f"{ticker_var95:+,.0f}")],
             right_cols={1})
         + "\n" + _pipe_table(
             ("ST", "Leg", "P&L$", "VaR"),

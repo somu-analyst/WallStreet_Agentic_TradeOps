@@ -3035,17 +3035,42 @@ async def positions_view(query):
             st   = _safe_float(tr.get('strike', 0), 0)
             ep   = _safe_float(tr.get('entry_price', 0), 0)
             qty  = _safe_int(tr.get('quantity', 0), 0)
-            exp  = str(tr.get('expiry', ''))[:10]
-            side = 'L' if qty >= 0 else 'S'
-            _leg_tbl_rows.append((f'#{tid}', side, ot, f'${st:.0f}', f'${ep:.2f}', exp))
+            try:
+                _ed_ = datetime.strptime(str(tr.get('expiry', ''))[:10], '%Y-%m-%d').date()
+                _dte = f"{max((_ed_ - datetime.now().date()).days, 0)}d"
+            except Exception:
+                _dte = "?"
+            _leg_tbl_rows.append(("🟢" if qty >= 0 else "🔴", f"{tid}",
+                                  f"{st:g}{ot[0]} {_dte}", f"{ep:.2f}"))
         s_mark = 's' if n_legs > 1 else ''
         parts.append(
             chr(10) + f"<b>{tk}</b>  {n_legs} leg{s_mark}"
-            + f"  ({n_calls}C / {n_puts}P  •  {n_long}L / {n_short}S)" + chr(10)
-            + f"Next exp: {next_exp}" + chr(10)
-            + _pipe_table(("#", "Side", "Type", "Strk", "Entry", "Expiry"),
-                          _leg_tbl_rows, right_cols={3, 4})
+            + f"  ({n_calls}C/{n_puts}P · {n_long}L/{n_short}S · exp {next_exp})" + chr(10)
+            + _pipe_table(("ST", "#", "Leg·DTE", "Entry"),
+                          _leg_tbl_rows, right_cols={1, 3},
+                          legend="🟢 long · 🔴 short")
         )
+
+    # 📦 stock lots — SEPARATE table (user keeps stocks apart from options)
+    try:
+        _sconn = get_conn()
+        _slots = _sconn.execute(
+            "SELECT trade_id, ticker, quantity, entry_price, entry_date FROM trades "
+            "WHERE status='OPEN' AND UPPER(option_type)='STOCK' ORDER BY ticker").fetchall()
+        _sconn.close()
+        if _slots:
+            _srows = []
+            for _sid, _stk, _sq, _sep, _sed in _slots:
+                _spx = _last_price(_stk) or 0
+                _spnl = f"{(_spx - float(_sep or 0)) * int(_sq or 0):+,.0f}" if _spx else "—"
+                _srows.append(("🟢" if int(_sq or 0) > 0 else "🔴", _stk,
+                               f"{int(_sq or 0)}", _spnl))
+            parts.append(chr(10) + "📦 <b>Stock lots</b>" + chr(10)
+                         + _pipe_table(("ST", "Tkr", "Sh", "P&L$"), _srows,
+                                       right_cols={2, 3},
+                                       legend="tax clock & entries — /tax"))
+    except Exception:
+        log.debug("stock lots block failed", exc_info=True)
 
     btn_rows = []
     for tk in tickers_order:

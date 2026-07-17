@@ -340,21 +340,23 @@ def _db_spot_date(ticker: str) -> str:
     except Exception:
         return ""
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def _cached_price(ticker: str) -> float:
-    """Latest confirmed close — DB first (stock_daily), then yfinance history fallback. Cached 5 min."""
+    """LIVE last price (yfinance fast_info, 60s cache) — after hours this equals the
+    official close. DB stock_daily close, then history, as fallbacks.
+    (Live-everywhere during market hours, user ask 2026-07-17.)"""
+    try:
+        fi = yf.Ticker(ticker).fast_info
+        px = float(fi.get("lastPrice") or fi.get("regularMarketPrice") or 0)
+        if px > 0:
+            return px
+    except Exception:
+        pass
     db = _db_spot(ticker)
     if db > 0:
         return db
     try:
         h = _cached_history(ticker, period="5d")
-        # Exclude today's bar (might be partial/pre-market): use last entry whose date < today
-        import datetime as _dt
-        today = _dt.date.today()
-        for i in range(len(h) - 1, -1, -1):
-            bar_date = h.index[i].date() if hasattr(h.index[i], 'date') else h.index[i]
-            if bar_date < today:
-                return float(h["Close"].iloc[i])
         return float(h["Close"].iloc[-1]) if len(h) >= 1 else 0.0
     except Exception:
         return 0.0
@@ -7802,7 +7804,7 @@ elif page == "🎛️ Command Center":
             _tk = str(_t2.get("ticker", "")).upper(); _k = float(_t2.get("strike", 0))
             _exp = str(_t2.get("expiry", ""))[:10]; _opt = str(_t2.get("option_type", "CALL")).upper()
             _qty = int(_t2.get("quantity", 1)); _ep = float(_t2.get("entry_price", 0))
-            _spot = _db_spot(_tk) or (_cached_price(_tk) or 0.0)
+            _spot = _cached_price(_tk) or (_db_spot(_tk) or 0.0)
             if _opt.startswith("S"):                            # STOCK: shares at spot, mult 1
                 _cp = _spot if _spot > 0 else None
                 _pnl = (_cp - _ep) * _qty if _cp is not None else None
@@ -8105,9 +8107,9 @@ elif page == "💼 Portfolio & Suggestions":
             _acct= str(_t.get("account_type","Taxable"))
             _nts = str(_t.get("notes","") or "")
             if _tk not in _spot_cache:
-                # DB stock_daily is primary — confirmed EOD close, no pre-market contamination
-                _db_s = _db_spot(_tk)
-                _spot_cache[_tk] = _db_s if _db_s > 0 else (_cached_price(_tk) or 0.0)
+                # LIVE last first (2026-07-17); DB confirmed close as fallback
+                _lv = _cached_price(_tk) or 0.0
+                _spot_cache[_tk] = _lv if _lv > 0 else (_db_spot(_tk) or 0.0)
             _spot_eod = _spot_cache[_tk]
             _is_stock = _opt.startswith("S")                  # STOCK leg: shares, no expiry
             if _is_stock:
@@ -13691,6 +13693,13 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
         _R = 0.045
 
         def _gp_spot(tk):
+            # LIVE first (fast_info via _cached_price, 60s) — DB close only as fallback
+            try:
+                _lp = _cached_price(tk.upper())
+                if _lp and _lp > 0:
+                    return float(_lp)
+            except Exception:
+                pass
             try:
                 row = _gp_conn.execute(
                     "SELECT close FROM stock_daily WHERE UPPER(ticker)=? ORDER BY "

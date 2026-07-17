@@ -1043,13 +1043,32 @@ def db():
         conn.close()
 
 
+_SPOT_LIVE_CACHE: dict = {}
+
+
 def _spot_price(sym):
-    """Latest close as float (cached); 0.0 on failure."""
+    """LIVE last price (fast_info, 60s cache); after hours this equals the close.
+    Falls back to daily-history close. 0.0 on failure. (Live-everywhere 2026-07-17.)"""
+    import time as _t
+    k = str(sym).upper()
+    v = _SPOT_LIVE_CACHE.get(k)
+    if v and _t.time() - v[1] < 60:
+        return v[0]
+    px = 0.0
     try:
-        h = _yf_ticker(sym).history(period="2d")
-        return float(h["Close"].iloc[-1]) if len(h) else 0.0
+        fi = _yf_ticker(sym).fast_info
+        px = float(fi.get("lastPrice") or fi.get("regularMarketPrice") or 0)
     except Exception:
-        return 0.0
+        px = 0.0
+    if px <= 0:
+        try:
+            h = _yf_ticker(sym).history(period="2d")
+            px = float(h["Close"].iloc[-1]) if len(h) else 0.0
+        except Exception:
+            px = 0.0
+    if px > 0:
+        _SPOT_LIVE_CACHE[k] = (px, _t.time())
+    return px
 
 
 def _iv_rank(sym):
@@ -26587,6 +26606,10 @@ _EVENT_TRACK = {
 }
 
 def _last_price(ticker):
+    """Live-first (shares _spot_price 60s cache); history/stooq fallback."""
+    px = _spot_price(ticker)
+    if px > 0:
+        return px
     try:
         h = yf.Ticker(ticker).history(period="5d")
         if len(h) >= 1 and float(h["Close"].iloc[-1]) > 0:

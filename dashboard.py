@@ -1338,13 +1338,33 @@ def _dh_banner():
                 status TEXT DEFAULT 'OPEN', ack_at TEXT)""")
             _open = pd.read_sql(
                 "SELECT * FROM data_health_alerts WHERE status='OPEN' ORDER BY alert_id", _c)
-        if _open.empty:
-            return
+        # Daily audit verdict banner (always shown for the latest audited day)
+        try:
+            with sqlite3.connect(DB_PATH) as _c:
+                _aud = pd.read_sql(
+                    "SELECT * FROM data_audit ORDER BY audit_date DESC LIMIT 1", _c)
+        except Exception:
+            _aud = pd.DataFrame()
         st.markdown(
             "<style>@keyframes dhflash{0%,100%{opacity:1}50%{opacity:.55}}"
             ".dh-banner{animation:dhflash 1.6s infinite;background:#7a1f1f;color:#fff;"
             "border:1px solid #ff5555;border-radius:8px;padding:10px 14px;margin:4px 0 10px 0;"
-            "font-weight:600}</style>", unsafe_allow_html=True)
+            "font-weight:600}"
+            ".dh-audit{border-radius:8px;padding:8px 14px;margin:4px 0 10px 0;font-weight:600}"
+            ".dh-ok{background:#0f3d1f;color:#7dff9f;border:1px solid #2e7d32}"
+            ".dh-part{animation:dhflash 1.6s infinite;background:#4d3a00;color:#ffd54f;border:1px solid #b28704}"
+            ".dh-fail{animation:dhflash 1.6s infinite;background:#7a1f1f;color:#fff;border:1px solid #ff5555}"
+            "</style>", unsafe_allow_html=True)
+        if not _aud.empty:
+            _a0 = _aud.iloc[0]
+            _cls = {"VALIDATED": "dh-ok", "PARTIAL": "dh-part", "FAILED": "dh-fail"}.get(_a0["status"], "dh-part")
+            _ic = {"VALIDATED": "✅", "PARTIAL": "🟡", "FAILED": "🔴"}.get(_a0["status"], "🟡")
+            st.markdown(
+                f"<div>{_ic} DATA {_a0['status']} — {_a0['audit_date']} "
+                f"({_a0['summary']})</div>",
+                unsafe_allow_html=True)
+        if _open.empty:
+            return
         for _, _a in _open.iterrows():
             _cols = st.columns([8, 1])
             _cols[0].markdown(

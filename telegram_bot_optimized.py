@@ -9929,43 +9929,35 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
         "HOLD":        "Trade is on track. Keep holding and monitor.",
     }
 
-    # ── Pipe-table layout ─────────────────────────────────────────────
-    # Row data lists for both tables
-    _tbl1_rows = []  # #|Tk|Type|Strike|DTE|Entry|Now
-    _tbl2_rows = []  # #|PnL$|P%|Win|OI|Action
-    html_cards  = []  # per-position advice cards (kept below tables)
+    # ── /earnvol standard: ONE narrow table (ST emoji col 0, ≤28 chars)
+    #    + per-leg detail lines below (entry→now, DTE, win, OI, advice) ──
+    _tbl_rows  = []
+    html_cards = []
 
-    for idx, (em, tk, otype, strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s, action) in enumerate(rows, 1):
-        buy_s = f"{entry:.2f}"  if entry  < 100 else f"{entry:.0f}"
-        cur_s = f"{cur_px:.2f}" if cur_px < 100 else f"{cur_px:.0f}"
-        pct_s = f"{pnl_pct:+.1f}%"
-        pnl_s = f"${pnl:+,.0f}"
-        a_em  = _action_em.get(action, "✅")
+    for (em, tk, otype, strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s, action) in rows:
+        a_em   = _action_em.get(action, "✅")
         advice = _action_advice.get(action, "Monitor position.")
-
-        dte_num = int(dte_s[1:]) if dte_s.startswith("D") and dte_s[1:].isdigit() else None
-        dte_disp = f"{dte_num}d" if dte_num is not None else dte_s
+        dte_num  = int(dte_s[1:]) if dte_s.startswith("D") and dte_s[1:].isdigit() else None
+        dte_disp = f"{dte_num}d" if dte_num is not None else "?"
         urg_flag = "⚠" if dte_num is not None and dte_num <= 3 else ""
+        oi_disp  = oi_s if oi_s and oi_s != "?" else "-"
 
-        oi_disp = oi_s if oi_s and oi_s != "?" else "-"
-        act_disp = f"{a_em}{action[:8]}"
+        _leg = f"{tk[:4]}{int(strike)}{otype[:1]}"
+        _pnl_s = f"{pnl:+,.0f}" if abs(pnl) < 1000 else f"{'+' if pnl >= 0 else '-'}{abs(pnl)/1000:.1f}K"
+        _tbl_rows.append((em, _leg, _pnl_s, f"{pnl_pct:+.0f}%"))
 
-        _tbl1_rows.append((str(idx), tk[:5], otype[:1], f"{int(strike)}", f"{dte_disp}{urg_flag}", buy_s, cur_s))
-        _tbl2_rows.append((str(idx), pnl_s, pct_s, prob_s[:6], oi_disp[:8], act_disp[:12]))
-
-        # Advice card — kept for context below tables
         html_cards.append(
-            f"{em} <b>{tk} {otype} ${int(strike)}</b>"
-            f"  {a_em} <b>{action}</b> — {advice}"
+            f"{a_em} <b>{tk} {otype} ${int(strike)}</b> {dte_disp}{urg_flag} · "
+            f"{entry:.2f}→{cur_px:.2f} · win {prob_s} · OI {oi_disp}\n"
+            f"<b>{action}</b> — {advice}"
         )
 
-    t1_hdr = ("#", "Ticker", "T", "Strike", "DTE", "Entry", "Now")
-    t2_hdr = ("#", "PnL$", "P%", "Win", "OI", "Action")
-    table1 = _pipe_table(t1_hdr, _tbl1_rows) if _tbl1_rows else ""
-    table2 = _pipe_table(t2_hdr, _tbl2_rows) if _tbl2_rows else ""
+    table1 = _pipe_table(("ST", "Leg", "P&L$", "P%"), _tbl_rows,
+                         right_cols={2, 3},
+                         legend="🟢 good · 🟡 watch · 🔴 bad · 🚨 urgent") if _tbl_rows else ""
 
-    advice_section = "\n".join(html_cards)
-    colour_section = f"{table1}\n{table2}\n\n{advice_section}"
+    advice_section = "\n\n".join(html_cards)
+    colour_section = f"{table1}\n\n{advice_section}"
 
     urgent_section = ""
     if urgent_lines:
@@ -10019,6 +10011,7 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
         + footer
     )
 
+    _first_tk = str(trades["ticker"].iloc[0]).upper() if not trades.empty else "SPY"
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("💼 Positions", callback_data="menu_positions"),
         InlineKeyboardButton("🎯 Exit Plan", callback_data="menu_exit"),
@@ -10151,6 +10144,98 @@ def _data_health_upsert(conn):
         tuple(live_kinds))
     conn.commit()
     return pd.read_sql("SELECT * FROM data_health_alerts WHERE status='OPEN' ORDER BY alert_id", conn)
+
+
+# ── Stringent daily data AUDIT (user 2026-07-17): after the EOD run, grade the
+#    day's data VALIDATED / PARTIAL / FAILED across every lane; dashboard shows
+#    the verdict banner every day; Telegram posts it post-EOD. ──
+def _ensure_data_audit_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS data_audit (
+            audit_date TEXT PRIMARY KEY,   -- trading day audited (ISO)
+            status     TEXT,               -- VALIDATED / PARTIAL / FAILED
+            summary    TEXT,               -- one line per check
+            run_at     TEXT
+        )
+    """)
+    conn.commit()
+
+
+def _data_audit(conn, day=None):
+    """Stringent per-day audit. Returns (status, checks, day);
+    checks = [(name, ok_bool, detail_str)]. Persists to data_audit."""
+    day = day or _last_expected_eod()
+    checks = []
+
+    def _nt(tbl, col):
+        try:
+            return int(conn.execute(
+                f"SELECT COUNT(DISTINCT ticker) FROM {tbl} WHERE {col}=?", (day,)).fetchone()[0] or 0)
+        except Exception:
+            return 0
+
+    cap = _nt("options_openbb", "trade_date")
+    der = _nt("options_change", "trade_date_now")
+    stk = _nt("stock_daily", "trade_date")
+    skw = _nt("skew_snapshot", "trade_date")
+    checks.append(("capture", cap >= 300, f"options_openbb: {cap} tickers"))
+    checks.append(("derive", der >= 300, f"options_change: {der} tickers"))
+    checks.append(("derive=capture", cap > 0 and der >= cap * 0.9, f"derive covers {der}/{cap}"))
+    checks.append(("stock", stk >= 300, f"stock_daily: {stk} tickers"))
+    checks.append(("skew", skw >= 300, f"skew_snapshot: {skw} tickers"))
+    try:
+        tot, nul = conn.execute(
+            "SELECT COUNT(*), SUM(CASE WHEN openInt_Call_now IS NULL THEN 1 ELSE 0 END) "
+            "FROM options_change WHERE trade_date_now=?", (day,)).fetchone()
+        _nr = (float(nul or 0) / tot * 100) if tot else 100.0
+        checks.append(("null-rate", _nr < 5.0, f"{_nr:.1f}% NULL call-OI rows"))
+    except Exception:
+        checks.append(("null-rate", False, "null check failed"))
+    _pq = os.path.join(os.path.dirname(DB_PATH), "openbb_chains", f"chains_{day}.parquet")
+    checks.append(("parquet", os.path.exists(_pq), f"chains_{day}.parquet "
+                   + ("present" if os.path.exists(_pq) else "MISSING (offsite-backup source)")))
+
+    if all(ok for _, ok, _ in checks):
+        status = "VALIDATED"
+    elif cap >= 300 and der >= 300:
+        status = "PARTIAL"
+    else:
+        status = "FAILED"
+    _ensure_data_audit_table(conn)
+    _summary = " · ".join(("✅" if ok else "❌") + f" {n}: {d}" for n, ok, d in checks)
+    conn.execute("INSERT OR REPLACE INTO data_audit (audit_date, status, summary, run_at) "
+                 "VALUES (?,?,?,?)",
+                 (day, status, _summary,
+                  datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M")))
+    conn.commit()
+    return status, checks, day
+
+
+async def data_audit_alert(ctx: ContextTypes.DEFAULT_TYPE):
+    """Post-EOD job: run the stringent audit and post the verdict (once/day)."""
+    conn = get_conn()
+    try:
+        status, checks, day = _data_audit(conn)
+        today_s = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
+        _ensure_alert_dedup_table(conn)
+        if _alert_already_sent(conn, today_s, f"{day}|{status}", "data_audit"):
+            return
+    finally:
+        conn.close()
+    _em = {"VALIDATED": "🟢", "PARTIAL": "🟡", "FAILED": "🔴"}[status]
+    rows = [(("✅" if ok else "❌"), n, d.split(":")[-1].strip()[:14]) for n, ok, d in checks]
+    msg = _report(
+        f"{_em} DATA AUDIT {day} — {status}",
+        ("ST", "Check", "Detail"), rows,
+        legend="✅ pass · ❌ fail",
+        notes=("All lanes verified — data is trustworthy today." if status == "VALIDATED" else
+               "Core lanes OK but some checks failed — see dashboard banner." if status == "PARTIAL" else
+               "Data NOT usable — capture/derive missing. Check scheduler + logs."))
+    _, chat_id = load_creds()
+    try:
+        await ctx.bot.send_message(chat_id=chat_id, text=msg, parse_mode=H)
+    except Exception as e:
+        log.warning(f"data_audit_alert send failed: {e}")
 
 
 async def data_health_alert(ctx: ContextTypes.DEFAULT_TYPE):
@@ -28592,6 +28677,7 @@ def main():
         job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # ~4:35 PM ET — silently log anti-bubble baskets for tracking
         job_queue.run_daily(data_health_alert, time=dt_time(13, 10, 0))  # data-health check ~8:10 AM ET (nags until acked)
         job_queue.run_daily(data_health_alert, time=dt_time(23, 30, 0))  # and post-EOD-lane ~6:30 PM ET
+        job_queue.run_daily(data_audit_alert, time=dt_time(23, 35, 0))   # stringent EOD audit verdict ~6:35 PM ET
         log.info("Scheduled Risk-Off Radar (startup + post-close)")
         log.info("Scheduled morning alert at 9:00 AM ET daily")
         # 15-min intraday alert (fires every 15 min; function checks market hours internally)

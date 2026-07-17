@@ -4602,29 +4602,27 @@ def _oi_opportunity_table(ticker: str, conn, df, spot: float) -> str:
         if a >= 1_000:     return f"{a/1e3:.0f}K"
         return f"{a:.0f}"
 
-    # ── BUY table ──────────────────────────────────────────────────
+    # ── BUY table (standard _pipe_table; P=2×In, L=In on 2:1 target) ──
     if buy_opps:
-        # cols: Strat(4) Stk(4) Win(3) In$(5) P$(5) L$(5)  total=~28
-        _bh = "{:<5} {:>4} {:>3}%  {:>5} {:>5} {:>5}".format("Strat","Stk","Win","In$","P$","L$")
-        _bsep = "-" * 28
-        _brows = [_bh, _bsep]
-        for strat, strike, pw, rr, invest, profit, loss in buy_opps:
-            _s = strat.replace("BUY ","").replace("STRADDLE","STRD")[:5]
-            _brows.append("{:<5} {:>4} {:>3}%  {:>5} {:>5} {:>5}".format(
-                _s, f"{strike:.0f}", pw, _fk(invest), _fk(profit), _fk(loss)))
-        lines.append("\n<b>BUY (pay premium)</b>\n<pre>" + "\n".join(_brows) + "</pre>")
+        _brows = [(strat.replace("BUY ", "").replace("STRADDLE", "STRD")[:5].strip(),
+                   f"{strike:.0f}", f"{pw}%", _fk(invest))
+                  for strat, strike, pw, rr, invest, profit, loss in buy_opps]
+        lines.append("\n" + _pipe_table(
+            ("Strat", "Stk", "Win", "In$"), _brows, right_cols={2, 3},
+            title="BUY (pay premium)",
+            legend="2:1 target — profit 2×In · max loss = In"))
 
-    # ── SELL table ─────────────────────────────────────────────────
+    # ── SELL table (Rcv in table, per-row risk in detail lines) ───────
     if sell_opps:
-        # cols: Strat(5) Stk(4) Win(3) Rcv$(5) Risk$(5)  total=~26
-        _sh = "{:<5} {:>4} {:>3}%  {:>5} {:>5}".format("Strat","Stk","Win","Rcv$","Risk")
-        _ssep = "-" * 26
-        _srows = [_sh, _ssep]
+        _srows, _sdet = [], []
         for strat, strike, pw, rr, invest, profit, loss in sell_opps:
-            _s = strat.replace("SELL ","S").replace("IRON COND","ICOND")[:5]
-            _srows.append("{:<5} {:>4} {:>3}%  {:>5} {:>5}".format(
-                _s, f"{strike:.0f}", pw, _fk(invest), _fk(loss)))
-        lines.append("\n<b>SELL (collect premium)</b>\n<pre>" + "\n".join(_srows) + "</pre>")
+            _s = strat.replace("SELL ", "S").replace("IRON COND", "ICOND")[:5].strip()
+            _srows.append((_s, f"{strike:.0f}", f"{pw}%", _fk(invest)))
+            _sdet.append(f"• {_s} {strike:.0f} — collect ${_fk(invest)}, max risk ${_fk(loss)}")
+        lines.append("\n" + _pipe_table(
+            ("Strat", "Stk", "Win", "Rcv$"), _srows, right_cols={2, 3},
+            title="SELL (collect premium)"))
+        lines.append("\n".join(_sdet))
 
     if earn_flag:
         lines.append(f"<i>Earnings in {earn_dte}d — IV crush after event. Buy straddle before, sell spread after.</i>")
@@ -5093,27 +5091,10 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
         if p < -300:                                   return "HOFF", zone
         return "FLAT", zone
 
-    # ── Box-table helpers (pipe + plus borders, mobile-safe) ──────────
-    # All widths are fixed so every column starts at the same index.
-    #
-    # Table A: |Stk(5)|C-Chg(6)|P-Chg(6)|Sig(4)|  → 26 chars
-    _A_SEP = "+-----+------+------+----+"
-    _A_HDR = "|{:<5}|{:>6}|{:>6}|{:<4}|".format("Stk", "C-Chg", "P-Chg", "Sig")
-    _A_ROW = "|{:<5}|{:>6}|{:>6}|{:<4}|"
-    #
-    # Table B: |Stk(5)|Zone(4)|C-Px$(5)|P-Px$(5)|  → 24 chars
-    _B_SEP = "+-----+----+-----+-----+"
-    _B_HDR = "|{:<5}|{:<4}|{:>5}|{:>5}|".format("Stk", "Zone", "C-Px$", "P-Px$")
-    _B_ROW = "|{:<5}|{:<4}|{:>5}|{:>5}|"
-    #
-    # Table C: |Stk(5)|Pat(4)|C-$Paid(7)|P-$Paid(7)|  → 28 chars
-    _C_SEP = "+-----+----+-------+-------+"
-    _C_HDR = "|{:<5}|{:<4}|{:>7}|{:>7}|".format("Stk", "Pat", "C-$Paid", "P-$Paid")
-    _C_ROW = "|{:<5}|{:<4}|{:>7}|{:>7}|"
-
-    _t1_rows = [_A_SEP, _A_HDR, _A_SEP]
-    _t2_rows = [_B_SEP, _B_HDR, _B_SEP]
-    _t3_rows = [_C_SEP, _C_HDR, _C_SEP]
+    # ── Standard _pipe_table rows (universal format 2026-07-16) ───────
+    _t1_rows = []   # (Stk, CΔ, PΔ, Sig)
+    _t2_rows = []   # (Stk, Zone, C$, P$)
+    _t3_rows = []   # (Stk, Pat, C$, P$)
 
     for _, r in df.sort_values("strike").iterrows():
         _c   = float(r["call_chg"] or 0)
@@ -5123,7 +5104,7 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
 
         # Table A: OI change + signal
         _sig = _sig_short(_c, _p, spot, _sk, agg_pcr)
-        _t1_rows.append(_A_ROW.format(_stk_lbl, _fk2(_c), _fk2(_p), _sig))
+        _t1_rows.append((_stk_lbl, _fk2(_c).strip(), _fk2(_p).strip(), _sig))
 
         # BS option prices
         try:
@@ -5137,35 +5118,30 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
         # Table B: prices
         _pat, _zone = _pat_short(_c, _p, float(r["call_oi"] or 0),
                                  float(r["put_oi"] or 0), spot, _sk, agg_pcr)
-        _t2_rows.append(_B_ROW.format(_stk_lbl, _zone, _px_fmt(_cpx), _px_fmt(_ppx)))
+        _t2_rows.append((_stk_lbl, _zone, _px_fmt(_cpx).strip(), _px_fmt(_ppx).strip()))
 
         # Table C: actual $ premium paid today
         def _prm_fmt(v):
-            if abs(v) < 500: return "      -"
-            sign = "+" if v >= 0 else "-"
-            return f"{sign}${_fmn(abs(v)):>5}"
+            if abs(v) < 500: return "-"
+            return f"{'+' if v >= 0 else '-'}{_fmn(abs(v))}"
         _c_prm = _c * _cpx * 100
         _p_prm = _p * _ppx * 100
-        _t3_rows.append(_C_ROW.format(_stk_lbl, _pat, _prm_fmt(_c_prm), _prm_fmt(_p_prm)))
+        _t3_rows.append((_stk_lbl, _pat, _prm_fmt(_c_prm), _prm_fmt(_p_prm)))
 
-    # Close box borders
-    _t1_rows.append(_A_SEP)
-    _t2_rows.append(_B_SEP)
-    _t3_rows.append(_C_SEP)
-
-    _sig_legend = (
-        "<i>BULL=calls  BEAR=puts  STRD=straddle\n"
-        "SPEC=OTM-spec  SHRT=ATM-short\n"
-        "UNWD=closing  HEDG=hedge  HOFF=hedge-off</i>"
-    )
-    table_str = "<pre>" + "\n".join(_t1_rows) + "</pre>\n" + _sig_legend
+    table_str = _pipe_table(
+        ("Stk", "CΔ", "PΔ", "Sig"), _t1_rows, right_cols={1, 2},
+        legend=("BULL=calls BEAR=puts STRD=strdl\n"
+                "SPEC=OTM-spec SHRT=ATM-short\n"
+                "UNWD=closing HEDG/HOFF=hedge"))
 
     detail_tbl = (
-        "\n<b>Option Prices (BS est.)</b>\n"
-        "<pre>" + "\n".join(_t2_rows) + "</pre>"
-        "\n<b>$ Paid Today (real premium)</b>\n"
-        "<pre>" + "\n".join(_t3_rows) + "</pre>\n"
-        "<i>+$=new money IN  -$=money leaving  qty x price x 100</i>"
+        "\n"
+        + _pipe_table(("Stk", "Zone", "C$", "P$"), _t2_rows, right_cols={2, 3},
+                      title="Option Prices (BS est.)")
+        + "\n"
+        + _pipe_table(("Stk", "Pat", "C$", "P$"), _t3_rows, right_cols={2, 3},
+                      title="$ Paid Today (real premium)",
+                      legend="+$=new money IN · -$=leaving · qty×px×100")
     )
 
     # ── OI Timeline: 5d / 10d / 30d per strike ─────────────────────
@@ -5236,17 +5212,12 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                     return " -- "
 
                 # Table format: |Stk(5)|5d%(4)|10d%(5)|30d%(5)|Sig(3)|Trd(4)| = 1+5+1+4+1+5+1+5+1+3+1+4+1 = 32 too wide
-                # Split: Call table and Put table separately
-                # |Stk(5)|5d%(4)|10d%(5)|30d%(5)|Trd(3)| = 1+5+1+4+1+5+1+5+1+3+1 = 27 chars
-                _WT_SEP = "+-----+----+-----+-----+---+"
-                _WT_CHR = "|{:<5}|{:>4}|{:>5}|{:>5}|{:<3}|"
-                _WT_PHR = "|{:<5}|{:>4}|{:>5}|{:>5}|{:<3}|"
-                _WT_CHDR = _WT_CHR.format("Stk"," 5d%"," 10d%"," 30d%","Trd")
-                _WT_PHDR = _WT_PHR.format("Stk"," 5d%"," 10d%"," 30d%","Trd")
-
-                _c_rows = [_WT_SEP, _WT_CHDR, _WT_SEP]
-                _p_rows = [_WT_SEP, _WT_PHDR, _WT_SEP]
+                # Split: Call table and Put table separately (_pipe_table rows;
+                # trend UP/DN folds into the Stk col as ^/v to keep width ≤28)
+                _c_rows = []
+                _p_rows = []
                 _sig_em_parts = []
+                _tarw = {"UP": "^", "~UP": "^", "DN": "v", "~DN": "v"}
 
                 for _sk3 in sorted(_active_sk):
                     _sk_data = _wk_df[_wk_df["strike"] == _sk3]
@@ -5258,30 +5229,31 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                     _c5  = _v(_d5,"c_oi");  _p5  = _v(_d5,"p_oi")
                     _c10 = _v(_d10,"c_oi"); _p10 = _v(_d10,"p_oi")
                     _c30 = _v(_d30,"c_oi"); _p30 = _v(_d30,"p_oi")
-                    _stk4 = (f"")[:5]
+                    _stk4 = f"{_sk3:g}"[:5]
                     _c5p = _pct(_c_now,_c5); _c10p = _pct(_c_now,_c10); _c30p = _pct(_c_now,_c30)
                     _p5p = _pct(_p_now,_p5); _p10p = _pct(_p_now,_p10); _p30p = _pct(_p_now,_p30)
                     _ct  = _trend3(_sk_data, "c_oi"); _pt  = _trend3(_sk_data, "p_oi")
                     _sg3 = _sig3(_c5p, _p5p)
-                    _em  = {"BUY":"GRN","SEL":"RED","HDG":"YLW","UNW":"RED","NEU":"GRY"}.get(_sg3,"GRY")
-                    _c_rows.append(_WT_CHR.format(_stk4, _ps4(_c5p), _ps5(_c10p), _ps5(_c30p), _ct.strip()[:3]))
-                    _p_rows.append(_WT_PHR.format(_stk4, _ps4(_p5p), _ps5(_p10p), _ps5(_p30p), _pt.strip()[:3]))
-                    _sig_em_parts.append(f"{_em}:{_stk4}")
+                    _em  = {"BUY":"🟢","SEL":"🔴","HDG":"🟡","UNW":"🔴","NEU":"⚪"}.get(_sg3,"⚪")
+                    _c_rows.append((_stk4 + _tarw.get(_ct.strip(), ""), _ps4(_c5p).strip(),
+                                    _ps4(_c10p).strip(), _ps4(_c30p).strip()))
+                    _p_rows.append((_stk4 + _tarw.get(_pt.strip(), ""), _ps4(_p5p).strip(),
+                                    _ps4(_p10p).strip(), _ps4(_p30p).strip()))
+                    _sig_em_parts.append(f"{_em}{_stk4}")
 
-                _c_rows.append(_WT_SEP); _p_rows.append(_WT_SEP)
+                _em_line = " ".join(_sig_em_parts)
 
-                _em_map = {"GRN":"Green","RED":"Red","YLW":"Yellow","GRY":"Gray"}
-                _em_line = "  ".join(_sig_em_parts)
-
-                if len(_c_rows) > 4:
+                if _c_rows:
                     week_tbl = (
-                        chr(10) + chr(10) + "<b>CALL OI Timeline</b>" + chr(10)
-                        + "<i>5d/10d/30d % change  Trd=UP/DN/-- trend</i>" + chr(10)
-                        + "<pre>" + chr(10).join(_c_rows) + "</pre>"
-                        + chr(10) + "<b>PUT OI Timeline</b>" + chr(10)
-                        + "<pre>" + chr(10).join(_p_rows) + "</pre>"
-                        + chr(10) + "<i>GRN=calls up  RED=puts up  YLW=both  GRY=flat</i>" + chr(10)
-                        + "<b>Signal: </b>" + _em_line
+                        "\n\n"
+                        + _pipe_table(("Stk", "5d%", "10d%", "30d%"), _c_rows,
+                                      right_cols={1, 2, 3}, title="CALL OI Timeline")
+                        + "\n"
+                        + _pipe_table(("Stk", "5d%", "10d%", "30d%"), _p_rows,
+                                      right_cols={1, 2, 3}, title="PUT OI Timeline",
+                                      legend="^ building · v unwinding (Stk suffix)")
+                        + "\n<b>Signal:</b> " + _em_line
+                        + "\n<i>🟢 call-buy · 🔴 put-sell/unwind · 🟡 hedged · ⚪ flat</i>"
                     )
     except Exception as _wk_e:
         pass  # week trend is optional
@@ -5355,14 +5327,12 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
     _net_dir = "BULL" if net_flow >= 0 else "BEAR"
     summary_lines = [
         "",
-        f"<b>📋 {theme}</b>",
-        "<pre>",
-        "{:<5} {:>7} {:>7}".format("Side","Amount","Ctrs"),
-        "-" * 22,
-        "{:<5} {:>7} {:>7}".format("Bull", _fmt_notional(call_notional), f"+{_fk_k(total_call_build)}c"),
-        "{:<5} {:>7} {:>7}".format("Bear", _fmt_notional(put_notional),  f"+{_fk_k(total_put_build)}p"),
-        "{:<5} {:>7} {:>7}".format("Net", _fmt_notional(abs(net_flow)),  _net_dir),
-        "</pre>",
+        _pipe_table(
+            ("ST", "Side", "Amount", "Ctrs"),
+            [("🟢", "Bull", _fmt_notional(call_notional), f"+{_fk_k(total_call_build)}c"),
+             ("🔴", "Bear", _fmt_notional(put_notional),  f"+{_fk_k(total_put_build)}p"),
+             ("⚖️", "Net",  _fmt_notional(abs(net_flow)), _net_dir)],
+            right_cols={2, 3}, title=f"📋 {theme}"),
         f"<i>{theme_detail}</i>",
         f"\n💡 <b>Idea:</b> {trade_idea}",
     ]

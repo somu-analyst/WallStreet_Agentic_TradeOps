@@ -8,7 +8,12 @@ Options-trading edge system: Telegram bot + dashboard + our own capture-forward 
 (bid/ask/IV/delta), every signal validated against DB history — less API dependence, more provable edge.
 
 ## Open tasks
-- [ ] **Format-sweep iteration (user 2026-07-16: "iteratively do it for all tabular outputs").**
+- [x] **Format-sweep COMPLETE 2026-07-17** — every genuine tabular reply now `_report()`/`_pipe_table`
+  (/earnvol shape, ST emoji col 0). Final batches (commit 9237648): mirofish, group-save, confirm
+  cards, quote view, RSI/MACD/BB/EMA/score, macro+positions minis, GTC orders, portfolio+ticker
+  risk summaries, HP model+backtest tables, short-interest ranking, smart-money UOA/blocks, gamma
+  advisor structure/ticket/expiry-walls, edge lab. Kept plain (judgment, narrative not tables):
+  roll-detector descriptions, mood lines, keyless-macro fallback, note/detail mono() one-liners.
   Standard = `_report()`/`_pipe_table` (emoji col 0, ≤28 chars, legend) — user re-confirmed
   2026-07-17: EXACT /earnvol shape, ST emoji col FIRST, never text signal columns. DONE so far:
   all `_fmt_*`/`_send_*` formatters + positions_view + momentum/opex/squeeze/macro/gex/OI-flow +

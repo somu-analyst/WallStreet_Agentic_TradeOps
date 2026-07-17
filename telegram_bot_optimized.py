@@ -9223,26 +9223,18 @@ async def signal_scanner(query):
         if a >= 1_000:     return f"{s}{a/1_000:.0f}K"
         return f"{s}{n:.0f}"
 
-    def signal_table(label, sub_df, badge=""):
-        """Narrow 5-col <pre> table — target ≤33 chars per row for mobile."""
-        # ST(3) | Tkr(4) | C-OI(4) | P-OI(4) | PCR(4)  =  ~31 chars
-        _hdrs  = ["ST", "Tkr", "C-OI", "P-OI", "PCR"]
-        _RIGHT = {2, 3, 4}
-        _rows  = []
+    def signal_table(label, sub_df, badge="🟡"):
+        """Narrow 5-col _pipe_table — /earnvol shape, emoji ST col 0, ≤28 chars."""
+        _hdrs = ("ST", "Tkr", "C-OI", "P-OI", "PCR")
+        _rows = []
         for _, r in sub_df.head(6).iterrows():
             c   = float(r["call_oi_chg"] or 0)
             p   = float(r["put_oi_chg"]  or 0)
             pcr = float(r["pcr"]) if r["pcr"] == r["pcr"] else 0.0
-            _rows.append([badge, str(r["ticker"])[:5], _fk(c), _fk(p), f"{pcr:.2f}"])
+            _rows.append((badge, str(r["ticker"])[:5], _fk(c), _fk(p), f"{pcr:.2f}"))
         if not _rows:
             return ""
-        _cw = [max(len(_hdrs[i]), max(len(rr[i]) for rr in _rows)) for i in range(len(_hdrs))]
-        _jn = lambda i, v: v.rjust(_cw[i]) if i in _RIGHT else v.ljust(_cw[i])
-        _sep = "-+-".join("-" * w for w in _cw)
-        lines = [" | ".join(_jn(i, _hdrs[i]) for i in range(len(_hdrs))), _sep]
-        for rr in _rows:
-            lines.append(" | ".join(_jn(i, rr[i]) for i in range(len(_hdrs))))
-        return f"\n<b>{label}</b>\n<pre>" + "\n".join(lines) + "</pre>"
+        return f"\n<b>{label}</b>\n" + _pipe_table(_hdrs, _rows, right_cols={2, 3, 4})
 
     # Classify each ticker using hedge-aware algorithm
     def _scan_sig(row):
@@ -9257,13 +9249,13 @@ async def signal_scanner(query):
     unusual = df[df["oi_sig"].isin(["STRADDLE", "BULL+HEDGE"])].nlargest(4, "total_chg")
 
     if not bulls.empty:
-        parts.append(signal_table("🟢 BULLISH — Call OI Building", bulls, badge="[B]"))
+        parts.append(signal_table("🟢 BULLISH — Call OI Building", bulls, badge="🟢"))
     if not bears.empty:
-        parts.append(signal_table("🔴 BEARISH — Put OI Directional", bears, badge="[S]"))
+        parts.append(signal_table("🔴 BEARISH — Put OI Directional", bears, badge="🔴"))
     if not hedges.empty:
-        parts.append(signal_table("🔵 HEDGE/PROTECT — Deep OTM Puts", hedges, badge="[H]"))
+        parts.append(signal_table("🔵 HEDGE/PROTECT — Deep OTM Puts", hedges, badge="🔵"))
     if not unusual.empty:
-        parts.append(signal_table("🟡 STRADDLE/EVENT — Both Sides Up", unusual, badge="[?]"))
+        parts.append(signal_table("🟡 STRADDLE/EVENT — Both Sides Up", unusual, badge="🟡"))
 
     mixed = len(df) - len(bulls) - len(bears)
     parts.append(f"\n📊 <b>{len(df)} tickers</b> scanned · {mixed} mixed/neutral")
@@ -9447,16 +9439,16 @@ async def market_analytics_report(query):
                 px   = float(h["Close"].iloc[-1])
                 prev = float(h["Close"].iloc[-2])
                 chg  = (px - prev) / prev * 100
-                st    = "[+]" if chg > 0.5 else ("[!]" if chg < -0.5 else "[ ]")
+                st    = "🟢" if chg > 0.5 else ("🔴" if chg < -0.5 else "🟡")
                 if sym in ("ES=F", "^GSPC"): sentiment_score += chg * 8
                 if sym == "^VIX":            vix_val = px
                 px_s = f"{px:,.2f}" if px < 1000 else f"{px:,.0f}"
                 _f_data.append([st, name, px_s, f"{chg:+.2f}%", _col_arrow(chg)])
                 _f_chgs[name] = chg
             else:
-                _f_data.append(["[?]", name, "N/A", "---", ""])
+                _f_data.append(["🟡", name, "N/A", "---", ""])
         except Exception:
-            _f_data.append(["[?]", name, "ERR", "---", ""])
+            _f_data.append(["🔴", name, "ERR", "---", ""])
 
     if vix_val > 30:   vol_lbl = "EXTREME FEAR"
     elif vix_val > 25: vol_lbl = "HIGH FEAR"
@@ -9519,11 +9511,11 @@ async def market_analytics_report(query):
     _oi_RGHT = {2, 3, 4}
     _oi_rows = []
     for tk, c, p, pcr in bull_rows_data[:5]:
-        _oi_rows.append(["[B]", tk[:7], _fmt_k(c), _fmt_k(p), f"{pcr:.2f}"])
+        _oi_rows.append(["🟢", tk[:7], _fmt_k(c), _fmt_k(p), f"{pcr:.2f}"])
     for tk, c, p, pcr in bear_rows_data[:5]:
-        _oi_rows.append(["[S]", tk[:7], _fmt_k(c), _fmt_k(p), f"{pcr:.2f}"])
+        _oi_rows.append(["🔴", tk[:7], _fmt_k(c), _fmt_k(p), f"{pcr:.2f}"])
     if unusual_tickers:
-        _oi_rows.append(["[?]", ", ".join(unusual_tickers[:3])[:7], "", "", ""])
+        _oi_rows.append(["🟡", ", ".join(unusual_tickers[:3])[:7], "", "", ""])
     if _oi_rows:
         parts.append(f"<b>OI FLOW  {latest_date}</b>\n"
                      + _pipe_table(tuple(_oi_hdr), _oi_rows, right_cols=_oi_RGHT))
@@ -10671,11 +10663,14 @@ def _format_trade_signal(rec: dict, direction: str) -> str:
 
 
 def _scanner_table(records, direction):
-    """Excel-style fixed-width table of scanner picks (keeps every field, scrolls like a sheet)."""
-    rows = []
+    """Standard format: narrow ST/Tk/Px/5d% table (≤28 chars, /earnvol shape) +
+    per-ticker detail lines for entry/stop/targets/hedge (was an 18-col grid
+    that wrapped unreadably on mobile — user flagged 2026-07-17)."""
+    rows, details = [], []
+    _em = "🟢" if direction == "BULL" else "🔴"
     for r in records:
         close = r["close"]; atr = r.get("atr", close * 0.02)
-        r5 = r.get("ret_5d", 0); r10 = r.get("ret_10d", 0); r20 = r.get("ret_20d", 0)
+        r5 = r.get("ret_5d", 0)
         vr = r.get("vol_rat", 1.0); pcr = r.get("pcr", 1.0)
         l20 = r.get("low_20d", close); h20 = r.get("high_20d", close)
         ss = _signal_strength(r, direction)
@@ -10695,13 +10690,15 @@ def _scanner_table(records, direction):
             rr = (close - t1) / max(stop - close, 0.01)
             hedge = f"B{close*1.03:.0f}c/S{stop*1.01:.0f}c"
             tag = "KNIFE" if r5 < -15 else ("BRKDN" if r5 < -7 else "WEAK")
-        rows.append((r["ticker"], f"{close:.2f}", tag, str(ss), f"{r5:+.0f}", f"{r10:+.0f}",
-                     f"{r20:+.0f}", f"{vr:.1f}x", str(cons), f"{pcr:.2f}", f"{l20:.0f}",
-                     f"{h20:.0f}", entry, f"{stop:.2f}", f"1:{rr:.1f}", f"{t1:.2f}", f"{t2:.2f}", hedge))
-    hdr_cols = ("Tk", "Px", "Tag", "S", "5d", "10d", "20d", "Vol", "Cn", "PCR", "Lo", "Hi",
-                "Entry", "Stop", "RR", "T1", "T2", "Hedge")
-    return (_pipe_table(hdr_cols, rows, right_cols={1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16})
-            + "\n<i>S=strength/10 · Cn=consec days · Vol=×avg · prices=$ · Hedge=spread ≥21DTE</i>")
+        rows.append((_em, r["ticker"][:5], f"{close:.2f}", f"{r5:+.0f}%"))
+        details.append(
+            f"<b>{r['ticker']} {tag}</b>  S{ss}/10 · {vr:.1f}x vol · {cons}d streak · PCR {pcr:.2f}\n"
+            f"Entry {entry} · Stop {stop:.2f} · RR 1:{rr:.1f}\n"
+            f"T1 {t1:.2f} · T2 {t2:.2f} · Hedge {hedge}"
+        )
+    tbl = _pipe_table(("ST", "Tk", "Px", "5d%"), rows, right_cols={2, 3})
+    return (tbl + "\n\n" + "\n\n".join(details)
+            + "\n<i>S=strength/10 · Range=20d Lo/Hi · Hedge=spread ≥21DTE</i>")
 
 
 async def scanner_menu(query):
@@ -10780,11 +10777,11 @@ async def intraday_alert(ctx: ContextTypes.DEFAULT_TYPE):
                 px  = float(h["Close"].iloc[-1])
                 op  = float(h["Open"].iloc[0])
                 chg = (px - op) / op * 100
-                st  = "[+]" if chg > 0.3 else ("[!]" if chg < -0.3 else "[ ]")
+                st  = "🟢" if chg > 0.3 else ("🔴" if chg < -0.3 else "🟡")
                 px_s = f"{px:,.1f}" if px < 10000 else f"{px:,.0f}"
                 _frows.append([st, name, px_s, f"{chg:+.2f}%"])
         except Exception:
-            _frows.append(["[?]", name, "ERR", "---"])
+            _frows.append(["🔴", name, "ERR", "---"])
     if _frows:
         parts.append("<b>FUTURES</b>\n" + _pipe_table(tuple(_fhdr), _frows, right_cols={2, 3}))
 
@@ -10898,7 +10895,7 @@ async def intraday_alert(ctx: ContextTypes.DEFAULT_TYPE):
                             p    = float(r["p_chg"] or 0)
                             exp  = str(r["expiry_date"])[:5]
                             bias = "BULL" if c > abs(p)*1.1 else ("BEAR" if p > abs(c)*1.1 else "FLAT")
-                            st   = "[B]" if bias=="BULL" else ("[S]" if bias=="BEAR" else "[ ]")
+                            st   = "🟢" if bias=="BULL" else ("🔴" if bias=="BEAR" else "🟡")
                             _oi_data.append([st, tk, exp, _fk2(c), _fk2(p)])
 
                             # Top active strikes for this expiry
@@ -11007,8 +11004,7 @@ async def intraday_alert(ctx: ContextTypes.DEFAULT_TYPE):
                     _oi_t_rows = []
                     for _od in _oi_data:
                         _st_badge, _tk2, _exp2, _c2s, _p2s = _od
-                        _em2 = "🟢" if _st_badge == "[B]" else ("🔴" if _st_badge == "[S]" else "🟡")
-                        _oi_t_rows.append((_em2, _tk2, _exp2, _c2s, _p2s))
+                        _oi_t_rows.append((_st_badge, _tk2, _exp2, _c2s, _p2s))
                     parts.append("\n" + _pipe_table(
                         ("ST", "Tkr", "Exp", "C-OI", "P-OI"), _oi_t_rows, right_cols={3, 4},
                         title="YOUR POSITIONS — NEXT EXPIRY OI",

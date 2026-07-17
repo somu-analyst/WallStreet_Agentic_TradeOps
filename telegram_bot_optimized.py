@@ -4602,26 +4602,28 @@ def _oi_opportunity_table(ticker: str, conn, df, spot: float) -> str:
         if a >= 1_000:     return f"{a/1e3:.0f}K"
         return f"{a:.0f}"
 
-    # ── BUY table (standard _pipe_table; P=2×In, L=In on 2:1 target) ──
+    # ── BUY table (/earnvol standard: emoji ST col; P=2×In, L=In) ─────
+    _bem = {"BUY CALL": "🟢", "BUY PUT ": "🔴", "STRADDLE": "🟡",
+            "SELL PUT": "🟢", "SELL CALL": "🔴", "IRON COND": "🟡"}
     if buy_opps:
-        _brows = [(strat.replace("BUY ", "").replace("STRADDLE", "STRD")[:5].strip(),
-                   f"{strike:.0f}", f"{pw}%", _fk(invest))
+        _brows = [(_bem.get(strat, "⚪"), f"{strike:.0f}", f"{pw}%", _fk(invest))
                   for strat, strike, pw, rr, invest, profit, loss in buy_opps]
         lines.append("\n" + _pipe_table(
-            ("Strat", "Stk", "Win", "In$"), _brows, right_cols={2, 3},
+            ("ST", "Stk", "Win", "In$"), _brows, right_cols={2, 3},
             title="BUY (pay premium)",
-            legend="2:1 target — profit 2×In · max loss = In"))
+            legend="🟢 call · 🔴 put · 🟡 straddle — 2:1 target, max loss = In"))
 
     # ── SELL table (Rcv in table, per-row risk in detail lines) ───────
     if sell_opps:
         _srows, _sdet = [], []
         for strat, strike, pw, rr, invest, profit, loss in sell_opps:
             _s = strat.replace("SELL ", "S").replace("IRON COND", "ICOND")[:5].strip()
-            _srows.append((_s, f"{strike:.0f}", f"{pw}%", _fk(invest)))
+            _srows.append((_bem.get(strat, "⚪"), f"{strike:.0f}", f"{pw}%", _fk(invest)))
             _sdet.append(f"• {_s} {strike:.0f} — collect ${_fk(invest)}, max risk ${_fk(loss)}")
         lines.append("\n" + _pipe_table(
-            ("Strat", "Stk", "Win", "Rcv$"), _srows, right_cols={2, 3},
-            title="SELL (collect premium)"))
+            ("ST", "Stk", "Win", "Rcv$"), _srows, right_cols={2, 3},
+            title="SELL (collect premium)",
+            legend="🟢 sell put · 🔴 sell call · 🟡 condor"))
         lines.append("\n".join(_sdet))
 
     if earn_flag:
@@ -5102,9 +5104,11 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
         _sk  = float(r["strike"])
         _stk_lbl = f"${_sk:.0f}"
 
-        # Table A: OI change + signal
+        # Table A: OI change + signal (emoji ST col 0, /earnvol standard)
         _sig = _sig_short(_c, _p, spot, _sk, agg_pcr)
-        _t1_rows.append((_stk_lbl, _fk2(_c).strip(), _fk2(_p).strip(), _sig))
+        _sig_em = {"BULL": "🟢", "SPEC": "🟢", "BEAR": "🔴", "SHRT": "🔴",
+                   "STRD": "🟡", "HEDG": "🟡", "UNWD": "⚪", "HOFF": "⚪"}.get(_sig, "⚪")
+        _t1_rows.append((_sig_em, _stk_lbl, _fk2(_c).strip(), _fk2(_p).strip()))
 
         # BS option prices
         try:
@@ -5118,7 +5122,8 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
         # Table B: prices
         _pat, _zone = _pat_short(_c, _p, float(r["call_oi"] or 0),
                                  float(r["put_oi"] or 0), spot, _sk, agg_pcr)
-        _t2_rows.append((_stk_lbl, _zone, _px_fmt(_cpx).strip(), _px_fmt(_ppx).strip()))
+        _zone_em = {"ATM": "🟡", "OTM+": "🟢", "OTM-": "🔴"}.get(_zone, "⚪")
+        _t2_rows.append((_zone_em, _stk_lbl, _px_fmt(_cpx).strip(), _px_fmt(_ppx).strip()))
 
         # Table C: actual $ premium paid today
         def _prm_fmt(v):
@@ -5126,22 +5131,23 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
             return f"{'+' if v >= 0 else '-'}{_fmn(abs(v))}"
         _c_prm = _c * _cpx * 100
         _p_prm = _p * _ppx * 100
-        _t3_rows.append((_stk_lbl, _pat, _prm_fmt(_c_prm), _prm_fmt(_p_prm)))
+        _pat_em = {"BULL": "🟢", "INST": "🟢", "SPEC": "🟢", "PUT": "🔴", "SHRT": "🔴",
+                   "STRD": "🟡", "HEDG": "🟡", "UNWD": "⚪", "HOFF": "⚪"}.get(_pat, "⚪")
+        _t3_rows.append((_pat_em, _stk_lbl, _prm_fmt(_c_prm), _prm_fmt(_p_prm)))
 
     table_str = _pipe_table(
-        ("Stk", "CΔ", "PΔ", "Sig"), _t1_rows, right_cols={1, 2},
-        legend=("BULL=calls BEAR=puts STRD=strdl\n"
-                "SPEC=OTM-spec SHRT=ATM-short\n"
-                "UNWD=closing HEDG/HOFF=hedge"))
+        ("ST", "Stk", "CΔ", "PΔ"), _t1_rows, right_cols={2, 3},
+        legend="🟢 call-build · 🔴 put-build · 🟡 straddle/hedge · ⚪ flat/unwind")
 
     detail_tbl = (
         "\n"
-        + _pipe_table(("Stk", "Zone", "C$", "P$"), _t2_rows, right_cols={2, 3},
-                      title="Option Prices (BS est.)")
+        + _pipe_table(("ST", "Stk", "C$", "P$"), _t2_rows, right_cols={2, 3},
+                      title="Option Prices (BS est.)",
+                      legend="🟡 ATM · 🟢 above spot · 🔴 below")
         + "\n"
-        + _pipe_table(("Stk", "Pat", "C$", "P$"), _t3_rows, right_cols={2, 3},
+        + _pipe_table(("ST", "Stk", "C$", "P$"), _t3_rows, right_cols={2, 3},
                       title="$ Paid Today (real premium)",
-                      legend="+$=new money IN · -$=leaving · qty×px×100")
+                      legend="+$=new money IN · -$=leaving")
     )
 
     # ── OI Timeline: 5d / 10d / 30d per strike ─────────────────────
@@ -5216,7 +5222,6 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                 # trend UP/DN folds into the Stk col as ^/v to keep width ≤28)
                 _c_rows = []
                 _p_rows = []
-                _sig_em_parts = []
                 _tarw = {"UP": "^", "~UP": "^", "DN": "v", "~DN": "v"}
 
                 for _sk3 in sorted(_active_sk):
@@ -5235,25 +5240,21 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                     _ct  = _trend3(_sk_data, "c_oi"); _pt  = _trend3(_sk_data, "p_oi")
                     _sg3 = _sig3(_c5p, _p5p)
                     _em  = {"BUY":"🟢","SEL":"🔴","HDG":"🟡","UNW":"🔴","NEU":"⚪"}.get(_sg3,"⚪")
-                    _c_rows.append((_stk4 + _tarw.get(_ct.strip(), ""), _ps4(_c5p).strip(),
-                                    _ps4(_c10p).strip(), _ps4(_c30p).strip()))
-                    _p_rows.append((_stk4 + _tarw.get(_pt.strip(), ""), _ps4(_p5p).strip(),
-                                    _ps4(_p10p).strip(), _ps4(_p30p).strip()))
-                    _sig_em_parts.append(f"{_em}{_stk4}")
-
-                _em_line = " ".join(_sig_em_parts)
+                    _c_rows.append((_em, _stk4 + _tarw.get(_ct.strip(), ""),
+                                    _ps4(_c5p).strip(), _ps4(_c30p).strip()))
+                    _p_rows.append((_em, _stk4 + _tarw.get(_pt.strip(), ""),
+                                    _ps4(_p5p).strip(), _ps4(_p30p).strip()))
 
                 if _c_rows:
                     week_tbl = (
                         "\n\n"
-                        + _pipe_table(("Stk", "5d%", "10d%", "30d%"), _c_rows,
-                                      right_cols={1, 2, 3}, title="CALL OI Timeline")
+                        + _pipe_table(("ST", "Stk", "5d%", "30d%"), _c_rows,
+                                      right_cols={2, 3}, title="CALL OI Timeline")
                         + "\n"
-                        + _pipe_table(("Stk", "5d%", "10d%", "30d%"), _p_rows,
-                                      right_cols={1, 2, 3}, title="PUT OI Timeline",
-                                      legend="^ building · v unwinding (Stk suffix)")
-                        + "\n<b>Signal:</b> " + _em_line
-                        + "\n<i>🟢 call-buy · 🔴 put-sell/unwind · 🟡 hedged · ⚪ flat</i>"
+                        + _pipe_table(("ST", "Stk", "5d%", "30d%"), _p_rows,
+                                      right_cols={2, 3}, title="PUT OI Timeline",
+                                      legend=("🟢 call-buy · 🔴 put-sell/unwind · "
+                                              "🟡 hedged · ⚪ flat · ^bld v unwnd"))
                     )
     except Exception as _wk_e:
         pass  # week trend is optional

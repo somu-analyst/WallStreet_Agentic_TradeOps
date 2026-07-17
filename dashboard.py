@@ -13409,7 +13409,7 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     _sk_row = _stk_tr[_stk_tr["trade_id"] == _sk_id].iloc[0]
                     _sk_open = str(_sk_row["status"]).upper() == "OPEN"
                     _sk_qty0 = int(_sk_row["quantity"] or 0)
-                    _sk_spot = _gp_spot(str(_sk_row["ticker"]).upper()) or 0.0
+                    _sk_spot = _cached_price(str(_sk_row["ticker"]).upper()) or 0.0
                     if _sk_spot and _sk_open:
                         _sk_pnl = (_sk_spot - float(_sk_row["entry_price"] or 0)) * _sk_qty0
                         st.caption(f"Live ${_sk_spot:,.2f} · unrealized **${_sk_pnl:,.0f}** · entry date drives the "

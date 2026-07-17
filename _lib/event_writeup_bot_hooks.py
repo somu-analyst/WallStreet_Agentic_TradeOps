@@ -163,20 +163,24 @@ async def event_anomaly_scan(ctx):
             msg = f"⚠️ <b>MARKET ANOMALY</b>\n\n{a['description']}"
             _d = a.get("data") or {}
             _tk = _d.get("ticker")
-            # Ticker shocks: standard table (ST col dedicated — never fold an
-            # emoji into a text label, that breaks visual column alignment,
-            # user flagged 2026-07-17) + 1-year line chart.
+            # Ticker shocks: plain 2-col Metric/Value table (no ST col — this is
+            # ONE ticker's snapshot, not a multi-row list, so a status column
+            # per row doesn't fit; color folds into the one row that needs it,
+            # user feedback 2026-07-17) + 1-year line chart.
             if a["type"] == "TICKER_SHOCK" and _tk and _d.get("now_px"):
                 _chg = float(_d.get("chg_pct") or 0)
                 _em = "🔴" if _chg < 0 else "🟢"
-                _rows = [(_em, "Now", f"${float(_d['now_px']):.2f}"),
-                         ("", "Open", f"${float(_d.get('day_open') or 0):.2f}"),
-                         ("", "Move", f"{_chg:+.1f}%")]
+                _rows = [("Now", f"${float(_d['now_px']):.2f}")]
+                _pc = _d.get("prev_close")
+                if _pc:
+                    _rows.append(("PrevCls", f"${float(_pc):.2f}"))
+                _rows.append(("Open", f"${float(_d.get('day_open') or 0):.2f}"))
+                _rows.append((f"{_em} Move", f"{_chg:+.1f}%"))
                 _mc = _d.get("mcap_impact")
                 if _mc:
-                    _rows.append(("", "MCapΔ", f"{'-' if _mc < 0 else '+'}${abs(_mc)/1e9:.1f}B"))
+                    _rows.append(("MCapΔ", f"{'-' if _mc < 0 else '+'}${abs(_mc)/1e9:.1f}B"))
                 msg = (f"⚠️ <b>MARKET ANOMALY — {_tk}</b>\n\n"
-                       + _pipe_table(("ST", "Metric", "Value"), _rows, right_cols={2},
+                       + _pipe_table(("Metric", "Value"), _rows, right_cols={1},
                                      legend="move measured vs TODAY's open"))
             await ctx.bot.send_message(chat_id=chat_id, text=msg, parse_mode=H)
             if a["type"] == "TICKER_SHOCK" and _tk:

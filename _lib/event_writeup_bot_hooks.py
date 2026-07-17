@@ -155,7 +155,7 @@ async def event_anomaly_scan(ctx):
     try:
         _ensure_dedup(conn)
         _, chat_id = load_creds()
-        from telegram_bot_optimized import _pipe_table, make_mini_chart
+        from telegram_bot_optimized import _pipe_table, make_line_chart
         for a in severe:
             key = a["type"] + "_" + (a.get("description") or "")[:30]
             if _already_sent(conn, today_str, key, "anomaly"):
@@ -163,25 +163,27 @@ async def event_anomaly_scan(ctx):
             msg = f"⚠️ <b>MARKET ANOMALY</b>\n\n{a['description']}"
             _d = a.get("data") or {}
             _tk = _d.get("ticker")
-            # Ticker shocks: standard table (now / from-open / drop) + 1-mo mini chart
+            # Ticker shocks: standard table (ST col dedicated — never fold an
+            # emoji into a text label, that breaks visual column alignment,
+            # user flagged 2026-07-17) + 1-year line chart.
             if a["type"] == "TICKER_SHOCK" and _tk and _d.get("now_px"):
                 _chg = float(_d.get("chg_pct") or 0)
                 _em = "🔴" if _chg < 0 else "🟢"
-                _rows = [(f"{_em} Now", f"${float(_d['now_px']):.2f}"),
-                         ("Open", f"${float(_d.get('day_open') or 0):.2f}"),
-                         ("Move", f"{_chg:+.1f}%")]
+                _rows = [(_em, "Now", f"${float(_d['now_px']):.2f}"),
+                         ("", "Open", f"${float(_d.get('day_open') or 0):.2f}"),
+                         ("", "Move", f"{_chg:+.1f}%")]
                 _mc = _d.get("mcap_impact")
                 if _mc:
-                    _rows.append(("MCapΔ", f"{'-' if _mc < 0 else '+'}${abs(_mc)/1e9:.1f}B"))
+                    _rows.append(("", "MCapΔ", f"{'-' if _mc < 0 else '+'}${abs(_mc)/1e9:.1f}B"))
                 msg = (f"⚠️ <b>MARKET ANOMALY — {_tk}</b>\n\n"
-                       + _pipe_table(("Metric", "Value"), _rows, right_cols={1},
+                       + _pipe_table(("ST", "Metric", "Value"), _rows, right_cols={2},
                                      legend="move measured vs TODAY's open"))
             await ctx.bot.send_message(chat_id=chat_id, text=msg, parse_mode=H)
             if a["type"] == "TICKER_SHOCK" and _tk:
                 try:
-                    _img = make_mini_chart(_tk, days=30)
+                    _img = make_line_chart(_tk, days=365)
                     await ctx.bot.send_photo(chat_id=chat_id, photo=_img,
-                                             caption=f"{_tk} — last 30 days")
+                                             caption=f"{_tk} — last 1 year")
                 except Exception:
                     log.debug("anomaly mini chart failed", exc_info=True)
     except Exception as e:

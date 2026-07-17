@@ -22,7 +22,7 @@
 
 ## ▶️ Run
 - Bot: `python telegram_bot_optimized.py` (token from `token.txt`). Dashboard: `streamlit run dashboard.py` (bot auto-launches it, port 8502).
-- EOD: `run_all_offhours.py` NY-gated scheduler → Yahoo lane (`NYSE_YFin.py`→`US_data.db`, backup) ∥ BB lane (`NYSE_OpenBB.py`→`NYSE_OpenBB_derive.py`→`skew_snapshot.py`).
+- EOD: `run_all_offhours.py` NY-gated scheduler — **BB PRIMARY first** (`NYSE_OpenBB.py`→derive→`skew_snapshot.py`); Yahoo lane (`NYSE_YFin.py`→`US_data.db` + `NYSE_Telegram.py` legacy report) runs ONLY as fallback when `bb_capture_ok()` fails (<300 tickers for target day). Changed from always-both 2026-07-16.
 - Intraday: `NYSE_intraday.py` (1m bars + 30-min CBOE chains → `US_intraday.db`) — AUTO-spawned by the bot's `intraday_lane_supervisor` (heartbeat-gated, separate process on purpose). Feeds `/live` `/heat`.
 - Old tests/`core/`/migrations + retired builders live in `archive/` (not wired in).
 

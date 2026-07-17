@@ -14,8 +14,9 @@ from zoneinfo import ZoneInfo
 BASE_DIR = r"C:\Users\srini\Options_chain_data\NYSE_DATA"
 JOB1 = os.path.join(BASE_DIR, "NYSE_YFin.py")
 JOB2 = os.path.join(BASE_DIR, "NYSE_Telegram.py")
-# OpenBB parallel lane (runs alongside the Yahoo fetch; writes ONLY US_data_OpenBB.db).
-# Non-fatal: BB failure never affects the Yahoo run or JOB2. Retire once DB_PATH flips to BB.
+# OpenBB is the PRIMARY lane (2026-07-16, user decision): capture+derive run first;
+# the Yahoo fetch (JOB1) + legacy report (JOB2) run ONLY as a fallback when the BB
+# capture is missing/incomplete for the target day (bb_capture_ok gate below).
 JOB_BB = os.path.join(BASE_DIR, "NYSE_OpenBB.py")
 JOB_BB_DERIVE = os.path.join(BASE_DIR, "NYSE_OpenBB_derive.py")
 JOB_BB_SKEW = os.path.join(BASE_DIR, "skew_snapshot.py")   # IV-metrics panel (idempotent, all dates)
@@ -257,6 +258,26 @@ def run_openbb_parallel_lane(bb_proc, bb_log):
         log_msg(f"OpenBB parallel lane error (non-fatal): {e}")
 
 
+def bb_capture_ok(target_day, min_tickers=300):
+    """True if the OpenBB capture produced a healthy snapshot for target_day
+    (≥ min_tickers distinct tickers in options_openbb). Gates the Yahoo fallback."""
+    import sqlite3
+    try:
+        db = os.path.join(os.path.dirname(BASE_DIR), "US_data_OpenBB.db")
+        conn = sqlite3.connect(db, timeout=30)
+        try:
+            n = conn.execute(
+                "SELECT COUNT(DISTINCT ticker) FROM options_openbb WHERE trade_date=?",
+                (target_day.strftime("%Y-%m-%d"),)).fetchone()[0]
+        finally:
+            conn.close()
+        log_msg(f"BB capture check for {target_day}: {n} tickers (need >= {min_tickers})")
+        return n >= min_tickers
+    except Exception as e:
+        log_msg(f"BB capture check failed ({e}) -> treating as unavailable")
+        return False
+
+
 # --- Main scheduler ---
 
 
@@ -301,36 +322,35 @@ if __name__ == "__main__":
 
         # 4. Run the two jobs (output visible in CMD and in log files)
         if DRY_RUN:
-            log_msg(f"[DRY-RUN] Would launch (parallel): {JOB_BB}")
-            log_msg(f"[DRY-RUN] Would run: {JOB1}")
-            log_msg(f"[DRY-RUN] Would run: {JOB_BB_DERIVE} (after BB capture)")
-            log_msg(f"[DRY-RUN] Would run: {JOB2}")
+            log_msg(f"[DRY-RUN] Would run PRIMARY: {JOB_BB} -> derive -> skew")
+            log_msg(f"[DRY-RUN] Would run FALLBACK only if BB incomplete: {JOB1} then {JOB2}")
             log_msg("[DRY-RUN] State file would be written — skipping.")
             success = True
             exit_code = 0
         else:
-            # Kick off the OpenBB capture in parallel with the long Yahoo fetch (non-fatal).
-            bb_proc = bb_log = None
-            try:
-                bb_proc, bb_log = launch_job_background(JOB_BB)
-            except Exception as e:
-                log_msg(f"Could not launch OpenBB capture (non-fatal): {e}")
+            # PRIMARY: OpenBB capture (foreground) -> derive -> skew panel.
+            bb_rc = run_job_headless(JOB_BB)
+            run_openbb_parallel_lane(None, None)      # derive + skew (handles no bg proc)
 
-            rc1 = run_job_headless(JOB1)
-
-            # BB capture should be done by now (Yahoo fetch is the long pole); derive its tables.
-            run_openbb_parallel_lane(bb_proc, bb_log)
-
-            rc2 = run_job_headless(JOB2)
-
-            success = (rc1 == 0 and rc2 == 0)
-            if success:
+            if bb_capture_ok(target_day):
+                log_msg("BB PRIMARY healthy -> skipping Yahoo fetch + legacy report "
+                        "(fallback-only mode; bot reporting covers the day)")
+                success = True
                 mark_success_for(target_day)
-                log_msg("ALL JOBS SUCCESS!")
+                log_msg("ALL JOBS SUCCESS (BB primary)!")
                 exit_code = 0
             else:
-                log_msg(f"FAILURE: rc1={rc1}, rc2={rc2}")
-                exit_code = 1
+                log_msg("BB capture unavailable/incomplete -> FALLBACK: Yahoo fetch + legacy report")
+                rc1 = run_job_headless(JOB1)
+                rc2 = run_job_headless(JOB2)
+                success = (rc1 == 0 and rc2 == 0)
+                if success:
+                    mark_success_for(target_day)
+                    log_msg("ALL JOBS SUCCESS (Yahoo fallback)!")
+                    exit_code = 0
+                else:
+                    log_msg(f"FAILURE: bb_rc={bb_rc}, rc1={rc1}, rc2={rc2}")
+                    exit_code = 1
 
         elapsed = (datetime.now() - start_time).total_seconds()
         log_msg(f"Total runtime: {elapsed:.1f}s")

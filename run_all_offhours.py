@@ -278,6 +278,23 @@ def bb_capture_ok(target_day, min_tickers=300):
         return False
 
 
+def cleanup_old_logs(days=7):
+    """Delete *.log files older than `days` in NYSE_DATA\\logs and the parent
+    openbb_fetch_*.log files (user 2026-07-17). NEVER touches .db/.parquet."""
+    import glob as _glob
+    cutoff = datetime.now().timestamp() - days * 86400
+    removed = 0
+    for pat in (os.path.join(LOG_DIR, "*.log"),
+                os.path.join(os.path.dirname(BASE_DIR), "openbb_fetch_*.log")):
+        for f in _glob.glob(pat):
+            try:
+                if os.path.getmtime(f) < cutoff:
+                    os.remove(f); removed += 1
+            except Exception:
+                pass
+    log_msg(f"Log cleanup: removed {removed} files older than {days}d")
+
+
 # --- Main scheduler ---
 
 
@@ -319,6 +336,8 @@ if __name__ == "__main__":
             sys.exit(exit_code)
 
         log_msg(f"Running for target: {target_day}")
+        if not DRY_RUN:
+            cleanup_old_logs(days=7)
 
         # 4. Run the two jobs (output visible in CMD and in log files)
         if DRY_RUN:

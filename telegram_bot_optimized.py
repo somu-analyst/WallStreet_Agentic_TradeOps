@@ -10064,6 +10064,125 @@ def _alert_already_sent(conn, today_str, grp_key, atype):
         return True
 
 
+# ── Data-health watchdog (user ask 2026-07-17): detect missing/stale/thin EOD
+#    data, alert Telegram + Streamlit banner DAILY until user acknowledges. ──
+def _ensure_data_health_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS data_health_alerts (
+            alert_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind       TEXT NOT NULL,
+            detail     TEXT,
+            first_seen TEXT,
+            last_seen  TEXT,
+            status     TEXT DEFAULT 'OPEN',   -- OPEN / ACK / RESOLVED
+            ack_at     TEXT
+        )
+    """)
+    conn.commit()
+
+
+def _last_expected_eod():
+    """Most recent trading day whose EOD capture should already exist (ISO).
+    Before ~22:30 UTC (post-EOD-lane) we only expect the PREVIOUS weekday."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    d = now.date()
+    if now.hour < 22 or (now.hour == 22 and now.minute < 30):
+        d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.isoformat()
+
+
+def _data_health_scan(conn):
+    """Return list of (kind, detail) issues. Checks capture vs derive vs stock lanes."""
+    exp = _last_expected_eod()
+    issues = []
+
+    def _latest(tbl, col):
+        try:
+            r = conn.execute(f"SELECT MAX({col}) FROM {tbl}").fetchone()
+            return r[0] or ""
+        except Exception:
+            return ""
+
+    def _count(tbl, col, day):
+        try:
+            r = conn.execute(
+                f"SELECT COUNT(DISTINCT ticker) FROM {tbl} WHERE {col}=?", (day,)).fetchone()
+            return int(r[0] or 0)
+        except Exception:
+            return 0
+
+    cap = _latest("options_openbb", "trade_date")
+    der = _latest("options_change", "trade_date_now")
+    stk = _latest("stock_daily", "trade_date")
+    if cap < exp:
+        issues.append(("capture_stale", f"options_openbb latest {cap or 'NONE'} < expected {exp} — BB EOD capture missed"))
+    elif _count("options_openbb", "trade_date", cap) < 300:
+        issues.append(("capture_thin", f"options_openbb {cap}: only {_count('options_openbb','trade_date',cap)} tickers (<300)"))
+    if der < exp:
+        issues.append(("derive_stale", f"options_change latest {der or 'NONE'} < expected {exp} — derive step missed (bot reads stale OI)"))
+    if stk < exp:
+        issues.append(("stock_stale", f"stock_daily latest {stk or 'NONE'} < expected {exp}"))
+    return issues
+
+
+def _data_health_upsert(conn):
+    """Scan + reconcile alert rows. Returns DataFrame of OPEN (un-acked) alerts."""
+    _ensure_data_health_table(conn)
+    issues = _data_health_scan(conn)
+    now_s = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M")
+    live_kinds = set()
+    for kind, detail in issues:
+        live_kinds.add(kind)
+        row = conn.execute(
+            "SELECT alert_id FROM data_health_alerts WHERE kind=? AND status IN ('OPEN','ACK') "
+            "ORDER BY alert_id DESC LIMIT 1", (kind,)).fetchone()
+        if row:
+            conn.execute("UPDATE data_health_alerts SET detail=?, last_seen=? WHERE alert_id=?",
+                         (detail, now_s, row[0]))
+        else:
+            conn.execute(
+                "INSERT INTO data_health_alerts (kind, detail, first_seen, last_seen) VALUES (?,?,?,?)",
+                (kind, detail, now_s, now_s))
+    conn.execute(
+        "UPDATE data_health_alerts SET status='RESOLVED' WHERE status IN ('OPEN','ACK') "
+        "AND kind NOT IN ({})".format(",".join("?" * len(live_kinds)) or "''"),
+        tuple(live_kinds))
+    conn.commit()
+    return pd.read_sql("SELECT * FROM data_health_alerts WHERE status='OPEN' ORDER BY alert_id", conn)
+
+
+async def data_health_alert(ctx: ContextTypes.DEFAULT_TYPE):
+    """Daily job: scan data health; message un-acked issues (once/day) w/ ack buttons."""
+    conn = get_conn()
+    try:
+        open_df = _data_health_upsert(conn)
+        if open_df.empty:
+            return
+        today_s = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
+        _ensure_alert_dedup_table(conn)
+        key = "|".join(str(i) for i in open_df["alert_id"].tolist())
+        if _alert_already_sent(conn, today_s, key, "data_health"):
+            return
+    finally:
+        conn.close()
+    _, chat_id = load_creds()
+    parts = [hdr("🚨 DATA HEALTH — action needed")]
+    kb_rows = []
+    for _, a in open_df.iterrows():
+        parts.append(f"🔴 <b>{a['kind']}</b> since {str(a['first_seen'])[:16]}\n{a['detail']}")
+        kb_rows.append([InlineKeyboardButton(
+            f"✅ Acknowledge #{int(a['alert_id'])} {a['kind']}",
+            callback_data=f"dh_ack_{int(a['alert_id'])}")])
+    parts.append("<i>Repeats daily (Telegram + dashboard banner) until acknowledged.</i>")
+    try:
+        await ctx.bot.send_message(chat_id=chat_id, text="\n\n".join(parts),
+                                   parse_mode=H, reply_markup=InlineKeyboardMarkup(kb_rows))
+    except Exception as e:
+        log.warning(f"data_health_alert send failed: {e}")
+
+
 async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
     """Smart alert job — fires ONLY when a trigger condition is hit.
     Runs every 5 min during market hours. Deduplicates via SQLite so
@@ -11741,6 +11860,23 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await mirofish_menu(query)
         elif data == "menu_scanner":
             await scanner_menu(query)
+        elif data.startswith("dh_ack_"):
+            _aid = _safe_int(data.replace("dh_ack_", ""), 0)
+            conn = get_conn()
+            try:
+                _ensure_data_health_table(conn)
+                conn.execute(
+                    "UPDATE data_health_alerts SET status='ACK', ack_at=? WHERE alert_id=?",
+                    (datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M"), _aid))
+                conn.commit()
+                _left = conn.execute(
+                    "SELECT COUNT(*) FROM data_health_alerts WHERE status='OPEN'").fetchone()[0]
+            finally:
+                conn.close()
+            await query.answer(f"Acknowledged #{_aid}")
+            await _safe_reply(query.message,
+                              f"✅ Data-health alert #{_aid} acknowledged."
+                              + (f" {_left} still open." if _left else " All clear."))
         elif data.startswith("miro_pos_"):
             tid = _safe_int(data.replace("miro_pos_", ""), 0)
             await mirofish_position_detail(query, tid)
@@ -28454,6 +28590,8 @@ def main():
         job_queue.run_once(riskoff_alert, when=25)                    # Risk-Off Radar readout ~on startup
         job_queue.run_daily(riskoff_alert, time=dt_time(21, 20, 0), data={"gate": True})  # post-close ~4:20 PM ET, only if caution+
         job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # ~4:35 PM ET — silently log anti-bubble baskets for tracking
+        job_queue.run_daily(data_health_alert, time=dt_time(13, 10, 0))  # data-health check ~8:10 AM ET (nags until acked)
+        job_queue.run_daily(data_health_alert, time=dt_time(23, 30, 0))  # and post-EOD-lane ~6:30 PM ET
         log.info("Scheduled Risk-Off Radar (startup + post-close)")
         log.info("Scheduled morning alert at 9:00 AM ET daily")
         # 15-min intraday alert (fires every 15 min; function checks market hours internally)

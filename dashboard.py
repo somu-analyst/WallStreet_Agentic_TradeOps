@@ -1326,6 +1326,44 @@ if os.path.exists(_TOK_FILE):
                          "(/terminal) or append ?token=… from dash_token.txt")
                 st.stop()
 
+# ── Data-health banner (user 2026-07-17): flash un-acked data issues on TOP of
+#    every page until acknowledged. Rows are written by the bot's twice-daily
+#    data_health_alert job; Ack here or via the Telegram button — same table.
+def _dh_banner():
+    try:
+        with sqlite3.connect(DB_PATH) as _c:
+            _c.execute("""CREATE TABLE IF NOT EXISTS data_health_alerts (
+                alert_id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
+                detail TEXT, first_seen TEXT, last_seen TEXT,
+                status TEXT DEFAULT 'OPEN', ack_at TEXT)""")
+            _open = pd.read_sql(
+                "SELECT * FROM data_health_alerts WHERE status='OPEN' ORDER BY alert_id", _c)
+        if _open.empty:
+            return
+        st.markdown(
+            "<style>@keyframes dhflash{0%,100%{opacity:1}50%{opacity:.55}}"
+            ".dh-banner{animation:dhflash 1.6s infinite;background:#7a1f1f;color:#fff;"
+            "border:1px solid #ff5555;border-radius:8px;padding:10px 14px;margin:4px 0 10px 0;"
+            "font-weight:600}</style>", unsafe_allow_html=True)
+        for _, _a in _open.iterrows():
+            _cols = st.columns([8, 1])
+            _cols[0].markdown(
+                f"<div>🚨 DATA ISSUE #{int(_a['alert_id'])} — "
+                f"{_a['kind']}: {_a['detail']} <i>(since {str(_a['first_seen'])[:16]})</i></div>",
+                unsafe_allow_html=True)
+            if _cols[1].button("✅ Ack", key=f"dh_ack_{int(_a['alert_id'])}",
+                               help="Acknowledge — stops the daily banner/Telegram nag"):
+                with sqlite3.connect(DB_PATH) as _c:
+                    _c.execute("UPDATE data_health_alerts SET status='ACK', ack_at=? WHERE alert_id=?",
+                               (datetime.now().strftime("%Y-%m-%d %H:%M"), int(_a["alert_id"])))
+                    _c.commit()
+                st.rerun()
+    except Exception:
+        pass  # banner must never break the app
+
+
+_dh_banner()
+
 # ---------------------------------------------------------------------------
 # DARK THEME CSS  (Bloomberg-style)
 # ---------------------------------------------------------------------------

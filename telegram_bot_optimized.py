@@ -10313,12 +10313,9 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
                 log.debug("suppressed exception", exc_info=True)
             leg_pnl  = (cur_px - entry) * qty * 100
             net_pnl += leg_pnl
-            _dir = "SELL" if qty < 0 else "BUY"
-            leg_lines.append(
-                f"  {_dir} {otype[:1]} ${strike:.0f}"
-                f" @${entry:.2f} now ${cur_px:.2f}"
-                f" P&L ${leg_pnl:+.0f}"
-            )
+            leg_lines.append((("🟢" if leg_pnl >= 0 else "🔴"),
+                              f"{'S' if qty < 0 else 'B'}{otype[:1]}{strike:g}",
+                              f"{cur_px:.2f}", f"{leg_pnl:+,.0f}"))
 
         entry_cost  = sum(
             abs(_safe_float(tr.get("entry_price", 0), 0)
@@ -10327,23 +10324,22 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
         )
         net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
         n_legs      = len(grp)
-        strat_label = f"{n_legs}-leg strategy" if n_legs > 1 else "single leg"
-        legs_text   = "\n".join(leg_lines)
+        strat_label = f"{n_legs}-leg" if n_legs > 1 else "1-leg"
+        legs_tbl    = _pipe_table(("ST", "Leg", "Now", "P&L$"), leg_lines, right_cols={2, 3})
         dte_s       = str(dte) if dte is not None else "?"
-        spot_line   = f"Spot: ${stock_px:.2f}" if stock_px else ""
+        spot_line   = f"${stock_px:.2f}" if stock_px else "—"
 
         def _alert(atype, icon, headline, detail,
                    _gk=grp_key, _tk=tk, _es=expiry_s, _ds=dte_s, _sl=strat_label,
-                   _sp=spot_line, _lt=legs_text, _nl=net_pnl, _np=net_pnl_pct):
+                   _sp=spot_line, _lt=legs_tbl, _nl=net_pnl, _np=net_pnl_pct):
             if _alert_already_sent(conn, today_str, _gk, atype):
                 return
+            _pnl_em = "🟢" if _nl >= 0 else "🔴"
             alert_msgs.append(
-                f"{icon} <b>ALERT - {_tk}</b> | {_sl}\n"
-                f"Expiry: {_es} | DTE: {_ds} | {_sp}\n"
-                f"<b>{headline}</b>\n"
-                f"{detail}\n"
+                f"{icon} <b>ALERT — {_tk}</b> · {_sl} · exp {_es} (D{_ds}) · spot {_sp}\n"
+                f"<b>{headline}</b>\n{detail}\n\n"
                 f"{_lt}\n"
-                f"Net P&L: <b>${_nl:+.0f} ({_np:+.1f}%)</b>"
+                f"<b>{_pnl_em} Net: ${_nl:+,.0f} ({_np:+.1f}%)</b>"
             )
 
         if net_pnl_pct >= 50:
@@ -10939,20 +10935,15 @@ async def intraday_alert(ctx: ContextTypes.DEFAULT_TYPE):
                         log.debug("suppressed exception", exc_info=True)
 
                 if _oi_data:
-                    _oi_t_hdr = ("ST", "Ticker", "Exp", "C-OI", "P-OI", "Bias")
                     _oi_t_rows = []
                     for _od in _oi_data:
                         _st_badge, _tk2, _exp2, _c2s, _p2s = _od
-                        _bias_s = "BULL" if _st_badge == "[B]" else ("BEAR" if _st_badge == "[S]" else "FLAT")
                         _em2 = "🟢" if _st_badge == "[B]" else ("🔴" if _st_badge == "[S]" else "🟡")
-                        _oi_t_rows.append((_em2, _tk2, _exp2, _c2s, _p2s, _bias_s))
-                    _oi_all = [_oi_t_hdr] + _oi_t_rows
-                    _oi_ws = [max(len(str(r[c])) for r in _oi_all) for c in range(len(_oi_t_hdr))]
-                    _oi_sep = "+" + "+".join("-" * (w + 2) for w in _oi_ws) + "+"
-                    def _oi_fmt(r):
-                        return "|" + "|".join(f" {str(r[c]):<{_oi_ws[c]}} " for c in range(len(_oi_ws))) + "|"
-                    _oi_table_lines = [_oi_sep, _oi_fmt(_oi_t_hdr), _oi_sep] + [_oi_fmt(r) for r in _oi_t_rows] + [_oi_sep]
-                    parts.append("\n<b>YOUR POSITIONS — NEXT EXPIRY OI</b>\n<pre>" + "\n".join(_oi_table_lines) + "</pre>")
+                        _oi_t_rows.append((_em2, _tk2, _exp2, _c2s, _p2s))
+                    parts.append("\n" + _pipe_table(
+                        ("ST", "Tkr", "Exp", "C-OI", "P-OI"), _oi_t_rows, right_cols={3, 4},
+                        title="YOUR POSITIONS — NEXT EXPIRY OI",
+                        legend="🟢 bull · 🔴 bear · 🟡 flat"))
 
                 if key_moves:
                     parts.append("\n<b>⚡ OI ACTIVITY — WHAT IS THE MARKET DOING?</b>")
@@ -26013,7 +26004,9 @@ def _riskoff_message(res):
     """Plain-English Telegram body shared by /riskoff and the auto alert.
     Two gauges: TURBULENCE (proven — predicts move size) + DIRECTION (soft lean)."""
     t = res["turbulence"]; d = res["direction"]
-    lights = "\n".join(f"{p['emoji']} {p['label']} — {p['reading']}" for p in res["pillars"])
+    pillars_tbl = _pipe_table(
+        ("ST", "Pillar", "Reading"),
+        [(p["emoji"], p["label"][:10], p["reading"][:16]) for p in res["pillars"]])
     nd = res.get("nextday")
     nd_block = (f"\n\n📅 <b>Next session — {nd['lean']}</b>\n{nd['text']}") if nd else ""
     return (f"{res['remoji']} <b>MARKET RADAR — {res['headline']}</b>\n\n"
@@ -26023,7 +26016,7 @@ def _riskoff_message(res):
             f"{nd_block}\n\n"
             f"<i>Backtested: put-flow predicts move SIZE (p&lt;0.01); direction is a weak hint only. "
             f"Context below · not advice.</i>\n"
-            f"<i>Context: {lights}</i>")
+            f"{pillars_tbl}")
 
 
 async def _send_riskoff(msg, res):

@@ -10964,13 +10964,14 @@ async def prop_trading_view(query):
         return
 
     top = df.assign(abs_signal=lambda x: x["net_signal"].abs()).sort_values("abs_signal", ascending=False).head(10)
-    tbl_rows = [f"{'Ticker':<6} {'Side':<7} {'Score':>6} {'PCR':>5}"]
-    tbl_rows.append("─" * 28)
+    _prow = []
     for _, r in top.iterrows():
-        side = "LONG" if r["net_signal"] > 2 else "SHORT" if r["net_signal"] < -2 else "MIXED"
+        emo = "🟢" if r["net_signal"] > 2 else "🔴" if r["net_signal"] < -2 else "🟡"
         pcr = r["pcr"] if r["pcr"] == r["pcr"] else 0
-        tbl_rows.append(f"{r['ticker']:<6} {side:<7} {r['net_signal']:+6.0f} {pcr:>5.2f}")
-    lines = [hdr("🏦 PROP TRADING SETUPS"), "", mono("\n".join(tbl_rows))]
+        _prow.append((emo, str(r["ticker"]), f"{r['net_signal']:+.0f}", f"{pcr:.2f}"))
+    lines = [hdr("🏦 PROP TRADING SETUPS"),
+             _pipe_table(("ST", "Tkr", "Score", "PCR"), _prow, right_cols={2, 3},
+                         legend="🟢 long · 🔴 short · 🟡 mixed")]
 
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🧩 More", callback_data="menu_more"), BACK_BTN]])
     await query.message.reply_text("\n".join(lines), parse_mode=H, reply_markup=kb)
@@ -11071,14 +11072,14 @@ async def whales_view(query):
         await query.message.reply_text("🐋 No whale holdings data available.", reply_markup=InlineKeyboardMarkup([[BACK_BTN]]))
         return
 
-    tbl_rows = [f"{'Ticker':<6} {'Value($B)':>9} {'Holder':<12}"]
-    tbl_rows.append("─" * 30)
+    _wrow = []
     for _, r in df.iterrows():
         v = pd.to_numeric(r.get("value_usd", 0), errors="coerce")
         v_b = (float(v) / 1e9) if pd.notna(v) else 0
-        holder = str(r.get("filer_name", "?"))[:12]
-        tbl_rows.append(f"{str(r.get('ticker', '?')):<6} {v_b:>9.2f} {holder:<12}")
-    lines = [hdr("🐋 WHALE HOLDINGS"), "", mono("\n".join(tbl_rows))]
+        _wrow.append(("🐋", str(r.get("ticker", "?")), f"{v_b:.1f}B",
+                      str(r.get("filer_name", "?"))[:10]))
+    lines = [hdr("🐋 WHALE HOLDINGS"),
+             _pipe_table(("ST", "Tkr", "Val$", "Holder"), _wrow, right_cols={2})]
 
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🧩 More", callback_data="menu_more"), BACK_BTN]])
     await query.message.reply_text("\n".join(lines), parse_mode=H, reply_markup=kb)

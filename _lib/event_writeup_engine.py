@@ -609,8 +609,15 @@ class EventWriteupEngine:
                 h = yf.Ticker(tk).history(period="2d", interval="5m")
                 if len(h) < 10:
                     continue
-                day_open = float(h["Open"].iloc[0])
-                now_px = float(h["Close"].iloc[-1])
+                # TODAY's session only — iloc[0] of a 2d frame is YESTERDAY's open
+                # (bug found 2026-07-17: GOOGL flagged -7.4% vs yesterday's open
+                # when it was actually -0.4% from today's open)
+                _last_day = h.index[-1].date()
+                _tday = h[[ts.date() == _last_day for ts in h.index]]
+                if len(_tday) < 2:
+                    continue
+                day_open = float(_tday["Open"].iloc[0])
+                now_px = float(_tday["Close"].iloc[-1])
                 chg = (now_px - day_open) / day_open * 100
                 if abs(chg) >= 4.0:
                     mcap_loss = None

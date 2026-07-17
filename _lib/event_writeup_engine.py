@@ -632,7 +632,8 @@ class EventWriteupEngine:
                         "type": "TICKER_SHOCK",
                         "severity": "CRITICAL" if abs(chg) >= 5 else "HIGH",
                         "description": f"{tk} {chg:+.1f}% from open",
-                        "data": {"ticker": tk, "chg_pct": chg, "mcap_impact": mcap_loss},
+                        "data": {"ticker": tk, "chg_pct": chg, "mcap_impact": mcap_loss,
+                                 "day_open": day_open, "now_px": now_px},
                     })
             except Exception:
                 continue

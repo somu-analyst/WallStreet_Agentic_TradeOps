@@ -1,3 +1,4 @@
+﻿[RESUME AFTER] 2026-07-17 18:00  (limit-guard: block at 87807797 tokens >= 80000000)
 # NEXT — switch-over note (2026-07-16, late evening)
 
 1. **Everything is LIVE**: bot restarted on latest code (universal _report formats, /premium,

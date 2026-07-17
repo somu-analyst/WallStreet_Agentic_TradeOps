@@ -14232,18 +14232,26 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     if not st.toggle("🔬 Full analysis", value=True, key=f"gp_open_{_tk}"):
                         st.caption("Collapsed — flip on for this stock's full plan. Metrics above are live.")
                         continue
-                _near = min(_tl, key=lambda x: x["dte"])
-                try:
-                    _chain = pd.read_sql(
-                        "SELECT strike, openInt_Call_now, openInt_Put_now, R1, S1 FROM options_change "
-                        "WHERE UPPER(ticker)=? AND expiry_date=? AND trade_date_now=("
-                        "SELECT trade_date_now FROM options_change WHERE UPPER(ticker)=? AND expiry_date=? "
-                        "ORDER BY trade_date_now "
-                        "DESC LIMIT 1)",
-                        _gp_conn, params=(_tk, _near["exp_mdy"], _tk, _near["exp_mdy"]))
-                except Exception:
+                # Stock-only positions have no option chain — skip wall calc to avoid
+                # stale/wrong expiry lookups (e.g. GOOG stock leg has exp_mdy=None
+                # which can pull historical chain rows giving phantom $200 put wall).
+                _opt_legs = [l for l in _tl if l["typ"] != "stock" and l.get("K", 0) > 0]
+                _near = min(_opt_legs, key=lambda x: x["dte"]) if _opt_legs else None
+                if _near is not None:
+                    try:
+                        _chain = pd.read_sql(
+                            "SELECT strike, openInt_Call_now, openInt_Put_now, R1, S1 FROM options_change "
+                            "WHERE UPPER(ticker)=? AND expiry_date=? AND trade_date_now=("
+                            "SELECT trade_date_now FROM options_change WHERE UPPER(ticker)=? AND expiry_date=? "
+                            "ORDER BY trade_date_now "
+                            "DESC LIMIT 1)",
+                            _gp_conn, params=(_tk, _near["exp_mdy"], _tk, _near["exp_mdy"]))
+                    except Exception:
+                        _chain = pd.DataFrame()
+                    _w = compute_walls(_chain, _spot) if not _chain.empty else {}
+                else:
                     _chain = pd.DataFrame()
-                _w = compute_walls(_chain, _spot) if not _chain.empty else {}
+                    _w = {}
                 _r1 = _s1 = None
                 if not _chain.empty:
                     try:

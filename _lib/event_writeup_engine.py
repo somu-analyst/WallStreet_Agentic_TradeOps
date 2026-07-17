@@ -621,11 +621,13 @@ class EventWriteupEngine:
                 chg = (now_px - day_open) / day_open * 100
                 if abs(chg) >= 4.0:
                     mcap_loss = None
+                    prev_close = None
                     try:
                         info = yf.Ticker(tk).info or {}
                         mcap = info.get("marketCap")
                         if mcap:
                             mcap_loss = mcap * (chg / 100)
+                        prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
                     except Exception:
                         pass
                     alerts.append({
@@ -633,7 +635,8 @@ class EventWriteupEngine:
                         "severity": "CRITICAL" if abs(chg) >= 5 else "HIGH",
                         "description": f"{tk} {chg:+.1f}% from open",
                         "data": {"ticker": tk, "chg_pct": chg, "mcap_impact": mcap_loss,
-                                 "day_open": day_open, "now_px": now_px},
+                                 "day_open": day_open, "now_px": now_px,
+                                 "prev_close": prev_close},
                     })
             except Exception:
                 continue

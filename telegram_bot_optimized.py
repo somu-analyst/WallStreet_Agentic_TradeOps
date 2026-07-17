@@ -3623,12 +3623,11 @@ async def grp_save_all(query, ctx):
     net_label = f"Net Cost: ${abs(net_cost):.0f}" if net_cost > 0 else f"Net Credit: ${abs(net_cost):.0f}"
 
     parts = [hdr(f"✅ GROUP #{gid} SAVED · {len(done)} LEGS")]
-    rows_txt = [f"{'#':<3} {'Type':<5} {'Side':<5} {'Strike':>6} {'Px':>5}"]
-    rows_txt.append("─" * 27)
-    for i, l in enumerate(done):
-        side_lbl = "BUY" if l["qty"] > 0 else "SELL"
-        rows_txt.append(f"L{i+1:<2} {l['opt_type']:<5} {side_lbl:<5} ${l['strike']:>5.0f} ${l['entry_price']:>4.2f}")
-    parts.append(mono("\n".join(rows_txt)))
+    _grow = [(("🟢" if l["qty"] > 0 else "🔴"), f"L{i+1}",
+              f"{l['strike']:g}{str(l['opt_type'])[:1].upper()}", f"{l['entry_price']:.2f}")
+             for i, l in enumerate(done)]
+    parts.append(_pipe_table(("ST", "#", "Leg", "Px"), _grow, right_cols={3},
+                             legend="🟢 buy · 🔴 sell"))
     parts.append(f"\n💰 <b>{net_label}</b>")
     parts.append(f"🆔 Trade IDs: {', '.join(f'#{i}' for i in saved_ids)}")
 
@@ -3918,22 +3917,21 @@ async def mirofish_menu(query):
         parts.append("\n💼 <b>No open positions</b> — showing top OI signals below\n")
     else:
         parts.append(f"\n💼 <b>YOUR POSITIONS ({len(open_trades)})</b>")
-        tbl_rows = [f"{'Ticker':<6} {'Tp':<3} {'Stk':>5} {'P&L%':>5} {'Sig':<4}"]
-        tbl_rows.append("─" * 27)
+        tbl_rows = []
+        _sig_em = {"EXIT": "🔴", "ADD": "🟢", "HOLD": "🟡"}
         for _, tr in open_trades.iterrows():
             result = _mirofish_score_position(tr)
-            sig_short = result['signal'].replace('HOLD', 'HLD').replace('EXIT', 'EXT').replace('ADD', 'ADD')[:4]
-            pnl = result['pnl_pct']
-            pnl_s = f"{pnl:>+.0f}%"
-            tk6 = result['tk'][:6]
-            tp3 = str(result['ot'])[:3]
-            tbl_rows.append(f"{tk6:<6} {tp3:<3} {result['strike']:>5.0f} {pnl_s:>5} {sig_short:<4}")
+            _em = _sig_em.get(str(result['signal']).upper()[:4].strip(), "🟡")
+            tbl_rows.append((_em, result['tk'][:5],
+                             f"{result['strike']:g}{str(result['ot'])[:1].upper()}",
+                             f"{result['pnl_pct']:+.0f}%"))
             tid = _safe_int(tr.get("trade_id", 0), 0)
             btn_rows.append([InlineKeyboardButton(
                 f"📋 {result['tk']} {result['ot']} ${result['strike']:.0f} — {result['signal']}",
                 callback_data=f"miro_pos_{tid}"
             )])
-        parts.append(mono("\n".join(tbl_rows)))
+        parts.append(_pipe_table(("ST", "Tkr", "Leg", "P&L%"), tbl_rows, right_cols={3},
+                                 legend="🟢 add · 🟡 hold · 🔴 exit"))
 
     # ── Section 2: Top OI signals from options_change ─────────────
     try:
@@ -4017,12 +4015,11 @@ async def mirofish_menu(query):
             parts.append(f"\n📡 <b>TOP OI SIGNALS · {dt}</b>")
 
             if bull_tickers:
-                parts.append("\n🟢 <b>Bullish (Call OI Building)</b>")
-                rows = [f"{'Ticker':<7} {'OI Δ':>8} {'%Chg':>6}"]
-                rows.append("─" * 24)
-                for tk, chg, pct in bull_tickers[:5]:
-                    rows.append(f"{tk:<7} {chg:>+8,.0f} {pct:>+6.1f}%")
-                parts.append(mono("\n".join(rows)))
+                _brow = [("🟢", tk[:6], f"{chg:+,.0f}", f"{pct:+.1f}%")
+                         for tk, chg, pct in bull_tickers[:5]]
+                parts.append("\n" + _pipe_table(("ST", "Tkr", "OIΔ", "%Chg"), _brow,
+                                                right_cols={2, 3},
+                                                title="🟢 Bullish (Call OI Building)"))
                 # buttons for top 3
                 for tk, _, _ in bull_tickers[:3]:
                     btn_rows.append([InlineKeyboardButton(
@@ -4030,12 +4027,11 @@ async def mirofish_menu(query):
                     )])
 
             if bear_tickers:
-                parts.append("\n🔴 <b>Bearish (Put OI Building)</b>")
-                rows = [f"{'Ticker':<7} {'OI Δ':>8} {'%Chg':>6}"]
-                rows.append("─" * 24)
-                for tk, chg, pct in bear_tickers[:5]:
-                    rows.append(f"{tk:<7} {chg:>+8,.0f} {pct:>+6.1f}%")
-                parts.append(mono("\n".join(rows)))
+                _brow = [("🔴", tk[:6], f"{chg:+,.0f}", f"{pct:+.1f}%")
+                         for tk, chg, pct in bear_tickers[:5]]
+                parts.append("\n" + _pipe_table(("ST", "Tkr", "OIΔ", "%Chg"), _brow,
+                                                right_cols={2, 3},
+                                                title="🔴 Bearish (Put OI Building)"))
                 # Strike breakdown for top 3 bearish tickers
                 for _btk, _, _ in bear_tickers[:3]:
                     if bear_strikes.get(_btk):
@@ -6864,26 +6860,22 @@ async def tech_signals_detail(query, ticker):
         any_data = True
         v   = rsi["value"]
         bar = "\u2588" * int(v / 10) + "\u2591" * (10 - int(v / 10))
-        parts.append("\n<b>RSI(14)</b>")
-        rows = [
-            "  Value:  {:.1f}  [{}]".format(v, bar),
-            "  Level:  {}".format(rsi["level"]),
-        ]
-        parts.append(mono("\n".join(rows)))
+        parts.append("\n" + _pipe_table(
+            ("Metric", "Value"),
+            [("Value", f"{v:.1f} {bar}"), ("Level", rsi["level"])],
+            title="RSI(14)"))
         parts.append("<i>{}</i>".format(rsi["action"]))
 
     # MACD(12,26,9)
     mc = sig.get("macd", {})
     if mc:
         any_data = True
-        parts.append("\n<b>MACD(12,26,9)</b>")
-        rows = [
-            "  MACD line: {:>+9.3f}".format(mc["macd"]),
-            "  Signal:    {:>+9.3f}".format(mc["signal"]),
-            "  Histogram: {:>+9.3f}  ({})".format(mc["hist"], mc["hist_dir"]),
-            "  Cross:     {}".format(mc["cross"]),
-        ]
-        parts.append(mono("\n".join(rows)))
+        parts.append("\n" + _pipe_table(
+            ("Metric", "Value"),
+            [("MACD", f"{mc['macd']:+.3f}"), ("Signal", f"{mc['signal']:+.3f}"),
+             ("Hist", f"{mc['hist']:+.3f} {str(mc['hist_dir'])[:4]}"),
+             ("Cross", ("🟢 " if mc["cross"] == "BULL" else "🔴 " if mc["cross"] == "BEAR" else "") + str(mc["cross"]))],
+            right_cols={1}, title="MACD(12,26,9)"))
         if mc["cross"] == "BULL" and mc["hist_dir"] == "expanding":
             parts.append("<i>Bullish momentum accelerating</i>")
         elif mc["cross"] == "BEAR" and mc["hist_dir"] == "expanding":
@@ -6896,15 +6888,12 @@ async def tech_signals_detail(query, ticker):
     bb = sig.get("bb", {})
     if bb:
         any_data = True
-        parts.append("\n<b>BOLLINGER BANDS(20, 2\u03c3)</b>")
-        rows = [
-            "  Upper: ${:>9.2f}".format(bb["upper"]),
-            "  Mid:   ${:>9.2f}  (20d SMA)".format(bb["mid"]),
-            "  Lower: ${:>9.2f}".format(bb["lower"]),
-            "  Price: ${:>9.2f}  {:.0f}% of band  [{}]".format(
-                bb["price"], bb["pct"], bb["pos"]),
-        ]
-        parts.append(mono("\n".join(rows)))
+        parts.append("\n" + _pipe_table(
+            ("Metric", "Value"),
+            [("Upper", f"${bb['upper']:.2f}"), ("Mid", f"${bb['mid']:.2f}"),
+             ("Lower", f"${bb['lower']:.2f}"),
+             ("Price", f"${bb['price']:.2f} {bb['pct']:.0f}% {bb['pos']}")],
+            right_cols={1}, title="BOLLINGER BANDS(20, 2\u03c3)"))
         if bb["pos"] == "TOP":
             parts.append("<i>At upper band -- mean reversion risk, consider fading</i>")
         elif bb["pos"] == "BOT":
@@ -6916,34 +6905,26 @@ async def tech_signals_detail(query, ticker):
     ema = sig.get("ema", {})
     if ema:
         any_data = True
-        parts.append("\n<b>EMA(20)  -- Trend Filter</b>")
-        rows = [
-            "  EMA20:  ${:>9.2f}".format(ema["ema20"]),
-            "  Price:  ${:>9.2f}  ({:+.2f}% vs EMA)".format(
-                ema["price"], ema["pct"]),
-            "  Trend:  {} EMA20   Day {:+.2f}%".format(
-                ema["rel"], ema["day_chg"]),
-        ]
-        parts.append(mono("\n".join(rows)))
+        parts.append("\n" + _pipe_table(
+            ("Metric", "Value"),
+            [("EMA20", f"${ema['ema20']:.2f}"),
+             ("Price", f"${ema['price']:.2f} ({ema['pct']:+.1f}%)"),
+             ("Trend", f"{ema['rel']} · day {ema['day_chg']:+.2f}%")],
+            right_cols={1}, title="EMA(20) — Trend Filter"))
 
     # Composite
     comp = sig.get("composite", {})
     if comp:
         any_data = True
-        parts.append("\n<b>RBI BEAT SCORE  ({}/5 bullish criteria)</b>".format(comp["pts"]))
-        rows = [
-            "  {} RSI not overbought (<70)".format(
-                "YES" if comp.get("rsi_ok") else "NO "),
-            "  {} RSI above midline (>50)".format(
-                "YES" if comp.get("rsi_mo") else "NO "),
-            "  {} MACD bull cross".format(
-                "YES" if comp.get("macd_ok") else "NO "),
-            "  {} BB not at ceiling".format(
-                "YES" if comp.get("bb_ok") else "NO "),
-            "  {} Price above EMA20".format(
-                "YES" if comp.get("ema_ok") else "NO "),
-        ]
-        parts.append(mono("\n".join(rows)))
+        _crow = [(("✅" if comp.get(k) else "❌"), lbl) for k, lbl in (
+            ("rsi_ok", "RSI not overbought"),
+            ("rsi_mo", "RSI above midline"),
+            ("macd_ok", "MACD bull cross"),
+            ("bb_ok", "BB not at ceiling"),
+            ("ema_ok", "Price above EMA20"))]
+        parts.append("\n" + _pipe_table(
+            ("ST", "Criteria"), _crow,
+            title=f"RBI BEAT SCORE ({comp['pts']}/5)"))
         parts.append("<b>Signal: {} {}</b>".format(comp["conf"], comp["signal"]))
 
 
@@ -7326,18 +7307,12 @@ async def posadd_confirm_menu(query, ctx):
     px_src = f"${est:.2f} (custom)" if px_mode == "custom" else f"${est:.2f} ({px_mode})"
     msg = (
         f"{hdr('✅ CONFIRM NEW POSITION')}\n\n"
-        + mono(
-            f"{row2('Ticker', tk)}\n"
-            f"{row2('Type', ot.upper())}\n"
-            f"{row2('Side', side.upper())}\n"
-            f"{row2('Strike', f'${strike:.2f}')}\n"
-            f"{row2('Expiry', exp)}\n"
-            f"{row2('Qty', str(signed_qty))}\n"
-            f"{row2('Entry Day', st['entry_date'])}\n"
-            f"{row2('Entry Px', px_src)}\n"
-            f"{'─'*27}\n"
-            + _single_leg_risk_text(side, ot, strike, est, qty)
-        )
+        + _pipe_table(
+            ("Field", "Value"),
+            [("Ticker", tk), ("Type", ot.upper()), ("Side", side.upper()),
+             ("Strike", f"${strike:.2f}"), ("Expiry", exp), ("Qty", str(signed_qty)),
+             ("Day", st["entry_date"]), ("Px", px_src)])
+        + "\n" + mono(_single_leg_risk_text(side, ot, strike, est, qty))
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Add", callback_data="posaddgo"), InlineKeyboardButton("❌ Cancel", callback_data="menu_positions")],
@@ -7513,22 +7488,17 @@ async def pair_confirm_menu(query, ctx):
 
     msg = (
         f"{hdr('✅ CONFIRM PAIR LEG')}\n\n"
-        + mono(
-            f"{row2('Parent #', str(parent_id))}\n"
-            f"{row2('Ticker', tk)}\n"
-            f"{row2('Type', ot.upper())}\n"
-            f"{row2('Side', side.upper())}\n"
-            f"{row2('Strike', f'${strike:.2f}')}\n"
-            f"{row2('Expiry', exp)}\n"
-            f"{row2('Qty', str(qty if side == 'buy' else -qty))}\n"
-            f"{row2('Entry Day', st['entry_date'])}\n"
-            f"{row2('Entry Px', f'${est:.2f} ({px_mode})')}\n"
-            f"{'─' * 27}\n"
-            f"{row2('Max Gain*', f'${max_gain:,.0f}')}\n"
-            f"{row2('Max Loss*', f'${max_loss:,.0f}')}\n"
-            f"{row2('Breakeven*', be_txt[:26])}"
-        )
-        + "\n*Approx over charted price range"
+        + _pipe_table(
+            ("Field", "Value"),
+            [("Parent#", str(parent_id)), ("Ticker", tk), ("Type", ot.upper()),
+             ("Side", side.upper()), ("Strike", f"${strike:.2f}"), ("Expiry", exp),
+             ("Qty", str(qty if side == "buy" else -qty)), ("Day", st["entry_date"]),
+             ("Px", f"${est:.2f} ({px_mode})")])
+        + "\n" + _pipe_table(
+            ("Risk*", "Value"),
+            [("MaxGain", f"${max_gain:,.0f}"), ("MaxLoss", f"${max_loss:,.0f}"),
+             ("Brkeven", be_txt[:20])],
+            legend="*approx over charted range")
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Add Pair Leg", callback_data="pairgo"), InlineKeyboardButton("❌ Cancel", callback_data=f"pos_{parent_id}")],
@@ -7802,19 +7772,21 @@ async def oi_detail(query, ticker):
             ORDER BY expiry_date
         """, get_conn(), params=(str(ticker).upper(), str(dt)))
         if not exp_df.empty:
-            rows = [f"{'Expiry':<8} {'Call':>6} {'Put':>6} {'PCR':>5}"]
-            rows.append("─" * 28)
             def _fkoi(n):
                 n = float(n or 0)
                 if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
                 if n >= 1_000: return f"{n/1_000:.0f}K"
                 return f"{n:.0f}"
+            _erows = []
             for _, er in exp_df.iterrows():
                 c = float(er.get('c_oi') or 0)
                 p = float(er.get('p_oi') or 0)
                 ep = p / c if c > 0 else 0
-                rows.append(f"{str(er['expiry_date'])[:8]:<8} {_fkoi(c):>6} {_fkoi(p):>6} {ep:>5.2f}")
-            msg += f"\n\n<b>By Expiry:</b>\n{mono(chr(10).join(rows))}"
+                _eem = "🟢" if ep < 0.8 else "🔴" if ep > 1.2 else "🟡"
+                _erows.append((_eem, str(er['expiry_date'])[5:10], _fkoi(c), _fkoi(p)))
+            msg += "\n\n" + _pipe_table(("ST", "Exp", "Call", "Put"), _erows,
+                                        right_cols={2, 3}, title="By Expiry",
+                                        legend="🟢 call-heavy · 🟡 even · 🔴 put-heavy (PCR)")
     except Exception as ex:
         log.warning(f"oi_detail expiry breakdown failed: {ex}")
 
@@ -9424,18 +9396,9 @@ async def market_analytics_report(query):
     risk_label = "RISK-ON" if sentiment_score > 5  else "RISK-OFF" if sentiment_score < -5 else "MIXED"
 
     if _f_data:
-        # Render arrow column outside <pre> to avoid emoji width issues
-        _f_pre_data  = [r[:4] for r in _f_data]
-        _f_pre_hdrs  = _f_hdrs[:4]
-        _f_pre_RIGHT = {2, 3}
-        _fw  = [max(len(_f_pre_hdrs[i]), max(len(r[i]) for r in _f_pre_data)) for i in range(4)]
-        _fj  = lambda i, v: v.rjust(_fw[i]) if i in _f_pre_RIGHT else v.ljust(_fw[i])
-        _fsep = "-+-".join("-" * w for w in _fw)
-        _flines = [" | ".join(_fj(i, _f_pre_hdrs[i]) for i in range(4)), _fsep]
-        for r in _f_pre_data:
-            _flines.append(" | ".join(_fj(i, r[i]) for i in range(4)))
-        _flines.append(f"Sent:{sent_label[:4]}  {risk_label[:4]}  VIX:{vol_lbl[:4]}")
-        parts.append("<pre>" + "\n".join(_flines) + "</pre>")
+        parts.append(_pipe_table(tuple(_f_hdrs[:4]), [tuple(r[:4]) for r in _f_data],
+                                 right_cols={2, 3},
+                                 legend=f"Sent:{sent_label[:4]} · {risk_label[:4]} · VIX:{vol_lbl[:4]}"))
 
     # ── 2. OI Signal Summary ───────────────────────────────────────
     conn = get_conn()
@@ -11194,11 +11157,9 @@ async def backtest_lab_view(query):
     avg_abs_move = (bt["next_ret"].abs().mean() * 100) if rows else 0
     msg = (
         f"{hdr('📈 BACKTEST LAB')}\n\n"
-        + mono(
-            f"{row2('Signals Tested', str(rows))}\n"
-            f"{row2('Accuracy', f'{acc:.1f}%')}\n"
-            f"{row2('Avg Next Move', f'{avg_abs_move:.2f}%')}"
-        )
+        + _pipe_table(("Metric", "Value"),
+                      [("Signals", str(rows)), ("Accuracy", f"{acc:.1f}%"),
+                       ("AvgMove", f"{avg_abs_move:.2f}%")], right_cols={1})
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🧩 More", callback_data="menu_more"), BACK_BTN]])
     await _safe_reply(query.message, msg, reply_markup=kb)
@@ -11215,14 +11176,13 @@ async def live_predictor_view(query):
         vix_px = 0
 
     regime = "BULLISH" if es_ret > 0.4 and vix_px < 20 else "BEARISH" if es_ret < -0.4 or vix_px > 25 else "NEUTRAL"
+    _rg_em = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "🟡"}[regime]
     msg = (
         f"{hdr('🔮 LIVE POSITION PREDICTOR')}\n\n"
-        + mono(
-            f"{row2('ES Futures', f'{es_ret:+.2f}%')}\n"
-            f"{row2('VIX', f'{vix_px:.2f}')}\n"
-            f"{row2('Regime', regime)}"
-        )
-        + "\nUse OI + futures + VIX together before taking new entries."
+        + _pipe_table(("Metric", "Value"),
+                      [("ES Fut", f"{es_ret:+.2f}%"), ("VIX", f"{vix_px:.2f}"),
+                       ("Regime", f"{_rg_em} {regime}")], right_cols={1},
+                      legend="use OI + futures + VIX together before new entries")
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🧩 More", callback_data="menu_more"), BACK_BTN]])
     await _safe_reply(query.message, msg, reply_markup=kb)
@@ -11327,37 +11287,29 @@ async def quick_quote(query, ticker):
             f"{color_emoji} <b>{ticker} · {name}</b>\n"
             f"{hdr('')}\n\n"
 
-            f"<b>💰 Price Action</b>\n"
-            + mono(
-                f"{row2('Last', f'${px:.2f}  {arrow} {chg:+.2f}%')}\n"
-                f"{row2('Change', f'${chg_abs:+.2f}')}\n"
-                f"{'─' * 27}\n"
-                f"{row2('Open', f'${opn:.2f}')}\n"
-                f"{row2('High', f'${hi:.2f}')}\n"
-                f"{row2('Low', f'${lo:.2f}')}\n"
-                f"{row2('Close', f'${px:.2f}')}\n"
-                f"{'─' * 27}\n"
-                f"{row2('Volume', fmt_vol(vol))}\n"
-                f"{row2('Avg Vol', fmt_vol(avg_vol))}\n"
-                f"Vol {vol_bar_str} {vol_ratio:.1f}x avg"
-            )
+            + _pipe_table(
+                ("Metric", "Value"),
+                [("Last", f"${px:.2f} {arrow}{chg:+.2f}%"), ("Chg$", f"{chg_abs:+.2f}"),
+                 ("Open", f"${opn:.2f}"), ("High", f"${hi:.2f}"),
+                 ("Low", f"${lo:.2f}"), ("Close", f"${px:.2f}"),
+                 ("Vol", f"{fmt_vol(vol)} ({vol_ratio:.1f}x)"), ("AvgVol", fmt_vol(avg_vol))],
+                right_cols={1}, title="💰 Price Action")
 
-            + "\n\n📏 <b>52-Week Range</b>\n"
-            + mono(
-                f"{row2('52W High', f'${hi52:.2f}  ({from52hi:+.1f}%)')}\n"
-                f"{row2('52W Low', f'${lo52:.2f}  ({from52lo:+.1f}%)')}\n"
-                f"Lo ├{'█' * max(0,min(20,int((px-lo52)/(hi52-lo52)*20) if hi52>lo52 else 10))}{'░' * max(0,20-int((px-lo52)/(hi52-lo52)*20) if hi52>lo52 else 10)}┤ Hi"
-            )
+            + "\n\n"
+            + _pipe_table(
+                ("Metric", "Value"),
+                [("52W Hi", f"${hi52:.2f} ({from52hi:+.1f}%)"),
+                 ("52W Lo", f"${lo52:.2f} ({from52lo:+.1f}%)")],
+                right_cols={1}, title="📏 52-Week Range")
+            + "\n" + mono(
+                f"Lo ├{'█' * max(0,min(20,int((px-lo52)/(hi52-lo52)*20) if hi52>lo52 else 10))}{'░' * max(0,20-int((px-lo52)/(hi52-lo52)*20) if hi52>lo52 else 10)}┤ Hi")
 
-            + "\n\n📊 <b>Fundamentals</b>\n"
-            + mono(
-                f"{row2('Mkt Cap', cap_str)}\n"
-                f"{row2('P/E (TTM)', pe_str)}\n"
-                f"{row2('P/E (Fwd)', fwd_pe_str)}\n"
-                f"{row2('EPS', eps_str)}\n"
-                f"{row2('Div Yield', div_str)}\n"
-                f"{row2('Beta', beta_str)}"
-            )
+            + "\n\n"
+            + _pipe_table(
+                ("Metric", "Value"),
+                [("MktCap", cap_str), ("P/E ttm", pe_str), ("P/E fwd", fwd_pe_str),
+                 ("EPS", eps_str), ("DivYld", div_str), ("Beta", beta_str)],
+                right_cols={1}, title="📊 Fundamentals")
 
             + f"\n\n<i>Updated {datetime.now().strftime('%H:%M:%S')}</i>"
         )
@@ -12196,19 +12148,13 @@ async def morning_alert(ctx: ContextTypes.DEFAULT_TYPE):
             if len(h) >= 2:
                 px  = float(h["Close"].iloc[-1])
                 pct = (px - float(h["Close"].iloc[-2])) / float(h["Close"].iloc[-2]) * 100
-                st_m = "[+]" if pct > 0.5 else ("[!]" if pct < -0.5 else "[ ]")
+                st_m = "🟢" if pct > 0.5 else ("🔴" if pct < -0.5 else "⚪")
                 px_s = f"{px:,.2f}" if px < 1000 else f"{px:,.0f}"
-                _mrows.append([st_m, short, px_s, f"{pct:+.2f}%"])
+                _mrows.append((st_m, short, px_s, f"{pct:+.2f}%"))
         except Exception:
             log.debug("suppressed exception", exc_info=True)
     if _mrows:
-        _mfw = [max(len(_mhdr[i]), max(len(r[i]) for r in _mrows)) for i in range(4)]
-        _mj  = lambda i, v: v.rjust(_mfw[i]) if i in {2, 3} else v.ljust(_mfw[i])
-        _msep = "-+-".join("-" * w for w in _mfw)
-        _ml  = [" | ".join(_mj(i, _mhdr[i]) for i in range(4)), _msep]
-        for r in _mrows:
-            _ml.append(" | ".join(_mj(i, r[i]) for i in range(4)))
-        parts.append("<pre>" + "\n".join(_ml) + "</pre>")
+        parts.append(_pipe_table(tuple(_mhdr), _mrows, right_cols={2, 3}))
 
     # Open positions check
     conn = get_conn()
@@ -12231,19 +12177,14 @@ async def morning_alert(ctx: ContextTypes.DEFAULT_TYPE):
                 stock_ret = (spot - spot_prev) / spot_prev * 100 if spot_prev > 0 else 0
                 # delta-neutral estimate: calls gain with rising stock, puts with falling
                 pnl_pct = stock_ret * 0.5 if not ot.startswith("PUT") else -stock_ret * 0.5
-                st_p = "[+]" if pnl_pct > 0 else "[!]"
+                st_p = "🟢" if pnl_pct > 0 else "🔴"
                 pnl_s = f"~{pnl_pct:+.1f}%"
             except Exception:
-                st_p = "[ ]"; pnl_s = "N/A"
-            _prows.append([st_p, str(tr.get("ticker","?"))[:6], side_s, f"{stk:.0f}", pnl_s])
+                st_p = "⚪"; pnl_s = "N/A"
+            _prows.append((st_p, str(tr.get("ticker","?"))[:6], side_s, f"{stk:.0f}", pnl_s))
         if _prows:
-            _pfw = [max(len(_phdr[i]), max(len(r[i]) for r in _prows)) for i in range(5)]
-            _pj  = lambda i, v: v.rjust(_pfw[i]) if i in {3, 4} else v.ljust(_pfw[i])
-            _psep = "-+-".join("-" * w for w in _pfw)
-            _pl  = ["POSITIONS", " | ".join(_pj(i, _phdr[i]) for i in range(5)), _psep]
-            for r in _prows:
-                _pl.append(" | ".join(_pj(i, r[i]) for i in range(5)))
-            parts.append("<pre>" + "\n".join(_pl) + "</pre>")
+            parts.append(_pipe_table(tuple(_phdr), _prows, right_cols={3, 4},
+                                     title="POSITIONS"))
 
     # ── Fear & Greed + Sector Rotation ─────────────────────────────
     try:
@@ -12346,20 +12287,9 @@ async def morning_alert(ctx: ContextTypes.DEFAULT_TYPE):
         except Exception: pass
 
         if _macro_events:
-            # Compact 3-col table: Ind(7) | Val(9) | Signal(9) = ~30 chars total
-            _mhdr2 = ["Ind", "Val", "Signal"]
-            _mfw2 = [
-                max(len(_mhdr2[0]), max(len(r[0]) for r in _macro_events)),
-                max(len(_mhdr2[1]), max(len(r[1]) for r in _macro_events)),
-                max(len(_mhdr2[2]), max(len(r[2]) for r in _macro_events)),
-            ]
-            _mj2 = lambda i, v: v.ljust(_mfw2[i]) if i == 0 else v.rjust(_mfw2[i]) if i == 1 else v.ljust(_mfw2[i])
-            _msep2 = "-+-".join("-" * w for w in _mfw2)
-            _ml2 = ["MACRO SIGNALS",
-                    " | ".join(_mj2(i, _mhdr2[i]) for i in range(3)), _msep2]
-            for r in _macro_events:
-                _ml2.append(" | ".join(_mj2(i, r[i]) for i in range(3)))
-            parts.append("<pre>" + "\n".join(_ml2) + "</pre>")
+            parts.append(_pipe_table(("Ind", "Val", "Signal"),
+                                     [tuple(r) for r in _macro_events],
+                                     right_cols={1}, title="MACRO SIGNALS"))
     except Exception as _mce:
         log.warning(f"morning macro section failed: {_mce}")
 
@@ -12998,27 +12928,20 @@ async def aftermarket_predict(query, ticker: str = None):
     ]
 
     if close_orders:
-        summary_lines.append("\n<b>📋 Pre-Market GTC Orders</b>")
-        _C2 = [5, 5, 6, 11, 7, 6]
-        _H2 = ("Tkr","Type","Strk","Action","Limit","Why")
-        _sep2 = "─" * (sum(_C2) + len(_C2) - 1)
-        ord_rows = [
-            "  ".join(str(h).ljust(w) for h, w in zip(_H2, _C2)),
-            _sep2,
-        ]
+        _orow, _odet = [], []
         for o in close_orders:
             lim_s = f"${o['limit']:.2f}" if o["limit"] else "MKT"
-            why_s = (o["reason"] or "")[:_C2[5]]
-            ord_rows.append("  ".join([
-                str(o["tk"])[:_C2[0]].ljust(_C2[0]),
-                str(o["ot_s"])[:_C2[1]].ljust(_C2[1]),
-                f"${o['strk']:.0f}".rjust(_C2[2]),
-                str(o["action"])[:_C2[3]].ljust(_C2[3]),
-                str(lim_s).rjust(_C2[4]),
-                str(why_s).ljust(_C2[6] if len(_C2) > 6 else _C2[5]),
-            ]))
-        ord_rows.append(_sep2)
-        summary_lines.append(mono("\n".join(ord_rows)))
+            _act = str(o["action"]).upper()
+            _oem = "🔴" if _act.startswith("BUY") else "🟢"
+            _orow.append((_oem, str(o["tk"])[:5],
+                          f"{o['strk']:.0f}{str(o['ot_s'])[:1]}", lim_s))
+            _odet.append(f"{_oem} <b>{o['tk']}</b> {o['ot_s']} ${o['strk']:.0f} — "
+                         f"{o['action']} @ {lim_s} · {o['reason'] or ''}")
+        summary_lines.append("\n" + _pipe_table(
+            ("ST", "Tkr", "Leg", "Limit"), _orow, right_cols={3},
+            title="📋 Pre-Market GTC Orders",
+            legend="🟢 sell-to-close · 🔴 buy-to-close"))
+        summary_lines.append("\n".join(_odet))
         summary_lines.append("<i>Place as GTC limit orders before market open</i>")
     else:
         summary_lines.append("\n<i>No urgent pre-market orders needed — all positions HOLD/WATCH</i>")
@@ -13518,19 +13441,22 @@ def _build_portfolio_summary(all_legs, ticker_pnl_map, tickers):
     pnl     = sum(l['pnl']  for l in all_legs)
     var95   = sum(l['var95'] for l in all_legs)
     em      = '🟢' if pnl >= 0 else '🔴'
-    breakdown = "\n".join(
-        f"{'🟢' if v>=0 else '🔴'} {k:<6} {v:>+9,.0f}"
-        for k, v in sorted(ticker_pnl_map.items())
-    )
+    # standard-format tables (2026-07-17); callers append raw — NOT mono()
     inner = (
-        f"{'Positions':<14} {n} legs  ({n_calls}C / {n_puts}P)\n"
-        f"{'Long / Short':<14} {n_long}L / {n_short}S\n"
-        f"{'Stocks':<14} {len(tickers)}\n"
-        f"{'─' * 27}\n"
-        f"{em} {'Total Exp P&L':<13} {pnl:>+9,.0f}\n"
-        f"🔴 {'Max Loss VaR95':<13} {var95:>+9,.0f}\n"
-        f"{'─' * 27}\n"
-        "Per-Stock:\n" + breakdown
+        _pipe_table(
+            ("Metric", "Value"),
+            [("Legs", f"{n} ({n_calls}C/{n_puts}P)"),
+             ("L/S", f"{n_long}L / {n_short}S"),
+             ("Stocks", str(len(tickers))),
+             (f"{em} ExpP&L", f"{pnl:+,.0f}"),
+             ("🔴 VaR95", f"{var95:+,.0f}")],
+            right_cols={1})
+        + "\n" + _pipe_table(
+            ("ST", "Tkr", "P&L$"),
+            [(("🟢" if v >= 0 else "🔴"), str(k)[:6], f"{v:+,.0f}")
+             for k, v in sorted(ticker_pnl_map.items())],
+            right_cols={2}, title="Per-Stock",
+            legend="VaR95 = 95% worst-case to expiry")
     )
     return inner, pnl, var95
 
@@ -13701,7 +13627,7 @@ async def exit_batch_all(query):
     if not _ev_port:
         _ev_port = _get_event_risk(tickers[0], vix_val=vix_val) if tickers else {}
     _verdict = _build_exit_verdict("PORTFOLIO", all_legs, port_pnl, port_var, ev=_ev_port)
-    summary = hdr("📊 PORTFOLIO RISK SUMMARY") + "\n\n" + mono(inner) + (_verdict if _verdict else "")
+    summary = hdr("📊 PORTFOLIO RISK SUMMARY") + "\n\n" + inner + (_verdict if _verdict else "")
     await query.message.reply_text(
         summary,
         parse_mode=H,
@@ -13775,24 +13701,26 @@ async def exit_batch_ticker(query, ticker):
     n_puts  = sum(1 for l in legs_data if l['ot'] == 'put')
     n_long  = sum(1 for l in legs_data if l['qty'] > 0)
     n_short = sum(1 for l in legs_data if l['qty'] < 0)
-    leg_lines = [
-        f"{'🟢' if l['pnl']>=0 else '🔴'} {('+' if l['qty']>0 else '-') + ('C' if l['ot']=='call' else 'P')}"
-        f" ${l['strike']:.0f}"
-        f" {l['pnl']:>+8,.0f}  VaR:{l['var95']:>+7,.0f}"
-        for l in legs_data
-    ]
     inner = (
-        f"{'Positions':<14} {n} legs  ({n_calls}C / {n_puts}P)\n"
-        f"{'Long / Short':<14} {n_long}L / {n_short}S\n"
-        f"{'─' * 27}\n"
-        f"{em} {'Total Exp P&L':<13} {ticker_pnl:>+9,.0f}\n"
-        f"🔴 {'Max Loss VaR95':<13} {ticker_var95:>+9,.0f}\n"
-        f"{'─' * 27}\n"
-        "Per-Leg:\n" + "\n".join(leg_lines)
+        _pipe_table(
+            ("Metric", "Value"),
+            [("Legs", f"{n} ({n_calls}C/{n_puts}P)"),
+             ("L/S", f"{n_long}L / {n_short}S"),
+             (f"{em} ExpP&L", f"{ticker_pnl:+,.0f}"),
+             ("🔴 VaR95", f"{ticker_var95:+,.0f}")],
+            right_cols={1})
+        + "\n" + _pipe_table(
+            ("ST", "Leg", "P&L$", "VaR"),
+            [(("🟢" if l['pnl'] >= 0 else "🔴"),
+              f"{'+' if l['qty'] > 0 else '-'}{l['strike']:.0f}{'C' if l['ot'] == 'call' else 'P'}",
+              f"{l['pnl']:+,.0f}", f"{l['var95']:+,.0f}")
+             for l in legs_data],
+            right_cols={2, 3}, title="Per-Leg",
+            legend="VaR95 = 95% worst-case to expiry")
     )
     _ev_tk = _get_event_risk(ticker, vix_val=vix_val)
     _verdict = _build_exit_verdict(ticker, legs_data, ticker_pnl, ticker_var95, ev=_ev_tk)
-    summary = hdr(f"🏢 {ticker} RISK SUMMARY") + "\n\n" + mono(inner) + (_verdict if _verdict else "")
+    summary = hdr(f"🏢 {ticker} RISK SUMMARY") + "\n\n" + inner + (_verdict if _verdict else "")
     await query.message.reply_text(
         summary,
         parse_mode=H,
@@ -16025,12 +15953,12 @@ async def high_prob_detail(query, ticker):
     if wall.get("put_wall") and wall.get("call_wall"):
         lines += [
             "",
-            "<b>🧱 OI Walls:</b>",
-            mono(
-                f"Put Wall  ${wall['put_wall']:>7.2f} ({wall.get('pw_str',1):.1f}x)\n"
-                f"Spot      ${res['spot']:>7.2f}\n"
-                f"Call Wall ${wall['call_wall']:>7.2f} ({wall.get('cw_str',1):.1f}x)"
-            ),
+            _pipe_table(
+                ("ST", "Level", "Px"),
+                [("🟩", "PutWall", f"${wall['put_wall']:.2f} ({wall.get('pw_str',1):.1f}x)"),
+                 ("⚖️", "Spot", f"${res['spot']:.2f}"),
+                 ("🟥", "CallWall", f"${wall['call_wall']:.2f} ({wall.get('cw_str',1):.1f}x)")],
+                right_cols={2}, title="🧱 OI Walls"),
         ]
 
     lines.append("")
@@ -16041,15 +15969,15 @@ async def high_prob_detail(query, ticker):
     chunks = [all_models[:8], all_models[8:16], all_models[16:]]
     for lbl, chunk in zip(chunk_labels, chunks):
         if not chunk: continue
-        lines.append(f"<b>{lbl}</b>")
         tbl = []
         for nm, short in chunk:
             r  = res["models"].get(nm, {})
             ms = r.get("signal", "NEUTRAL")
             mp = r.get("prob", 50)
             mw = res["weights"].get(nm, 1.0)
-            tbl.append(f"{short[:8]:<8} {_ME.get(ms,'⚪')}{ms[:4]:<4} {mp:>3}% {mw:.1f}")
-        lines.append(mono("\n".join(tbl)))
+            tbl.append((_ME.get(ms, "⚪"), short[:8], f"{mp}%", f"{mw:.1f}"))
+        lines.append(_pipe_table(("ST", "Model", "P%", "W"), tbl,
+                                 right_cols={2, 3}, title=lbl))
         lines.append("")
 
     # Top signals across all 24 models (sorted by prob, exclude NEUTRAL<55)
@@ -16070,12 +15998,12 @@ async def high_prob_detail(query, ticker):
     n_cln = meta.get("n_clean", 0)
     bt_rows = [(nm, v) for nm, v in bt.items() if nm != "meta" and isinstance(v, dict) and "acc" in v]
     if bt_rows:
-        lines.append("<b>Walk-Forward Backtest:</b>")
-        btl = []
-        for nm, v in bt_rows:
-            bar = "█" * min(int(v["acc"] / 10), 10)
-            btl.append(f"{nm:<10} {v['acc']:>5.1f}%  n={v['n']}  {bar}")
-        lines.append(mono("\n".join(btl)))
+        lines.append(_pipe_table(
+            ("ST", "Model", "Acc%", "N"),
+            [(("🟢" if v["acc"] >= 55 else "🟡" if v["acc"] >= 45 else "🔴"),
+              str(nm)[:10], f"{v['acc']:.1f}", str(v["n"])) for nm, v in bt_rows],
+            right_cols={2, 3}, title="Walk-Forward Backtest",
+            legend="🟢 ≥55% · 🟡 45-55% · 🔴 <45%"))
         lines.append(f"<i>Removed {n_ext} extreme days · {n_cln} clean</i>")
     else:
         lines.append("<i>Backtest: need ≥15 clean days</i>")
@@ -16884,16 +16812,15 @@ async def short_sellers_view(query):
     parts = [hdr("SHORT SELLERS TOP SHORTED")]
     parts.append(f"<i>{len(rows)} stocks scanned</i>\n")
 
-    parts.append(shdr("SHORT % FLOAT RANKING"))
-    tbl = [f"{'Tkr':<6} {'Shrt%':>5} {'Days':>5} {'MoM':>6} {'Sqz':>3}"]
-    tbl.append("-" * 32)
+    _srow = []
     for r in rows[:12]:
-        spf_s = f"{r['spf']:.1f}%" if r['spf'] else "  -- "
-        sr_s  = f"{r['sr']:.0f}d"  if r['sr']  else "  -- "
-        mom_s = f"{r['mom']:+.0f}%" if r['mom'] is not None else "   -- "
-        em    = "[HOT]" if r['sc'] >= 7 else ("[!]" if r['sc'] >= 4 else "   ")
-        tbl.append(f"{r['tk']:<6} {spf_s:>5} {sr_s:>5} {mom_s:>6} {r['sc']:>2}{em}")
-    parts.append(mono("\n".join(tbl)))
+        spf_s = f"{r['spf']:.1f}" if r['spf'] else "-"
+        sr_s  = f"{r['sr']:.0f}d" if r['sr'] else "-"
+        em    = "🔥" if r['sc'] >= 7 else ("🟡" if r['sc'] >= 4 else "⚪")
+        _srow.append((em, r['tk'][:5], spf_s, sr_s, str(r['sc'])))
+    parts.append(_pipe_table(("ST", "Tkr", "Sh%", "Day", "Sq"), _srow,
+                             right_cols={2, 3, 4}, title="SHORT % FLOAT RANKING",
+                             legend="🔥 squeeze 7+ · 🟡 4-6 · Sq=/10"))
 
     squeeze = [r for r in rows if r["sc"] >= 6]
     if squeeze:
@@ -18707,10 +18634,11 @@ async def smart_money_hub_report(query):
                 parts.append(mono("🟡 No big bets today — market\n   is quiet"))
             else:
                 score += min(2, len(hot))
-                lines = ["Ticker  Surge  Expiries"]
-                for _, r in hot.iterrows():
-                    lines.append(f"{r['ticker']:<7} {r['surge']:.1f}×  {int(r['strikes'])} strikes")
-                parts.append(mono("\n".join(lines)))
+                parts.append(_pipe_table(
+                    ("ST", "Tkr", "Surge", "Stks"),
+                    [("🔥", str(r['ticker'])[:6], f"{r['surge']:.1f}x", str(int(r['strikes'])))
+                     for _, r in hot.iterrows()],
+                    right_cols={2, 3}))
                 parts.append(f"🔴 <b>Alert: {len(hot)} tickers show unusual bets</b>")
         except Exception as e:
             parts.append(mono(f"UOA: data unavailable"))
@@ -18739,12 +18667,14 @@ async def smart_money_hub_report(query):
                 parts.append(mono("🟡 No block concentrations found"))
             else:
                 score += min(1, len(blocks))
-                lines = ["Ticker Strike  Expiry  Bias"]
+                _blk = []
                 for _, r in blocks.iterrows():
-                    bias = "CALL" if r["call_pct"] > 0.6 else ("PUT" if r["call_pct"] < 0.4 else "MIX")
-                    exp_short = str(r["expiry_date"])[:5] if r["expiry_date"] else "?"
-                    lines.append(f"{r['ticker']:<6} {r['strike']:<7.0f} {exp_short}  {bias}")
-                parts.append(mono("\n".join(lines)))
+                    _bem = "🟢" if r["call_pct"] > 0.6 else ("🔴" if r["call_pct"] < 0.4 else "🟡")
+                    _blk.append((_bem, str(r['ticker'])[:5], f"{r['strike']:.0f}",
+                                 str(r["expiry_date"])[5:10] if r["expiry_date"] else "?"))
+                parts.append(_pipe_table(("ST", "Tkr", "Stk", "Exp"), _blk,
+                                         right_cols={2},
+                                         legend="🟢 call-bias · 🔴 put-bias · 🟡 mixed"))
                 parts.append(f"🔵 <b>{len(blocks)} block positions detected</b>")
         except Exception as e:
             parts.append(mono(f"DarkPool: data unavailable"))
@@ -19419,18 +19349,15 @@ async def gamma_advisor_view(query, ticker=None):
         parts.append("─" * 26)
 
         # Market structure
-        parts.append("\n<b>📐 Market Structure</b>")
-        sl = []
-        sl.append(f"Spot:      ${spot:.2f}")
+        sl = [("⚖️", "Spot", f"${spot:.2f}")]
         if cw:
-            dist_c = (cw - spot) / spot * 100
-            sl.append(f"Call Wall: ${cw:.2f} ({dist_c:+.1f}%) [{w['call_wall_str']:.1f}×OI]")
+            sl.append(("🟥", "CWall", f"${cw:.0f} ({(cw - spot) / spot * 100:+.1f}%)"))
         if pw:
-            dist_p = (pw - spot) / spot * 100
-            sl.append(f"Put Wall:  ${pw:.2f} ({dist_p:+.1f}%) [{w['put_wall_str']:.1f}×OI]")
-        sl.append(f"GEX:       {w['gex_regime']}")
-        sl.append(f"PCR:       {w['pcr']:.2f}")
-        parts.append(mono("\n".join(sl)))
+            sl.append(("🟩", "PWall", f"${pw:.0f} ({(pw - spot) / spot * 100:+.1f}%)"))
+        sl.append(("📊", "GEX", str(w['gex_regime'])))
+        sl.append(("📊", "PCR", f"{w['pcr']:.2f}"))
+        parts.append("\n" + _pipe_table(("ST", "Lvl", "Value"), sl, right_cols={2},
+                                        title="📐 Market Structure"))
 
         # Advisor conviction
         parts.append(f"\n<b>Conviction: {stars} ({score}/5)</b>")
@@ -19442,16 +19369,15 @@ async def gamma_advisor_view(query, ticker=None):
             long_strike = cw + spread_width
             est_credit = round(spot * 0.003, 2)   # rough ~0.3% premium
             max_loss = round((long_strike - cw) * 100 - est_credit * 100, 0)
-            parts.append(mono(
-                f"SELL CALL SPREAD:\n"
-                f"  Sell ${cw:.0f} Call  (at wall)\n"
-                f"  Buy  ${long_strike:.0f} Call  (protection)\n"
-                f"  Est. credit: ~${est_credit:.2f}/share\n"
-                f"  Est. credit: ~${est_credit*100:.0f}/contract\n"
-                f"  Max profit:  ${est_credit*100:.0f}/contract\n"
-                f"  Max loss:    ~${max_loss:.0f}/contract\n"
-                f"  Target exit: 50% profit = ${est_credit*50:.0f}"
-            ))
+            parts.append(_pipe_table(
+                ("ST", "Leg/Term", "Value"),
+                [("🔴", "Sell", f"{cw:.0f}C (wall)"),
+                 ("🟢", "Buy", f"{long_strike:.0f}C (prot)"),
+                 ("💰", "Credit", f"${est_credit * 100:.0f}/ct"),
+                 ("🟢", "MaxP", f"${est_credit * 100:.0f}"),
+                 ("🔴", "MaxL", f"~${max_loss:.0f}"),
+                 ("🎯", "Exit", f"+50% = ${est_credit * 50:.0f}")],
+                right_cols={2}, title="SELL CALL SPREAD"))
             parts.append(f"\n<b>Exit rules (from tastytrade/SpotGamma research):</b>")
             parts.append(f"✅ Close when P&L = +50% of credit (${est_credit*50:.0f})")
             parts.append(f"🛑 Stop loss if cost-to-close = 2× credit (${est_credit*200:.0f})")
@@ -19475,19 +19401,16 @@ async def gamma_advisor_view(query, ticker=None):
         # ── Per-expiry wall table ─────────────────────────────
         _ew_rows, _ew_anomalies = _ga_expiry_wall_table(tk, conn, spot)
         if _ew_rows:
-            parts.append("\n<b>📅 Wall by Expiry</b>")
-            # Header
-            _tbl = [f"{'Exp':<10} {'DTE':>3} {'CW':>6} {'CWd':>5} {'PW':>6} {'PWd':>6}"]
-            _tbl.append("─" * 42)
+            _tbl = []
             for _r in _ew_rows[:8]:   # cap at 8 rows for mobile
-                _cw_s = f"${_r['cw']:.0f}" if _r["cw"] else "  —  "
-                _pw_s = f"${_r['pw']:.0f}" if _r["pw"] else "  —  "
-                _cwd  = f"{_r['cw_dist']:+.1f}%" if _r["cw_dist"] is not None else "  — "
-                _pwd  = f"{_r['pw_dist']:+.1f}%" if _r["pw_dist"] is not None else "  — "
-                _z    = "✅" if _r["zone"] == "IDEAL" else ("⚡" if _r["zone"] == "NEAR" else "📌")
-                _tbl.append(f"{_r['expiry']:<10} {_r['dte']:>3} {_cw_s:>6} {_cwd:>5} {_pw_s:>6} {_pwd:>6} {_z}")
-            parts.append(mono("\n".join(_tbl)))
-            parts.append("<i>✅IDEAL(21-50d) ⚡NEAR(&lt;21d) 📌FAR(&gt;50d)</i>")
+                _z = "✅" if _r["zone"] == "IDEAL" else ("⚡" if _r["zone"] == "NEAR" else "📌")
+                _tbl.append((_z, str(_r['expiry'])[5:10], f"{_r['dte']}d",
+                             f"{_r['cw']:.0f}" if _r["cw"] else "-",
+                             f"{_r['pw']:.0f}" if _r["pw"] else "-"))
+            parts.append("\n" + _pipe_table(
+                ("ST", "Exp", "DTE", "CW", "PW"), _tbl, right_cols={2, 3, 4},
+                title="📅 Wall by Expiry",
+                legend="✅ ideal 21-50d · ⚡ <21d · 📌 >50d"))
 
         # ── Anomaly flags ─────────────────────────────────────
         if _ew_anomalies:
@@ -19735,14 +19658,13 @@ async def edge_lab_view(query):
         if not walls:
             parts.append(mono("No walls found today"))
         else:
-            hdr = f"{'Tk':<5} {'Wall':>6} {'Dist':>5} {'WR%':>5} {'N':>3}"
-            rows = [hdr, "─" * len(hdr)]
-            for w in walls[:8]:
-                rows.append(
-                    f"{w['ticker']:<5} ${w['call_wall']:>5.0f} "
-                    f"{w['dist_pct']:>4.1f}% {w['hist_wr']:>4.0f}% {w['hist_trades']:>3}")
-            parts.append(mono("\n".join(rows)))
-            parts.append("WR% = historical win rate (spot stayed below wall)")
+            parts.append(_pipe_table(
+                ("ST", "Tk", "Wall", "WR%", "N"),
+                [(("🟢" if w['hist_wr'] >= 70 else "🟡"), str(w['ticker'])[:5],
+                  f"{w['call_wall']:.0f}", f"{w['hist_wr']:.0f}", str(w['hist_trades']))
+                 for w in walls[:8]],
+                right_cols={2, 3, 4},
+                legend="WR% = hist win rate (stayed below wall) · 🟢 ≥70%"))
 
         # ── OI Flow signals ──
         parts.append("\n<b>📊 OI FLOW — DIRECTIONAL SIGNAL</b>")
@@ -19776,12 +19698,14 @@ async def edge_lab_view(query):
                         continue
                     raw_dir = 1 if flow > 0 else -1
                     d = -raw_dir if m['contrarian'] else raw_dir
-                    sig = "🟢 LONG" if d == 1 else "🔴 SHORT"
-                    flow_rows.append(f"{tk:<6} {sig} WR:{m['win_rate']:.0f}%")
+                    flow_rows.append((("🟢" if d == 1 else "🔴"), tk[:6],
+                                      ("LONG" if d == 1 else "SHORT"),
+                                      f"{m['win_rate']:.0f}%"))
                 except Exception:
                     continue
             if flow_rows:
-                parts.append(mono("\n".join(flow_rows)))
+                parts.append(_pipe_table(("ST", "Tkr", "Dir", "WR%"), flow_rows,
+                                         right_cols={3}))
             else:
                 parts.append(mono("No strong flow signals today"))
 

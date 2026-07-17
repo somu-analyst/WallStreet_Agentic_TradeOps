@@ -163,23 +163,30 @@ async def event_anomaly_scan(ctx):
             msg = f"⚠️ <b>MARKET ANOMALY</b>\n\n{a['description']}"
             _d = a.get("data") or {}
             _tk = _d.get("ticker")
-            # Ticker shocks: plain 2-col Metric/Value table (no ST col — this is
-            # ONE ticker's snapshot, not a multi-row list, so a status column
-            # per row doesn't fit; color folds into the one row that needs it,
-            # user feedback 2026-07-17) + 1-year line chart.
+            # Ticker shocks: PURE text/number table — no emoji anywhere inside
+            # the <pre> block. Every working table elsewhere in the bot either
+            # gives emoji its OWN column on EVERY row, or leaves it out; mixing
+            # emoji + text in a single cell (e.g. "🟢 Move") renders wider than
+            # the width math predicts on some Telegram clients and breaks pipe
+            # alignment (user flagged twice, 2026-07-17). Direction now goes in
+            # the plain-text title line instead, where alignment doesn't matter.
             if a["type"] == "TICKER_SHOCK" and _tk and _d.get("now_px"):
                 _chg = float(_d.get("chg_pct") or 0)
-                _em = "🔴" if _chg < 0 else "🟢"
+                # No pure green/red arrow glyph exists in Unicode (🔺🔻🔼🔽 are
+                # all red, no green counterpart; ⬆️⬇️ aren't colored). 📈/📉 is
+                # the closest real match — genuinely green-up/red-down by
+                # design, single glyph, safe width. Decided 2026-07-17.
+                _dir_word = "📈" if _chg >= 0 else "📉"
                 _rows = [("Now", f"${float(_d['now_px']):.2f}")]
                 _pc = _d.get("prev_close")
                 if _pc:
                     _rows.append(("PrevCls", f"${float(_pc):.2f}"))
                 _rows.append(("Open", f"${float(_d.get('day_open') or 0):.2f}"))
-                _rows.append((f"{_em} Move", f"{_chg:+.1f}%"))
+                _rows.append(("Move", f"{_chg:+.1f}%"))
                 _mc = _d.get("mcap_impact")
                 if _mc:
                     _rows.append(("MCapΔ", f"{'-' if _mc < 0 else '+'}${abs(_mc)/1e9:.1f}B"))
-                msg = (f"⚠️ <b>MARKET ANOMALY — {_tk}</b>\n\n"
+                msg = (f"⚠️ <b>MARKET ANOMALY — {_tk} {_dir_word} {_chg:+.1f}%</b>\n\n"
                        + _pipe_table(("Metric", "Value"), _rows, right_cols={1},
                                      legend="move measured vs TODAY's open"))
             await ctx.bot.send_message(chat_id=chat_id, text=msg, parse_mode=H)

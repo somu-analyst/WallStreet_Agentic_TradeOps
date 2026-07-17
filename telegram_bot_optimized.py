@@ -482,10 +482,11 @@ def ensure_streamlit_running(port: int = 8502) -> bool:
         log.warning(f"Failed to start Streamlit dashboard: {e}")
         return False
 
-    for _ in range(25):
+    # Dashboard imports the full bot module → cold start can exceed 60s
+    for _ in range(90):
         if _is_local_port_open(port):
             return True
-        time.sleep(0.4)
+        time.sleep(1.0)
 
     return False
 

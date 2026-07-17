@@ -1359,10 +1359,16 @@ def _dh_banner():
             _a0 = _aud.iloc[0]
             _cls = {"VALIDATED": "dh-ok", "PARTIAL": "dh-part", "FAILED": "dh-fail"}.get(_a0["status"], "dh-part")
             _ic = {"VALIDATED": "✅", "PARTIAL": "🟡", "FAILED": "🔴"}.get(_a0["status"], "🟡")
+            # SHORT + BIG (user 2026-07-17); full checks live in the expander below
+            _n_fail = str(_a0["summary"]).count("❌")
+            _extra = f" · {_n_fail} check{'s' if _n_fail > 1 else ''} failed" if _n_fail else ""
             st.markdown(
-                f"<div>{_ic} DATA {_a0['status']} — {_a0['audit_date']} "
-                f"({_a0['summary']})</div>",
+                f"<div>"
+                f"{_ic} DATA {_a0['status']} — {_a0['audit_date']}{_extra}</div>",
                 unsafe_allow_html=True)
+            with st.expander("🔍 Audit details (7 checks)", expanded=False):
+                for _chk in str(_a0["summary"]).split(" · "):
+                    st.markdown(_chk)
         if _open.empty:
             return
         for _, _a in _open.iterrows():

@@ -26,7 +26,12 @@ paths:
 - Long reports: `<blockquote expandable>` per section (see `/plan`; strip-and-resend fallback).
 - Scanner output = `_pipe_table` rank table (≤28 chars wide) + per-row HTML detail lines (see `_send_spreads`, `/ratings`) — never crammed single-line bullets.
 
-## Tables — ALWAYS `_pipe_table(headers, rows, right_cols, title, legend)`
+## Tables — ALWAYS `_report()` / `_pipe_table()`
+- `_report(title, headers, rows, right_cols, legend, notes, details)` = THE universal
+  result-message macro (header bar + table + legend + detail lines + italic note) — use it
+  for every new tabular command output. Tables embedded mid-narrative use `_pipe_table` directly.
+- Swept 2026-07-16: momentum/opex/squeeze/macro/gex/OI-expiry-flow all converted off hand-rolled
+  `<pre>` grids. Charts = `make_mini_chart` PNG.
 Emoji/width-aware (`_disp_w`: emoji/CJK=2). Status emoji in column 0 only (🟢/🔴/🟡). Numbers → `right_cols`, K/M notation. `title`/`legend` render outside `<pre>`. Never hand-roll `mono()` grids.
 
 ## Key functions

@@ -2090,6 +2090,19 @@ def _disp_w(s):
     return w
 
 
+def _report(title, headers, rows, right_cols=None, legend=None, notes=None, details=None):
+    """UNIVERSAL result-message macro (user standard 2026-07-16, modeled on /earnvol):
+    header bar + aligned _pipe_table + legend + optional per-row detail lines +
+    one italic guidance note. Use for EVERY tabular bot output; charts stay PNG
+    via make_mini_chart. Returns the full HTML message string."""
+    parts = [hdr(title), _pipe_table(headers, rows, right_cols=right_cols, legend=legend)]
+    if details:
+        parts.append("\n".join(details))
+    if notes:
+        parts.append(f"<i>{notes}</i>")
+    return "\n".join(parts)
+
+
 def _pipe_table(header_cols, rows_data, right_cols=None, title=None, legend=None):
     """Excel-style fixed-width table in <pre> — columns align at the same index.
 
@@ -4212,6 +4225,7 @@ def _oi_expiry_flow_table(ticker: str, conn, latest_date: str) -> str:
         if p > abs(c)*1.5 and p > 0:  return "BEAR"
         if c < -200 and p < -200:     return "UNWD"
         return "FLAT"
+    _bemo = {"BULL": "🟢", "BEAR": "🔴", "STRD": "🟡", "UNWD": "⚪", "FLAT": "⚪"}
     rows = []
     for _, r in edf.iterrows():
         try:
@@ -4219,13 +4233,12 @@ def _oi_expiry_flow_table(ticker: str, conn, latest_date: str) -> str:
                 continue
         except Exception:
             log.debug("suppressed exception", exc_info=True)
-        exp_s = str(r["expiry_date"])[:5]
-        rows.append("{:<5} {:>6} {:>6}  {:<4}".format(
-            exp_s, _fk(r["c_chg"]), _fk(r["p_chg"]), _bias(r["c_chg"], r["p_chg"])))
+        b = _bias(r["c_chg"], r["p_chg"])
+        rows.append((_bemo.get(b, "⚪"), str(r["expiry_date"])[5:], _fk(r["c_chg"]), _fk(r["p_chg"])))
     if not rows:
         return ""
-    hdr_l = "{:<5} {:>6} {:>6}  {:<4}".format("Exp","CΔ","PΔ","Bias")
-    return "<pre>" + "\n".join([hdr_l, "-"*26] + rows[:6]) + "</pre>"
+    return _pipe_table(("ST", "Exp", "CΔ", "PΔ"), rows[:6], right_cols={2, 3},
+                       legend="🟢 call build · 🔴 put build · 🟡 straddle · ⚪ flat/unwind")
 
 
 def _get_earnings_dte(ticker: str) -> "int | None":
@@ -13743,13 +13756,13 @@ def _fmt_squeeze_report(sig) -> str:
              f"Score: <b>{sc}/5</b> [{bars}]",
              f"Stage: <b>{sig['stage']}</b> — {sig['label']}", ""]
     t = []
-    if sig.get("short_pct")  is not None: t.append(f"Short%Flt {sig['short_pct']:>5.1f}%")
-    if sig.get("dtc")        is not None: t.append(f"DaysCover {sig['dtc']:>5.1f}")
-    if sig.get("si_chg_pct") is not None: t.append(f"SI MoM    {sig['si_chg_pct']:>+5.0f}%")
-    if sig.get("price_chg")  is not None: t.append(f"Price     {sig['price_chg']:>+5.1f}%")
-    if sig.get("vol_ratio")  is not None: t.append(f"Volume    {sig['vol_ratio']:>5.1f}x")
+    if sig.get("short_pct")  is not None: t.append(("Short%Flt", f"{sig['short_pct']:.1f}%"))
+    if sig.get("dtc")        is not None: t.append(("DaysCover", f"{sig['dtc']:.1f}"))
+    if sig.get("si_chg_pct") is not None: t.append(("SI MoM", f"{sig['si_chg_pct']:+.0f}%"))
+    if sig.get("price_chg")  is not None: t.append(("Price", f"{sig['price_chg']:+.1f}%"))
+    if sig.get("vol_ratio")  is not None: t.append(("Volume", f"{sig['vol_ratio']:.1f}x"))
     if t:
-        lines.append("<pre>" + "\n".join(t) + "</pre>")
+        lines.append(_pipe_table(("Metric", "Val"), t, right_cols={1}))
     lines.append("<b>Why:</b>")
     lines.extend("• " + r for r in sig["reasons"])
     lines.append("")
@@ -19681,11 +19694,10 @@ def _fmt_opex_report(rad):
     gex = rad.get("gex") or {}
     lines = ["\U0001F5D3 <b>OPEX RADAR</b>  (" + "+".join(rad["tickers"]) + ")",
              "<i>ETF/equity slice you store - excludes SPX index headline.</i>", ""]
-    tbl = []
-    for r in rad["rows"]:
-        star = "*" if r["date"] == mj["date"] else " "
-        tbl.append(f"{star}{r['date']} {r['dte']:>3}d {_opex_notional_str(r['notional']):>7}")
-    lines.append("<pre>" + "\n".join(tbl) + "</pre>")
+    tbl = [(("🎯" if r["date"] == mj["date"] else "⚪"), r["date"], f"{r['dte']}d",
+            _opex_notional_str(r["notional"])) for r in rad["rows"]]
+    lines.append(_pipe_table(("ST", "Expiry", "DTE", "Notional"), tbl, right_cols={2, 3},
+                             legend="🎯 = major expiry"))
     q = "QUAD-WITCHING" if mj.get("is_quarterly") else "monthly OpEx"
     lines.append(f"\U0001F3AF <b>Major: {mj['date']}</b> ({mj['dte']}d) - {q}")
     lines.append(f"Notional rolling off: <b>{_opex_notional_str(mj['notional'])}</b>")
@@ -26788,11 +26800,11 @@ def _fmt_gex_report(g, tk, spot, pos=None):
              f"Regime: <b>{reg}</b>  · exp {g.get('expiry','?')} ({g.get('dte','?')}d)",
              f"Total GEX: {gm:+.1f}M"]
     wl = []
-    if pw:   wl.append(f"Put wall (support)  ${pw:.0f}")
-    if flip: wl.append(f"Gamma flip          ${flip:.0f}")
-    if cw:   wl.append(f"Call wall (resist)  ${cw:.0f}")
+    if pw:   wl.append(("🟩", "Put wall (supp)", f"${pw:.0f}"))
+    if flip: wl.append(("⚖️", "Gamma flip", f"${flip:.0f}"))
+    if cw:   wl.append(("🟥", "Call wall (res)", f"${cw:.0f}"))
     if wl:
-        lines.append("<pre>" + "\n".join(wl) + "</pre>")
+        lines.append(_pipe_table(("ST", "Level", "Px"), wl, right_cols={2}))
     if reg == "TRENDING":
         lines.append("⚡ <b>Negative gamma:</b> dealers amplify moves — expect bigger swings/trends. "
                      "Favors LONG options & breakouts; risky to sell premium.")
@@ -27245,10 +27257,11 @@ def _fmt_macro_report():
             if not d:
                 continue
             chg = d["value"] - d["prev"]
-            arrow = "UP" if chg > 0 else ("DN" if chg < 0 else "--")
-            rows.append(f"{name:<10}{d['value']:>8.2f}{unit:<1} {arrow}")
+            rows.append((("🟢" if chg > 0 else "🔴" if chg < 0 else "⚪"),
+                         name[:10], f"{d['value']:.2f}{unit}"))
         if rows:
-            lines.append("<pre>" + "\n".join(rows) + "</pre>")
+            lines.append(_pipe_table(("ST", "Series", "Val"), rows, right_cols={2},
+                                     legend="🟢 rising · 🔴 falling vs prior print"))
         else:
             lines.append("Could not fetch FRED data.")
     av = _av_macro()
@@ -27597,14 +27610,10 @@ def _fmt_momentum_leaderboard(conn, n=8, highlight=None):
     total = len(df)
 
     def _block(sub, title):
-        out = [title, "<pre>", "rk tkr    12-1  1m"]
-        for _, r in sub.iterrows():
-            tk = str(r["ticker"])[:5]
-            star = "*" if tk in highlight else " "
-            tr = "↑" if int(r["above200"]) else "↓"
-            out.append(f"{int(r['mom_rank']):<2}{star}{tk:<5}{r['ret_12_1']:>+5.0f}%{r['ret_1m']:>+4.0f}%{tr}")
-        out.append("</pre>")
-        return "\n".join(out)
+        data = [(("⭐" if str(r["ticker"])[:5] in highlight else ("↑" if int(r["above200"]) else "↓")),
+                 f"{int(r['mom_rank'])}", str(r["ticker"])[:5],
+                 f"{r['ret_12_1']:+.0f}%", f"{r['ret_1m']:+.0f}%") for _, r in sub.iterrows()]
+        return title + "\n" + _pipe_table(("ST", "Rk", "Tkr", "12-1", "1m"), data, right_cols={1, 3, 4})
 
     parts = ["🚀 <b>MOMENTUM 12-1 — UNIVERSE</b>",
              f"<i>as of {_mom_asof_disp(asof)} · {total} names · 12-mo ret, skip 1m</i>"]
@@ -27615,11 +27624,10 @@ def _fmt_momentum_leaderboard(conn, n=8, highlight=None):
     if highlight:
         mine = df[df["ticker"].isin(highlight)].sort_values("mom_rank")
         if not mine.empty:
-            ml = ["⭐ <b>Your positions ranked</b>", "<pre>", "tkr    12-1  rk/dec"]
-            for _, r in mine.iterrows():
-                ml.append(f"{str(r['ticker'])[:5]:<5}{r['ret_12_1']:>+5.0f}% {int(r['mom_rank'])}/{int(r['decile'])}")
-            ml.append("</pre>")
-            parts.append("\n".join(ml))
+            _md = [("⭐", str(r["ticker"])[:5], f"{r['ret_12_1']:+.0f}%",
+                    f"{int(r['mom_rank'])}/{int(r['decile'])}") for _, r in mine.iterrows()]
+            parts.append("⭐ <b>Your positions ranked</b>\n"
+                         + _pipe_table(("ST", "Tkr", "12-1", "Rk/D"), _md, right_cols={2, 3}))
     parts.append("<i>Top decile = strongest trend (long bias); bottom decile = weakest "
                  "(short/avoid). Leveraged/inverse/vol ETFs excluded. Best when aligned "
                  "with Risk Regime — press longs in RISK-ON.</i>")

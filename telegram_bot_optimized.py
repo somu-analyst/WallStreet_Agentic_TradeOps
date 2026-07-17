@@ -5458,10 +5458,11 @@ def _oi_trend_summary(ticker: str, conn, latest_date: str) -> str:
         rows.append(("1M", _fk_static(mc), _fk_static(mp), _trend_short(mc, mp)))
     if not rows:
         return ""
-    hdr_line = "{:<3} {:>6} {:>6}  {:<8}".format("Per","Call","Put","Signal")
-    sep      = "-" * 27
-    data_lines = ["{:<3} {:>6} {:>6}  {:<8}".format(*r) for r in rows]
-    return "<pre>" + "\n".join([hdr_line, sep] + data_lines) + "</pre>"
+    _temo = {"CALL-DOM": "🟢", "PUT-DOM": "🔴", "STRD/VOL": "🟡", "MIXED-C": "⚪", "MIXED-P": "⚪"}
+    return _pipe_table(("ST", "Per", "CallΔ", "PutΔ"),
+                       [(_temo.get(r[3], "⚪"), r[0], r[1], r[2]) for r in rows],
+                       right_cols={2, 3},
+                       legend="🟢 call-dom · 🔴 put-dom · 🟡 straddle · ⚪ mixed")
 
 
 

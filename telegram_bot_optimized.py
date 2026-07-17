@@ -716,6 +716,62 @@ def make_mini_chart(ticker: str, days: int = 7) -> bytes:
     buf.seek(0)
     return buf.read()
 
+
+def make_line_chart(ticker: str, days: int = 365) -> bytes:
+    """Simple CLOSE-price line chart, no candles/volume bars (user ask 2026-07-17:
+    long-lookback context chart — e.g. anomaly alerts — should read as one clean
+    trend line, not a dense multi-month candlestick grid). White background
+    (user ask 2026-07-17) — reads better than dark on a phone notification."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    BG, GRID, TEXT_C = "#ffffff", "#e1e4e8", "#24292e"
+    UP_C, DN_C, LINE_C = "#1a7f37", "#cf222e", "#0969da"
+
+    tk = _yf_ticker(ticker)
+    hist = tk.history(period=f"{days}d")
+    if hist.empty:
+        fig, ax = plt.subplots(figsize=(6, 3), dpi=120)
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", color=TEXT_C)
+        ax.set_facecolor(BG); fig.patch.set_facecolor(BG)
+        buf = BytesIO(); fig.savefig(buf, format="png", facecolor=BG); plt.close(fig)
+        buf.seek(0); return buf.read()
+
+    C = hist["Close"].values
+    net_pct = (C[-1] - C[0]) / C[0] * 100 if C[0] else 0
+    net_col = UP_C if net_pct >= 0 else DN_C
+    label_disp = "S&P 500" if ticker == "^GSPC" else ticker
+
+    fig, ax = plt.subplots(figsize=(7, 3.2), dpi=130, facecolor=BG)
+    ax.set_facecolor(BG)
+    ax.grid(True, color=GRID, linewidth=0.5, linestyle="--")
+    ax.spines[:].set_visible(False)
+    ax.tick_params(colors=TEXT_C, labelsize=7)
+
+    xs = range(len(hist))
+    ax.plot(list(xs), C, color=LINE_C, linewidth=1.3)
+    ax.fill_between(list(xs), C, min(C), color=LINE_C, alpha=0.08)
+    ax.set_xlim(0, len(hist) - 1)
+    ax.set_ylim(min(C) * 0.98, max(C) * 1.02)
+    ax.yaxis.set_label_position("right"); ax.yaxis.tick_right()
+
+    ax.set_title(f"{label_disp}   {C[-1]:,.2f}   {net_pct:+.1f}%  ({days}d)",
+                 loc="left", fontsize=10, color=TEXT_C, pad=6, fontweight="bold")
+
+    date_labels = [d.strftime("%b'%y") if hasattr(d, "strftime") else str(d) for d in hist.index]
+    tick_positions = list(range(0, len(hist), max(1, len(hist) // 6)))
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels([date_labels[i] for i in tick_positions], fontsize=7, color=TEXT_C)
+
+    plt.tight_layout(pad=0.5)
+    buf = BytesIO()
+    fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
 # File logging for the bot (tailable)
 LOG_PATH = os.path.join(NYSE_DIR, "telegram_bot.log")
 try:
@@ -2100,9 +2156,12 @@ def _disp_w(s):
         o = ord(ch)
         if 0xFE00 <= o <= 0xFE0F or 0x0300 <= o <= 0x036F or o == 0x200D:
             continue  # variation selector / combining mark / zero-width joiner
+        # NOTE: bare arrows (→↑↓←) and unfilled shapes (▲▼◆) default to NARROW
+        # text presentation in Telegram's monospace font unless paired with a
+        # variation selector — do NOT add them here, they broke column alignment
+        # (found 2026-07-17). Stick to solid emoji (🟢🔴🟡⚪🟩🟥) inside table cells.
         if (0x1F000 <= o <= 0x1FAFF or 0x2600 <= o <= 0x27BF or 0x2B00 <= o <= 0x2BFF
-                or 0x1F1E6 <= o <= 0x1F1FF or o in (0x2190, 0x2191, 0x2192, 0x2193,
-                0x25B2, 0x25BC, 0x25C6, 0x2705, 0x274C, 0x26A0, 0x2B50)
+                or 0x1F1E6 <= o <= 0x1F1FF
                 or _ud.east_asian_width(ch) in ("W", "F")):
             w += 2
         else:
@@ -10313,8 +10372,11 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
                 log.debug("suppressed exception", exc_info=True)
             leg_pnl  = (cur_px - entry) * qty * 100
             net_pnl += leg_pnl
-            leg_lines.append((("🟢" if leg_pnl >= 0 else "🔴"),
-                              f"{'S' if qty < 0 else 'B'}{otype[:1]}{strike:g}",
+            # ST = long/short (matches positions_view convention); leg label =
+            # strike+type only (e.g. "375P") — avoid "BP375"-style prefixes,
+            # which read like a stock ticker (user flagged 2026-07-17).
+            leg_lines.append((("🟢" if qty >= 0 else "🔴"),
+                              f"{strike:g}{otype[:1]}",
                               f"{cur_px:.2f}", f"{leg_pnl:+,.0f}"))
 
         entry_cost  = sum(
@@ -10325,7 +10387,8 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
         net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
         n_legs      = len(grp)
         strat_label = f"{n_legs}-leg" if n_legs > 1 else "1-leg"
-        legs_tbl    = _pipe_table(("ST", "Leg", "Now", "P&L$"), leg_lines, right_cols={2, 3})
+        legs_tbl    = _pipe_table(("ST", "Leg", "Now", "P&L$"), leg_lines, right_cols={2, 3},
+                                  legend="🟢 long · 🔴 short")
         dte_s       = str(dte) if dte is not None else "?"
         spot_line   = f"${stock_px:.2f}" if stock_px else "—"
 

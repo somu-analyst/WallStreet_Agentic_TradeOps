@@ -9977,7 +9977,12 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
 
         _leg = f"{tk[:4]}{int(strike)}{otype[:1]}"
         _pnl_s = f"{pnl:+,.0f}" if abs(pnl) < 1000 else f"{'+' if pnl >= 0 else '-'}{abs(pnl)/1000:.1f}K"
-        _tbl_rows.append((em, _leg, _pnl_s, f"{pnl_pct:+.0f}%"))
+        # ASCII marker for the table's ST column — colored circle emoji render
+        # visibly larger than one text char on some Telegram clients, breaking
+        # the grid look (user flagged 2026-07-17). Prose lines (urgent_lines,
+        # html_cards below) keep emoji since alignment isn't a concern there.
+        _st_ascii = {"🚨": "!", "🔴": "-", "🟢": "+", "⚠️": "!", "🟡": "~"}.get(em, "~")
+        _tbl_rows.append((_st_ascii, _leg, _pnl_s, f"{pnl_pct:+.0f}%"))
 
         html_cards.append(
             f"{a_em} <b>{tk} {otype} ${int(strike)}</b> {dte_disp}{urg_flag} · "
@@ -9987,7 +9992,7 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
 
     table1 = _pipe_table(("ST", "Leg", "P&L$", "P%"), _tbl_rows,
                          right_cols={2, 3},
-                         legend="🟢 good · 🟡 watch · 🔴 bad · 🚨 urgent") if _tbl_rows else ""
+                         legend="+ good · ~ watch · - bad · ! urgent") if _tbl_rows else ""
 
     advice_section = "\n\n".join(html_cards)
     colour_section = f"{table1}\n\n{advice_section}"

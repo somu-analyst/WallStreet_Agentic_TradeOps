@@ -2918,40 +2918,36 @@ async def run_exit_analysis(query, ticker, opt_type, strike, entry, expiry_str, 
     side_label = "SHORT (Sold)" if qty < 0 else "LONG (Bought)"
     msg = (
         f"{hdr(f'🎯 {ticker} {opt_type.upper()} ${K:.0f} · {side_label}')}\n\n"
-        f"📊 <b>Market Snapshot</b>\n"
-        + mono(
-            f"{row2(ticker, f'${spot:.2f} ({day_chg:+.2f}%)')}\n"
-            f"{row2('VIX', f'{vix_val:.1f} ({vix_pct:+.1f}%)')}\n"
-            f"{row2('ES / NQ', f'{es_pct:+.2f}% / {nq_pct:+.2f}%')}\n"
-            f"{row2('Gap Est.', f'{predicted_gap:+.2f}%')}"
-        )
-        + "\n📖 <b>Parameters</b>\n"
-        + mono(
-            f"{row2('Strike', f'${K:.0f}')}\n"
-            f"{row2('DTE', f'{dte} days')}\n"
-            f"{row2('IV Source', iv_src)}\n"
-            f"{row2('Entry', f'${entry:.2f}')}\n"
-            f"{row2('Now (Theo)', f'${cur_val:.2f}')}\n"
-            f"{row2('MC Vol', f'{mc_vol:.0%}')}"
-        )
-        + "\n🎲 <b>Monte Carlo · 10K Sims</b>\n"
-        + mono(
-            f"{row2('Exp. Stock', f'${exp_stock:.2f}')}\n"
-            f"{row2('Exp. Option', f'${exp_val:.2f}')}\n"
-            f"{row2('Range', f'${p10:.2f} – ${p90:.2f}')}\n"
-            f"{'─' * 27}\n"
-            f"{pnl_emoji} {row2('P&L vs Entry', f'${exp_pnl:+,.0f} ({pnl_pct:+.0f}%)')}\n"
-            f"{tmrw_emoji} {row2('P&L Tomorrow', f'${tmrw_pnl_vs_today:+,.0f} ({tmrw_pct_vs_today:+.0f}%)')}\n"
-            f"{row2('P(Profit)', f'{prob_profit:.0f}%  {profit_bar}')}\n"
-            f"{row2('VaR 95%', f'${var_95:+,.0f}')}"
-        )
-        + "\n📊 <b>Greeks (Current)</b>\n"
-        + mono(
-            row2('Theo Value', f'${cur_val:.2f}') + "\n"
-            + row2('Delta', f'{greeks.get("delta", 0):.3f}') + "\n"
-            + row2('Theta', f'-${abs(greeks.get("theta", 0))*100:.2f}/day') + "\n"
-            + row2('Vega', f'${greeks.get("vega", 0)*100:.2f}')
-        )
+        + _pipe_table(
+            ("Metric", "Value"),
+            [(ticker[:6], f"${spot:.2f} {day_chg:+.1f}%"),
+             ("VIX", f"{vix_val:.1f} ({vix_pct:+.1f}%)"),
+             ("ES/NQ", f"{es_pct:+.1f}%/{nq_pct:+.1f}%"),
+             ("GapEst", f"{predicted_gap:+.2f}%")],
+            right_cols={1}, title="📊 Market Snapshot")
+        + "\n"
+        + _pipe_table(
+            ("Metric", "Value"),
+            [("Strike", f"${K:.0f}"), ("DTE", f"{dte}d"), ("IV src", iv_src[:10]),
+             ("Entry", f"${entry:.2f}"), ("Now", f"${cur_val:.2f}"),
+             ("MC Vol", f"{mc_vol:.0%}")],
+            right_cols={1}, title="📖 Parameters")
+        + "\n"
+        + _pipe_table(
+            ("Metric", "Value"),
+            [("ExpStk", f"${exp_stock:.2f}"), ("ExpOpt", f"${exp_val:.2f}"),
+             ("Range", f"{p10:.2f}–{p90:.2f}"),
+             (f"{pnl_emoji} P&L", f"{exp_pnl:+,.0f} ({pnl_pct:+.0f}%)"),
+             (f"{tmrw_emoji} Tmrw", f"{tmrw_pnl_vs_today:+,.0f} ({tmrw_pct_vs_today:+.0f}%)"),
+             ("P(win)", f"{prob_profit:.0f}%"), ("VaR95", f"{var_95:+,.0f}")],
+            right_cols={1}, title="🎲 Monte Carlo · 10K Sims")
+        + "\n"
+        + _pipe_table(
+            ("Metric", "Value"),
+            [("Theo", f"${cur_val:.2f}"), ("Delta", f"{greeks.get('delta', 0):.3f}"),
+             ("Theta", f"-{abs(greeks.get('theta', 0)) * 100:.2f}/d"),
+             ("Vega", f"{greeks.get('vega', 0) * 100:.2f}")],
+            right_cols={1}, title="📊 Greeks (Current)")
         + f"\n💡 <b>Recommendation</b>\n{rec}\n{rec_detail}\n"
         + f"\n<i>Updated {datetime.now().strftime('%H:%M:%S')}</i>"
     )
@@ -2992,25 +2988,21 @@ async def show_scenarios(query, ticker, opt_type, strike, entry, expiry_str, qty
     r = 0.045
     moves = [-3, -2, -1, -0.5, 0, 0.5, 1, 2, 3]
 
-    # Build mono table
-
-    tbl_rows = [f"{'Move':>6}  {'Stock':>5}  {'Val':>5}  {'P&L':>7}"]
-    tbl_rows.append("─" * 30)
+    # Standard scenario table (ST emoji = P&L sign)
+    tbl_rows = []
     pos_sign = -1 if qty < 0 else 1
     for mv in moves:
         s = spot * (1 + mv / 100)
         val = bs_price(s, K, T, r, iv, opt_type)
         pnl = (val - entry) * 100 * pos_sign
-        sign_s = "+" if pnl >= 0 else "-"
-        tbl_rows.append(f"{mv:>+5.1f}%  ${s:>5.0f}  ${val:>4.2f}  {sign_s}${abs(pnl):>5.0f}")
+        tbl_rows.append((("🟢" if pnl >= 0 else "🔴"), f"{mv:+.1f}%",
+                         f"{s:.0f}", f"{pnl:+,.0f}"))
 
     side_lbl = "SHORT" if qty < 0 else "LONG"
     parts = [
         hdr(f"📊 SCENARIOS · {ticker} {opt_type.upper()} ${K:.0f} [{side_lbl}]"),
-        mono(
-            f"Spot: ${spot:.2f}  DTE: {dte}  IV: {iv:.0%}\n\n"
-            + "\n".join(tbl_rows)
-        ),
+        _pipe_table(("ST", "Move", "Stk", "P&L$"), tbl_rows, right_cols={2, 3},
+                    legend=f"spot ${spot:.2f} · DTE {dte} · IV {iv:.0%}"),
     ]
 
     cb_data = f"exitmc|{ticker}|{opt_type}|{strike}|{entry}|{expiry_str}|{qty}"
@@ -3139,23 +3131,26 @@ async def position_detail(query, trade_id, notice=None):
     note = str(tr.get("notes", "") or "")[:60]
 
     side_lbl = "SELL" if qty < 0 else "BUY"
+    _sem = "🟢" if qty >= 0 else "🔴"
     msg = [hdr(f"🛠 POSITION #{tid}")]
     if notice:
         msg.append(f"\n{notice}")
-    msg.append(
-        mono(
-            f"{row2('Ticker', tk)}\n"
-            f"{row2('Side', side_lbl)}\n"
-            f"{row2('Type', ot)}\n"
-            f"{row2('Strike', f'${st:.2f}')}\n"
-            f"{row2('Expiry', exp)}\n"
-            f"{row2('Entry', f'${ep:.2f}')}\n"
-            f"{row2('Qty', str(qty))}\n"
-            f"{row2('Status', status)}\n"
-            f"{row2('Account', acct)}\n"
-            f"{row2('Notes', note if note else '—')}"
-        )
-    )
+    _cur = 0.0
+    try:
+        _cur = _estimate_option_mark(tk, ot, st, exp, fallback=0.0) or 0.0
+    except Exception:
+        pass
+    _rows = [(f"{_sem} Leg", f"{side_lbl} {abs(qty)}x {st:g}{ot[:1]}"),
+             ("Expiry", exp[:10]),
+             ("Entry", f"${ep:.2f}")]
+    if _cur > 0:
+        _pnl = (_cur - ep) * qty * 100
+        _rows.append((("🟢" if _pnl >= 0 else "🔴") + " Now", f"${_cur:.2f} ({_pnl:+,.0f})"))
+    _rows.append(("Status", status + (f" · {acct}" if acct else "")))
+    if note:
+        _rows.append(("Notes", note[:16]))
+    msg.append(_pipe_table(("Field", "Value"), _rows, right_cols={1},
+                           legend="🟢 long/profit · 🔴 short/loss"))
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Qty -1", callback_data=f"posedit_{tid}_qty_m1"),
@@ -3310,18 +3305,17 @@ async def group_detail(query, group_id):
     metrics = _calculate_group_pnl(group_id)
     
     parts = [hdr(f"📦 GROUP #{group_id} DETAIL")]
-    parts.append(
-        mono(
-            f"{row2('Num Legs', str(metrics['num_legs']))}\n"
-            f"{row2('Total Cost', f'${metrics['total_cost']:,.0f}')}\n"
-            f"{row2('Current Value', f'${metrics['current_value']:,.0f}')}\n"
-            f"{'─' * 27}\n"
-            f"{row2('Unrealized P&L', f'${metrics['unrealized_pnl']:+,.0f}')}\n"
-            f"{row2('Max Profit', f'${metrics['max_profit']:,.0f}')}\n"
-            f"{row2('Max Loss', f'${metrics['max_loss']:,.0f}')}\n"
-            f"{row2('Breakevens', ', '.join([f'${b:.2f}' for b in metrics['breakevens'][:3]]))}"
-        )
-    )
+    _upnl = metrics['unrealized_pnl']
+    parts.append(_pipe_table(
+        ("Metric", "Value"),
+        [("Legs", str(metrics['num_legs'])),
+         ("Cost", f"${metrics['total_cost']:,.0f}"),
+         ("Value", f"${metrics['current_value']:,.0f}"),
+         (("🟢" if _upnl >= 0 else "🔴") + " P&L", f"{_upnl:+,.0f}"),
+         ("MaxP", f"${metrics['max_profit']:,.0f}"),
+         ("MaxL", f"${metrics['max_loss']:,.0f}"),
+         ("Brkevn", ", ".join(f"{b:.0f}" for b in metrics['breakevens'][:3]) or "—")],
+        right_cols={1}))
     
     parts.append("\n📋 <b>Legs:</b>")
     for _, trade in trades_df.iterrows():
@@ -13336,52 +13330,47 @@ def _batch_build_leg_card(ticker, opt_type, strike, entry, expiry_str, qty,
         ah_em  = "🟢" if ah_pnl >= 0 else "🔴"
         ah_row = f"\n{row2(ext_src, f'${spot_ext:.2f} ({ah_chg_pct:+.2f}%)')}"
         ah_scenario_block = (
-            "\n🌙 <b>After-Market Scenario</b>\n"
-            + mono(
-                f"{row2(ext_src, f'${spot_ext:.2f} ({ah_chg_pct:+.2f}%)')}\n"
-                f"{row2('AH Option Theo', f'${ah_val:.2f}')}\n"
-                f"{ah_em} {row2('AH P&L vs Entry', f'${ah_pnl:+,.0f}')}"
-            )
+            "\n"
+            + _pipe_table(
+                ("Metric", "Value"),
+                [(ext_src[:8], f"${spot_ext:.2f} ({ah_chg_pct:+.1f}%)"),
+                 ("AH Theo", f"${ah_val:.2f}"),
+                 (f"{ah_em} AH P&L", f"{ah_pnl:+,.0f}")],
+                right_cols={1}, title="🌙 After-Market Scenario")
         )
 
+    _snap_rows = [(ticker[:6], f"${spot:.2f} {day_chg:+.1f}%")]
+    _snap_rows += [("VIX", f"{vix_val:.1f} ({vix_pct:+.1f}%)"),
+                   ("ES/NQ", f"{es_pct:+.1f}%/{nq_pct:+.1f}%"),
+                   ("GapEst", f"{predicted_gap:+.2f}%")]
     msg = (
         f"{hdr(f'🎯 {ticker} {opt_type.upper()} ${K:.0f} · {side_label}')}\n\n"
-        f"📊 <b>Market Snapshot</b>\n"
-        + mono(
-            f"{row2(ticker + ' Close', f'${spot:.2f} ({day_chg:+.2f}%)')}"
-            + ah_row + "\n"
-            f"{row2('VIX', f'{vix_val:.1f} ({vix_pct:+.1f}%)')}\n"
-            f"{row2('ES / NQ', f'{es_pct:+.2f}% / {nq_pct:+.2f}%')}\n"
-            f"{row2('Gap Est.', f'{predicted_gap:+.2f}%')}"
-        )
-        + "\n📖 <b>Parameters</b>\n"
-        + mono(
-            f"{row2('Strike', f'${K:.0f}')}\n"
-            f"{row2('DTE', f'{dte} days')}\n"
-            f"{row2('IV Source', iv_src)}\n"
-            f"{row2('Entry', f'${entry:.2f}')}\n"
-            f"{row2('Now (Theo)', f'${cur_val:.2f}')}\n"
-            f"{row2('MC Vol', f'{mc_vol:.0%}')}"
-        )
-        + "\n🎲 <b>Monte Carlo · 10K Sims</b>\n"
-        + mono(
-            f"{row2('Exp. Stock', f'${exp_stock:.2f}')}\n"
-            f"{row2('Exp. Option', f'${exp_val:.2f}')}\n"
-            f"{row2('Range', f'${p10:.2f} – ${p90:.2f}')}\n"
-            f"{'─' * 27}\n"
-            f"{pnl_emoji} {row2('P&L vs Entry', f'${exp_pnl:+,.0f} ({pnl_pct:+.0f}%)')}\n"
-            f"{tmrw_emoji} {row2('P&L Tomorrow', f'${tmrw_pnl:+,.0f} ({tmrw_pct:+.0f}%)')}\n"
-            f"{row2('P(Profit)', f'{prob_profit:.0f}%  {bar(prob_profit)}')}\n"
-            f"{row2('VaR 95%', f'${var_95:+,.0f}')}"
-        )
+        + _pipe_table(("Metric", "Value"), _snap_rows, right_cols={1},
+                      title="📊 Market Snapshot")
+        + "\n"
+        + _pipe_table(
+            ("Metric", "Value"),
+            [("Strike", f"${K:.0f}"), ("DTE", f"{dte}d"), ("IV src", iv_src[:10]),
+             ("Entry", f"${entry:.2f}"), ("Now", f"${cur_val:.2f}"),
+             ("MC Vol", f"{mc_vol:.0%}")],
+            right_cols={1}, title="📖 Parameters")
+        + "\n"
+        + _pipe_table(
+            ("Metric", "Value"),
+            [("ExpStk", f"${exp_stock:.2f}"), ("ExpOpt", f"${exp_val:.2f}"),
+             ("Range", f"{p10:.2f}–{p90:.2f}"),
+             (f"{pnl_emoji} P&L", f"{exp_pnl:+,.0f} ({pnl_pct:+.0f}%)"),
+             (f"{tmrw_emoji} Tmrw", f"{tmrw_pnl:+,.0f} ({tmrw_pct:+.0f}%)"),
+             ("P(win)", f"{prob_profit:.0f}%"), ("VaR95", f"{var_95:+,.0f}")],
+            right_cols={1}, title="🎲 Monte Carlo · 10K Sims")
         + ah_scenario_block
-        + "\n📊 <b>Greeks (Current)</b>\n"
-        + mono(
-            row2('Theo Value', f'${cur_val:.2f}') + "\n"
-            + row2('Delta', f'{greeks.get("delta", 0):.3f}') + "\n"
-            + row2('Theta', f'-${abs(greeks.get("theta", 0))*100:.2f}/day') + "\n"
-            + row2('Vega', f'${greeks.get("vega", 0)*100:.2f}')
-        )
+        + "\n"
+        + _pipe_table(
+            ("Metric", "Value"),
+            [("Theo", f"${cur_val:.2f}"), ("Delta", f"{greeks.get('delta', 0):.3f}"),
+             ("Theta", f"-{abs(greeks.get('theta', 0)) * 100:.2f}/d"),
+             ("Vega", f"{greeks.get('vega', 0) * 100:.2f}")],
+            right_cols={1}, title="📊 Greeks (Current)")
         + f"\n💡 <b>Recommendation</b>\n{rec}\n{rec_detail}\n"
     )
     return msg, exp_pnl, var_95

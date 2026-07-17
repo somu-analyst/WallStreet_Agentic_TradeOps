@@ -13368,7 +13368,87 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
         except Exception:
             _all_tr = pd.DataFrame()
         with st.expander("➕ Manage positions — add, edit, or close trades", expanded=_gp_tr.empty):
-            _mtab_add, _mtab_edit = st.tabs(["➕ Add new", "✏️ Edit / Close existing"])
+            _mtab_add, _mtab_edit, _mtab_stk = st.tabs(["➕ Add option", "✏️ Edit / Close options", "📦 Stocks"])
+
+            # ── 📦 Stocks — SEPARATE from options (user 2026-07-16): shares have no
+            #    strike/expiry/type; entry date drives the tax clock; P&L multiplier ×1 ──
+            with _mtab_stk:
+                _stk_tr = (_all_tr[_all_tr["option_type"].astype(str).str.upper().str.startswith("S")]
+                           if not _all_tr.empty else pd.DataFrame())
+                st.markdown("**Add stock lot**")
+                _sa1, _sa2, _sa3, _sa4 = st.columns(4)
+                _sa_tk = _sa1.text_input("Ticker", key="gp_stk_tk").strip().upper()
+                _sa_q = _sa2.number_input("Shares", min_value=1, step=1, value=100, key="gp_stk_q")
+                _sa_px = _sa3.number_input("Buy price / share", min_value=0.0, step=0.01, key="gp_stk_px")
+                _sa_dt = _sa4.date_input("Purchase date (tax clock)", value=datetime.now().date(), key="gp_stk_dt")
+                if st.button("➕ Add shares", key="gp_stk_add"):
+                    if _sa_tk and _sa_px > 0:
+                        try:
+                            _gp_conn.execute(
+                                "INSERT INTO trades (ticker, option_type, strike, expiry, entry_price, "
+                                "quantity, entry_date, notes, status) VALUES (?, 'STOCK', 0, '', ?, ?, ?, ?, 'OPEN')",
+                                (_sa_tk, float(_sa_px), int(_sa_q), _sa_dt.strftime("%Y-%m-%d"), None))
+                            _gp_conn.commit()
+                            st.success(f"Added {_sa_q} {_sa_tk} @ ${_sa_px:.2f} (entry {_sa_dt})")
+                            st.rerun()
+                        except Exception as _e:
+                            st.error(f"Could not add: {_e}")
+                    else:
+                        st.error("Need ticker and buy price.")
+                st.markdown("---")
+                if _stk_tr.empty:
+                    st.caption("No stock lots yet — add one above.")
+                else:
+                    def _stklabel(r):
+                        _s = "🟢" if str(r["status"]).upper() == "OPEN" else "⚪"
+                        return (f"{_s} {r['ticker']} {int(r['quantity'] or 0)} sh @ ${float(r['entry_price'] or 0):.2f} "
+                                f"since {r.get('entry_date') or '?'} · {r['status']} (id {int(r['trade_id'])})")
+                    _sk_map = {_stklabel(r): int(r["trade_id"]) for _, r in _stk_tr.iterrows()}
+                    _sk_pick = st.selectbox("Select a stock lot", list(_sk_map), key="gp_stk_pick")
+                    _sk_id = _sk_map[_sk_pick]
+                    _sk_row = _stk_tr[_stk_tr["trade_id"] == _sk_id].iloc[0]
+                    _sk_open = str(_sk_row["status"]).upper() == "OPEN"
+                    _sk_qty0 = int(_sk_row["quantity"] or 0)
+                    _sk_spot = _gp_spot(str(_sk_row["ticker"]).upper()) or 0.0
+                    if _sk_spot and _sk_open:
+                        _sk_pnl = (_sk_spot - float(_sk_row["entry_price"] or 0)) * _sk_qty0
+                        st.caption(f"Live ${_sk_spot:,.2f} · unrealized **${_sk_pnl:,.0f}** · entry date drives the "
+                                   f"tax clock — see Portfolio → P&L tab for the LT/ST view")
+                    _se1, _se2, _se3, _se4 = st.columns(4)
+                    _se_q = _se1.number_input("Shares", min_value=1, step=1, value=max(abs(_sk_qty0), 1), key=f"se_q_{_sk_id}")
+                    _se_px = _se2.number_input("Buy price", min_value=0.0, step=0.01,
+                                               value=float(_sk_row["entry_price"] or 0), key=f"se_px_{_sk_id}")
+                    _se_dt = _se3.text_input("Purchase date", value=str(_sk_row.get("entry_date") or ""), key=f"se_dt_{_sk_id}")
+                    _se_nt = _se4.text_input("Notes", value=str(_sk_row.get("notes") or ""), key=f"se_nt_{_sk_id}")
+                    if st.button("💾 Save lot", key=f"se_save_{_sk_id}"):
+                        try:
+                            _gp_conn.execute(
+                                "UPDATE trades SET quantity=?, entry_price=?, entry_date=?, notes=?, updated_at=? "
+                                "WHERE trade_id=?",
+                                (int(_se_q) * (1 if _sk_qty0 >= 0 else -1), float(_se_px), _se_dt or None,
+                                 _se_nt or None, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _sk_id))
+                            _gp_conn.commit()
+                            st.success("Saved."); st.cache_data.clear(); st.rerun()
+                        except Exception as _e:
+                            st.error(f"Could not save: {_e}")
+                    if _sk_open:
+                        st.markdown("**Sell / close lot**")
+                        _sc1, _sc2 = st.columns(2)
+                        _sc_px = _sc1.number_input("Sell price / share", min_value=0.0, step=0.01, key=f"sc_px_{_sk_id}")
+                        _sc_dt = _sc2.date_input("Sell date", value=datetime.now().date(), key=f"sc_dt_{_sk_id}")
+                        if st.button("✖️ Close lot", key=f"sc_btn_{_sk_id}"):
+                            try:
+                                _pnl = (float(_sc_px) - float(_sk_row["entry_price"] or 0)) * _sk_qty0 if _sc_px > 0 else None
+                                _gp_conn.execute(
+                                    "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, exit_reason=?, "
+                                    "pnl=?, updated_at=? WHERE trade_id=?",
+                                    ((float(_sc_px) or None), _sc_dt.strftime("%Y-%m-%d"), "manual (stock)",
+                                     _pnl, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _sk_id))
+                                _gp_conn.commit()
+                                st.success(f"Closed (P&L ${_pnl:,.0f})." if _pnl is not None else "Closed.")
+                                st.cache_data.clear(); st.rerun()
+                            except Exception as _e:
+                                st.error(f"Could not close: {_e}")
 
             # ── Add new ──
             with _mtab_add:
@@ -13406,17 +13486,19 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                         except Exception as _e:
                             st.error(f"Could not add: {_e}")
 
-            # ── Edit / Close existing ──
+            # ── Edit / Close existing (OPTIONS ONLY — stock lots live in the 📦 Stocks tab) ──
             with _mtab_edit:
-                if _all_tr.empty:
-                    st.caption("No trades yet. Add one in the other tab.")
+                _opt_tr = (_all_tr[~_all_tr["option_type"].astype(str).str.upper().str.startswith("S")]
+                           if not _all_tr.empty else pd.DataFrame())
+                if _opt_tr.empty:
+                    st.caption("No option trades yet. Add one in the other tab (stocks → 📦 Stocks tab).")
                 else:
                     def _trlabel(r):
                         _s = "🟢" if str(r["status"]).upper() == "OPEN" else "⚪"
                         return (f"{_s} {r['ticker']} ${_kf(r['strike'] or 0)}"
                                 f"{str(r['option_type'])[0].upper()} {r['expiry']} ×{int(r['quantity'] or 0)} "
                                 f"· {r['status']} (id {int(r['trade_id'])})")
-                    _em_map = {_trlabel(r): int(r["trade_id"]) for _, r in _all_tr.iterrows()}
+                    _em_map = {_trlabel(r): int(r["trade_id"]) for _, r in _opt_tr.iterrows()}
                     _em_pick = st.selectbox("Select a trade", list(_em_map), key="gp_edit_pick")
                     _tid = _em_map[_em_pick]
                     _row = _all_tr[_all_tr["trade_id"] == _tid].iloc[0]

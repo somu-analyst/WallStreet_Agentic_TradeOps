@@ -309,3 +309,19 @@ targets + honest Est Open captions (validated 4-7% err) · heatmap split-day gua
 BS-model backtest artifacts: scratchpad bs_validate/bs_tune/bs_liquid.py (1.19M contract-days).
 PENDING (PLAN.md): intraday 1-min lane + heat-seeking/reversal + live writeups · NSE India lane
 (bhavcopy DELIV_PER verified) · bot stock-leg display · gated backtests (scanner fires, skew panel).
+
+## 2026-07-16 (marathon session, part 2) — recap before /compact
+- **Shipped & committed** (all on main): intraday lane supervisor · /live /heat + dashboard hub tabs
+  (Live/Heat/Skew/Catalysts/Regime) · stock-leg crash fixes (VaR/MC/scenarios ×5 sites) · /tax Pub 550
+  running-clock fix + NaN guards + app_settings income · /add one-line entry + typed-ticker wizard ·
+  UX modernization (morphing wizards, readable /spreads, @bot inline search, collapsible /plan) ·
+  Mini App /terminal (tunnel parked → local-only, NYSE_MINIAPP_TUNNEL=1 re-enables) · limit-guard
+  hooks (Stop+PostToolUse → NEXT.md reset stamp + ClaudeResume task `claude --continue /standup`) ·
+  token diet (CLAUDE.md 2.9k→1.1k tok, rules path-scoped) · date audit (DB 100% ISO; NYSE_YFin
+  monthly-substr fix; _to_mdy→_exp_iso renames) · backtests P2/P3 (revert VALIDATED +2.7% t+5;
+  uoa/building direction FAILED; heat/skew thin → rerun ~2wks; `backtest_summary` table) ·
+  /premium rich-IV seller (VRP + tastytrade mechanics) bot+dashboard · EOD scheduler BB-primary
+  (Yahoo fallback-only via bb_capture_ok) · stocks-separate manage tab (Exit Planner) ·
+  universal _report() macro + format sweep (momentum/opex/squeeze/macro/gex/OI-flow).
+- **Trades**: UNH closed (+$483 net); AMD −2×400P 7/31 + GOOGL collar + GOOG 100sh@167 open.
+- **Verify method**: everything tested against live DB before commit; bot restarted on final code.

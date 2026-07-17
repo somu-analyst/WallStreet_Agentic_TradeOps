@@ -9977,12 +9977,15 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
 
         _leg = f"{tk[:4]}{int(strike)}{otype[:1]}"
         _pnl_s = f"{pnl:+,.0f}" if abs(pnl) < 1000 else f"{'+' if pnl >= 0 else '-'}{abs(pnl)/1000:.1f}K"
-        # ASCII marker for the table's ST column — colored circle emoji render
-        # visibly larger than one text char on some Telegram clients, breaking
-        # the grid look (user flagged 2026-07-17). Prose lines (urgent_lines,
-        # html_cards below) keep emoji since alignment isn't a concern there.
-        _st_ascii = {"🚨": "!", "🔴": "-", "🟢": "+", "⚠️": "!", "🟡": "~"}.get(em, "~")
-        _tbl_rows.append((_st_ascii, _leg, _pnl_s, f"{pnl_pct:+.0f}%"))
+        # 3-state colored circle (user wants real green/yellow/red 2026-07-17;
+        # this is the only way to get genuine color in Telegram — solid emoji
+        # circles, alone in their own ST column, no text glued on). Now that
+        # the arrow-width bug and emoji+text-in-cell bug are fixed at the
+        # root, this should align correctly; any residual size is the emoji
+        # glyph itself, which every Telegram client renders larger than a
+        # text character — that's a font fact, not fixable in the table code.
+        _st_dot = {"🚨": "🔴", "🔴": "🔴", "🟢": "🟢", "⚠️": "🟡", "🟡": "🟡"}.get(em, "🟡")
+        _tbl_rows.append((_st_dot, _leg, _pnl_s, f"{pnl_pct:+.0f}%"))
 
         html_cards.append(
             f"{a_em} <b>{tk} {otype} ${int(strike)}</b> {dte_disp}{urg_flag} · "
@@ -9992,7 +9995,7 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
 
     table1 = _pipe_table(("ST", "Leg", "P&L$", "P%"), _tbl_rows,
                          right_cols={2, 3},
-                         legend="+ good · ~ watch · - bad · ! urgent") if _tbl_rows else ""
+                         legend="🟢 good · 🟡 watch · 🔴 bad") if _tbl_rows else ""
 
     advice_section = "\n\n".join(html_cards)
     colour_section = f"{table1}\n\n{advice_section}"

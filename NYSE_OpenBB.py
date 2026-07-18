@@ -36,6 +36,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
+try:
+    import yfinance as yf
+    from curl_cffi import requests as curl_requests
+except Exception:
+    yf = None
+    curl_requests = None
 
 # ---- config (mirrors NYSE_YFin.py) ------------------------------------------
 DATA_DIR = r"C:\Users\srini\Options_chain_data"
@@ -46,6 +52,7 @@ UNIVERSE_SHEET_ACTIVE = "ticker_universe"
 # seeded once via sqlite backup) + this script's captures accumulating in the
 # 'options_openbb' table. Production US_data.db is STILL never written to.
 OUT_DB_PATH = os.path.join(DATA_DIR, "US_data_OpenBB.db")
+OB_DB = OUT_DB_PATH   # alias used by derive + skew functions below
 
 MAX_HORIZON_DAYS = 45          # same horizon window as NYSE_YFin
 # Strike filter: PERCENT of spot (not strike count). NYSE_YFin uses +/-25 STRIKES,
@@ -787,16 +794,374 @@ def main():
     except Exception as e:
         print(f"(compare vs yfinance skipped: {e})")
 
-    # --full: one-shot recovery — chain derive + skew after a successful capture
+    # --full: one-shot recovery — derive + skew run in-process (no subprocess)
     if getattr(args, "full", False):
-        import subprocess as _sp
-        _base = os.path.dirname(os.path.abspath(__file__))
-        for _script, _extra in [
-            (os.path.join(_base, "NYSE_OpenBB_derive.py"), ["--stock"]),
-            (os.path.join(_base, "skew_snapshot.py"), []),
-        ]:
-            print(f"\n{'='*60}\n  {os.path.basename(_script)}\n{'='*60}")
-            _sp.run([sys.executable, "-u", _script] + _extra, cwd=_base)
+        _sc = sqlite3.connect(OB_DB)
+        _dates = [r[0] for r in _sc.execute(
+            "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
+        _sc.close()
+        print(f"\n{'='*60}\n  derive (options_daily/options_change/stock_daily)\n{'='*60}")
+        derive(dates=_dates, do_stock=True)
+        print(f"\n{'='*60}\n  skew_snapshot\n{'='*60}")
+        _sc = sqlite3.connect(OB_DB)
+        try:
+            build_skew(_sc)
+        finally:
+            _sc.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DERIVE — raw options_openbb -> options_daily / options_change / stock_daily
+# (ported from NYSE_OpenBB_derive.py; runs in-process when --full is passed)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_OPTIONS_DAILY_CORE = [
+    "ticker", "asset_type", "company_name", "strike", "expiry_date", "trade_date",
+    "openInt_Call", "lastPrice_Call", "vol_Call",
+    "openInt_Put", "lastPrice_Put", "vol_Put",
+    "contractSymbol_Call", "contractSymbol_Put", "load_date",
+]
+
+
+def _current_load_date():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _ensure_columns(df, required):
+    for c in required:
+        if c not in df.columns:
+            df[c] = np.nan
+    return df
+
+
+def _name_map(conn):
+    try:
+        d = pd.read_sql("SELECT DISTINCT ticker, company_name, asset_type FROM options_daily", conn)
+        return {str(r.ticker).upper(): (r.company_name, r.asset_type)
+                for _, r in d.iterrows() if pd.notna(r.company_name)}
+    except Exception:
+        return {}
+
+
+def _map_raw_to_options_daily(conn, date):
+    raw = pd.read_sql(
+        "SELECT ticker, strike, expiry_date, openInt_Call, openInt_Put, vol_Call, vol_Put, "
+        "lastPrice_Call, lastPrice_Put, contractSymbol_Call, contractSymbol_Put "
+        "FROM options_openbb WHERE trade_date=?", conn, params=(date,))
+    if raw.empty:
+        print(f"  {date}: options_openbb empty — skip"); return 0
+    raw["ticker"] = raw["ticker"].str.upper()
+    nm = _name_map(conn)
+    raw["company_name"] = raw["ticker"].map(lambda t: nm.get(t, (t, "stock"))[0])
+    raw["asset_type"]   = raw["ticker"].map(lambda t: nm.get(t, (t, "stock"))[1])
+    raw["trade_date"]   = date
+    raw["load_date"]    = _current_load_date()
+    raw = _ensure_columns(raw, _OPTIONS_DAILY_CORE)
+    out = raw[_OPTIONS_DAILY_CORE].copy()
+    try:
+        conn.execute("DELETE FROM options_daily WHERE trade_date=?", (date,)); conn.commit()
+    except Exception:
+        pass
+    out.to_sql("options_daily", conn, if_exists="append", index=False)
+    conn.commit()
+    print(f"  {date}: mapped {len(out)} rows -> options_daily")
+    return len(out)
+
+
+def _compute_oi_vol_change(trade_day, db_path=OB_DB):
+    trade_date_now_db = trade_day.strftime("%Y-%m-%d")
+    print(f"Computing OI/vol changes for {trade_date_now_db}...")
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT DISTINCT trade_date FROM options_daily WHERE trade_date < ? "
+                       "ORDER BY trade_date DESC LIMIT 1", (trade_date_now_db,)).fetchone()
+    if not row:
+        print("  no previous date — skip"); conn.close(); return None
+    prev = row[0]
+    df_now  = pd.read_sql("SELECT * FROM options_daily WHERE trade_date=?", conn, params=(trade_date_now_db,))
+    df_prev = pd.read_sql("SELECT * FROM options_daily WHERE trade_date=?", conn, params=(prev,))
+    if df_now.empty or df_prev.empty:
+        print("  today/prev empty — skip"); conn.close(); return None
+    req  = ['ticker','company_name','asset_type','strike','expiry_date','trade_date',
+            'openInt_Call','openInt_Put','vol_Call','vol_Put','lastPrice_Call','lastPrice_Put']
+    ohlc = ['call_open','call_high','call_low','call_close','put_open','put_high','put_low','put_close']
+    df_now  = _ensure_columns(df_now,  req + ohlc)
+    df_prev = _ensure_columns(df_prev, req + ohlc)
+    for df in (df_now, df_prev):
+        df['expiry_date'] = pd.to_datetime(df['expiry_date'].astype(str), errors='coerce').dt.strftime("%Y-%m-%d")
+        df['strike'] = pd.to_numeric(df['strike'], errors='coerce')
+    merged = pd.merge(df_now, df_prev, on=['ticker','strike','expiry_date'], suffixes=('_now','_prev'), how='inner')
+    if merged.empty:
+        print("  no overlapping rows"); conn.close(); return None
+    for c in ['openInt_Call_now','openInt_Call_prev','openInt_Put_now','openInt_Put_prev',
+              'vol_Call_now','vol_Call_prev','vol_Put_now','vol_Put_prev']:
+        if c in merged.columns: merged[c] = merged[c].fillna(0)
+    merged['change_OI_Call']  = merged['openInt_Call_now'] - merged['openInt_Call_prev']
+    merged['change_OI_Put']   = merged['openInt_Put_now']  - merged['openInt_Put_prev']
+    merged['change_vol_Call'] = merged['vol_Call_now']     - merged['vol_Call_prev']
+    merged['change_vol_Put']  = merged['vol_Put_now']      - merged['vol_Put_prev']
+    def pct(now, prev): return np.where(prev == 0, np.nan, (now - prev) / prev * 100)
+    merged['pct_change_OI_Call']  = pct(merged['openInt_Call_now'],  merged['openInt_Call_prev'])
+    merged['pct_change_OI_Put']   = pct(merged['openInt_Put_now'],   merged['openInt_Put_prev'])
+    merged['pct_change_vol_Call'] = pct(merged['vol_Call_now'],      merged['vol_Call_prev'])
+    merged['pct_change_vol_Put']  = pct(merged['vol_Put_now'],       merged['vol_Put_prev'])
+    lc = merged["lastPrice_Call_now"] = merged["lastPrice_Call_now"].fillna(0)
+    lp = merged["lastPrice_Put_now"]  = merged["lastPrice_Put_now"].fillna(0)
+    for f in ("open","high","low","close"):
+        merged[f"call_{f}_now"] = lc; merged[f"put_{f}_now"] = lp
+    merged["R1"] = merged["R12"] = merged["strike"] + lc
+    merged["S1"] = merged["S12"] = merged["strike"] - lp
+    cols_out = [
+        'ticker','company_name_now','asset_type_now','strike','expiry_date','trade_date_now',
+        'openInt_Call_now','openInt_Call_prev','change_OI_Call','pct_change_OI_Call',
+        'openInt_Put_now','openInt_Put_prev','change_OI_Put','pct_change_OI_Put',
+        'vol_Call_now','vol_Call_prev','change_vol_Call','pct_change_vol_Call',
+        'vol_Put_now','vol_Put_prev','change_vol_Put','pct_change_vol_Put',
+        'lastPrice_Call_now','lastPrice_Put_now',
+        'call_open_now','call_high_now','call_low_now','call_close_now',
+        'put_open_now','put_high_now','put_low_now','put_close_now',
+        'R1','S1','R12','S12']
+    merged = _ensure_columns(merged, cols_out)
+    df_out = merged[cols_out].copy()
+    df_out["trade_date_now"] = trade_date_now_db
+    df_out["load_date"] = _current_load_date()
+    try:
+        conn.execute("DELETE FROM options_change WHERE trade_date_now=?", (trade_date_now_db,)); conn.commit()
+    except Exception:
+        pass
+    df_out.to_sql("options_change", conn, if_exists="append", index=False)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_oc_date ON options_change(trade_date_now)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_od_date ON options_daily(trade_date)")
+    conn.execute("ANALYZE"); conn.commit(); conn.close()
+    print(f"  appended {len(df_out)} rows -> options_change")
+    return len(df_out)
+
+
+def _build_stock_daily(trade_day, all_tickers, db_path=OB_DB):
+    if yf is None:
+        print("  yfinance unavailable — skip stock_daily"); return None
+    trade_day_str = trade_day.strftime("%Y-%m-%d")
+    print(f"Building stock_daily for {trade_day_str}...")
+    session = curl_requests.Session(impersonate="chrome") if curl_requests else None
+    records = []
+    for ticker in all_tickers:
+        try:
+            tk  = yf.Ticker(ticker, session=session)
+            end = (trade_day + timedelta(days=1)).strftime("%Y-%m-%d")
+            hist = tk.history(start=trade_day_str, end=end, interval="1d")
+            if hist.empty: hist = tk.history(period="1d")
+            if hist.empty: continue
+            r = hist.iloc[-1]
+            conn = sqlite3.connect(db_path)
+            df_opt = pd.read_sql("SELECT openInt_Call, openInt_Put FROM options_daily "
+                                 "WHERE ticker=? AND trade_date=?", conn, params=(ticker, trade_day_str))
+            conn.close()
+            coi = df_opt["openInt_Call"].fillna(0).sum() if not df_opt.empty else 0
+            poi = df_opt["openInt_Put"].fillna(0).sum()  if not df_opt.empty else 0
+            records.append({"ticker": ticker, "trade_date": trade_day_str,
+                            "open": float(r.get("Open", np.nan)), "high": float(r.get("High", np.nan)),
+                            "low":  float(r.get("Low",  np.nan)), "close": float(r.get("Close", np.nan)),
+                            "volume": float(r.get("Volume", np.nan)),
+                            "pcr_oi": (poi / coi if coi > 0 else np.nan),
+                            "load_date": _current_load_date()})
+        except Exception as e:
+            print(f"  stock_daily {ticker}: {e}"); continue
+    if not records:
+        print("  stock_daily: no records"); return None
+    df_stock = pd.DataFrame(records)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM stock_daily WHERE trade_date=?", (trade_day_str,)); conn.commit()
+    except Exception:
+        pass
+    df_stock.to_sql("stock_daily", conn, if_exists="append", index=False)
+    conn.close()
+    print(f"  stock_daily: {len(df_stock)} rows")
+    return df_stock
+
+
+def _build_serving_layer(conn, dates=None):
+    conn.execute("""CREATE TABLE IF NOT EXISTS daily_ticker_summary (
+        trade_date TEXT, ticker TEXT, n_strikes INTEGER,
+        call_oi REAL, put_oi REAL, pcr_oi REAL,
+        call_oi_chg REAL, put_oi_chg REAL, net_oi_chg REAL,
+        call_vol REAL, put_vol REAL, call_notional REAL, put_notional REAL,
+        spot REAL, atm_iv REAL, skew25 REAL, pcvol REAL, gex_notional REAL,
+        PRIMARY KEY (trade_date, ticker))""")
+    try: conn.execute("ALTER TABLE daily_ticker_summary ADD COLUMN gex_notional REAL")
+    except Exception: pass
+    if dates is None:
+        dates = [r[0] for r in conn.execute(
+            "SELECT DISTINCT trade_date_now FROM options_change").fetchall()]
+    for d in dates:
+        agg = pd.read_sql("""SELECT UPPER(ticker) ticker, COUNT(*) n_strikes,
+            SUM(COALESCE(openInt_Call_now,0)) call_oi, SUM(COALESCE(openInt_Put_now,0)) put_oi,
+            SUM(COALESCE(change_OI_Call,0)) call_oi_chg, SUM(COALESCE(change_OI_Put,0)) put_oi_chg,
+            SUM(COALESCE(vol_Call_now,0)) call_vol, SUM(COALESCE(vol_Put_now,0)) put_vol,
+            SUM(COALESCE(lastPrice_Call_now,0)*COALESCE(openInt_Call_now,0)*100) call_notional,
+            SUM(COALESCE(lastPrice_Put_now,0)*COALESCE(openInt_Put_now,0)*100) put_notional,
+            SUM(COALESCE(openInt_Call_now,0)*strike) _c_oi_k,
+            SUM(COALESCE(openInt_Put_now,0)*strike) _p_oi_k
+            FROM options_change WHERE trade_date_now=? GROUP BY UPPER(ticker)""", conn, params=(d,))
+        if agg.empty: continue
+        agg = agg.drop_duplicates(subset=["ticker"])
+        agg["pcr_oi"]       = agg.put_oi / agg.call_oi.replace(0, np.nan)
+        agg["net_oi_chg"]   = agg.call_oi_chg - agg.put_oi_chg
+        agg["gex_notional"] = agg["_c_oi_k"] - agg["_p_oi_k"]
+        sd = pd.read_sql("SELECT UPPER(ticker) ticker, close spot FROM stock_daily WHERE trade_date=?",
+                         conn, params=(d,)).drop_duplicates("ticker")
+        agg = agg.merge(sd, on="ticker", how="left")
+        try:
+            sk = pd.read_sql("SELECT UPPER(ticker) ticker, atm_iv, skew25, pcvol FROM skew_snapshot "
+                             "WHERE trade_date=?", conn, params=(d,)).drop_duplicates("ticker")
+            agg = agg.merge(sk, on="ticker", how="left")
+        except Exception:
+            agg["atm_iv"] = agg["skew25"] = agg["pcvol"] = np.nan
+        agg = agg.drop_duplicates(subset=["ticker"])
+        agg["trade_date"] = d
+        cols = ["trade_date","ticker","n_strikes","call_oi","put_oi","pcr_oi",
+                "call_oi_chg","put_oi_chg","net_oi_chg","call_vol","put_vol",
+                "call_notional","put_notional","spot","atm_iv","skew25","pcvol","gex_notional"]
+        for c in cols:
+            if c not in agg.columns: agg[c] = np.nan
+        try:
+            conn.execute("DELETE FROM daily_ticker_summary WHERE trade_date=?", (d,))
+            agg[cols].to_sql("daily_ticker_summary", conn, if_exists="append", index=False)
+            print(f"  serving layer {d}: {len(agg)} tickers")
+        except Exception as e:
+            print(f"  serving layer {d} failed: {e}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dts_date ON daily_ticker_summary(trade_date)")
+    conn.commit()
+
+
+def _build_fundamentals(conn, min_oi=10000, max_names=500):
+    if yf is None:
+        print("  yfinance unavailable — skip fundamentals"); return 0
+    import datetime as _dt
+    today = _dt.date.today().isoformat()
+    conn.execute("""CREATE TABLE IF NOT EXISTS daily_fundamentals (
+        ticker TEXT PRIMARY KEY, asof TEXT, beta REAL, market_cap REAL, sector TEXT)""")
+    d = conn.execute("SELECT MAX(trade_date_now) FROM options_change").fetchone()[0]
+    liq = [r[0] for r in conn.execute(
+        "SELECT UPPER(ticker) FROM options_change WHERE trade_date_now=? GROUP BY UPPER(ticker) "
+        "HAVING SUM(COALESCE(openInt_Call_now,0)+COALESCE(openInt_Put_now,0))>=? "
+        "ORDER BY 1 LIMIT ?", (d, min_oi, max_names)).fetchall() if not r[0].startswith("^")]
+    done = {r[0] for r in conn.execute("SELECT ticker FROM daily_fundamentals WHERE asof=?", (today,))}
+    todo = [t for t in liq if t not in done]
+    print(f"  fundamentals: {len(liq)} liquid, {len(todo)} to fetch")
+    n = 0
+    for tk in todo:
+        try:
+            i = yf.Ticker(tk).info or {}
+            conn.execute("INSERT OR REPLACE INTO daily_fundamentals (ticker,asof,beta,market_cap,sector) "
+                         "VALUES (?,?,?,?,?)", (tk, today, i.get("beta"), i.get("marketCap"),
+                                                i.get("sector") or ""))
+            n += 1
+            if n % 25 == 0: conn.commit()
+        except Exception:
+            continue
+    conn.commit()
+    print(f"  fundamentals: {n} tickers written")
+    return n
+
+
+def derive(dates=None, do_stock=False):
+    """Full derive pipeline: options_daily -> options_change -> stock_daily -> serving layer."""
+    conn = sqlite3.connect(OB_DB)
+    all_dates = [r[0] for r in conn.execute(
+        "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
+    dates = dates or all_dates
+    print(f"\nOpenBB derive -> {OB_DB}\ncapture dates: {all_dates}\nprocessing: {dates}")
+    print("\nSTEP 1: map raw -> options_daily")
+    for d in all_dates:
+        _map_raw_to_options_daily(conn, d)
+    conn.close()
+    print("\nSTEP 2: compute_oi_vol_change")
+    for d in dates:
+        try: _compute_oi_vol_change(datetime.strptime(d, "%Y-%m-%d"))
+        except Exception as e: print(f"  {d}: change failed: {e}")
+    if do_stock:
+        print("\nSTEP 3: build_stock_daily")
+        c = sqlite3.connect(OB_DB)
+        tickers = [r[0] for r in c.execute(
+            "SELECT DISTINCT ticker FROM options_daily WHERE trade_date=?", (dates[-1],))]
+        c.close()
+        for d in dates:
+            try: _build_stock_daily(datetime.strptime(d, "%Y-%m-%d"), tickers)
+            except Exception as e: print(f"  {d}: stock_daily failed: {e}")
+    print("\nSTEP 4: build serving layer")
+    c = sqlite3.connect(OB_DB)
+    try: _build_serving_layer(c, dates=dates)
+    except Exception as e: print(f"  serving layer failed: {e}")
+    finally: c.close()
+    print("\nSTEP 5: build fundamentals")
+    c = sqlite3.connect(OB_DB)
+    try: _build_fundamentals(c)
+    except Exception as e: print(f"  fundamentals failed: {e}")
+    finally: c.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SKEW SNAPSHOT — IV metrics panel from options_openbb
+# (ported from skew_snapshot.py; runs in-process when --full is passed)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _skew_metrics(g):
+    g = g.copy()
+    for c in ("iv_Call","iv_Put","delta_Call","delta_Put","vol_Call","vol_Put",
+              "openInt_Call","openInt_Put","bid_Call","ask_Call","bid_Put","ask_Put"):
+        g[c] = pd.to_numeric(g[c], errors="coerce")
+    g = g[(g.dte >= 10) & (g.dte <= 45)]
+    if g.empty: return None
+    exp = g.expiry_date.value_counts().idxmax()
+    e   = g[g.expiry_date == exp]
+    gc  = e[(e.iv_Call > 0.01) & e.delta_Call.between(0.05, 0.7)]
+    gp  = e[(e.iv_Put  > 0.01) & e.delta_Put.between(-0.7, -0.05)]
+    if len(gc) < 2 or len(gp) < 2: return None
+    c25 = gc.iloc[(gc.delta_Call - 0.25).abs().argmin()]
+    c50 = gc.iloc[(gc.delta_Call - 0.50).abs().argmin()]
+    p25 = gp.iloc[(gp.delta_Put  + 0.25).abs().argmin()]
+    p50 = gp.iloc[(gp.delta_Put  + 0.50).abs().argmin()]
+    def relspr(row, side):
+        b, a = row[f"bid_{side}"], row[f"ask_{side}"]
+        m = (b + a) / 2
+        return (a - b) / m if (m and m > 0 and a >= b) else np.nan
+    liq = np.nanmedian([relspr(c50, "Call"), relspr(p50, "Put")])
+    vc, vp = e.vol_Call.sum(), e.vol_Put.sum()
+    oc, op = e.openInt_Call.sum(), e.openInt_Put.sum()
+    return {"skew25": p25.iv_Put - c25.iv_Call,
+            "atm_iv": np.nanmean([c50.iv_Call, p50.iv_Put]),
+            "pc_iv":  p50.iv_Put - c50.iv_Call,
+            "pcvol":  (vp / vc) if vc else np.nan,
+            "pcoi":   (op / oc) if oc else np.nan,
+            "liq": liq}
+
+
+def build_skew(conn):
+    """Compute skew_snapshot metrics from options_openbb into skew_snapshot table."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS skew_snapshot (
+        trade_date TEXT, ticker TEXT, skew25 REAL, atm_iv REAL, pc_iv REAL,
+        pcvol REAL, pcoi REAL, liq REAL, PRIMARY KEY (trade_date, ticker))""")
+    conn.commit()
+    dates = [r[0] for r in conn.execute(
+        "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
+    print(f"skew_snapshot: capture dates {dates}")
+    for d in dates:
+        df = pd.read_sql(
+            "SELECT ticker,strike,expiry_date,iv_Call,iv_Put,delta_Call,delta_Put,"
+            "vol_Call,vol_Put,openInt_Call,openInt_Put,bid_Call,ask_Call,bid_Put,ask_Put "
+            "FROM options_openbb WHERE trade_date=?", conn, params=(d,))
+        df["dte"] = (pd.to_datetime(df.expiry_date, errors="coerce") - pd.to_datetime(d)).dt.days
+        rows = []
+        for tk, g in df.groupby("ticker"):
+            m = _skew_metrics(g)
+            if m:
+                rows.append((d, tk, m["skew25"], m["atm_iv"], m["pc_iv"],
+                             m["pcvol"], m["pcoi"], m["liq"]))
+        conn.executemany("INSERT OR REPLACE INTO skew_snapshot "
+                         "(trade_date,ticker,skew25,atm_iv,pc_iv,pcvol,pcoi,liq) "
+                         "VALUES (?,?,?,?,?,?,?,?)", rows)
+        conn.commit()
+        print(f"  skew {d}: {len(rows)} tickers")
 
 
 if __name__ == "__main__":

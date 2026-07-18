@@ -10004,12 +10004,12 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
     n_pos   = len(html_cards)
     footer  = f"\n{net_em} <b>Portfolio total: ${total_pnl:+,.0f}</b>  ({n_pos} open position{'s' if n_pos != 1 else ''})"
 
-    # ── High-Prob Engine — one card per ticker ─────────────────────────
+    # ── High-Prob Engine — compact ST table + per-ticker detail lines ──
     hp_section = ""
     _SIG_ICON = {"BULL":"🟢","BEAR":"🔴","SELL_PREMIUM":"💰","NEUTRAL":"⚪"}
     try:
         conn_hp_pm = get_conn()
-        _hp_cards = []
+        _hp_rows = []; _hp_details = []
         for _htk_pm in trades["ticker"].str.upper().unique().tolist()[:5]:
             try:
                 _sp_pm = _get_spot_with_ah(_htk_pm).get("spot_ext", 0.0)
@@ -10019,23 +10019,25 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
                 _pb_pm = _hr_pm["prob"]
                 _bv   = _hr_pm["bull_v"]; _rv = _hr_pm["bear_v"]
                 _sv   = _hr_pm.get("sell_v", 0)
-                # compact card ≤28 chars per line
-                _card = [
-                    f"<b>{_htk_pm}</b> ${_sp_pm:.0f}",
-                    f"{_ic_pm} {_hr_pm['signal']}  {_pb_pm:.0f}%  {_cf_pm}",
-                    f"🟢{_bv} 🔴{_rv} 💰{_sv}/24",
-                ]
                 _vb = _hr_pm.get("vrvp_box", {})
+                _poc = f"${_vb['poc']:.0f}" if _vb.get("poc") else "—"
+                _hp_rows.append((_ic_pm, _htk_pm[:6], f"{_pb_pm:.0f}%", _poc))
+                _dt = (f"{_ic_pm} <b>{_htk_pm}</b> ${_sp_pm:.0f} — {_hr_pm['signal']} "
+                       f"{_pb_pm:.0f}% {_cf_pm} · votes 🟢{_bv}/🔴{_rv}/💰{_sv}")
                 if _vb.get("lo"):
-                    _card.append(f"📦 ${_vb['lo']:.0f}–${_vb['hi']:.0f} POC${_vb.get('poc',0):.0f}")
+                    _dt += f" · range ${_vb['lo']:.0f}–{_vb['hi']:.0f} (POC ${_vb.get('poc',0):.0f})"
                 _wl = _hr_pm.get("models", {}).get("put_call_wall", {})
                 if _wl.get("call_wall") and _wl.get("prob", 0) >= 65:
-                    _card.append(f"🧱 P${_wl['put_wall']:.0f} C${_wl['call_wall']:.0f}")
-                _hp_cards.append("\n".join(_card))
+                    _dt += f" · walls P${_wl['put_wall']:.0f} C${_wl['call_wall']:.0f}"
+                _hp_details.append(_dt)
             except Exception as _e_pm:
                 log.debug(f"pos_mon hp {_htk_pm}: {_e_pm}")
-        if _hp_cards:
-            hp_section = "\n\n<b>🧠 HP Engine</b>\n" + "\n\n".join(_hp_cards)
+        if _hp_rows:
+            _hp_tbl = _pipe_table(("ST", "Tkr", "Prob", "POC"), _hp_rows,
+                                  right_cols={2, 3},
+                                  legend="💰 sell-prem · 🟢 bull · 🔴 bear · ⚪ neutral")
+            hp_section = ("\n\n<b>🧠 HP Engine</b>\n" + _hp_tbl + "\n"
+                          + "\n".join(_hp_details))
         conn_hp_pm.close()
     except Exception as _e_hp_pm:
         log.debug(f"pos_mon hp block: {_e_hp_pm}")
@@ -10273,6 +10275,30 @@ async def data_audit_alert(ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id=chat_id, text=msg, parse_mode=H)
     except Exception as e:
         log.warning(f"data_audit_alert send failed: {e}")
+
+
+async def data_status_cmd(update, ctx):
+    """/data (alias /status) — on-demand EOD data-download status. Runs the stringent
+    audit LIVE against the current DB (VALIDATED / PARTIAL / FAILED) so you can check
+    whether today's capture + derive finished — watch the ticker count climb mid-run."""
+    conn = get_conn()
+    try:
+        status, checks, day = _data_audit(conn)
+        exp = _last_expected_eod()
+        cap_date = conn.execute("SELECT MAX(trade_date) FROM options_openbb").fetchone()[0] or "NONE"
+    finally:
+        conn.close()
+    _em = {"VALIDATED": "🟢", "PARTIAL": "🟡", "FAILED": "🔴"}[status]
+    rows = [(("✅" if ok else "❌"), n, d.split(":")[-1].strip()[:16]) for n, ok, d in checks]
+    _note = ("All lanes verified — data is ready to use." if status == "VALIDATED" else
+             "Core data present; some checks still pending — capture may be mid-run." if status == "PARTIAL" else
+             "Data incomplete — capture/derive missing. Scheduler retries on login / 17:00 ET.")
+    msg = _report(
+        f"{_em} DATA {status} — {day}",
+        ("ST", "Check", "Detail"), rows,
+        legend="✅ pass · ❌ fail",
+        notes=f"Latest capture {cap_date} · expected {exp}. {_note}")
+    await update.message.reply_text(msg, parse_mode=H)
 
 
 async def data_health_alert(ctx: ContextTypes.DEFAULT_TYPE):
@@ -12371,7 +12397,7 @@ async def morning_alert(ctx: ContextTypes.DEFAULT_TYPE):
     try:
         conn_hp_ma = get_conn()
         _hp_tks = pd.read_sql("SELECT DISTINCT ticker FROM trades WHERE status='OPEN'", conn_hp_ma)
-        _hp_out = []
+        _hp_rows = []; _hp_details = []
         for _htk in _hp_tks["ticker"].tolist()[:5]:
             try:
                 _sp_ma = _get_spot_with_ah(str(_htk).upper()).get("spot_ext", 0.0)
@@ -12380,21 +12406,25 @@ async def morning_alert(ctx: ContextTypes.DEFAULT_TYPE):
                 _cf = _hr.get("confidence", "")
                 _pb = _hr["prob"]
                 _bv = _hr["bull_v"]; _rv = _hr["bear_v"]; _sv = _hr.get("sell_v", 0)
-                _hp_out.append(f"<b>{_htk}</b> ${_sp_ma:.0f}")
-                _hp_out.append(f"{_he} {_hr['signal']}  {_pb:.0f}%  {_cf}")
-                _hp_out.append(f"🟢{_bv} 🔴{_rv} 💰{_sv}/24")
                 _vb = _hr.get("vrvp_box", {})
+                _poc = f"${_vb['poc']:.0f}" if _vb.get("poc") else "—"
+                _hp_rows.append((_he, str(_htk).upper()[:6], f"{_pb:.0f}%", _poc))
+                _dt = (f"{_he} <b>{str(_htk).upper()}</b> ${_sp_ma:.0f} — {_hr['signal']} "
+                       f"{_pb:.0f}% {_cf} · votes 🟢{_bv}/🔴{_rv}/💰{_sv}")
                 if _vb.get("lo"):
-                    _hp_out.append(f"📦 ${_vb['lo']:.0f}–${_vb['hi']:.0f} POC${_vb.get('poc',0):.0f}")
+                    _dt += f" · range ${_vb['lo']:.0f}–{_vb['hi']:.0f} (POC ${_vb.get('poc',0):.0f})"
                 _wl = _hr.get("models", {}).get("put_call_wall", {})
                 if _wl.get("call_wall") and _wl.get("prob", 0) >= 65:
-                    _hp_out.append(f"🧱 P${_wl['put_wall']:.0f} C${_wl['call_wall']:.0f}")
-                _hp_out.append("")
+                    _dt += f" · walls P${_wl['put_wall']:.0f} C${_wl['call_wall']:.0f}"
+                _hp_details.append(_dt)
             except Exception as _e_hp:
                 log.debug(f"ma hp {_htk}: {_e_hp}")
-        if _hp_out:
+        if _hp_rows:
             parts.append("\n<b>🧠 HP Engine — Positions:</b>")
-            parts.extend(_hp_out)
+            parts.append(_pipe_table(("ST", "Tkr", "Prob", "POC"), _hp_rows,
+                                     right_cols={2, 3},
+                                     legend="💰 sell-prem · 🟢 bull · 🔴 bear · ⚪ neutral"))
+            parts.extend(_hp_details)
         conn_hp_ma.close()
     except Exception as _e_hp_ma: log.debug(f"ma hp block: {_e_hp_ma}")
 
@@ -16595,11 +16625,9 @@ async def signal_ticker_detail(query, ticker):
     parts = [
         hdr(f"📊 {tk} · {latest_date}"),
         f"{sig_em} <b>{sig_lbl}</b>\n<i>{sig_txt}</i>",
-        mono(
-            f"{'Call dOI':<10} {_fk(call_chg):>8}\n"
-            f"{'Put  dOI':<10} {_fk(put_chg):>8}\n"
-            f"{'PCR':<10} {pcr:>8.2f}"
-        )
+        _pipe_table(("Metric", "Value"),
+                    [("Call dOI", _fk(call_chg)), ("Put dOI", _fk(put_chg)),
+                     ("PCR", f"{pcr:.2f}")], right_cols={1})
     ]
 
     # OI walls
@@ -16608,11 +16636,13 @@ async def signal_ticker_detail(query, ticker):
         if _kl:
             _cws = _kl.get("call_wall",0); _pws = _kl.get("put_wall",0); _mps = _kl.get("max_pain",0)
             _gws = " / ".join(f"${g:.0f}" for g in _kl.get("gamma_walls",[])[:3]) or "—"
-            parts.append(
-                f"\n<b>🧱 OI Walls ({_kl.get('expiry','')[:8]})</b>\n"
-                + mono(f"{'CWall':<8}${_cws:.0f}  {'PWall':<7}${_pws:.0f}\n"
-                      f"{'MaxPain':<8}${_mps:.0f}  Γ:{_gws}")
-            )
+            _wrows = [("Call Wall", f"${_cws:.0f}"), ("Put Wall", f"${_pws:.0f}"),
+                      ("Max Pain", f"${_mps:.0f}")]
+            _wtxt = (f"\n<b>🧱 OI Walls ({str(_kl.get('expiry',''))[5:]})</b>\n"
+                     + _pipe_table(("Level", "Strike"), _wrows, right_cols={1}))
+            if _gws and _gws != "—":
+                _wtxt += f"\n<i>Γ walls: {_gws}</i>"
+            parts.append(_wtxt)
     except Exception: pass
 
     # Per-expiry: This Week / Next Week / Later
@@ -16645,14 +16675,15 @@ async def signal_ticker_detail(query, ticker):
             exp_parts = ["\n<b>Expiry Breakdown:</b>"]
             for _lbl, _rows in _bk.items():
                 if not _rows: continue
-                tbl_lines = ["{:<8} {:>6} {:>6} {:>4}".format("Expiry","CdOI","PdOI","PCR")]
-                tbl_lines.append("-" * 27)
+                _erows = []
                 for er in _rows:
                     cc2 = float(er["cc"] or 0); pp2 = float(er["pp"] or 0)
                     ep2 = float(er["po"] or 0) / max(float(er["co"] or 0), 1)
-                    tbl_lines.append("{:<8} {:>6} {:>6} {:>4.1f}".format(
-                        str(er["expiry_date"])[:8], _fk(cc2), _fk(pp2), min(ep2,9.9)))
-                exp_parts.append(f"\n<b>{_lbl}</b>\n{mono(chr(10).join(tbl_lines))}")
+                    _erows.append((str(er["expiry_date"])[5:], _fk(cc2), _fk(pp2),
+                                   f"{min(ep2, 9.9):.1f}"))
+                exp_parts.append(f"\n<b>{_lbl}</b>\n"
+                                 + _pipe_table(("Expiry", "CdOI", "PdOI", "PCR"), _erows,
+                                               right_cols={1, 2, 3}))
             parts.append("\n".join(exp_parts))
     except Exception as _ex_e:
         log.warning(f"signal_ticker_detail expiry {tk}: {_ex_e}")
@@ -16787,11 +16818,10 @@ async def oi_build_detail(query, ticker):
     )
 
     if res["daily"]:
-        tbl = [f"{'Date':<10} {'dCall':>7} {'dPut':>7} {'PCR':>5}"]
-        tbl.append("-" * 31)
-        for d in res["daily"][:5]:
-            tbl.append(f"{d['date']:<10} {_fk(d['call_chg']):>7} {_fk(d['put_chg']):>7} {d['pcr']:>5.2f}")
-        parts.append(f"\n<b>Daily OI Flow:</b>\n{mono(chr(10).join(tbl))}")
+        _drows = [(str(d['date'])[5:], _fk(d['call_chg']), _fk(d['put_chg']), f"{d['pcr']:.2f}")
+                  for d in res["daily"][:5]]
+        parts.append("\n<b>Daily OI Flow:</b>\n"
+                     + _pipe_table(("Date", "dCall", "dPut", "PCR"), _drows, right_cols={1, 2, 3}))
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 OI Detail",    callback_data=f"oi_detail_{tk}"),
@@ -18524,13 +18554,13 @@ async def recommend_engine(query):
         em  = "🟢" if s["total"] >= 65 else "🟡"
         lbl = "STRONG BUY" if s["total"] >= 65 else "WATCH"
         rsi_v  = s.get("rsi", 0)
-        macd_s = "↑" if s.get("macd_bull") else "↓"
+        macd_s = "🟢" if s.get("macd_bull") else "🔴"
         bb_s   = "BOT" if s.get("bb_bot") else ("TOP" if s.get("bb_top") else "MID")
-        ema_s  = "↑" if s.get("above200") else "↓"
+        ema_s  = "🟢" if s.get("above200") else "🔴"
         spf    = s.get("short_pct", 0)
         sc     = s.get("squeeze_score", 0)
         sq_em  = "🔴" if sc >= 7 else ("🟡" if sc >= 4 else "🟢")
-        oi_s   = "↑Bull" if s.get("oi_bull") else ("↓Bear" if s.get("oi_bear") else "Neut")
+        oi_s   = "🟢 Bull" if s.get("oi_bull") else ("🔴 Bear" if s.get("oi_bear") else "Neut")
         parts.append(
             f"\n{em} <b>{s['ticker']}</b>  {s['total']}/100  [{lbl}]\n"
             f"  Tech:  RSI:{rsi_v:.0f} MACD:{macd_s} BB:{bb_s} EMA200:{ema_s}\n"
@@ -19880,7 +19910,7 @@ def _fmt_opex_report(rad):
     gex = rad.get("gex") or {}
     lines = ["\U0001F5D3 <b>OPEX RADAR</b>  (" + "+".join(rad["tickers"]) + ")",
              "<i>ETF/equity slice you store - excludes SPX index headline.</i>", ""]
-    tbl = [(("🎯" if r["date"] == mj["date"] else "⚪"), r["date"], f"{r['dte']}d",
+    tbl = [(("🎯" if r["date"] == mj["date"] else "⚪"), str(r["date"])[5:], f"{r['dte']}d",
             _opex_notional_str(r["notional"])) for r in rad["rows"]]
     lines.append(_pipe_table(("ST", "Expiry", "DTE", "Notional"), tbl, right_cols={2, 3},
                              legend="🎯 = major expiry"))
@@ -21809,7 +21839,7 @@ def _fmt_hiprob(rows):
              f"<i>premium selling · defined/cash-secured risk · {dte_lbl} · not advice</i>"]
     if spreads:
         rd = [(r["tk"], r["setup"], f"{r['credit']:.2f}", f"{r['risk']:.0f}") for r in spreads]
-        parts.append(_pipe_table(("Tkr", "Setup", "Cr", "Rsk$"), rd, right_cols={2, 3},
+        parts.append(_pipe_table(("Tkr", "Setup", "Cr", "Rsk"), rd, right_cols={2, 3},
                                  title="Spreads · defined risk",
                                  legend="Setup=short/long+P(put)/C(call) · Cr=credit · Rsk$=max loss"))
     if csps:
@@ -25458,7 +25488,8 @@ async def _send_uoa(msg, rows):
     for r in rows:
         emoji = "🟢" if r["side"] == "C" else "🔴"
         _data.append((emoji, r["ticker"], f"{r['strike']:g}{r['side']}",
-                      f"{r['ratio']:.1f}", _knum(r["notional"])))
+                      ("99+" if r["ratio"] > 99 else f"{r['ratio']:.1f}"),
+                      _knum(r["notional"])))
     table = _pipe_table(("ST", "Tkr", "Opt", "V/OI", "$"), _data, right_cols={3, 4},
                         legend="vol÷OI (≥2 = unusual) · 🟢 call flow · 🔴 put flow · $=notional")
     top = rows[0]
@@ -26047,9 +26078,22 @@ def _riskoff_message(res):
     """Plain-English Telegram body shared by /riskoff and the auto alert.
     Two gauges: TURBULENCE (proven — predicts move size) + DIRECTION (soft lean)."""
     t = res["turbulence"]; d = res["direction"]
+    # Compact table uses SHORT complete tags (never mid-word truncation), with the full
+    # pillar name + why spelled out in per-row detail lines below (scanner-format standard).
+    _short = {
+        "Crash-insurance buying": "Put flow",
+        "Hot stocks overstretched": "Froth",
+        "Market too calm": "Low VRP",
+        "Broad weakness": "Breadth",
+        "No shock absorbers": "Neg gamma",
+    }
     pillars_tbl = _pipe_table(
         ("ST", "Pillar", "Reading"),
-        [(p["emoji"], p["label"][:10], p["reading"][:16]) for p in res["pillars"]])
+        [(p["emoji"], _short.get(p["label"], p["label"])[:10], p["reading"][:10])
+         for p in res["pillars"]])
+    pillars_detail = "\n".join(
+        f"{p['emoji']} <b>{p['label']}</b> — {p['reading']}: {p['why']}"
+        for p in res["pillars"])
     nd = res.get("nextday")
     nd_block = (f"\n\n📅 <b>Next session — {nd['lean']}</b>\n{nd['text']}") if nd else ""
     return (f"{res['remoji']} <b>MARKET RADAR — {res['headline']}</b>\n\n"
@@ -26059,7 +26103,8 @@ def _riskoff_message(res):
             f"{nd_block}\n\n"
             f"<i>Backtested: put-flow predicts move SIZE (p&lt;0.01); direction is a weak hint only. "
             f"Context below · not advice.</i>\n"
-            f"{pillars_tbl}")
+            f"{pillars_tbl}\n"
+            f"{pillars_detail}")
 
 
 async def _send_riskoff(msg, res):
@@ -27057,7 +27102,7 @@ def _kb_gex():
 def _fmt_squeeze_inline(sq):
     """One-line short-interest / days-to-cover / covering tag for position views."""
     if not sq or sq.get("short_pct") is None:
-        return "‍Short interest: n/a (no float data)"
+        return "Short interest: n/a (no float data)"
     parts = [f"Short {sq['short_pct']:.0f}% float"]
     if sq.get("dtc"):
         parts.append(f"DTC {sq['dtc']:.1f}")
@@ -27295,9 +27340,9 @@ def _macro_keyless():
 
 
 _AV_MACRO_SERIES = [
-    ("REAL_GDP", "Real GDP", "&interval=quarterly", "$B"),
+    ("REAL_GDP", "GDP", "&interval=quarterly", "$B"),
     ("INFLATION", "Inflation", "", "%"),
-    ("RETAIL_SALES", "Retail Sales", "", "$M"),
+    ("RETAIL_SALES", "Retail", "", "$M"),
     ("DURABLES", "Durables", "", "$M"),
     ("FEDERAL_FUNDS_RATE", "Fed Funds", "&interval=monthly", "%"),
 ]
@@ -27318,10 +27363,19 @@ def _av_macro():
     try:
         if os.path.exists(cache_f):
             c = _j.load(open(cache_f, encoding="utf-8"))
-            if c.get("day") == today and c.get("rows"):
+            # rows are (name, value, asof) tuples since 2026-07-18 — ignore old string-format caches
+            if c.get("day") == today and c.get("rows") and isinstance(c["rows"][0], (list, tuple)):
                 _AV_MACRO_CACHE.update(day=today, rows=c["rows"]); return c["rows"]
     except Exception:
         pass
+
+    def _av_val(v, unit):
+        if unit == "$B":
+            return f"${v/1000:.1f}T" if v >= 1000 else f"${v:,.0f}B"
+        if unit == "$M":
+            return f"${v/1000:,.0f}B" if v >= 1000 else f"${v:,.0f}M"
+        return f"{v:.1f}{unit}"
+
     rows = []; ok = False
     for fn, name, extra, unit in _AV_MACRO_SERIES:
         try:
@@ -27329,7 +27383,9 @@ def _av_macro():
             d = _j.loads(_u.urlopen(url, timeout=12).read().decode())
             data = d.get("data", [])
             if data:
-                rows.append(f"{name:<13}{float(data[0]['value']):>12,.1f} {unit} ·{data[0].get('date','')[:7]}"); ok = True
+                _dt7 = str(data[0].get("date", ""))[:7]          # YYYY-MM
+                _asof = f"{_dt7[5:7]}/{_dt7[2:4]}" if len(_dt7) == 7 else ""
+                rows.append((name, _av_val(float(data[0]["value"]), unit), _asof)); ok = True
             _t.sleep(1.3)
         except Exception:
             continue
@@ -27458,7 +27514,9 @@ def _fmt_macro_report():
             lines.append("Could not fetch FRED data.")
     av = _av_macro()
     if av:
-        lines += ["", "🏦 <b>AlphaVantage indicators:</b>", "<pre>" + "\n".join(av) + "</pre>"]
+        lines += ["", "🏦 <b>AlphaVantage indicators:</b>",
+                  _pipe_table(("Series", "Value", "As of"), [tuple(r) for r in av],
+                              right_cols={1, 2})]
     _fl, _fdir = _fed_soma_line()
     if _fl:
         lines += ["", "🏦 " + _fl]
@@ -27802,7 +27860,7 @@ def _fmt_momentum_leaderboard(conn, n=8, highlight=None):
     total = len(df)
 
     def _block(sub, title):
-        data = [(("⭐" if str(r["ticker"])[:5] in highlight else ("↑" if int(r["above200"]) else "↓")),
+        data = [(("⭐" if str(r["ticker"])[:5] in highlight else ("🟢" if int(r["above200"]) else "🔴")),
                  f"{int(r['mom_rank'])}", str(r["ticker"])[:5],
                  f"{r['ret_12_1']:+.0f}%", f"{r['ret_1m']:+.0f}%") for _, r in sub.iterrows()]
         return title + "\n" + _pipe_table(("ST", "Rk", "Tkr", "12-1", "1m"), data, right_cols={1, 3, 4})
@@ -27813,6 +27871,7 @@ def _fmt_momentum_leaderboard(conn, n=8, highlight=None):
         parts.append("⚠️ <i>snapshot not from today — tap Recompute</i>")
     parts.append(_block(df.head(n), "🟢 <b>TOP — momentum longs</b>"))
     parts.append(_block(df.tail(n).iloc[::-1], "🔴 <b>BOTTOM — momentum shorts</b>"))
+    parts.append("<i>ST: 🟢 above 200-day avg · 🔴 below · ⭐ your position</i>")
     if highlight:
         mine = df[df["ticker"].isin(highlight)].sort_values("mom_rank")
         if not mine.empty:
@@ -27841,7 +27900,7 @@ _MOM_HELP = (
     "• <b>12-1</b> — 12-month return, <i>skipping the last month</i>. The trend that "
     "tends to persist — the core score.\n"
     "• <b>1m</b> — last month's return; health-check (still going or rolling over?)\n"
-    "• <b>↑/↓</b> — above/below the 200-day average (long-term uptrend intact?)\n\n"
+    "• <b>🟢/🔴</b> — above/below the 200-day average (long-term uptrend intact?)\n\n"
     "<b>Sections</b>\n"
     "🟢 <b>TOP</b> — strongest trends (top decile) → ride-winners longs\n"
     "🔴 <b>BOTTOM</b> — weakest names (bottom decile) → avoid longs / careful shorts\n"
@@ -28497,6 +28556,7 @@ async def _post_init(app):
         from telegram import BotCommand
         cmds = [
             BotCommand("start", "Menu & command list"),
+            BotCommand("data", "EOD data-download status (VALIDATED/PARTIAL/FAILED)"),
             BotCommand("wan", "Live 24-model ensemble signals"),
             BotCommand("building", "Positioning: new long/short OI building"),
             BotCommand("uoa", "Unusual options activity (vol>>OI)"),
@@ -28577,6 +28637,8 @@ def main():
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("terminal", terminal_command))
     app.add_handler(CommandHandler("premium", premium_command))
+    app.add_handler(CommandHandler("data", data_status_cmd))     # EOD data-download status
+    app.add_handler(CommandHandler("status", data_status_cmd))   # alias for /data
     app.add_handler(InlineQueryHandler(inline_query_handler))   # @bot TICKER search (BotFather /setinline)
     app.add_handler(CommandHandler("wrap", wrap_command))
     app.add_handler(CommandHandler("tv", tv_command))

@@ -13,13 +13,9 @@ from zoneinfo import ZoneInfo
 # ================== PATHS / CONFIG ==================
 BASE_DIR = r"C:\Users\srini\Options_chain_data\NYSE_DATA"
 JOB1 = os.path.join(BASE_DIR, "NYSE_YFin.py")
-JOB2 = os.path.join(BASE_DIR, "NYSE_Telegram.py")
-# OpenBB is the PRIMARY lane (2026-07-16, user decision): capture+derive run first;
-# the Yahoo fetch (JOB1) + legacy report (JOB2) run ONLY as a fallback when the BB
-# capture is missing/incomplete for the target day (bb_capture_ok gate below).
+# OpenBB is the PRIMARY lane: capture+derive+skew in one shot (--full).
+# Yahoo (JOB1) is the fallback when BB capture is missing/incomplete for the day.
 JOB_BB = os.path.join(BASE_DIR, "NYSE_OpenBB.py")
-JOB_BB_DERIVE = os.path.join(BASE_DIR, "NYSE_OpenBB_derive.py")
-JOB_BB_SKEW = os.path.join(BASE_DIR, "skew_snapshot.py")   # IV-metrics panel (idempotent, all dates)
 STATE_DIR = BASE_DIR
 STATE_FILE = os.path.join(STATE_DIR, "run_all_offhours_last_ok.txt")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
@@ -101,29 +97,42 @@ def in_off_hours():
 def can_run_now_for_gate():
     """Return (ok, target_day, today_ny, now_ny, reason).
 
-    Two allowed windows (NY time):
-      Pre-market  00:00–PRE_MARKET_END   → target = previous trading day
-      Post-close  POST_CLOSE_START–23:59 → target = today (must be trading day)
+    Target = the most recent COMPLETED trading day whose EOD data we should hold:
+      - today, if today is a trading day and now >= POST_CLOSE_START (NY);
+      - otherwise the last trading day strictly before today.
+
+    We return ok=True whenever such a day exists — INCLUDING during market hours and
+    weekends/holidays — so a capture missed because the laptop was asleep/off/unplugged
+    at 17:00 is backfilled the moment the machine is next usable. The caller dedups via
+    the state file (already_ran_for), so a day already captured is a cheap no-op.
+
+    This replaces the old hard pre-market/post-close windows, which silently SKIPPED a
+    mid-day open and lost the day permanently — the failure the 2026-07-17 hang exposed.
+
+    Data note: a mid-day catch-up for the prior day still fetches OI that reflects that
+    day's close (OCC settles overnight), so OI / walls / PCR stay valid; only intraday
+    price columns may be slightly live — an acceptable trade vs. a permanent hole. Miss
+    two-plus days and only the most recent is recoverable (CBOE serves current OI only).
     """
     ny_tz = ZoneInfo(RUN_TZ)
     now_ny = datetime.now(ny_tz)
     today_ny = now_ny.date()
     hour = now_ny.hour
 
-    # Pre-market window: midnight up to PRE_MARKET_END
-    if hour < PRE_MARKET_END:
-        prev = last_trading_day_before(today_ny)
-        if prev is None:
-            return False, today_ny, today_ny, now_ny, "No previous trading day found"
-        return True, prev, today_ny, now_ny, f"Pre-market: targeting {prev}"
-
-    # Post-close window: POST_CLOSE_START onwards, today must be a trading day
-    if hour >= POST_CLOSE_START:
-        if not is_trading_day(today_ny):
-            return False, today_ny, today_ny, now_ny, "Today is not an NYSE trading day"
+    # Today's session is finished → capture today.
+    if is_trading_day(today_ny) and hour >= POST_CLOSE_START:
         return True, today_ny, today_ny, now_ny, "Post-close: targeting today"
 
-    return False, today_ny, today_ny, now_ny, f"Market hours ({hour:02d}:xx NY) — not a run window"
+    # Before today's close, or a weekend/holiday → last completed trading day.
+    prev = last_trading_day_before(today_ny)
+    if prev is None:
+        return False, today_ny, today_ny, now_ny, "No previous trading day found"
+
+    if is_trading_day(today_ny) and hour >= PRE_MARKET_END:
+        reason = f"Catch-up during market hours: targeting last completed day {prev}"
+    else:
+        reason = f"Pre-market / off-day: targeting {prev}"
+    return True, prev, today_ny, now_ny, reason
 
 
 def is_trading_day(day: date) -> bool:
@@ -342,7 +351,7 @@ if __name__ == "__main__":
         # 4. Run the two jobs (output visible in CMD and in log files)
         if DRY_RUN:
             log_msg(f"[DRY-RUN] Would run PRIMARY: {JOB_BB} -> derive -> skew")
-            log_msg(f"[DRY-RUN] Would run FALLBACK only if BB incomplete: {JOB1} then {JOB2}")
+            log_msg(f"[DRY-RUN] Would run FALLBACK only if BB incomplete: {JOB1}")
             log_msg("[DRY-RUN] State file would be written — skipping.")
             success = True
             exit_code = 0
@@ -358,16 +367,15 @@ if __name__ == "__main__":
                 log_msg("ALL JOBS SUCCESS (BB primary)!")
                 exit_code = 0
             else:
-                log_msg("BB capture unavailable/incomplete -> FALLBACK: Yahoo fetch + legacy report")
+                log_msg("BB capture unavailable/incomplete -> FALLBACK: Yahoo fetch")
                 rc1 = run_job_headless(JOB1)
-                rc2 = run_job_headless(JOB2)
-                success = (rc1 == 0 and rc2 == 0)
+                success = (rc1 == 0)
                 if success:
                     mark_success_for(target_day)
                     log_msg("ALL JOBS SUCCESS (Yahoo fallback)!")
                     exit_code = 0
                 else:
-                    log_msg(f"FAILURE: bb_rc={bb_rc}, rc1={rc1}, rc2={rc2}")
+                    log_msg(f"FAILURE: bb_rc={bb_rc}, rc1={rc1}")
                     exit_code = 1
 
         elapsed = (datetime.now() - start_time).total_seconds()

@@ -168,7 +168,7 @@ def mark_success_for(day: date):
 # --- Job runner (with stdout echoed to CMD) ---
 
 
-def run_job_headless(path):
+def run_job_headless(path, extra_args=None):
     job_dir = os.path.dirname(path)
     job_name = os.path.splitext(os.path.basename(path))[0]
     ts = datetime.now().strftime("%Y%m%d_%H%M")
@@ -181,7 +181,7 @@ def run_job_headless(path):
         log.write(f"[{datetime.now().isoformat()}] Started: {path}\n\n")
 
         proc = subprocess.Popen(
-            [sys.executable, "-u", path],
+            [sys.executable, "-u", path] + (extra_args or []),
             cwd=job_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -347,9 +347,8 @@ if __name__ == "__main__":
             success = True
             exit_code = 0
         else:
-            # PRIMARY: OpenBB capture (foreground) -> derive -> skew panel.
-            bb_rc = run_job_headless(JOB_BB)
-            run_openbb_parallel_lane(None, None)      # derive + skew (handles no bg proc)
+            # PRIMARY: OpenBB capture + derive + skew in one shot (--full chains them).
+            bb_rc = run_job_headless(JOB_BB, ["--full"])
 
             if bb_capture_ok(target_day):
                 log_msg("BB PRIMARY healthy -> skipping Yahoo fetch + legacy report "

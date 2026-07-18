@@ -809,6 +809,23 @@ def sanitize_for_telegram(s: str) -> str:
             s = re.sub(rf'</?{tag}[^>]*>', '', s)
     return s
 
+def _tg_cut(text, limit=4000):
+    """Length-cut for Telegram HTML WITHOUT breaking entities (root cause of the
+    'plain text fallback' old-look messages, diagnosed 2026-07-18: blind [:4000]
+    slices mid-tag -> Telegram rejects HTML -> plain-text fallback). Cuts at the
+    last newline before `limit`, then closes any tags left open."""
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    cut = text[:limit - 60]                    # head-room for closing tags + marker
+    nl = cut.rfind("\n")
+    if nl > limit - 500:                       # prefer a clean line boundary near the cut
+        cut = cut[:nl]
+    for tag in ("pre", "code", "b", "i", "u"):
+        if cut.count(f"<{tag}>") > cut.count(f"</{tag}>"):
+            cut += f"</{tag}>"
+    return cut + "\n<i>…truncated</i>"
+
+
 # Monkeypatch Message.reply_text and Bot.send_message to auto-sanitize text
 try:
     _orig_reply = Message.reply_text
@@ -820,6 +837,16 @@ try:
         except Exception as e:
             # Log original and sanitized text for debugging
             log.warning("Telegram send parse error: %s", e)
+            # HEAL first (2026-07-18): entity errors are almost always a mid-tag
+            # length cut — retry with a tag-balanced cut BEFORE degrading to the
+            # plain-text fallback that looks like the old unformatted style.
+            if isinstance(text2, str):
+                try:
+                    _healed = _tg_cut(text2, 3900)
+                    if _healed != text2:
+                        return await _orig_reply(self, _healed, *args, **kwargs)
+                except Exception:
+                    log.debug("healed resend failed", exc_info=True)
             try:
                 log.debug("Original message:\n%s", orig_text)
                 log.debug("Sanitized message:\n%s", text2)
@@ -850,6 +877,15 @@ try:
                 log.debug("Sanitized message:\n%s", text2)
             except Exception:
                 log.debug("suppressed exception", exc_info=True)
+            # HEAL first (2026-07-18): retry with a tag-balanced cut before the
+            # plain-text fallback (which renders as the old unformatted style).
+            if isinstance(text2, str):
+                try:
+                    _healed = _tg_cut(text2, 3900)
+                    if _healed != text2:
+                        return await _orig_send(self, chat_id=chat_id, text=_healed, *args, **kwargs)
+                except Exception:
+                    log.debug("healed resend failed", exc_info=True)
             try:
                 safe = orig_text.replace('<', '&lt;').replace('>', '&gt;') if isinstance(orig_text, str) else text2
                 kwargs2 = dict(kwargs)
@@ -3160,8 +3196,8 @@ async def positions_view(query):
         await query.message.reply_text(_txt, parse_mode=H, reply_markup=_kb)
     else:
         # Split: header+cards first, then urgent+hp+footer (+stock lots) w/ buttons
-        await query.message.reply_text(card["head"], parse_mode=H)
-        await query.message.reply_text('\n'.join([card["tail"].lstrip('\n')] + parts[1:]),
+        await query.message.reply_text(_tg_cut(card["head"]), parse_mode=H)
+        await query.message.reply_text(_tg_cut('\n'.join([card["tail"].lstrip('\n')] + parts[1:])),
                                        parse_mode=H, reply_markup=_kb)
 
 
@@ -9284,8 +9320,7 @@ async def signal_scanner(query):
     ])
     # Send main signals, then strike breakdown as separate messages to avoid 4096 limit
     main_msg = "\n".join(parts)
-    if len(main_msg) > 4000:
-        main_msg = main_msg[:4000] + "\n<i>…truncated</i>"
+    main_msg = _tg_cut(main_msg)     # HTML-safe cut — never slices mid-tag
     await query.message.reply_text(main_msg, parse_mode=H, reply_markup=kb)
 
     if _strike_parts:
@@ -9301,7 +9336,7 @@ async def signal_scanner(query):
             _chunks.append(_cur)
         for i, chunk in enumerate(_chunks):
             prefix = "📊 <b>STRIKE-LEVEL OI ANALYSIS</b>\n" if i == 0 else ""
-            await query.message.reply_text(prefix + chunk[:3900], parse_mode=H)
+            await query.message.reply_text(_tg_cut(prefix + chunk, 3900), parse_mode=H)
 
     try: await _loading.delete()
     except Exception: pass
@@ -9914,6 +9949,12 @@ def _positions_card_parts(trades, now_s, today):
                 prob = max(5, min(95, 50 + mono_pct * 2.5))
             else:
                 prob = max(5, min(95, 50 - mono_pct * 2.5))
+
+        # |delta| ~ P(expire ITM) = the BUYER's win chance. A SHORT leg wins when
+        # the option expires WORTHLESS — flip it (user bug report 2026-07-18:
+        # short AMD 400P deep OTM showed 'win 5%'; seller's true win ~95%).
+        if prob is not None and qty < 0:
+            prob = 100 - prob
 
         pnl     = (cur_px - entry) * qty * 100
         pnl_pct = (pnl / abs(entry * qty * 100) * 100) if entry > 0 else 0

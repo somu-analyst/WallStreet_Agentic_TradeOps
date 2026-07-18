@@ -118,6 +118,12 @@ def compute_walls(df, spot=None):
         d = d.dropna(subset=["strike"])
         if d.empty:
             return out
+        # Clamp to ±35% of spot — stale deep-OTM positions (e.g. $200 puts when spot=$420)
+        # dominate idxmax() and produce nonsense walls; real support/resistance lives near price.
+        if spot and spot > 0:
+            d = d[(d["strike"] >= spot * 0.65) & (d["strike"] <= spot * 1.35)]
+            if d.empty:
+                return out
         c = d["openInt_Call_now"].fillna(0.0) if "openInt_Call_now" in d.columns else pd.Series(0.0, index=d.index)
         p = d["openInt_Put_now"].fillna(0.0) if "openInt_Put_now" in d.columns else pd.Series(0.0, index=d.index)
         mean_c = float(c[c > 0].mean()) if (c > 0).any() else 0.0

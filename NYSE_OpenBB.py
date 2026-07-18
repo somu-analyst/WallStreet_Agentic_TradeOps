@@ -614,6 +614,8 @@ def main():
                     help="space-saver: export the day to parquet-zstd and clear it from sqlite")
     ap.add_argument("--compare", nargs="?", const="today", default=None,
                     help="parallel-test scorer: compare openbb vs yfinance for a date (default today) and exit")
+    ap.add_argument("--full", action="store_true",
+                    help="after capture, automatically run derive (--stock) then skew_snapshot — one-shot recovery")
     args = ap.parse_args()
     if args.strike_pct is not None:
         global STRIKE_PCT
@@ -784,6 +786,17 @@ def main():
         compare_vs_yfinance(None)
     except Exception as e:
         print(f"(compare vs yfinance skipped: {e})")
+
+    # --full: one-shot recovery — chain derive + skew after a successful capture
+    if getattr(args, "full", False):
+        import subprocess as _sp
+        _base = os.path.dirname(os.path.abspath(__file__))
+        for _script, _extra in [
+            (os.path.join(_base, "NYSE_OpenBB_derive.py"), ["--stock"]),
+            (os.path.join(_base, "skew_snapshot.py"), []),
+        ]:
+            print(f"\n{'='*60}\n  {os.path.basename(_script)}\n{'='*60}")
+            _sp.run([sys.executable, "-u", _script] + _extra, cwd=_base)
 
 
 if __name__ == "__main__":

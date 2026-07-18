@@ -1334,6 +1334,20 @@ if os.path.exists(_TOK_FILE):
                          "(/terminal) or append ?token=… from dash_token.txt")
                 st.stop()
 
+@st.cache_data(ttl=30)
+def _live_audit_refresh():
+    """Run the bot's stringent EOD audit against the current DB and persist it, so the
+    header banner reflects a download IN PROGRESS (climbing ticker count) instead of
+    only the last scheduled audit. Cached 30s to bound cost across reruns. Never raises."""
+    try:
+        import telegram_bot_optimized as _tb
+        with sqlite3.connect(DB_PATH) as _c:
+            _tb._data_audit(_c)
+    except Exception:
+        pass
+    return True
+
+
 # ── Data-health banner (user 2026-07-17): flash un-acked data issues on TOP of
 #    every page until acknowledged. Rows are written by the bot's twice-daily
 #    data_health_alert job; Ack here or via the Telegram button — same table.
@@ -1346,7 +1360,10 @@ def _dh_banner():
                 status TEXT DEFAULT 'OPEN', ack_at TEXT)""")
             _open = pd.read_sql(
                 "SELECT * FROM data_health_alerts WHERE status='OPEN' ORDER BY alert_id", _c)
-        # Daily audit verdict banner (always shown for the latest audited day)
+        # Daily audit verdict banner (always shown for the latest audited day).
+        # Refresh LIVE first (cached 30s) so an in-progress download shows its climbing
+        # ticker count instead of a stale scheduled audit; _data_audit persists the row.
+        _live_audit_refresh()
         try:
             with sqlite3.connect(DB_PATH) as _c:
                 _aud = pd.read_sql(
@@ -14175,7 +14192,10 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
 
             st.markdown("**🧾 Per-leg detail**")
             _fdf = pd.DataFrame(_flat).sort_values(["Ticker", "DTE"])
+            # Full column set (user 2026-07-18: keep ALL columns); height sized to every
+            # row so there's no inner vertical scroll — the page scrolls naturally instead.
             st.dataframe(_fdf, hide_index=True, use_container_width=True,
+                         height=(len(_fdf) + 1) * 35 + 3,
                          column_config={
                              "Spot": st.column_config.NumberColumn(format="$%.2f"),
                              "Entry": st.column_config.NumberColumn(format="$%.2f"),

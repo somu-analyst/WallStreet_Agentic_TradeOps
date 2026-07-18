@@ -3091,40 +3091,22 @@ async def positions_view(query):
         return
 
     tickers_order = list(dict.fromkeys(trades['ticker'].astype(str).tolist()))
-    parts = [hdr(f'💼 OPEN POSITIONS  ({len(trades)} legs / {len(tickers_order)} stocks)')]
-
-    for tk in tickers_order:
-        grp     = trades[trades['ticker'].astype(str) == tk]
-        n_legs  = len(grp)
-        n_calls = int((grp['option_type'].str.upper() == 'CALL').sum())
-        n_puts  = int((grp['option_type'].str.upper() == 'PUT').sum())
-        n_long  = int((grp['quantity'].fillna(0).astype(float) > 0).sum())
-        n_short = int((grp['quantity'].fillna(0).astype(float) < 0).sum())
-        exp_vals = sorted(grp['expiry'].dropna().astype(str).tolist())
-        next_exp = exp_vals[0][:10] if exp_vals else '?'
-
-        _leg_tbl_rows = []
-        for _, tr in grp.iterrows():
-            tid  = _safe_int(tr.get('trade_id', 0), 0)
-            ot   = str(tr.get('option_type', '?'))[:4].upper()
-            st   = _safe_float(tr.get('strike', 0), 0)
-            ep   = _safe_float(tr.get('entry_price', 0), 0)
-            qty  = _safe_int(tr.get('quantity', 0), 0)
-            try:
-                _ed_ = datetime.strptime(str(tr.get('expiry', ''))[:10], '%Y-%m-%d').date()
-                _dte = f"{max((_ed_ - datetime.now().date()).days, 0)}d"
-            except Exception:
-                _dte = "?"
-            _leg_tbl_rows.append(("🟢" if qty >= 0 else "🔴", f"{tid}",
-                                  f"{st:g}{ot[0]} {_dte}", f"{ep:.2f}"))
-        s_mark = 's' if n_legs > 1 else ''
-        parts.append(
-            chr(10) + f"<b>{tk}</b>  {n_legs} leg{s_mark}"
-            + f"  ({n_calls}C/{n_puts}P · {n_long}L/{n_short}S · exp {next_exp})" + chr(10)
-            + _pipe_table(("ST", "#", "Leg·DTE", "Entry"),
-                          _leg_tbl_rows, right_cols={1, 3},
-                          legend="🟢 long · 🔴 short")
-        )
+    # ONE card format everywhere (user 2026-07-18): menu Positions now renders the
+    # SAME health card as the 10-min monitor push — live marks, P&L$/P%, colored
+    # status, per-leg advice, HP Engine. Shared builder: _positions_card_parts.
+    _loading = None
+    try:
+        _loading = await query.message.reply_text("⏳ Fetching live marks…", parse_mode=H)
+    except Exception:
+        pass
+    now_et = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=5)
+    card = _positions_card_parts(trades, now_et.strftime("%H:%M ET"), now_et.date())
+    parts = [card["full"]]
+    try:
+        if _loading:
+            await _loading.delete()
+    except Exception:
+        pass
 
     # 📦 stock lots — SEPARATE table (user keeps stocks apart from options)
     try:
@@ -3172,8 +3154,15 @@ async def positions_view(query):
                      InlineKeyboardButton('🤖 MiroFish',         callback_data='menu_mirofish')])
     btn_rows.append([InlineKeyboardButton('🔄 Refresh', callback_data='menu_positions'), BACK_BTN])
 
-    await query.message.reply_text('\n'.join(parts), parse_mode=H,
-                                   reply_markup=InlineKeyboardMarkup(btn_rows))
+    _txt = '\n'.join(parts)
+    _kb = InlineKeyboardMarkup(btn_rows)
+    if len(_txt) <= 4000:
+        await query.message.reply_text(_txt, parse_mode=H, reply_markup=_kb)
+    else:
+        # Split: header+cards first, then urgent+hp+footer (+stock lots) w/ buttons
+        await query.message.reply_text(card["head"], parse_mode=H)
+        await query.message.reply_text('\n'.join([card["tail"].lstrip('\n')] + parts[1:]),
+                                       parse_mode=H, reply_markup=_kb)
 
 
 async def position_detail(query, trade_id, notice=None):
@@ -9227,19 +9216,6 @@ async def signal_scanner(query):
         if a >= 1_000:     return f"{s}{a/1_000:.0f}K"
         return f"{s}{n:.0f}"
 
-    def signal_table(label, sub_df, badge="🟡"):
-        """Narrow 5-col _pipe_table — /earnvol shape, emoji ST col 0, ≤28 chars."""
-        _hdrs = ("ST", "Tkr", "C-OI", "P-OI", "PCR")
-        _rows = []
-        for _, r in sub_df.head(6).iterrows():
-            c   = float(r["call_oi_chg"] or 0)
-            p   = float(r["put_oi_chg"]  or 0)
-            pcr = float(r["pcr"]) if r["pcr"] == r["pcr"] else 0.0
-            _rows.append((badge, str(r["ticker"])[:5], _fk(c), _fk(p), f"{pcr:.2f}"))
-        if not _rows:
-            return ""
-        return f"\n<b>{label}</b>\n" + _pipe_table(_hdrs, _rows, right_cols={2, 3, 4})
-
     # Classify each ticker using hedge-aware algorithm
     def _scan_sig(row):
         lbl, _ = _oi_signal_light(row["call_oi_chg"], row["put_oi_chg"], row.get("pcr", 1.0))
@@ -9252,17 +9228,33 @@ async def signal_scanner(query):
     hedges  = df[df["oi_sig"] == "HEDGE"].nlargest(4, "put_oi_chg")
     unusual = df[df["oi_sig"].isin(["STRADDLE", "BULL+HEDGE"])].nlargest(4, "total_chg")
 
-    if not bulls.empty:
-        parts.append(signal_table("🟢 BULLISH — Call OI Building", bulls, badge="🟢"))
-    if not bears.empty:
-        parts.append(signal_table("🔴 BEARISH — Put OI Directional", bears, badge="🔴"))
-    if not hedges.empty:
-        parts.append(signal_table("🔵 HEDGE/PROTECT — Deep OTM Puts", hedges, badge="🔵"))
-    if not unusual.empty:
-        parts.append(signal_table("🟡 STRADDLE/EVENT — Both Sides Up", unusual, badge="🟡"))
+    # /earnvol standard (user re-confirmed 2026-07-18): ONE ranked table — the ST
+    # emoji IS the signal, varying per row — + legend + per-row detail lines.
+    _sig_em   = {"BULLISH": "🟢", "BEARISH": "🔴", "HEDGE": "🔵",
+                 "STRADDLE": "🟡", "BULL+HEDGE": "🟡"}
+    _sig_desc = {"BULLISH": "call OI building — bullish bets",
+                 "BEARISH": "put OI directional — bearish bets",
+                 "HEDGE": "deep-OTM puts — protection, not direction",
+                 "STRADDLE": "both sides loading — event play",
+                 "BULL+HEDGE": "calls + protective puts — hedged longs"}
+    _rows = []; _details = []
+    for _sub in (bulls, bears, hedges, unusual):
+        for _, r in _sub.iterrows():
+            _em  = _sig_em.get(r["oi_sig"], "🟡")
+            _c   = float(r["call_oi_chg"] or 0)
+            _p   = float(r["put_oi_chg"] or 0)
+            _pcr = float(r["pcr"]) if r["pcr"] == r["pcr"] else 0.0
+            _rows.append((_em, str(r["ticker"])[:5], _fk(_c), _fk(_p)))
+            _details.append(f"{_em} <b>{str(r['ticker'])}</b> — calls {_fk(_c)} vs puts "
+                            f"{_fk(_p)} · PCR {_pcr:.2f} · {_sig_desc.get(r['oi_sig'], '')}")
+    if _rows:
+        parts.append(_pipe_table(("ST", "Tkr", "C-OI", "P-OI"), _rows,
+                                 right_cols={2, 3},
+                                 legend="🟢 bull · 🔴 bear · 🔵 hedge · 🟡 straddle"))
+        parts.append("\n".join(_details[:8]))
 
     mixed = len(df) - len(bulls) - len(bears)
-    parts.append(f"\n📊 <b>{len(df)} tickers</b> scanned · {mixed} mixed/neutral")
+    parts.append(f"<i>{len(df)} tickers scanned · {mixed} mixed/neutral not shown</i>")
 
     # ── Per-ticker strike breakdown (top 3 bulls + top 3 bears) ──
     conn2 = get_conn()
@@ -9273,6 +9265,8 @@ async def signal_scanner(query):
             ORDER BY trade_date DESC
             LIMIT 1""", conn2, params=(_tk,))
         _spot2 = float(_sd2["close"].iloc[0]) if not _sd2.empty else 0.0
+        if _spot2 <= 0:
+            continue     # indexes w/o stock_daily close (VIX) — ±20% window is meaningless
         _breakdown = _oi_strike_breakdown(_tk, conn2, _spot2, latest_date)
         _trend = _oi_trend_summary(_tk, conn2, latest_date)
         if _breakdown or _trend:
@@ -9295,11 +9289,19 @@ async def signal_scanner(query):
     await query.message.reply_text(main_msg, parse_mode=H, reply_markup=kb)
 
     if _strike_parts:
-        strike_body = "\n".join(_strike_parts)
-        for i, chunk_start in enumerate(range(0, len(strike_body), 3500)):
-            chunk = strike_body[chunk_start:chunk_start + 3500]
+        # Section-aware chunking: never cut a section (or HTML tag) mid-way —
+        # group whole sections into <=3500-char messages (was blind slicing).
+        _chunks, _cur = [], ""
+        for _sec in _strike_parts:
+            if _cur and len(_cur) + len(_sec) + 1 > 3500:
+                _chunks.append(_cur); _cur = _sec
+            else:
+                _cur = (_cur + "\n" + _sec) if _cur else _sec
+        if _cur:
+            _chunks.append(_cur)
+        for i, chunk in enumerate(_chunks):
             prefix = "📊 <b>STRIKE-LEVEL OI ANALYSIS</b>\n" if i == 0 else ""
-            await query.message.reply_text(prefix + chunk, parse_mode=H)
+            await query.message.reply_text(prefix + chunk[:3900], parse_mode=H)
 
     try: await _loading.delete()
     except Exception: pass
@@ -9798,9 +9800,34 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     now_et = now_utc - timedelta(hours=5)
-    today  = now_et.date()
-    now_s  = now_et.strftime("%H:%M ET")
+    parts = _positions_card_parts(trades, now_et.strftime("%H:%M ET"), now_et.date())
+    kb = _positions_card_kb(parts["first_tk"])
+    try:
+        if len(parts["full"]) <= 4000:
+            await ctx.bot.send_message(chat_id=int(chat_id), text=parts["full"],
+                                       parse_mode=H, reply_markup=kb)
+        else:
+            # Split: header + cards, then urgent + hp + footer
+            await ctx.bot.send_message(chat_id=int(chat_id), text=parts["head"], parse_mode=H)
+            await ctx.bot.send_message(chat_id=int(chat_id), text=parts["tail"],
+                                       parse_mode=H, reply_markup=kb)
+    except Exception as e:
+        log.warning(f"position_monitor send failed: {e}")
 
+
+def _positions_card_kb(first_tk):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("💼 Positions", callback_data="menu_positions"),
+        InlineKeyboardButton("🎯 Exit Plan", callback_data="menu_exit"),
+        InlineKeyboardButton("🧠 HP Engine", callback_data=f"high_prob_{first_tk}"),
+    ]])
+
+
+def _positions_card_parts(trades, now_s, today):
+    """Build the POSITIONS health card (table + advice + urgent + HP engine) —
+    SHARED by the 10-min position_monitor push and the menu positions_view
+    (user 2026-07-18: one card format everywhere). Returns dict with 'full',
+    'head' (header+cards for splitting), 'tail' (urgent+hp+footer), 'first_tk'."""
     # ── Prefetch OI signals for all tickers ──────────────────────
     oi_sigs = {}
     try:
@@ -10050,25 +10077,10 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
         + footer
     )
 
-    _first_tk = str(trades["ticker"].iloc[0]).upper() if not trades.empty else "SPY"
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("💼 Positions", callback_data="menu_positions"),
-        InlineKeyboardButton("🎯 Exit Plan", callback_data="menu_exit"),
-        InlineKeyboardButton("🧠 HP Engine", callback_data=f"high_prob_{_first_tk}"),
-    ]])
-    try:
-        if len(full_msg) <= 4000:
-            await ctx.bot.send_message(chat_id=int(chat_id), text=full_msg,
-                                       parse_mode=H, reply_markup=kb)
-        else:
-            # Split: header + cards, then urgent + hp + footer
-            header_cards = f"{hdr(f'💼 POSITIONS · {now_s}')}\n\n{colour_section}"
-            await ctx.bot.send_message(chat_id=int(chat_id), text=header_cards, parse_mode=H)
-            await ctx.bot.send_message(chat_id=int(chat_id),
-                                       text=urgent_section + hp_section + footer,
-                                       parse_mode=H, reply_markup=kb)
-    except Exception as e:
-        log.warning(f"position_monitor send failed: {e}")
+    return {"full": full_msg,
+            "head": f"{hdr(f'💼 POSITIONS · {now_s}')}\n\n{colour_section}",
+            "tail": urgent_section + hp_section + footer,
+            "first_tk": str(trades["ticker"].iloc[0]).upper() if not trades.empty else "SPY"}
 
 
 def _ensure_alert_dedup_table(conn):
@@ -24743,6 +24755,26 @@ async def skew_view(query):
 _RATINGS_DEFAULT = _SKEW_DEFAULT
 
 
+_FIRM_ABBR = {
+    "B of A Securities": "BofA", "Bank of America": "BofA", "JP Morgan": "JPMorgan",
+    "Wells Fargo & Company": "Wells Fargo", "Cantor Fitzgerald": "Cantor",
+    "Keefe, Bruyette & Woods": "KBW", "Truist Securities": "Truist",
+    "Wedbush Securities": "Wedbush", "Rosenblatt Securities": "Rosenblatt",
+}
+
+
+def _firm_short(name, limit=16):
+    """Readable broker name for detail lines: known abbreviation, else cut at a WORD
+    boundary within `limit` — never mid-word ('B of A Securitie' bug, 2026-07-18)."""
+    name = str(name or "").strip()
+    if name in _FIRM_ABBR:
+        return _FIRM_ABBR[name]
+    if len(name) <= limit:
+        return name
+    cut = name[:limit]
+    return cut[:cut.rfind(" ")] if " " in cut else cut
+
+
 def _ratings_default_tickers():
     """Open-position tickers first (what you actually hold), else the skew default universe."""
     try:
@@ -24781,7 +24813,7 @@ def _ratings_analyze(tk, days=45):
         latest = []
         for _, r in df.head(3).iterrows():
             arrow = {"up": "⬆️", "down": "⬇️", "init": "🆕"}.get(str(r.get("Action", "")).lower(), "▪️")
-            seg = f"{arrow}{r[dcol]:%m-%d} <b>{str(r.get('Firm', ''))[:16]}</b> {str(r.get('ToGrade', '') or '—')}"
+            seg = f"{arrow}{r[dcol]:%m-%d} <b>{_firm_short(r.get('Firm', ''))}</b> {str(r.get('ToGrade', '') or '—')}"
             c0, p0 = r.get("currentPriceTarget"), r.get("priorPriceTarget")
             if pd.notna(c0) and pd.notna(p0) and p0:
                 seg += f" · PT {p0:g}→{c0:g}"

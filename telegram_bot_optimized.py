@@ -8892,15 +8892,15 @@ async def oi_change_chart_live_view(query, ticker):
             if call_wall and spot:
                 _cw_dist = (call_wall - spot) / spot * 100
                 _cw_oi_k = f"{call_wall_oi/1000:.0f}K" if call_wall_oi >= 1000 else str(call_wall_oi)
-                strike_lines.append(f"  Call Wall: ${call_wall:.0f} ({_cw_dist:+.1f}% from spot) OI:{_cw_oi_k} — CEILING")
+                strike_lines.append(f"🟢 <b>Call Wall</b> ${call_wall:.0f} <i>({_cw_dist:+.1f}% from spot, OI:{_cw_oi_k}) CEILING</i>")
             if put_wall and spot:
                 _pw_dist = (put_wall - spot) / spot * 100
                 _pw_oi_k = f"{put_wall_oi/1000:.0f}K" if put_wall_oi >= 1000 else str(put_wall_oi)
-                strike_lines.append(f"  Put Wall:  ${put_wall:.0f} ({_pw_dist:+.1f}% from spot) OI:{_pw_oi_k} — FLOOR")
+                strike_lines.append(f"🔴 <b>Put Wall</b> ${put_wall:.0f} <i>({_pw_dist:+.1f}% from spot, OI:{_pw_oi_k}) FLOOR</i>")
             if mp_strike and spot:
                 _mp_dist = (mp_strike - spot) / spot * 100
                 _mp_dir  = "above" if mp_strike > spot else "below"
-                strike_lines.append(f"  Max Pain:  ${mp_strike:.0f} ({_mp_dist:+.1f}%) {_mp_dir} spot — expiry magnet")
+                strike_lines.append(f"⚪ <b>Max Pain</b> ${mp_strike:.0f} <i>({_mp_dist:+.1f}%) {_mp_dir} spot · expiry magnet</i>")
 
             # Simple Answer targets
             bull_target = call_wall if call_wall > spot else (spot * 1.03 if spot else 0)
@@ -8948,10 +8948,10 @@ async def oi_change_chart_live_view(query, ticker):
                         _em_expiry = "🟢" if _pnl_expiry  >= 0 else "🔴"
                         _expiry_label = "at expiry" if _dte > 1 else "⚠️ EXPIRING SOON"
                         pos_lines.append(
-                            f"  {_side} {_ot.upper()} ${_strk:.0f} x{_contracts} [{_dte}d to exp]\n"
-                            f"    {_em_now}  Now:       ${_val_now:.2f}  P&amp;L ${_pnl_now:+,.0f}\n"
-                            f"    {_em_tmrw}  Tomorrow:  ${_val_tmrw:.2f}  P&amp;L ${_pnl_tmrw:+,.0f}\n"
-                            f"    {_em_expiry}  {_expiry_label}: ${_val_expiry:.2f}  P&amp;L ${_pnl_expiry:+,.0f}"
+                            f"<b>{_side} {_ot.upper()} ${_strk:.0f} ×{_contracts}</b> [{_dte}d]\n"
+                            f"  {_em_now} Now <b>${_val_now:.2f}</b>  P&amp;L <b>${_pnl_now:+,.0f}</b>\n"
+                            f"  {_em_tmrw} Tmrw <b>${_val_tmrw:.2f}</b>  P&amp;L <b>${_pnl_tmrw:+,.0f}</b>\n"
+                            f"  {_em_expiry} {_expiry_label} <b>${_val_expiry:.2f}</b>  P&amp;L <b>${_pnl_expiry:+,.0f}</b>"
                         )
                     except Exception:
                         log.debug("suppressed exception", exc_info=True)
@@ -8961,9 +8961,9 @@ async def oi_change_chart_live_view(query, ticker):
                 f"<b>Verdict: {sig}</b>\n\n"
                 f"<b>Why {sig.title()}?</b>\n"
                 + "\n".join(reasons)
-                + (f"\n\n<b>Key Strike Levels</b>\n<pre>" + "\n".join(strike_lines) + "</pre>" if strike_lines else "")
+                + (f"\n\n<b>Key Strike Levels</b>\n" + "\n".join(strike_lines) if strike_lines else "")
                 + simple_ans
-                + (f"\n\n<b>Your Open Positions — P&amp;L Impact</b>\n<pre>" + "\n\n".join(pos_lines) + "</pre>" if pos_lines else "")
+                + (f"\n\n<b>Your Open Positions — P&amp;L Impact</b>\n" + "\n\n".join(pos_lines) if pos_lines else "")
                 + f"\n\n<i>{sig_desc}</i>"
             )
             await query.message.reply_text(writeup, parse_mode=H)
@@ -12733,36 +12733,24 @@ async def overnight_risk_report(query):
     )
     await query.message.reply_text(summary, parse_mode=H)
 
-    # ── Flat <pre> table ──────────────────────────────────────────
-    C = [5, 6, 6, 4, 8, 6, 6, 4]   # col widths
-    def _cell(v, w, right=False):
-        s = str(v)[:w]
-        return s.rjust(w) if right else s.ljust(w)
-
-    HDR = ("Tkr", "Type", "Strk", "DTE", "Spot", "Th/d", "D1%", "Risk")
-    sep = "─" * (sum(C) + len(C) - 1)
-    rows_pre = [
-        "  ".join(_cell(h, w) for h, w in zip(HDR, C)),
-        sep,
-    ]
+    # ── _pipe_table: ST=risk, Tkr, Leg, θ/d, Δ1$ ─────────────────
+    _risk_em = {"HIGH": "🔴", "MED": "🟡", "LOW": "🟢"}
+    _pd_rows, _pd_dets = [], []
     for (tk2, typ, strk2, dte2, spot_tag, theta_d, delta_1, risk_lv) in risk_rows:
-        rs = {"HIGH": "HI!", "MED": "MED", "LOW": "ok"}.get(risk_lv, "   ")
-        rows_pre.append("  ".join([
-            _cell(tk2,            C[0]),
-            _cell(typ,            C[1]),
-            _cell(f"${strk2:.0f}", C[2], right=True),
-            _cell(f"{dte2}d",     C[3], right=True),
-            _cell(spot_tag,       C[4], right=True),
-            _cell(f"${theta_d:+.0f}", C[5], right=True),
-            _cell(f"${delta_1:+.0f}", C[6], right=True),
-            _cell(rs,             C[7]),
-        ]))
-    rows_pre += [
-        sep,
-        f"Theta: ${total_theta_day:+,.0f}   Delta+1%: ${total_delta_1pct:+,.0f}",
-        "HI!=DTE<=3/PnL<=-40%  MED=DTE<=7",
-    ]
-    detail_msg = f"<b>📋 Position Detail</b>\n<pre>{chr(10).join(rows_pre)}</pre>"
+        _em = _risk_em.get(risk_lv, "⚪")
+        _leg = f"{strk2:.0f}{typ[0].upper()}"[:6]
+        _pd_rows.append((_em, tk2[:5], _leg, f"${theta_d:+.0f}", f"${delta_1:+.0f}"))
+        _pd_dets.append(f"  {tk2} {typ} ${strk2:.0f} · {dte2}d · Spot {spot_tag}")
+    _pd_footer = f"θ total ${total_theta_day:+,.0f}  Δ+1% ${total_delta_1pct:+,.0f}"
+    detail_msg = _report(
+        "📋 Position Detail",
+        ("ST", "Tkr", "Leg", "θ/d", "Δ1$"),
+        _pd_rows,
+        right_cols={3, 4},
+        legend="🔴 HIGH(DTE≤3/PnL≤-40%) · 🟡 MED(DTE≤7) · 🟢 LOW",
+        notes=_pd_footer,
+        details=_pd_dets,
+    )
 
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("📡 Position Monitor", callback_data="menu_pos_monitor"),
@@ -12944,44 +12932,31 @@ async def aftermarket_predict(query, ticker: str = None):
             + ev_line
         )
 
-        # ── Flat <pre> leg table — EOD + AH prices side by side ─────
-        # Cols: Side Type Strk DTE Entry  EOD-val  AH-val  P&L%  Tmrw  Act
-        _C = [5, 4, 6, 3, 6, 6, 6, 5, 6, 5]
-        _H = ("Side","Type","Strk","DTE","Entry","EOD$","AH$","P&L%","Tmrw$","Act")
-        _sep = "─" * (sum(_C) + len(_C) - 1)
-        _rows = [
-            "  ".join(str(h).ljust(w) for h, w in zip(_H, _C)),
-            _sep,
-        ]
+        # ── _pipe_table: ST Leg DTE AH$ P&L% ─────────────────────────
+        _ah_rows, _ah_dets = [], []
         for (sd, ot2, st2, dt2, en2, v_eod, v_ah, _is_ext,
              pnl_eod, pnl_d, pnl_p, vt, pct_t, act, lim, rsn, csfx) in leg_lines:
-            act_s = act[:5] if act else "WATCH"
-            # highlight AH col with * when extended hours
-            ah_s = f"${v_ah:.2f}" + ("*" if _is_ext else " ")
-            _rows.append("  ".join([
-                str(sd)[:_C[0]].ljust(_C[0]),
-                str(ot2)[:_C[1]].ljust(_C[1]),
-                f"${st2:.0f}".rjust(_C[2]),
-                f"{dt2}d".rjust(_C[3]),
-                f"${en2:.2f}".rjust(_C[4]),
-                f"${v_eod:.2f}".rjust(_C[5]),
-                ah_s.rjust(_C[6]),
-                f"{pnl_p:+.0f}%".rjust(_C[7]),
-                f"${vt:.2f}".rjust(_C[8]),
-                str(act_s).ljust(_C[9]),
-            ]))
-            if csfx:
-                _rows.append(f"  🔥 {csfx}")
-        _rows.append(_sep)
-        _rows.append("* = AH/PM price used for premium calc")
-        for (sd, ot2, st2, dt2, en2, v_eod, v_ah, _is_ext,
-             pnl_eod, pnl_d, pnl_p, vt, pct_t, act, lim, rsn, csfx) in leg_lines:
+            _em = "🟢" if pnl_p > 0 else ("🔴" if pnl_p < -5 else "🟡")
+            _leg = f"{st2:.0f}{ot2[0].upper()}"[:6]
+            _ah_s = f"${v_ah:.2f}" + ("*" if _is_ext else "")
+            _ah_rows.append((_em, _leg, f"{dt2}d", _ah_s, f"{pnl_p:+.0f}%"))
+            _act_s = (act[:5] if act else "WATCH")
+            _det = (f"  {sd} {ot2} ${st2:.0f} · Entry ${en2:.2f} · "
+                    f"EOD ${v_eod:.2f} · Tmrw ${vt:.2f} → {_act_s}")
             if lim:
-                _rows.append(f"  -> {act}: limit ${lim:.2f}  ({rsn})")
+                _det += f" @${lim:.2f} ({rsn})"
+            if csfx:
+                _det += f"\n  🔥 {csfx}"
+            _ah_dets.append(_det)
 
         tk_card = (
             stock_line + "\n"
-            + f"<pre>{chr(10).join(_rows)}</pre>"
+            + _pipe_table(
+                ("ST", "Leg", "DTE", "AH$", "P&L%"),
+                _ah_rows, right_cols={3, 4},
+                legend="* AH/PM price · Tmrw est in detail lines",
+            )
+            + ("\n" + "\n".join(_ah_dets) if _ah_dets else "")
         )
         await query.message.reply_text(tk_card, parse_mode="HTML")
 
@@ -27291,15 +27266,15 @@ def _macro_keyless():
 
         c = _yoy("CUUR0000SA0"); cc = _yoy("CUUR0000SA0L1E")
         if c is not None:
-            rows.append(f"CPI YoY   {c:>6.1f}%")
+            rows.append(("CPI YoY", f"{c:.1f}%"))
         if cc is not None:
-            rows.append(f"Core CPI  {cc:>6.1f}%")
+            rows.append(("Core CPI", f"{cc:.1f}%"))
         un = S.get("LNS14000000", [])
         if un:
-            rows.append(f"Unemploy  {un[0][2]:>6.1f}%")
+            rows.append(("Unemploy", f"{un[0][2]:.1f}%"))
         nfp = S.get("CES0000000001", [])
         if len(nfp) >= 2:
-            rows.append(f"NFP chg  {(nfp[0][2] - nfp[1][2]):>+6.0f}k")
+            rows.append(("NFP chg", f"{(nfp[0][2] - nfp[1][2]):+.0f}k"))
     except Exception:
         pass
     try:
@@ -27307,7 +27282,7 @@ def _macro_keyless():
             try:
                 h = yf.Ticker(sym).history(period="5d")["Close"].dropna()
                 if len(h):
-                    rows.append(f"{name:<9}{float(h.iloc[-1]):>6.2f}%")
+                    rows.append((name, f"{float(h.iloc[-1]):.2f}%"))
             except Exception:
                 pass
     except Exception:
@@ -27458,9 +27433,9 @@ def _fmt_macro_report():
     if not os.environ.get("FRED_API_KEY"):
         rows = _macro_keyless()
         if rows:
-            lines.append("<pre>" + "\n".join(rows) + "</pre>")
-            lines.append("<i>Free keyless data (BLS prints + market yields). "
-                         "Set FRED_API_KEY for the full FRED series.</i>")
+            lines.append(_pipe_table(("Indicator", "Value"), rows, right_cols={1},
+                                     legend="BLS prints + market yields · no API key needed"))
+            lines.append("<i>Set FRED_API_KEY for full FRED series.</i>")
         else:
             lines.append("<i>Macro data unavailable right now — try again shortly.</i>")
     else:

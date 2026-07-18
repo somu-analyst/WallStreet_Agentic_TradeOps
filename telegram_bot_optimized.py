@@ -798,16 +798,21 @@ def sanitize_for_telegram(s: str) -> str:
     s = re.sub(r'</?span[^>]*>', '', s)
     # strip style/class attributes
     s = re.sub(r"\s*(style|class)=(\".*?\"|'.*?')", '', s)
-    # remove any HTML tags not in whitelist
+    # remove any HTML tags not in whitelist. ROOT-CAUSE BUG (found 2026-07-18): the old
+    # pattern `<(/?)(?!(allowed)\b)...` let the regex engine backtrack so `/?` matched
+    # ZERO chars and the actual '/' got swallowed by `[^>]*` instead — the lookahead then
+    # checked "b>" style text with the slash gone, but for a CLOSING tag the text at that
+    # point is "/b>" which the lookahead never tested, so it silently matched and stripped
+    # every closing tag (</b>, </pre>, ...) on every message the live bot ever sent. The
+    # fixed pattern checks the optional slash INSIDE the lookahead so both <tag> and
+    # </tag> are correctly recognized and preserved.
     allowed = '|'.join(_ALLOWED_TG_TAGS)
-    s = re.sub(rf'<(/?)(?!({allowed})\b)[^>]*>', '', s)
-    # ensure allowed tags are balanced; if not, strip that tag entirely
-    for tag in list(_ALLOWED_TG_TAGS):
-        opens = len(re.findall(rf"<{tag}\b", s))
-        closes = len(re.findall(rf"</{tag}>", s))
-        if opens != closes:
-            s = re.sub(rf'</?{tag}[^>]*>', '', s)
-    return s
+    s = re.sub(rf'<(?!/?(?:{allowed})\b)[^>]*>', '', s)
+    # REPAIR imbalanced tags (2026-07-18: the old behavior stripped a tag
+    # EVERYWHERE in the message on any imbalance — one unclosed <pre> among
+    # 9 in a long multi-table message wiped every table's code-block styling,
+    # degrading it to plain text. _tg_balance closes/drops surgically instead.
+    return _tg_balance(s)
 
 def _tg_cut(text, limit=4000):
     """Length-cut for Telegram HTML WITHOUT breaking entities (root cause of the
@@ -826,12 +831,29 @@ def _tg_cut(text, limit=4000):
     return cut + "\n<i>…truncated</i>"
 
 
+def _tg_balance(s):
+    """Repair HTML broken by blunt [:4000]-style cuts BEFORE sending (2026-07-18:
+    43 sender sites blunt-cut; instead of editing each, every send passes through
+    here). Trims a trailing partial tag, drops orphan closers, closes open tags."""
+    if not isinstance(s, str) or "<" not in s:
+        return s
+    s = re.sub(r"<[^>]*$", "", s)                      # trailing partial tag '<pr…'
+    for tag in ("pre", "code", "b", "strong", "i", "em", "u", "s", "blockquote"):
+        o, c = f"<{tag}>", f"</{tag}>"
+        while s.count(c) > s.count(o):                 # orphan closer -> drop last
+            i = s.rfind(c)
+            s = s[:i] + s[i + len(c):]
+        if s.count(o) > s.count(c):                    # unclosed opener -> close
+            s += c
+    return s
+
+
 # Monkeypatch Message.reply_text and Bot.send_message to auto-sanitize text
 try:
     _orig_reply = Message.reply_text
     async def _reply_text_sanitized(self, text, *args, **kwargs):
         orig_text = text
-        text2 = sanitize_for_telegram(text) if isinstance(text, str) else text
+        text2 = _tg_balance(sanitize_for_telegram(text)) if isinstance(text, str) else text
         try:
             return await _orig_reply(self, text2, *args, **kwargs)
         except Exception as e:
@@ -867,7 +889,7 @@ try:
     _orig_send = Bot.send_message
     async def _send_message_sanitized(self, chat_id, text=None, *args, **kwargs):
         orig_text = text
-        text2 = sanitize_for_telegram(text) if isinstance(text, str) else text
+        text2 = _tg_balance(sanitize_for_telegram(text)) if isinstance(text, str) else text
         try:
             return await _orig_send(self, chat_id=chat_id, text=text2, *args, **kwargs)
         except Exception as e:
@@ -894,6 +916,27 @@ try:
             except Exception:
                 raise
     Bot.send_message = _send_message_sanitized
+
+    # Edited messages (wizards, refresh buttons) had NO protection (2026-07-18).
+    # Message.edit_text and CallbackQuery.edit_message_text both delegate here.
+    _orig_editmt = Bot.edit_message_text
+    async def _edit_mt_sanitized(self, text=None, *args, **kwargs):
+        text2 = _tg_balance(sanitize_for_telegram(text)) if isinstance(text, str) else text
+        try:
+            return await _orig_editmt(self, *args, text=text2, **kwargs)
+        except Exception as e:
+            if "not modified" in str(e).lower():
+                raise                       # normal no-op edit — caller handles
+            log.warning("Telegram edit parse error: %s", e)
+            if isinstance(text2, str):
+                try:
+                    _healed = _tg_cut(text2, 3900)
+                    if _healed != text2:
+                        return await _orig_editmt(self, *args, text=_healed, **kwargs)
+                except Exception:
+                    log.debug("healed edit resend failed", exc_info=True)
+            raise
+    Bot.edit_message_text = _edit_mt_sanitized
     # Also sanitize photo captions
     _orig_send_photo = Bot.send_photo
     async def _send_photo_sanitized(self, chat_id, photo, caption=None, *args, **kwargs):
@@ -3114,6 +3157,7 @@ async def show_scenarios(query, ticker, opt_type, strike, entry, expiry_str, qty
 #  4) MY POSITIONS — card-style per trade
 # ═══════════════════════════════════════════════════════════
 async def positions_view(query):
+    log.info("positions_view ENTER (card renderer)")   # TRACE 2026-07-18
     _close_expired_positions()
     conn = get_conn()
     trades = pd.read_sql(
@@ -3192,6 +3236,7 @@ async def positions_view(query):
 
     _txt = '\n'.join(parts)
     _kb = InlineKeyboardMarkup(btn_rows)
+    log.info("positions_view SEND: %d chars, split=%s", len(_txt), len(_txt) > 4000)
     if len(_txt) <= 4000:
         await query.message.reply_text(_txt, parse_mode=H, reply_markup=_kb)
     else:
@@ -11494,6 +11539,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+    log.info("CB tap: %r", data)          # TRACE 2026-07-18: which button data arrives
 
     try:
         if data == "menu_main":
@@ -12173,7 +12219,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             gid = _safe_int(data.replace("grp_", ""), 0)
             await group_detail(query, gid)
         elif data == "menu_signals":
+            log.info("signal_scanner ENTER (redesigned table+detail)")
             await signal_scanner(query)
+            log.info("signal_scanner DONE")
         elif data == "menu_insider":
             await insider_menu(query)
         elif data == "menu_more":

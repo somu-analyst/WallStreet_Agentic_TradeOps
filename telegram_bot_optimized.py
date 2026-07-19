@@ -5128,7 +5128,7 @@ def _oi_money_flow_chart(ticker: str, conn, spot: float, latest_date: str):
 
 
 def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
-                         n_strikes: int = 20) -> str:
+                         n_strikes: int = 20, compact: bool = False) -> str:
     """
     Query ±n_strikes around spot for ticker on latest_date.
     Returns formatted strike-level analysis with notional money.
@@ -5280,7 +5280,9 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
         ("ST", "Stk", "CΔ", "PΔ"), _t1_rows, right_cols={2, 3},
         legend="🟢 call-build · 🔴 put-build · 🟡 straddle/hedge · ⚪ flat/unwind")
 
-    detail_tbl = (
+    # compact mode (signal_scanner, 2026-07-18): skip BS-price/premium filler tables —
+    # keep only the core OI-change signal table + verdict + trade idea.
+    detail_tbl = "" if compact else (
         "\n"
         + _pipe_table(("ST", "Stk", "C$", "P$"), _t2_rows, right_cols={2, 3},
                       title="Option Prices (BS est.)",
@@ -5298,6 +5300,8 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
     # Emoji color line below tables: easy visual scan on mobile.
     week_tbl = ""
     try:
+        if compact:     # compact mode (signal_scanner, 2026-07-18): skip OI-timeline tables
+            raise ValueError("compact: skip week_tbl")
         _wk_dates = pd.read_sql("""
             SELECT DISTINCT trade_date_now FROM options_change WHERE ticker=?
             ORDER BY trade_date_now DESC
@@ -5480,13 +5484,15 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
     ]
     summary_str = "\n".join(summary_lines)
 
-    # ── Expiry-level flow table ──────────────────────────────────────
-    try:
-        _exp_tbl = _oi_expiry_flow_table(ticker, conn, latest_date)
-    except Exception:
-        _exp_tbl = ""
+    # ── Expiry-level flow table (skipped in compact mode) ────────────
+    _exp_tbl = ""
+    if not compact:
+        try:
+            _exp_tbl = _oi_expiry_flow_table(ticker, conn, latest_date)
+        except Exception:
+            _exp_tbl = ""
 
-    # ── Opportunity table ────────────────────────────────────────────
+    # ── Opportunity table (kept in compact mode — the actionable idea) ─
     try:
         _opp_tbl = _oi_opportunity_table(ticker, conn, df, spot)
     except Exception:
@@ -9337,10 +9343,11 @@ async def signal_scanner(query):
     mixed = len(df) - len(bulls) - len(bears)
     parts.append(f"<i>{len(df)} tickers scanned · {mixed} mixed/neutral not shown</i>")
 
-    # ── Per-ticker strike breakdown (top 3 bulls + top 3 bears) ──
+    # ── Per-ticker strike breakdown (user 2026-07-18: "so many" — cut from top
+    #    3+3 tickers x 7 tables to top 1+1 x 3 tables, compact mode) ──
     conn2 = get_conn()
     _strike_parts = []
-    for _tk_row in list(bulls.head(3).itertuples()) + list(bears.head(3).itertuples()):
+    for _tk_row in list(bulls.head(1).itertuples()) + list(bears.head(1).itertuples()):
         _tk = str(_tk_row.ticker)
         _sd2 = pd.read_sql("""SELECT close FROM stock_daily WHERE ticker=?
             ORDER BY trade_date DESC
@@ -9348,7 +9355,7 @@ async def signal_scanner(query):
         _spot2 = float(_sd2["close"].iloc[0]) if not _sd2.empty else 0.0
         if _spot2 <= 0:
             continue     # indexes w/o stock_daily close (VIX) — ±20% window is meaningless
-        _breakdown = _oi_strike_breakdown(_tk, conn2, _spot2, latest_date)
+        _breakdown = _oi_strike_breakdown(_tk, conn2, _spot2, latest_date, compact=True)
         _trend = _oi_trend_summary(_tk, conn2, latest_date)
         if _breakdown or _trend:
             _strike_parts.append(f"\n<b>🔍 {_tk}</b> spot=${_spot2:.2f}")

@@ -319,6 +319,33 @@ def _cached_history(ticker: str, period: str = "5d", interval: str = "1d"):
         return pd.DataFrame()
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _dma_status(ticker: str, spot: float):
+    """50/200-day SMA trend read (user 2026-07-18: add to Portfolio tabs).
+    50DMA = short/medium trend filter; 200DMA = the standard bull/bear line;
+    50 crossing above 200 = Golden Cross (bullish), below = Death Cross (bearish).
+    Returns None if <200d of history (recent IPO)."""
+    try:
+        h = _cached_history(ticker, period="14mo", interval="1d")["Close"].dropna()
+        if len(h) < 200:
+            return None
+        dma50  = float(h.tail(50).mean())
+        dma200 = float(h.tail(200).mean())
+        golden = dma50 > dma200
+        above50  = spot > dma50
+        above200 = spot > dma200
+        if above50 and above200:
+            em, lbl = "🟢", "above both — uptrend"
+        elif not above50 and not above200:
+            em, lbl = "🔴", "below both — downtrend"
+        else:
+            em, lbl = "🟡", "mixed"
+        return {"dma50": dma50, "dma200": dma200, "golden": golden,
+                "above50": above50, "above200": above200, "em": em, "lbl": lbl}
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def _db_spot(ticker: str) -> float:
     """Confirmed EOD close from stock_daily DB (MM-DD-YYYY sorted). Primary source for portfolio calcs."""
     try:
@@ -5195,6 +5222,7 @@ with st.sidebar:
             "🧑‍💼 AI Hedge Fund",
             "🎯 Gamma Wall Advisor",
             "🚀 Live Momentum Scanner",
+            "📐 DMA & Mean Reversion",
         ],
         "💼 Portfolio & Risk": [
             "💼 Portfolio & Suggestions",
@@ -14251,6 +14279,11 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                 if _pb:
                     st.caption(f"💰 **{_tk} position** (to expiry): max profit **{_fmt_maxp(_pb)}** · "
                                f"max loss **{_fmt_maxl(_pb)}** · open P&L ${_tk_pnl:,.0f}".replace("$", "\\$"))
+                _dma = _dma_status(_tk, _spot)
+                if _dma:
+                    _gc = "Golden Cross (50>200)" if _dma["golden"] else "Death Cross (50<200)"
+                    st.caption(f"{_dma['em']} **Trend:** {_dma['lbl']} · "
+                               f"50DMA \\${_dma['dma50']:.2f} · 200DMA \\${_dma['dma200']:.2f} · {_gc}")
 
                 # ── lazy gate: in 'By stock' mode load heavy detail on demand; in 'All positions'
                 #    mode every section auto-renders for every stock ──
@@ -18264,6 +18297,224 @@ if page == "🚀 Live Momentum Scanner":
         st.plotly_chart(fig_scatter, use_container_width=True)
 
     st.caption("⚠️ All signals are algorithmic based on price momentum and volume. Always verify with OI data, news, and your own analysis before trading. Past momentum does not guarantee future returns.")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PAGE: DMA & MEAN REVERSION SCREENER (user 2026-07-18)
+# Backtest (742 tickers, 10y, 2016-2026, DB-grounded — session scratchpad
+# dma_backtest.py): Golden/Death Cross ~ noise vs baseline (53-56%); mean-
+# reversion oversold (z<=-2) is the one real edge (58-61% hit-rate, beats
+# baseline at every horizon) -- confirms/strengthens the bot's own /revert
+# backtest (signal_accuracy, N=362, 54%). Z-score is the flagship column here.
+# ═══════════════════════════════════════════════════════════════════════════
+if page == "📐 DMA & Mean Reversion":
+
+    def _cap_tier(mc):
+        if pd.isna(mc) or mc is None: return "Unknown"
+        mc = float(mc)
+        if mc >= 200e9: return "Mega (>$200B)"
+        if mc >= 10e9:  return "Large ($10-200B)"
+        if mc >= 2e9:   return "Mid ($2-10B)"
+        if mc >= 300e6: return "Small ($300M-2B)"
+        return "Micro (<$300M)"
+
+    @st.cache_data(ttl=900, show_spinner="Computing 50/200 DMA + mean-reversion across universe...")
+    def _dma_screen():
+        with get_conn() as _c:
+            fund = pd.read_sql("SELECT ticker, market_cap, sector, beta FROM daily_fundamentals", _c)
+            hist = pd.read_sql(
+                "SELECT ticker, trade_date, close, volume FROM stock_history "
+                "WHERE trade_date >= date('now', '-380 day')",
+                _c, parse_dates=["trade_date"])
+        hist = hist[hist["close"].notna() & (hist["close"] > 0)].sort_values(["ticker", "trade_date"])
+        rows = []
+        for tk, g in hist.groupby("ticker"):
+            if len(g) < 60:
+                continue
+            g = g.reset_index(drop=True)
+            close = g["close"]
+            spot = float(close.iloc[-1])
+            vol_today = float(g["volume"].iloc[-1]) if g["volume"].notna().iloc[-1] else 0.0
+            vol20 = float(g["volume"].tail(20).mean()) if g["volume"].notna().any() else 0.0
+            vol_ratio = vol_today / vol20 if vol20 > 0 else 0.0
+            dma50_s = close.rolling(50).mean()
+            dma50 = float(dma50_s.iloc[-1])
+            has200 = len(g) >= 200
+            dma200_s = close.rolling(200).mean() if has200 else None
+            dma200 = float(dma200_s.iloc[-1]) if has200 else None
+            mean20 = float(close.tail(20).mean())
+            std20 = float(close.tail(20).std())
+            z = (spot - mean20) / std20 if std20 > 0 else 0.0
+            look = close.tail(252)
+            hi52, lo52 = float(look.max()), float(look.min())
+            pct_from_hi = (spot / hi52 - 1) * 100 if hi52 else 0.0
+            pct_from_lo = (spot / lo52 - 1) * 100 if lo52 else 0.0
+            # RSI(14) — standard trend-strength read
+            delta = close.diff()
+            gain14 = delta.clip(lower=0).rolling(14).mean()
+            loss14 = (-delta.clip(upper=0)).rolling(14).mean()
+            rs14 = gain14 / loss14.replace(0, np.nan)
+            rsi = float((100 - 100 / (1 + rs14)).iloc[-1]) if not rs14.empty and pd.notna(rs14.iloc[-1]) else None
+            # RSI(2) — Larry Connors' specific mean-reversion trigger (Street Smarts /
+            # Short Term Trading Strategies That Work). Backtested against THIS DB
+            # (session scratchpad rsi2_backtest.py, 10y, 519 tickers, N=88,468 events):
+            # RSI(2)<10 AND price>200DMA -> 68.4% win rate — the strongest validated
+            # signal found for this tool, so it drives the Setup tag below.
+            gain2 = delta.clip(lower=0).rolling(2).mean()
+            loss2 = (-delta.clip(upper=0)).rolling(2).mean()
+            rs2 = gain2 / loss2.replace(0, np.nan)
+            rsi2 = float((100 - 100 / (1 + rs2)).iloc[-1]) if not rs2.empty and pd.notna(rs2.iloc[-1]) else None
+            # Days since the most recent Golden/Death cross (stale crosses matter less)
+            days_since_cross = None
+            if has200:
+                sign = (dma50_s > dma200_s).astype(int)
+                flips = sign.diff().fillna(0) != 0
+                flip_idx = flips[flips].index
+                if len(flip_idx):
+                    days_since_cross = int(len(g) - 1 - flip_idx[-1])
+            if not has200:
+                trend_em, cross = "⚪", "-"
+            elif spot > dma50 and spot > dma200:
+                trend_em, cross = "🟢", ("Golden" if dma50 > dma200 else "-")
+            elif spot < dma50 and spot < dma200:
+                trend_em, cross = "🔴", ("Death" if dma50 < dma200 else "-")
+            else:
+                trend_em, cross = "🟡", "-"
+            # Setup tag: Connors RSI(2)<10 + above-200DMA is the strongest validated rule
+            # (68.4% win rate on this DB) -> leads. Z<=-2 is the second-best validated
+            # edge (58-61%, see dma_backtest.py) -> secondary watch tier.
+            if rsi2 is not None and rsi2 < 10 and has200 and spot > dma200:
+                setup = "🎯 Connors RSI(2) Setup (68.4% win rate, validated)"
+            elif z <= -2 or (rsi is not None and rsi <= 30):
+                setup = "👁 Watch (oversold)"
+            elif rsi2 is not None and rsi2 > 90 and has200 and spot < dma200:
+                setup = "⚠️ Overbought (backtest: avoid shorting)"
+            else:
+                setup = "-"
+            rows.append(dict(ticker=tk, Price=round(spot, 2), DMA50=round(dma50, 2),
+                             DMA200=round(dma200, 2) if dma200 else None, Trend=trend_em,
+                             Cross=cross, DaysSinceCross=days_since_cross, Z=round(z, 2),
+                             RSI=round(rsi, 1) if rsi is not None else None,
+                             RSI2=round(rsi2, 1) if rsi2 is not None else None, VolRatio=round(vol_ratio, 2),
+                             Vol20d=vol20, PctFromHi=round(pct_from_hi, 1), PctFromLo=round(pct_from_lo, 1),
+                             Setup=setup))
+        df = pd.DataFrame(rows)
+        if not fund.empty:
+            df = df.merge(fund, on="ticker", how="left")
+        df["CapTier"] = df["market_cap"].apply(_cap_tier)
+        return df
+
+    st.title("📐 50/200 DMA & Mean Reversion Screener")
+    st.caption("DB-first, EOD data (15-min cache). Z-score = std-devs from the 20d mean — "
+               "the flagship column here: backtested as the one signal with a real edge "
+               "(see note below). Not advice.")
+
+    _df = _dma_screen()
+
+    # ⭐ mark tickers already held — ties the screener to actual positions
+    try:
+        with get_conn() as _c:
+            _held = set(pd.read_sql(
+                "SELECT DISTINCT ticker FROM trades WHERE status='OPEN'", _c)["ticker"].str.upper())
+    except Exception:
+        _held = set()
+    _df["Held"] = _df["ticker"].str.upper().isin(_held).map({True: "⭐", False: ""})
+
+    c1, c2, c3, c4, c5, c6 = st.columns([1.2, 1.2, 0.9, 0.9, 0.9, 1.1])
+    with c1:
+        _cap_opts = ["Mega (>$200B)", "Large ($10-200B)", "Mid ($2-10B)", "Small ($300M-2B)",
+                    "Micro (<$300M)", "Unknown"]
+        cap_sel = st.multiselect("Cap tier", _cap_opts,
+                                 default=["Mega (>$200B)", "Large ($10-200B)", "Mid ($2-10B)"],
+                                 key="dma_cap")
+    with c2:
+        _sectors = sorted(_df["sector"].dropna().unique().tolist())
+        sec_sel = st.multiselect("Sector", _sectors, default=_sectors, key="dma_sec")
+    with c3:
+        min_vol = st.number_input("Min avg vol (20d)", value=500_000, step=100_000,
+                                  format="%d", key="dma_minvol",
+                                  help="Default = liquid names only; set to 0 to include everything")
+    with c4:
+        trend_sel = st.selectbox("Trend", ["All", "🟢 Uptrend", "🔴 Downtrend", "🟡 Mixed"], key="dma_trend")
+    with c5:
+        setup_sel = st.selectbox("Setup", ["All", "🎯 Connors RSI(2) only", "👁 Watch+", "⭐ My positions only"],
+                                 key="dma_setup")
+    with c6:
+        sort_sel = st.selectbox("Sort by", ["|Z| (mean reversion)", "Market Cap", "% from 52w high",
+                                            "RSI", "Ticker"], key="dma_sort")
+
+    _shown = _df[_df["CapTier"].isin(cap_sel) & _df["sector"].isin(sec_sel) & (_df["Vol20d"] >= min_vol)].copy()
+    if trend_sel != "All":
+        _shown = _shown[_shown["Trend"] == trend_sel[0]]
+    if setup_sel == "🎯 Connors RSI(2) only":
+        _shown = _shown[_shown["Setup"].str.startswith("🎯")]
+    elif setup_sel == "👁 Watch+":
+        _shown = _shown[_shown["Setup"] != "-"]
+    elif setup_sel == "⭐ My positions only":
+        _shown = _shown[_shown["Held"] == "⭐"]
+
+    if sort_sel == "|Z| (mean reversion)":
+        _shown = _shown.reindex(_shown["Z"].abs().sort_values(ascending=False).index)
+    elif sort_sel == "Market Cap":
+        _shown = _shown.sort_values("market_cap", ascending=False)
+    elif sort_sel == "% from 52w high":
+        _shown = _shown.sort_values("PctFromHi")
+    elif sort_sel == "RSI":
+        _shown = _shown.sort_values("RSI")
+    else:
+        _shown = _shown.sort_values("ticker")
+
+    _n_oversold = int((_shown["Z"] <= -2).sum())
+    _n_overbought = int((_shown["Z"] >= 2).sum())
+    _n_strong = int(_shown["Setup"].str.startswith("🎯").sum())
+    st.caption(f"{len(_shown)} / {len(_df)} tickers match filters · "
+               f"🎯 {_n_strong} Connors RSI(2) setups (68.4% win rate, validated on this DB) · "
+               f"{_n_oversold} oversold by Z (z≤-2) · "
+               f"{_n_overbought} overbought (z≥+2, avoid shorting — backtest shows this fails 54-58% of the time)")
+
+    _cols = ["Held", "Trend", "ticker", "CapTier", "sector", "beta", "Price", "DMA50", "DMA200",
+             "Cross", "DaysSinceCross", "Z", "RSI", "RSI2", "VolRatio", "PctFromHi", "PctFromLo",
+             "Vol20d", "Setup"]
+    _disp = _shown[_cols].rename(columns={
+        "ticker": "Ticker", "CapTier": "Cap Tier", "sector": "Sector", "beta": "Beta",
+        "DaysSinceCross": "Days Since Cross", "RSI2": "RSI(2)", "VolRatio": "Vol Ratio (today/20d)",
+        "PctFromHi": "% from 52w Hi", "PctFromLo": "% from 52w Lo", "Vol20d": "Avg Vol (20d)"})
+    st.dataframe(
+        _disp, hide_index=True, use_container_width=True, height=560,
+        column_config={
+            "Price": st.column_config.NumberColumn(format="$%.2f"),
+            "DMA50": st.column_config.NumberColumn(format="$%.2f"),
+            "DMA200": st.column_config.NumberColumn(format="$%.2f"),
+            "Beta": st.column_config.NumberColumn(format="%.2f"),
+            "Z": st.column_config.NumberColumn(format="%.2f"),
+            "RSI": st.column_config.NumberColumn(format="%.1f"),
+            "RSI(2)": st.column_config.NumberColumn(format="%.1f"),
+            "Vol Ratio (today/20d)": st.column_config.NumberColumn(format="%.2fx"),
+            "% from 52w Hi": st.column_config.NumberColumn(format="%+.1f%%"),
+            "% from 52w Lo": st.column_config.NumberColumn(format="%+.1f%%"),
+            "Avg Vol (20d)": st.column_config.NumberColumn(format="%d"),
+        })
+    st.download_button("⬇️ Download filtered results (CSV)",
+                       _disp.to_csv(index=False).encode("utf-8"),
+                       file_name=f"dma_screen_{datetime.now().strftime('%Y%m%d')}.csv",
+                       mime="text/csv", key="dma_csv")
+
+    with st.expander("📊 Backtest: how often do these signals actually work? (10y, DB-grounded, not external claims)"):
+        st.markdown("""
+| Signal | Rule | N events | Win/Hit rate | Verdict |
+|---|---|---|---|---|
+| **Connors RSI(2)** | RSI(2)<10 AND price>200DMA; exit on close>5DMA | 88,468 | **68.4%** | **Strongest validated edge — this drives the 🎯 Setup tag** |
+| Oversold mean-reversion (z≤-2) | 20d z-score extreme, 20-120d hold | 81,087 | 58-61% | Real, robust edge — confirms the bot's own `/revert` backtest |
+| Above 200DMA trend filter | Simple trend split | 85,686 | 54-60% | Marginal, mainly at 120d |
+| Golden Cross (50 crosses above 200) | Classic crossover | 4,998 | 53-56% | Weak — close to the 52-58% "buy any day" baseline |
+| Death Cross (50 crosses below 200) | Classic crossover, expect down | 5,208 | 42-45% | **Backwards** — stocks kept rising anyway |
+| Overbought (z≥+2), betting on pullback | Fade the extreme | 100,890 | 42-46% | Fails — momentum beats mean-reversion short-side |
+
+Connors' rule is a well-published strategy (*Street Smarts*, 1996; *Short Term Trading Strategies That Work*, 2008) —
+externally cited win rates run 75-79% on narrower large-cap universes; **68.4% is this tool's own test**
+against 519 tickers / 10 years of your actual DB, average hold 3.6 days, avg +0.39%/trade.
+Sample is a bull-dominated decade — absolute hit-rates skew high; the baseline-relative edge is the fairer read.
+No transaction costs/slippage modeled — signal quality only, not a P&L backtest. Not advice.
+        """)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE: HIGH-PROB ENGINE (24-model ensemble)

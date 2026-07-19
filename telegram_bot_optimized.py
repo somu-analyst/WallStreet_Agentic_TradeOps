@@ -20629,9 +20629,14 @@ def _plan_patterns(tk, spot, pw=None, cw=None):
 
 
 def _plan_trust(conn, tk, hold=5, thr=0.005):
-    """Inline signal track-record for /plan: per-signal hit-rate so the user can prioritize.
-    Backtests OI-bias / momentum / RSI from DB and pulls the 24-model's resolved accuracy."""
-    out = []
+    """Per-ticker signal track-record for /plan: THIS ticker's own historical hit-rate per
+    signal, plus each signal's CURRENT direction — so the caller can render both a real
+    table and a plain-English inference ("Mom is bullish now, 52% hist hit-rate here").
+    Backtests OI-bias / momentum / RSI(14) / Connors RSI(2) from DB + pulls the 24-model's
+    resolved accuracy. RSI(2) added 2026-07-18 after validating 68.4% win-rate universe-wide
+    (session scratchpad rsi2_backtest.py) — now tested per-ticker here, not just quoted.
+    Returns {"rows": [(name, hit%, cur_dir)], "best": (name, hit%, cur_dir)} or None."""
+    rows = []
     try:
         sk = "trade_date"
         sd = pd.read_sql(f"SELECT trade_date, close FROM stock_daily WHERE ticker=? ORDER BY {sk}",
@@ -20648,8 +20653,11 @@ def _plan_trust(conn, tk, hold=5, thr=0.005):
                 / (sd["oin"].rolling(20, min_periods=8).std() + 1e-9)
             sd["mom"] = sd["close"] / sd["close"].shift(10) - 1
             d = sd["close"].diff()
-            up = d.clip(lower=0).rolling(14).mean(); dn = (-d.clip(upper=0)).rolling(14).mean()
-            sd["rsi"] = 100 - 100 / (1 + up / dn.replace(0, np.nan))
+            up14 = d.clip(lower=0).rolling(14).mean(); dn14 = (-d.clip(upper=0)).rolling(14).mean()
+            sd["rsi"] = 100 - 100 / (1 + up14 / dn14.replace(0, np.nan))
+            up2 = d.clip(lower=0).rolling(2).mean(); dn2 = (-d.clip(upper=0)).rolling(2).mean()
+            sd["rsi2"] = 100 - 100 / (1 + up2 / dn2.replace(0, np.nan))
+            sd["dma200"] = sd["close"].rolling(200).mean()
             sd["fwd"] = sd["close"].shift(-hold) / sd["close"] - 1
             d2 = sd.dropna(subset=["fwd"])
 
@@ -20660,26 +20668,59 @@ def _plan_trust(conn, tk, hold=5, thr=0.005):
                 dr = direction(s)
                 return float(((dr > 0) & (s["fwd"] > thr)).sum()
                              + ((dr < 0) & (s["fwd"] < -thr)).sum()) / len(s) * 100
-            for nm, h in (("OI", _hit(d2["oiz"].abs() > 0.5, lambda s: np.sign(s["oiz"]))),
-                          ("Mom", _hit(d2["mom"].abs() > 0.01, lambda s: np.sign(s["mom"]))),
-                          ("RSI", _hit((d2["rsi"] < 35) | (d2["rsi"] > 65),
-                                       lambda s: np.where(s["rsi"] < 35, 1, -1)))):
+
+            last = sd.iloc[-1]
+            cur_oi = "UP" if last.get("oiz", 0) > 0.5 else ("DOWN" if last.get("oiz", 0) < -0.5 else "-")
+            cur_mom = "UP" if last.get("mom", 0) > 0.01 else ("DOWN" if last.get("mom", 0) < -0.01 else "-")
+            _rsi_now = last.get("rsi", 50)
+            cur_rsi = "UP" if _rsi_now < 35 else ("DOWN" if _rsi_now > 65 else "-")
+            _rsi2_now = last.get("rsi2", 50)
+            _above200 = pd.notna(last.get("dma200")) and last["close"] > last["dma200"]
+            cur_rsi2 = "UP" if (_rsi2_now < 10 and _above200) else "-"
+
+            h_oi = _hit(d2["oiz"].abs() > 0.5, lambda s: np.sign(s["oiz"]))
+            h_mom = _hit(d2["mom"].abs() > 0.01, lambda s: np.sign(s["mom"]))
+            h_rsi = _hit((d2["rsi"] < 35) | (d2["rsi"] > 65), lambda s: np.where(s["rsi"] < 35, 1, -1))
+            h_rsi2 = _hit((d2["rsi2"] < 10) & (d2["close"] > d2["dma200"]), lambda s: 1)
+            for nm, h, cd in (("OI", h_oi, cur_oi), ("Mom", h_mom, cur_mom),
+                              ("RSI14", h_rsi, cur_rsi), ("RSI2", h_rsi2, cur_rsi2)):
                 if h is not None:
-                    out.append((nm, h))
+                    rows.append((nm, h, cd))
     except Exception:
         pass
     try:
         m = pd.read_sql("SELECT AVG(correct)*100 h, COUNT(*) n FROM signal_accuracy "
                         "WHERE ticker=? AND correct>=0", conn, params=(tk.upper(),))
         if not m.empty and m["n"].iloc[0] and int(m["n"].iloc[0]) >= 5:
-            out.append(("24M", float(m["h"].iloc[0])))
+            rows.append(("24M", float(m["h"].iloc[0]), "-"))
     except Exception:
         pass
-    if not out:
+    if not rows:
         return None
-    best = max(out, key=lambda x: x[1])
-    body = " · ".join(f"{k} {v:.0f}%" for k, v in out)
-    return f"  🎯 Track record: {body} → trust {best[0]}"
+    best = max(rows, key=lambda x: x[1])
+    return {"rows": rows, "best": best}
+
+
+def _plan_trust_render(trust):
+    """Table + plain-English inference for the /plan block. Inference is DERIVED from the
+    backtested hit-rate + that signal's CURRENT direction — never a free-standing guess
+    (user 2026-07-18: 'inference in high quality... build a system and backtest')."""
+    if not trust:
+        return None, None
+    rows = trust["rows"]; best = trust["best"]
+    _tbl_rows = [(("🟢" if h >= 60 else "🟡" if h >= 50 else "🔴"), nm, f"{h:.0f}%",
+                  {"UP": "🟢 UP", "DOWN": "🔴 DOWN", "-": "—"}[cd]) for nm, h, cd in rows]
+    tbl = _pipe_table(("ST", "Signal", "Hit%", "Now"), _tbl_rows, right_cols={2})
+    nm, h, cd = best
+    if cd == "-":
+        infer = f"→ {nm} has the best track record ({h:.0f}%) but isn't firing right now — no active lean."
+    elif h >= 60:
+        infer = f"→ {nm} is {cd} now with a strong {h:.0f}% historical hit-rate here — the highest-confidence read available."
+    elif h >= 52:
+        infer = f"→ {nm} is {cd} now, {h:.0f}% historical hit-rate — a mild lean, not a strong edge."
+    else:
+        infer = f"→ Best signal ({nm}) only hits {h:.0f}% historically — no real edge; trade the structure, not a prediction."
+    return tbl, infer
 
 
 def _kfb(k):
@@ -20819,10 +20860,46 @@ def _pl_beta(conn, tk, lookback=60):
     return float(np.cov(ra[-n:], rs[-n:])[0, 1] / np.var(rs[-n:]))
 
 
+_PLAN_INTL_IDX = [("^N225", "Nikkei"), ("^FTSE", "FTSE"), ("^GDAXI", "DAX"), ("^HSI", "HangSeng")]
+_PLAN_COMMOD = [("GC=F", "Gold", "$"), ("CL=F", "Oil", "$"), ("HG=F", "Copper", "$")]
+
+
+def _plan_markets_snapshot():
+    """US + international indices + commodities, one line each (user 2026-07-18).
+    Reuses _wrap_quote/_WRAP_IDX (already defined for /wrap) — no duplicate fetch logic.
+    Never invents a figure: a symbol that fails to fetch is silently dropped."""
+    def _line(specs, money=False):
+        bits = []
+        for sym, name, *rest in specs:
+            q = _wrap_quote(sym)
+            if not q:
+                continue
+            em = "🟢" if q["pct"] > 0.3 else ("🔴" if q["pct"] < -0.3 else "🟡")
+            px_s = f"${q['last']:,.2f}" if money else f"{q['last']:,.0f}"
+            bits.append(f"{name} {px_s} {q['pct']:+.1f}%{em}")
+        return " · ".join(bits)
+    _us_want = {"^GSPC": "SPX", "^NDX": "NDX", "^DJI": "DOW", "^RUT": "RUT"}
+    us = _line([(s, _us_want[s]) for s, n, *_ in _WRAP_IDX if s in _us_want])
+    intl = _line(_PLAN_INTL_IDX)
+    comm = _line(_PLAN_COMMOD, money=True)
+    lines = ["🌍 <b>Markets</b>"]
+    if us:   lines.append(f"US: {us}")
+    if intl: lines.append(f"Intl: {intl}")
+    if comm: lines.append(f"Commodities: {comm}")
+    return "\n".join(lines) if len(lines) > 1 else None
+
+
 def _next_day_plan(conn):
     """Condensed whole-portfolio next-day plan: regime + Greeks + per-stock levels,
     expected move, StockTwits sentiment, per-leg actions, and a morning checklist."""
     L = ["🌅 <b>NEXT-DAY GAME PLAN</b>"]
+    try:
+        _mkt = _plan_markets_snapshot()
+        if _mkt:
+            L.append(_mkt)
+            L.append("")
+    except Exception:
+        log.debug("plan markets snapshot failed", exc_info=True)
     try:
         rg = _risk_regime()
         L.append(f"{rg['emoji']} Regime <b>{rg['label']}</b> ({rg['score']:+d})")
@@ -20962,22 +21039,30 @@ def _next_day_plan(conn):
         if cw: lv.append(f"CW${cw:.0f}")
         if lv:
             head += " · " + " ".join(lv)
+        # Sentiment consolidated to ONE labeled line (was 3 separate emoji-prefixed lines —
+        # user 2026-07-18: too many different label-emoji with no grouping)
+        sent_bits = []
         stt = _stocktwits_sentiment(tk)
         if stt:
-            head += f"\n  💬 StockTwits {stt['label']} ({stt['bull']}🟢/{stt['bear']}🔴)"
+            _es = "🟢" if "BULL" in stt["label"] else "🔴" if "BEAR" in stt["label"] else "🟡"
+            sent_bits.append(f"{_es} StockTwits {stt['label']} ({stt['bull']}🟢/{stt['bear']}🔴)")
         fh = _finnhub_sentiment(tk)
         if fh:
-            head += f"\n  🛰 Finnhub {fh['label']} ({fh['bull_pct']:.0f}% bull)"
+            _ef = "🟢" if fh["bull_pct"] >= 60 else "🔴" if fh["bull_pct"] <= 40 else "🟡"
+            sent_bits.append(f"{_ef} Finnhub {fh['label']} ({fh['bull_pct']:.0f}% bull)")
         rd = _reddit_sentiment(tk)
         if rd:
-            head += f"\n  👽 r/WSB {rd['label']} ({rd['bull']}🟢/{rd['bear']}🔴 of {rd['n']})"
+            _er = "🟢" if "BULL" in rd["label"] else "🔴" if "BEAR" in rd["label"] else "🟡"
+            sent_bits.append(f"{_er} r/WSB {rd['label']} ({rd['bull']}🟢/{rd['bear']}🔴 of {rd['n']})")
+        if sent_bits:
+            head += "\n  <b>Sentiment</b>  " + " · ".join(sent_bits)
         ivr = _iv_rank(conn, tk)
         if ivr:
             hint = "cheap→buy" if ivr["rank"] < 30 else "rich→sell" if ivr["rank"] > 70 else "mid"
-            head += f"\n  🌡️ IV Rank {ivr['rank']:.0f} ({ivr['iv']*100:.0f}%) {hint}"
+            head += f"\n  <b>IV Rank</b>  {ivr['rank']:.0f} ({ivr['iv']*100:.0f}%) {hint}"
         ea = _next_earnings(tk)
         if ea and ea["days"] <= 14:
-            head += f"\n  📅 ⚠️ Earnings {ea['date']} ({ea['days']}d) — gap risk"
+            head += f"\n  <b>Earnings</b>  ⚠️ {ea['date']} ({ea['days']}d) — gap risk"
         extra = []
         _ofl = _plan_oi_flow(conn, tk, spot)
         if _ofl:
@@ -20985,9 +21070,13 @@ def _next_day_plan(conn):
         _ptl = _plan_patterns(tk, spot, pw, cw)
         if _ptl:
             extra.append(_ptl)
-        _trl = _plan_trust(conn, tk)
-        if _trl:
-            extra.append(_trl)
+        # Track record: real table + inference DERIVED from the backtested hit-rate + that
+        # signal's current direction (user 2026-07-18: "high quality inference... build a
+        # system and backtest") — never a free-standing prediction.
+        _trust = _plan_trust(conn, tk)
+        _ttbl, _tinfer = _plan_trust_render(_trust)
+        if _ttbl:
+            extra.append("  <b>Track record</b>\n" + _ttbl + "\n  " + _tinfer)
         _b = _pl_bounds(tk_legs, spot)
         _a = _pl_analytics(tk_legs, spot)
         if _b:
@@ -25113,11 +25202,14 @@ def _iv_drift(day):
     return out
 
 
-_HEAT_EMO = {"HEAT": "🔥", "FADE": "🌀", None: "⚪"}
+# Neutral state: plain "-" not a white circle (user 2026-07-18: "white doesn't mean
+# anything") — only 🔥/🌀 are real signals, so neutral rows get NO emoji at all,
+# making the two real states stand out instead of looking like a missed color.
+_HEAT_EMO = {"HEAT": "🔥", "FADE": "🌀", None: "-"}
 
 
 def _fmt_heat(rows, day, title="🔥 Heat-Seeker · intraday"):
-    data = [(_HEAT_EMO.get(m["state"], "⚪"), m["tk"], f"{m['day_ret']:+.1%}",
+    data = [(_HEAT_EMO.get(m["state"], "-"), m["tk"], f"{m['day_ret']:+.1%}",
              f"{m['move_z']:+.1f}" if m["move_z"] is not None else "—",
              f"{m['pace']:.1f}x" if m["pace"] else "—") for m in rows[:12]]
     return _pipe_table(("ST", "Tkr", "Day%", "z", "Pace"), data, right_cols={2, 3, 4},

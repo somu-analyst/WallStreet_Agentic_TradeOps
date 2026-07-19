@@ -619,6 +619,8 @@ def main():
                     help="seconds to rest between chunks")
     ap.add_argument("--parquet", action="store_true",
                     help="space-saver: export the day to parquet-zstd and clear it from sqlite")
+    ap.add_argument("--fresh", action="store_true",
+                    help="wipe the day's rows and refetch EVERYTHING (disables auto-resume)")
     ap.add_argument("--compare", nargs="?", const="today", default=None,
                     help="parallel-test scorer: compare openbb vs yfinance for a date (default today) and exit")
     ap.add_argument("--full", action="store_true",
@@ -670,12 +672,29 @@ def main():
     t0 = time.time()
     today_str = pd.Timestamp(trade_dt).strftime("%Y-%m-%d")
     conn = sqlite3.connect(OUT_DB_PATH)
-    # idempotent per day: clear today's rows once, then APPEND per chunk (crash-safe)
-    try:
-        conn.execute(f"DELETE FROM {table} WHERE trade_date=?", (today_str,))
-        conn.commit()
-    except Exception:
-        pass
+    # ── RESUME (2026-07-18): chunks APPEND + commit as they land, so a halted/killed
+    # run leaves whole tickers safely in the DB. Default = skip those and fetch only
+    # what's missing for the day (laptop closed mid-run, Ctrl+C, crash — just rerun).
+    # --fresh restores the old wipe-and-refetch-everything behavior. ──
+    _done = set()
+    if not args.fresh:
+        try:
+            _done = {r[0] for r in conn.execute(
+                f"SELECT DISTINCT ticker FROM {table} WHERE trade_date=?", (today_str,))}
+        except Exception:
+            _done = set()
+    if _done:
+        _before = len(tickers)
+        tickers = [t for t in tickers if t not in _done]
+        log(f"RESUME: {len(_done)} tickers already captured for {today_str} "
+            f"-> fetching remaining {len(tickers)}/{_before} (use --fresh to refetch all)")
+    else:
+        # nothing to resume: clear the day once, then APPEND per chunk (crash-safe)
+        try:
+            conn.execute(f"DELETE FROM {table} WHERE trade_date=?", (today_str,))
+            conn.commit()
+        except Exception:
+            pass
     failed, total_ok, total_rows, processed = [], 0, 0, 0
     total_n = len(tickers)
 

@@ -2580,27 +2580,55 @@ async def market_overview(query):
         except Exception:
             return None
 
+    # Signal tag_fn takes the fetched dict (px, chg) so every row can read a real
+    # tag off the day's move, not just VIX (user 2026-07-18: "why is signal blank").
+    # Thresholds are asset-appropriate: equities/BTC move more per day than FX/yields.
+    def _idx_tag(d):
+        if d["chg"] <= -1.0: return "SELLOFF"
+        if d["chg"] >=  1.0: return "RALLY"
+        return ""
+    def _gold_tag(d):
+        if d["chg"] >=  1.0: return "SAFE-HVN"
+        if d["chg"] <= -1.0: return "RISK-OFF"
+        return ""
+    def _oil_tag(d):
+        if d["chg"] >=  2.0: return "SUPPLY"
+        if d["chg"] <= -2.0: return "DEMAND-WK"
+        return ""
+    def _btc_tag(d):
+        if d["chg"] >=  2.0: return "RISK-ON"
+        if d["chg"] <= -2.0: return "RISK-OFF"
+        return ""
+    def _fx_tag(d):
+        if d["chg"] >=  0.5: return "USD WEAK"
+        if d["chg"] <= -0.5: return "USD STRNG"
+        return ""
+    def _yld_tag(d):
+        if d["chg"] <= -1.0: return "SAFETY"
+        if d["chg"] >=  1.0: return "YLD SPIKE"
+        return ""
+
     SPECS = [
         # (section, display_name, yf_symbol, is_yield, extra_tag_fn)
-        ("INDICES",     "SPX",     "^GSPC",    False, None),
-        ("INDICES",     "NDX",     "^IXIC",    False, None),
-        ("INDICES",     "DOW",     "^DJI",     False, None),
-        ("INDICES",     "RUT",     "^RUT",     False, None),
-        ("FUTURES",     "ES",      "ES=F",     False, None),
-        ("FUTURES",     "NQ",      "NQ=F",     False, None),
+        ("INDICES",     "SPX",     "^GSPC",    False, _idx_tag),
+        ("INDICES",     "NDX",     "^IXIC",    False, _idx_tag),
+        ("INDICES",     "DOW",     "^DJI",     False, _idx_tag),
+        ("INDICES",     "RUT",     "^RUT",     False, _idx_tag),
+        ("FUTURES",     "ES",      "ES=F",     False, _idx_tag),
+        ("FUTURES",     "NQ",      "NQ=F",     False, _idx_tag),
         ("VOLATILITY",  "VIX",     "^VIX",     False,
-         lambda px: "EXTREME FEAR" if px>30 else ("HIGH FEAR" if px>25 else ("ELEVATED" if px>20 else "CALM"))),
-        ("COMMODITIES", "Gold",    "GC=F",     False, None),
-        ("COMMODITIES", "Oil",     "CL=F",     False, None),
-        ("CRYPTO/FX",   "BTC",     "BTC-USD",  False, None),
-        ("CRYPTO/FX",   "EUR/USD", "EURUSD=X", False, None),
-        ("BONDS",       "10Y Yld", "^TNX",     True,  None),
+         lambda d: "EXTREME FEAR" if d["px"]>30 else ("HIGH FEAR" if d["px"]>25 else ("ELEVATED" if d["px"]>20 else "CALM"))),
+        ("COMMODITIES", "Gold",    "GC=F",     False, _gold_tag),
+        ("COMMODITIES", "Oil",     "CL=F",     False, _oil_tag),
+        ("CRYPTO/FX",   "BTC",     "BTC-USD",  False, _btc_tag),
+        ("CRYPTO/FX",   "EUR/USD", "EURUSD=X", False, _fx_tag),
+        ("BONDS",       "10Y Yld", "^TNX",     True,  _yld_tag),
     ]
 
     all_rows = []   # (section, name, d) — d is _fetch result or None
     for sec, name, sym, is_yld, tag_fn in SPECS:
         d = _fetch(sym, is_yld)
-        tag = tag_fn(d["px"]) if (d and tag_fn) else ""
+        tag = tag_fn(d) if (d and tag_fn) else ""
         all_rows.append((sec, name, d, tag))
 
     # ── Aligned <pre> tables per section ──
@@ -2726,8 +2754,7 @@ async def news_for_ticker(query, ticker):
         [InlineKeyboardButton("🔄 Refresh", callback_data=f"news_{ticker}"),
          InlineKeyboardButton("📰 Other", callback_data="menu_news"), BACK_BTN]
     ])
-    await _safe_reply(query.message, sanitize_html("\n".join(parts)), reply_markup=kb,
-                                   disable_web_page_preview=True)
+    await _safe_reply(query.message, sanitize_html("\n".join(parts)), reply_markup=kb)
     try: await _loading.delete()
     except Exception: pass
 
@@ -2793,8 +2820,8 @@ async def market_headlines(query):
     ])
     try: await _loading.delete()
     except Exception: pass
-    await _safe_reply(query.message, 
-        "\n".join(parts), reply_markup=kb, disable_web_page_preview=True)
+    await _safe_reply(query.message,
+        "\n".join(parts), reply_markup=kb)
 
 
 # ═══════════════════════════════════════════════════════════

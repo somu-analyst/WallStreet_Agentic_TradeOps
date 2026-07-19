@@ -2622,10 +2622,11 @@ async def market_overview(query):
         for name, d in items:
             if d:
                 arrow = _col_arrow(d["chg"])
-                _sec_rows.append((name, d["px_s"], f"{d['chg']:>+.2f}%", arrow, d["em"]))
+                _sec_rows.append((name, d["px_s"], f"{d['chg']:>+.2f}%", arrow))
             else:
-                _sec_rows.append((name, "N/A", "-", "-", "-"))
-        colour_lines.append(_pipe_table(("Name", "Price", "Chg%", "Dir", "Signal"),
+                _sec_rows.append((name, "N/A", "-", "-"))
+        # Signal column removed 2026-07-19 (user: duplicates Dir — same color+direction).
+        colour_lines.append(_pipe_table(("Name", "Price", "Chg%", "Dir"),
                                         _sec_rows, right_cols={1, 2}))
     colour_block = "\n".join(colour_lines)
 
@@ -20871,28 +20872,27 @@ _PLAN_COMMOD = [("GC=F", "Gold", "$"), ("CL=F", "Oil", "$"), ("HG=F", "Copper", 
 
 
 def _plan_markets_snapshot():
-    """US + international indices + commodities, one line each (user 2026-07-18).
-    Reuses _wrap_quote/_WRAP_IDX (already defined for /wrap) — no duplicate fetch logic.
-    Never invents a figure: a symbol that fails to fetch is silently dropped."""
-    def _line(specs, money=False):
-        bits = []
-        for sym, name, *rest in specs:
-            q = _wrap_quote(sym)
-            if not q:
-                continue
-            em = "🟢" if q["pct"] > 0.3 else ("🔴" if q["pct"] < -0.3 else "🟡")
-            px_s = f"${q['last']:,.2f}" if money else f"{q['last']:,.0f}"
-            bits.append(f"{name} {px_s} {q['pct']:+.1f}%{em}")
-        return " · ".join(bits)
-    _us_want = {"^GSPC": "SPX", "^NDX": "NDX", "^DJI": "DOW", "^RUT": "RUT"}
-    us = _line([(s, _us_want[s]) for s, n, *_ in _WRAP_IDX if s in _us_want])
-    intl = _line(_PLAN_INTL_IDX)
-    comm = _line(_PLAN_COMMOD, money=True)
-    lines = ["🌍 <b>Markets</b>"]
-    if us:   lines.append(f"US: {us}")
-    if intl: lines.append(f"Intl: {intl}")
-    if comm: lines.append(f"Commodities: {comm}")
-    return "\n".join(lines) if len(lines) > 1 else None
+    """US + international indices + commodities as ONE table (user 2026-07-19: tables).
+    Reuses _wrap_quote (already defined for /wrap) — no duplicate fetch logic. Never
+    invents a figure: a symbol that fails to fetch is silently dropped."""
+    specs = [("^GSPC", "SPX", 0), ("^NDX", "NDX", 0), ("^DJI", "DOW", 0), ("^RUT", "RUT", 0),
+             ("^N225", "Nikkei", 0), ("^FTSE", "FTSE", 0), ("^GDAXI", "DAX", 0), ("^HSI", "HSI", 0),
+             ("GC=F", "Gold", 1), ("CL=F", "Oil", 1), ("HG=F", "Copper", 1)]
+    rows = []
+    for sym, name, money in specs:
+        q = _wrap_quote(sym)
+        if not q:
+            continue
+        em = "🟢" if q["pct"] > 0.3 else ("🔴" if q["pct"] < -0.3 else "🟡")
+        if money:
+            px_s = f"${q['last']:,.0f}" if q["last"] >= 100 else f"${q['last']:.2f}"
+        else:
+            px_s = f"{q['last']:,.0f}"
+        rows.append((em, name, px_s, f"{q['pct']:+.1f}%"))
+    if not rows:
+        return None
+    return "🌍 <b>Markets</b>\n" + _pipe_table(("ST", "Market", "Price", "Chg%"),
+                                               rows, right_cols={2, 3})
 
 
 def _next_day_plan(conn):
@@ -20952,6 +20952,7 @@ def _next_day_plan(conn):
         cw, pw = g.get("call_wall"), g.get("put_wall")
         tk_dd = tk_th = 0.0
         ivs, leglines, tk_legs = [], [], []
+        leg_rows, leg_acts = [], []      # option legs -> table (user 2026-07-19), actions -> detail
         for t in legs:
             typ = "call" if str(t["option_type"]).lower().startswith("c") else "put"
             K = float(t["strike"] or 0); qty = int(t["quantity"] or 0); exp = str(t["expiry"])
@@ -20996,9 +20997,10 @@ def _next_day_plan(conn):
             if pnlp >= 50: acts.append("take profit")
             elif pnlp <= -50: acts.append("cut/roll")
             a = "; ".join(acts) if acts else "hold"
-            leglines.append(f"  {'🔻' if side == 'short' else '🔹'} {side} ${K:.0f}{typ[0].upper()} "
-                            f"{dte}d {money} {pnlp:+.0f}% → {a}")
+            _side_em = "🔻" if side == "short" else "🔹"
+            leg_rows.append((_side_em, f"{K:.0f}{typ[0].upper()}", f"{dte}d", f"{pnlp:+.0f}%"))
             if acts:
+                leg_acts.append(f"{_side_em} {K:.0f}{typ[0].upper()} {money} → {a}")
                 checklist.append(f"{tk} ${K:.0f}{typ[0].upper()}: {a}")
             tk_legs.append({"K": K, "typ": typ, "entry": entry, "m": m, "iv": iv,
                             "dte": dte, "cur": cur, "side": side, "qty": qty, "exp": exp,
@@ -21109,8 +21111,16 @@ def _next_day_plan(conn):
                 f"{_kfb(r['l']['K'])}{r['l']['typ'][0].upper()} ({r['why']})" for r in _xs))
         for _t in _pl_tickets(tk_legs, spot, cw, pw)[:4]:
             ana.append("  🧾 " + _t)
+        # Legs section: stock lines (📦, prose — hedge/held context) + option-leg TABLE
+        # (user 2026-07-19) + action detail lines below it.
+        _leg_block = "\n".join(leglines)      # stock 📦 lines (may be empty)
+        if leg_rows:
+            _lt = _pipe_table(("ST", "Leg", "DTE", "P&L"), leg_rows, right_cols={3})
+            _leg_block += ("\n" if _leg_block else "") + "  <b>Legs</b>\n" + _lt
+            if leg_acts:
+                _leg_block += "\n" + "\n".join("  " + x for x in leg_acts)
         _inner = (("\n".join(extra) + "\n" if extra else "")
-                  + "\n".join(leglines) + ("\n" + "\n".join(ana) if ana else ""))
+                  + _leg_block + ("\n" + "\n".join(ana) if ana else ""))
         # collapse the detail under the headline (tap to expand) — modern, scannable
         blocks.append(head + ("\n<blockquote expandable>" + _inner + "</blockquote>"
                               if _inner.strip() else ""))

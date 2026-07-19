@@ -794,6 +794,12 @@ def sanitize_for_telegram(s: str) -> str:
     # Escape stray ampersands not part of a valid HTML entity. Raw & in news URLs
     # (query params), or text like "E&P" / "S&P" / "P&L", breaks Telegram HTML parsing.
     s = re.sub(r'&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9A-Fa-f]+);)', '&amp;', s)
+    # Escape a '<' that can't be the start of a real tag, i.e. not followed by a letter
+    # or '/' (ROOT CAUSE, found 2026-07-19: a literal '<' in content like "neg-gamma<$362"
+    # was read as an opening tag whose [^>]* then greedily ate the NEXT real '>' — swallowing
+    # the adjacent <b> and producing a stray </b>. Escaping stray '<' up front prevents any
+    # content '<' from consuming a following tag). Real tags (</b>, <pre>, ...) are untouched.
+    s = re.sub(r'<(?![a-zA-Z/])', '&lt;', s)
     # remove span tags
     s = re.sub(r'</?span[^>]*>', '', s)
     # strip style/class attributes
@@ -20620,7 +20626,7 @@ def _plan_patterns(tk, spot, pw=None, cw=None):
     if pw and cw and spot:
         flip = (float(pw) + float(cw)) / 2.0
         if spot < min(float(pw), flip):
-            parts.append(f"neg-gamma<${flip:.0f} 🔴")
+            parts.append(f"neg-gamma&lt;${flip:.0f} 🔴")   # escape < so it's not read as a tag
         elif spot > max(float(cw), flip):
             parts.append("above-walls 🟢")
         else:

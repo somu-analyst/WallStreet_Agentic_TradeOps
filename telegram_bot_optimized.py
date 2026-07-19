@@ -2580,72 +2580,43 @@ async def market_overview(query):
         except Exception:
             return None
 
-    # Signal tag_fn takes the fetched dict (px, chg) so every row can read a real
-    # tag off the day's move, not just VIX (user 2026-07-18: "why is signal blank").
-    # Thresholds are asset-appropriate: equities/BTC move more per day than FX/yields.
-    def _idx_tag(d):
-        if d["chg"] <= -1.0: return "SELLOFF"
-        if d["chg"] >=  1.0: return "RALLY"
-        return ""
-    def _gold_tag(d):
-        if d["chg"] >=  1.0: return "SAFE-HVN"
-        if d["chg"] <= -1.0: return "RISK-OFF"
-        return ""
-    def _oil_tag(d):
-        if d["chg"] >=  2.0: return "SUPPLY"
-        if d["chg"] <= -2.0: return "DEMAND-WK"
-        return ""
-    def _btc_tag(d):
-        if d["chg"] >=  2.0: return "RISK-ON"
-        if d["chg"] <= -2.0: return "RISK-OFF"
-        return ""
-    def _fx_tag(d):
-        if d["chg"] >=  0.5: return "USD WEAK"
-        if d["chg"] <= -0.5: return "USD STRNG"
-        return ""
-    def _yld_tag(d):
-        if d["chg"] <= -1.0: return "SAFETY"
-        if d["chg"] >=  1.0: return "YLD SPIKE"
-        return ""
-
     SPECS = [
-        # (section, display_name, yf_symbol, is_yield, extra_tag_fn)
-        ("INDICES",     "SPX",     "^GSPC",    False, _idx_tag),
-        ("INDICES",     "NDX",     "^IXIC",    False, _idx_tag),
-        ("INDICES",     "DOW",     "^DJI",     False, _idx_tag),
-        ("INDICES",     "RUT",     "^RUT",     False, _idx_tag),
-        ("FUTURES",     "ES",      "ES=F",     False, _idx_tag),
-        ("FUTURES",     "NQ",      "NQ=F",     False, _idx_tag),
-        ("VOLATILITY",  "VIX",     "^VIX",     False,
-         lambda d: "EXTREME FEAR" if d["px"]>30 else ("HIGH FEAR" if d["px"]>25 else ("ELEVATED" if d["px"]>20 else "CALM"))),
-        ("COMMODITIES", "Gold",    "GC=F",     False, _gold_tag),
-        ("COMMODITIES", "Oil",     "CL=F",     False, _oil_tag),
-        ("CRYPTO/FX",   "BTC",     "BTC-USD",  False, _btc_tag),
-        ("CRYPTO/FX",   "EUR/USD", "EURUSD=X", False, _fx_tag),
-        ("BONDS",       "10Y Yld", "^TNX",     True,  _yld_tag),
+        # (section, display_name, yf_symbol, is_yield)
+        ("INDICES",     "SPX",     "^GSPC",    False),
+        ("INDICES",     "NDX",     "^IXIC",    False),
+        ("INDICES",     "DOW",     "^DJI",     False),
+        ("INDICES",     "RUT",     "^RUT",     False),
+        ("FUTURES",     "ES",      "ES=F",     False),
+        ("FUTURES",     "NQ",      "NQ=F",     False),
+        ("VOLATILITY",  "VIX",     "^VIX",     False),
+        ("COMMODITIES", "Gold",    "GC=F",     False),
+        ("COMMODITIES", "Oil",     "CL=F",     False),
+        ("CRYPTO/FX",   "BTC",     "BTC-USD",  False),
+        ("CRYPTO/FX",   "EUR/USD", "EURUSD=X", False),
+        ("BONDS",       "10Y Yld", "^TNX",     True),
     ]
 
     all_rows = []   # (section, name, d) — d is _fetch result or None
-    for sec, name, sym, is_yld, tag_fn in SPECS:
+    for sec, name, sym, is_yld in SPECS:
         d = _fetch(sym, is_yld)
-        tag = tag_fn(d) if (d and tag_fn) else ""
-        all_rows.append((sec, name, d, tag))
+        all_rows.append((sec, name, d))
 
     # ── Aligned <pre> tables per section ──
+    # Signal col = plain colored circle (user 2026-07-18: "🔴/🟢, let it be" — no
+    # verbose text tags, just reuse the circle _fetch already computes off chg).
     from collections import defaultdict
     sections = defaultdict(list)
-    for _sec, name, d, tag in all_rows:
-        sections[_sec].append((name, d, tag))
+    for _sec, name, d in all_rows:
+        sections[_sec].append((name, d))
 
     colour_lines = []
     for sec_name, items in sections.items():
         colour_lines.append(shdr(sec_name))
         _sec_rows = []
-        for name, d, tag in items:
+        for name, d in items:
             if d:
                 arrow = _col_arrow(d["chg"])
-                note = tag if tag else "-"
-                _sec_rows.append((name, d["px_s"], f"{d['chg']:>+.2f}%", arrow, note))
+                _sec_rows.append((name, d["px_s"], f"{d['chg']:>+.2f}%", arrow, d["em"]))
             else:
                 _sec_rows.append((name, "N/A", "-", "-", "-"))
         colour_lines.append(_pipe_table(("Name", "Price", "Chg%", "Dir", "Signal"),

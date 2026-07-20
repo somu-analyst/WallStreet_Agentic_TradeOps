@@ -46,7 +46,12 @@ except Exception:
 # ---- config (mirrors NYSE_YFin.py) ------------------------------------------
 DATA_DIR = r"C:\Users\srini\Options_chain_data"
 US_CHARTS_DIR = os.path.join(DATA_DIR, "US_CHARTS")
-UNIVERSE_FILE = os.path.join(US_CHARTS_DIR, "ticker_universe.xlsx")
+# ticker_universe.xlsx moved into NYSE_DATA (next to the scripts) 2026-07-20; prefer that,
+# fall back to the old US_CHARTS location for safety.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+UNIVERSE_FILE = (os.path.join(_SCRIPT_DIR, "ticker_universe.xlsx")
+                 if os.path.exists(os.path.join(_SCRIPT_DIR, "ticker_universe.xlsx"))
+                 else os.path.join(US_CHARTS_DIR, "ticker_universe.xlsx"))
 UNIVERSE_SHEET_ACTIVE = "ticker_universe"
 # Output DB: US_data_OpenBB.db = full copy of the yfinance DB (all 53 tables,
 # seeded once via sqlite backup) + this script's captures accumulating in the

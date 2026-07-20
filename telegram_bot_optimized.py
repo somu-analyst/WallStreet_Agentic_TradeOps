@@ -371,22 +371,49 @@ import re
 
 
 # ─── Message splitting helpers (defined early so all handlers can use them) ───
+_SPLIT_TAG_RE = re.compile(r"<(/?)([a-zA-Z][\w-]*)\b[^>]*>")
+
 def _split_msg(text, limit=4000):
+    """Split a long HTML message into <=limit-char chunks WITHOUT breaking HTML.
+    Root cause fixed 2026-07-19: the old splitter cut on newlines with zero tag
+    awareness, so a cut inside a <pre> table left an unclosed <pre> in chunk N and
+    an orphan </pre> in chunk N+1 -> Telegram 400 -> escaped-plaintext fallback
+    (the '&lt;/pre&gt;' junk). Now: any tags left open at a cut are closed at the
+    end of that chunk and re-opened (with their original attributes) at the start
+    of the next, so every chunk is self-balanced HTML."""
+    text = str(text)
     if len(text) <= limit:
         return [text]
-    chunks = []
+    raw = []
     while len(text) > limit:
         cut = text.rfind(chr(10), 0, limit)
         if cut < 200:
             cut = limit
-        chunks.append(text[:cut])
+        raw.append(text[:cut])
         text = text[cut:].lstrip(chr(10))
     if text:
-        chunks.append(text)
+        raw.append(text)
+
+    chunks, carry = [], ""      # `carry` = re-open prefix inherited from prior chunk
+    for piece in raw:
+        piece = carry + piece
+        stack = []              # [(tagname, full_open_tag_string), ...]
+        for m in _SPLIT_TAG_RE.finditer(piece):
+            closing, name = m.group(1), m.group(2).lower()
+            if closing:
+                for j in range(len(stack) - 1, -1, -1):
+                    if stack[j][0] == name:
+                        del stack[j]; break
+            else:
+                stack.append((name, m.group(0)))
+        suffix = "".join(f"</{n}>" for n, _ in reversed(stack))   # close here
+        carry  = "".join(full for _, full in stack)               # reopen next
+        chunks.append(piece + suffix)
     return chunks
 
 async def _safe_reply(message, text, parse_mode="HTML", reply_markup=None):
     """Send text, auto-splitting at 4000 chars to avoid Telegram message-too-long errors."""
+    text = _colorize_headers(str(text))          # colour every standalone <b>heading</b>
     chunks = _split_msg(str(text))
     for i, chunk in enumerate(chunks):
         kb = reply_markup if i == len(chunks) - 1 else None
@@ -1040,6 +1067,17 @@ def get_conn():
         global _DB_TUNED
         if not _DB_TUNED:
             conn.execute("PRAGMA journal_mode=WAL")      # concurrent read while writing (set once, persists)
+            # perf indexes (2026-07-19): options_openbb had ZERO indexes (1.97M rows) so
+            # _bb_quote/_plan_prem full-scanned ~0.9s each. Composite idx -> microseconds.
+            # IF NOT EXISTS = instant no-op once built; re-creates if a rebuild drops them.
+            for _ix in (
+                "CREATE INDEX IF NOT EXISTS idx_oo_lookup ON options_openbb(ticker, strike, expiry_date, trade_date)",
+                "CREATE INDEX IF NOT EXISTS idx_oc_lookup ON options_change(ticker, strike, expiry_date, trade_date_now)",
+            ):
+                try:
+                    conn.execute(_ix)
+                except Exception:
+                    log.debug("perf index ensure failed", exc_info=True)
             _DB_TUNED = True
         conn.execute("PRAGMA synchronous=NORMAL")        # faster writes, still crash-safe under WAL
         conn.execute("PRAGMA temp_store=MEMORY")
@@ -2258,6 +2296,70 @@ def _disp_w(s):
     return w
 
 
+_TITLE_EMOJI_RULES = [
+    (("SQUEEZE", "SHORT INT", "FLOAT", "DAYS TO COVER"),                       "🩳"),
+    (("MAX PAIN", "PIN RISK", "PIN"),                                          "🎯"),
+    (("GAMMA", "WALL", "GEX", "KEY LEVEL"),                                    "🧱"),
+    (("SKEW", "FEAR", "PUT-CALL", "PUT/CALL", "PCR"),                          "😨"),
+    (("NOTIONAL", "SMART MONEY", "FLOW", "$ PAID", "PREMIUM", "DOLLAR"),       "💰"),
+    (("RSI", "MOMENTUM", "MACD", "STOCH"),                                     "📈"),
+    (("BOLLINGER", "BAND", "VOLATIL", "IV RANK", "IV RANK", "VRP"),            "🎚️"),
+    (("EMA", "DMA", "SMA", "TREND", "MOVING AV"),                              "📐"),
+    (("SCORE", "BEAT", "RATING", "CONVICTION", "GRADE"),                       "🏆"),
+    (("EVENT", "STRADDLE"),                                                    "⚡"),
+    (("VELOCITY", "SPIKE"),                                                    "🚀"),
+    (("ROLL",),                                                               "🔄"),
+    (("REVERSAL", "RISK REV"),                                                 "🔁"),
+    (("TRADE IDEA", "IDEA", "PLAY", "SETUP"),                                  "💡"),
+    (("RISK", "WARNING", "CAUTION"),                                          "⚠️"),
+    (("EXPIRY", "CALENDAR", "DTE", "TERM"),                                    "📅"),
+    (("BULL",),                                                               "🟢"),
+    (("BEAR",),                                                               "🔴"),
+    (("OI", "OPEN INTEREST", "BUILD", "VOLUME"),                              "📊"),
+]
+
+def _title_emoji(title):
+    """Prefix a section heading with a semantic color-emoji so replies aren't a
+    monotone wall of bold text (user ask 2026-07-19: 'add colors/symbols to headings
+    so the reader scans quickly'). Titles that already lead with an emoji/marker are
+    left untouched. Telegram HTML has no font colour, so a leading emoji IS the colour."""
+    t = str(title).strip()
+    if not t:
+        return title
+    o0 = ord(t[0])
+    if (0x1F000 <= o0 <= 0x1FAFF or 0x2600 <= o0 <= 0x27BF or 0x2B00 <= o0 <= 0x2BFF
+            or t[0] in "◈▸★☆●◆✦⭐"):
+        return title                                   # already has a leading marker
+    up = t.upper()
+    for keys, em in _TITLE_EMOJI_RULES:
+        if any(k in up for k in keys):
+            return f"{em} {t}"
+    return f"\U0001f539 {t}"                            # 🔹 default anchor
+
+
+_HDR_LINE_RE = re.compile(r"^(\s*)<b>([^<>]+)</b>\s*$")
+
+def _colorize_headers(text):
+    """Give every standalone <b>heading</b> line a semantic colour-emoji so messages
+    aren't a monotone wall of bold text (user ask 2026-07-19: 'colours/symbols on ALL
+    headings, not just this one'). Applied once in _safe_reply so it reaches every
+    command without touching hundreds of call sites. Only whole-line bold headers are
+    touched (inline bold inside a sentence is left alone); headers that already lead
+    with an emoji/marker are skipped by _title_emoji."""
+    if not isinstance(text, str) or "<b>" not in text:
+        return text
+    out = []
+    for ln in text.split("\n"):
+        m = _HDR_LINE_RE.match(ln)
+        if m:
+            inner = m.group(2)
+            colored = _title_emoji(inner)
+            if colored != inner:
+                ln = f"{m.group(1)}<b>{colored}</b>"
+        out.append(ln)
+    return "\n".join(out)
+
+
 def _report(title, headers, rows, right_cols=None, legend=None, notes=None, details=None):
     """UNIVERSAL result-message macro (user standard 2026-07-16, modeled on /earnvol):
     header bar + aligned _pipe_table + legend + optional per-row detail lines +
@@ -2300,7 +2402,7 @@ def _pipe_table(header_cols, rows_data, right_cols=None, title=None, legend=None
     body = "<pre>" + _html.escape("\n".join([_fmt(header_cols), sep] + [_fmt(r) for r in rows_data])) + "</pre>"
     out = []
     if title:
-        out.append(f"<b>{title}</b>")
+        out.append(f"<b>{_title_emoji(title)}</b>")
     out.append(body)
     if legend:
         out.append(f"<i>{legend}</i>")
@@ -4738,9 +4840,10 @@ def _oi_opportunity_table(ticker: str, conn, df, spot: float) -> str:
         return ""
 
     lines = []
-    exp_label = f" exp {exp_str[:5]}" if exp_str else ""
-    lines.append(f"\n<b>Trade Ideas{exp_label}{earn_flag}</b>")
-    lines.append(f"<i>HV:{hv*100:.0f}%  DTE:{dte}d  Monitor:{monitor}</i>")
+    _exp_disp = str(exp_str)[5:10] if exp_str else ""     # MM-DD (was exp_str[:5] -> '2026-' bug)
+    _exp_tag  = (f" · exp {_exp_disp} ({dte}d)" if _exp_disp else f" · {dte}d")
+    lines.append(f"\n<b>Trade Ideas{_exp_tag}{earn_flag}</b>")
+    lines.append(f"<i>HV:{hv*100:.0f}%  Monitor:{monitor}</i>")
 
     def _fk(n):
         a = abs(float(n or 0))
@@ -4748,16 +4851,24 @@ def _oi_opportunity_table(ticker: str, conn, df, spot: float) -> str:
         if a >= 1_000:     return f"{a/1e3:.0f}K"
         return f"{a:.0f}"
 
+    _exp_ttl = (f" · exp {_exp_disp}" if _exp_disp else "")
+    _exp_leg = (f" exp {_exp_disp}" if _exp_disp else "")
+    _typ_word = {"BUY CALL": "CALL", "BUY PUT ": "PUT", "STRADDLE": "STRADDLE",
+                 "SELL PUT": "PUT", "SELL CALL": "CALL", "IRON COND": "CONDOR"}
     # ── BUY table (/earnvol standard: emoji ST col; P=2×In, L=In) ─────
     _bem = {"BUY CALL": "🟢", "BUY PUT ": "🔴", "STRADDLE": "🟡",
             "SELL PUT": "🟢", "SELL CALL": "🔴", "IRON COND": "🟡"}
     if buy_opps:
-        _brows = [(_bem.get(strat, "⚪"), f"{strike:.0f}", f"{pw}%", _fk(invest))
-                  for strat, strike, pw, rr, invest, profit, loss in buy_opps]
+        _brows, _bdet = [], []
+        for strat, strike, pw, rr, invest, profit, loss in buy_opps:
+            _brows.append((_bem.get(strat, "⚪"), f"{strike:.0f}", f"{pw}%", _fk(invest)))
+            _bdet.append(f"• BUY {_typ_word.get(strat, strat)} ${strike:.0f}{_exp_leg} — "
+                         f"pay ${_fk(invest)}, target 2:1 (+${_fk(profit)}), win {pw}%")
         lines.append("\n" + _pipe_table(
             ("ST", "Stk", "Win", "In$"), _brows, right_cols={2, 3},
-            title="BUY (pay premium)",
+            title=f"BUY (pay premium){_exp_ttl}",
             legend="🟢 call · 🔴 put · 🟡 straddle — 2:1 target, max loss = In"))
+        lines.append("\n".join(_bdet))
 
     # ── SELL table (Rcv in table, per-row risk in detail lines) ───────
     if sell_opps:
@@ -4765,10 +4876,10 @@ def _oi_opportunity_table(ticker: str, conn, df, spot: float) -> str:
         for strat, strike, pw, rr, invest, profit, loss in sell_opps:
             _s = strat.replace("SELL ", "S").replace("IRON COND", "ICOND")[:5].strip()
             _srows.append((_bem.get(strat, "⚪"), f"{strike:.0f}", f"{pw}%", _fk(invest)))
-            _sdet.append(f"• {_s} {strike:.0f} — collect ${_fk(invest)}, max risk ${_fk(loss)}")
+            _sdet.append(f"• {_s} ${strike:.0f}{_exp_leg} — collect ${_fk(invest)}, max risk ${_fk(loss)}")
         lines.append("\n" + _pipe_table(
             ("ST", "Stk", "Win", "Rcv$"), _srows, right_cols={2, 3},
-            title="SELL (collect premium)",
+            title=f"SELL (collect premium){_exp_ttl}",
             legend="🟢 sell put · 🔴 sell call · 🟡 condor"))
         lines.append("\n".join(_sdet))
 
@@ -5830,6 +5941,16 @@ async def mirofish_ticker_detail(query, ticker):
         parts.append(f"📌 Bias: {bias}")
         parts.append(f"💡 <i>{rec}</i>")
 
+    # Plain-English write-up + your-position advice
+    try:
+        _wc = get_conn()
+        _wu = _ticker_writeup(tk, _wc)
+        _wc.close()
+        if _wu:
+            parts.append(_wu)
+    except Exception:
+        log.debug("mirofish writeup failed", exc_info=True)
+
     try:
         await _loading.delete()
     except Exception:
@@ -5845,6 +5966,15 @@ async def mirofish_ticker_detail(query, ticker):
         [BACK_BTN],
     ])
     await _safe_reply(query.message, "\n".join(parts), reply_markup=kb)
+
+    # Visual: today intraday + ~2yr line w/ volume-by-price (POC) + OI walls
+    try:
+        _png = _ticker_chart_png(tk)
+        if _png:
+            await query.message.reply_photo(
+                _png, caption=f"📈 {tk} — today + ~2yr · volume-by-price (POC) + OI walls")
+    except Exception:
+        log.debug("mirofish chart send failed", exc_info=True)
 
 
 
@@ -6025,6 +6155,16 @@ async def oi_roll_detail(query, ticker):
         parts.append("\n<i>No significant roll activity today.</i>")
         parts.append("<i>Rolls require min 300 contracts moved.</i>")
 
+    # Plain-English write-up + your-position advice
+    try:
+        _wc = get_conn()
+        _wu = _ticker_writeup(tk, _wc)
+        _wc.close()
+        if _wu:
+            parts.append(_wu)
+    except Exception:
+        log.debug("oi_roll writeup failed", exc_info=True)
+
     try:
         await _loading.delete()
     except Exception:
@@ -6109,16 +6249,17 @@ def analyze_inst_signals(ticker, conn):
                 dte = max(0, (_dt.strptime(exp_label, "%Y-%m-%d") - td).days)
             except Exception:
                 log.debug("suppressed exception", exc_info=True)
+        # Vectorized max-pain (2026-07-19): the old O(n^2) iterrows loop dominated
+        # analyze_inst_signals (~3s -> ms). numpy broadcast, same result.
+        _sa = grp["strike"].to_numpy(dtype=float)
+        _ca = pd.to_numeric(grp["openInt_Call_now"], errors="coerce").fillna(0).to_numpy(dtype=float)
+        _pa = pd.to_numeric(grp["openInt_Put_now"],  errors="coerce").fillna(0).to_numpy(dtype=float)
         best_s, best_pain = None, float("inf")
-        for s in grp["strike"].values:
-            itm_c = float(sum((float(s) - float(r["strike"])) * float(r["openInt_Call_now"])
-                              for _, r in grp.iterrows() if float(r["strike"]) < float(s)))
-            itm_p = float(sum((float(r["strike"]) - float(s)) * float(r["openInt_Put_now"])
-                              for _, r in grp.iterrows() if float(r["strike"]) > float(s)))
-            pain = itm_c + itm_p
-            if pain < best_pain:
-                best_pain = pain
-                best_s = float(s)
+        if len(_sa):
+            _pain = (np.maximum(0.0, _sa[:, None] - _sa[None, :]) * _ca[None, :]).sum(axis=1) \
+                  + (np.maximum(0.0, _sa[None, :] - _sa[:, None]) * _pa[None, :]).sum(axis=1)
+            _bi = int(np.argmin(_pain))
+            best_s = float(_sa[_bi]); best_pain = float(_pain[_bi])
         if best_s is not None:
             result["max_pain"].append(
                 {"expiry": exp_label, "expiry_sort": str(exp_sort), "strike": best_s, "dte": dte})
@@ -6443,21 +6584,34 @@ async def inst_signals_detail(query, ticker):
         sig = {}
     conn.close()
 
-    spot = sig.get("notional", {}).get("avg_spot", 0) if sig.get("notional") else 0
+    # spot = CURRENT close (was notional 'avg_spot', an OI-weighted average that ran
+    # ~7% off the real price -> wrong max-pain distances + a nonsense '+5%' target,
+    # 2026-07-20). DB close first (fast, EOD-correct); avg_spot only as last resort.
+    spot = 0.0
+    try:
+        _sconn = get_conn()
+        _sd = pd.read_sql("SELECT close FROM stock_daily WHERE ticker=? "
+                          "ORDER BY trade_date DESC LIMIT 1", _sconn, params=(tk,))
+        _sconn.close()
+        if not _sd.empty:
+            spot = float(_sd["close"].iloc[0])
+    except Exception:
+        log.debug("inst_signals spot lookup failed", exc_info=True)
+    if not spot:
+        spot = (_last_price(tk) or 0) or (sig.get("notional", {}).get("avg_spot", 0) if sig.get("notional") else 0)
     parts = [hdr(f"INSTITUTIONAL SIGNALS -- {tk}")]
     parts.append("<i>Max Pain = strike where most options expire worthless. Gamma Walls = high-OI strikes where dealers hedge hard, acting as price magnets/barriers.</i>")
 
     # 1. Max Pain
     mp_list = sig.get("max_pain", [])
     if mp_list:
-        parts.append("\n<b>MAX PAIN  (Expiry Price Magnet)</b>")
         _mp_rows = []
         for mp in mp_list[:4]:
             dte_s = f"{mp['dte']}d" if mp.get("dte") is not None else "-"
             dist  = f"{(spot - mp['strike']) / spot * 100:+.1f}%" if spot > 0 else "-"
             _mp_rows.append((mp["expiry"][:8], f"${mp['strike']:.0f}", dte_s, dist))
-        parts.append("\n<b>MAX PAIN  (Expiry Price Magnet)</b>\n"
-                     + _pipe_table(("Expiry", "Strike", "DTE", "vs Spot"), _mp_rows, right_cols={1, 2, 3}))
+        parts.append("\n" + _pipe_table(("Expiry", "Strike", "DTE", "vs Spot"), _mp_rows,
+                     right_cols={1, 2, 3}, title="MAX PAIN  (Expiry Price Magnet)"))
         parts.append("<i>Fade moves away from max pain as expiry nears</i>")
 
     # 2. Gamma Walls
@@ -6470,8 +6624,8 @@ async def inst_signals_detail(query, ticker):
             label = "CEILING" if w["type"] == "CALL" else ("FLOOR" if w["type"] == "PUT" else "WALL")
             _gw_rows.append((f"${w['strike']:.0f}", label, _fk_w(w["total_oi"]),
                              _fk_w(w["call_oi"]), _fk_w(w["put_oi"])))
-        parts.append("\n<b>GAMMA WALLS  (Dealer Hedging Levels)</b>\n"
-                     + _pipe_table(("Strike", "Type", "Total OI", "C-OI", "P-OI"), _gw_rows, right_cols={2, 3, 4}))
+        parts.append("\n" + _pipe_table(("Strike", "Type", "Total OI", "C-OI", "P-OI"), _gw_rows,
+                     right_cols={2, 3, 4}, title="GAMMA WALLS  (Dealer Hedging Levels)"))
         parts.append("<i>Price gravitates toward / stalls at these strikes</i>")
 
     # 3. Smart Money Flow
@@ -6486,8 +6640,8 @@ async def inst_signals_detail(query, ticker):
             ("CALLS", _fk_sf(sf.get("call_oi_chg", 0)), _fk_sf(sf.get("call_vol", 0)), sf.get("call_verdict", "-")),
             ("PUTS",  _fk_sf(sf.get("put_oi_chg",  0)), _fk_sf(sf.get("put_vol",  0)), sf.get("put_verdict",  "-")),
         ]
-        parts.append("\n<b>SMART MONEY FLOW</b>\n"
-                     + _pipe_table(("Side", "OI Chg", "Volume", "Verdict"), _sf_rows, right_cols={1, 2}))
+        parts.append("\n" + _pipe_table(("Side", "OI Chg", "Volume", "Verdict"), _sf_rows,
+                     right_cols={1, 2}, title="SMART MONEY FLOW"))
         cv, pv = sf.get("call_verdict", ""), sf.get("put_verdict", "")
         if "ACCUM" in cv and "DISTRIB" in pv:
             interp = "BULLISH — calls building, puts unwinding"
@@ -6509,8 +6663,8 @@ async def inst_signals_detail(query, ticker):
             ("Put",   f"${nt.get('put_m',  0):.1f}M", f"{nt.get('bear_score', 0):,.0f}"),
             ("Net",   f"${nt.get('net_m',  0):+.1f}M", f"{nt.get('ratio', 0):.2f}x"),
         ]
-        parts.append("\n<b>NOTIONAL CONVICTION  (Dollar Weight)</b>\n"
-                     + _pipe_table(("Side", "Notional", "Score"), _nt_rows, right_cols={1, 2}))
+        parts.append("\n" + _pipe_table(("Side", "Notional", "Score"), _nt_rows,
+                     right_cols={1, 2}, title="NOTIONAL CONVICTION  (Dollar Weight)"))
         parts.append(f"<i>Dollar bias: <b>{nt.get('bias', '')}</b></i>")
 
     # 5. Put Skew Term Structure
@@ -6523,8 +6677,8 @@ async def inst_signals_detail(query, ticker):
                 f"${_se['call_strike']:.0f}/${_se['put_strike']:.0f}",
                 f"{_se['skew']:.2f}x {_se['fear']}",
             ))
-        parts.append("\n<b>PUT-CALL SKEW  (Fear Gauge — Term Structure)</b>\n"
-                     + _pipe_table(("Expiry", "C/P Strike", "Skew / Sentiment"), _ps_rows, right_cols={2}))
+        parts.append("\n" + _pipe_table(("Expiry", "C/P Strike", "Skew / Sentiment"), _ps_rows,
+                     right_cols={2}, title="PUT-CALL SKEW  (Fear Gauge — Term Structure)"))
         _top_fear = _skew_term[0].get("fear", "")
         if _top_fear in ("XFEAR", "HFEAR"):
             hint = "Heavy put-premium demand — institutions hedging; often near bottoms"
@@ -6541,11 +6695,11 @@ async def inst_signals_detail(query, ticker):
         for pin in pins[:5]:
             oi_k = f"{pin['total_oi']//1000}K" if pin['total_oi'] >= 1000 else str(pin['total_oi'])
             _pin_rows.append((f"${pin['strike']:.0f}", pin["expiry"][:8], str(pin["dte"]), oi_k))
-        parts.append("\n<b>PIN RISK  (DTE \u2264 7)</b>\n"
-                     + _pipe_table(("Strike", "Expiry", "DTE", "Total OI"), _pin_rows, right_cols={2, 3}))
+        parts.append("\n" + _pipe_table(("Strike", "Expiry", "DTE", "Total OI"), _pin_rows,
+                     right_cols={2, 3}, title="PIN RISK  (DTE \u2264 7)"))
         parts.append("<i>High OI near expiry = gravitational price pin</i>")
 
-    if not any([mp_list, walls, sf, nt, ps, pins]):
+    if not any([mp_list, walls, sf, nt, _skew_term, pins]):
         parts.append("\n<i>No institutional data available for this ticker.</i>")
 
     # ── Multi-week OI trend + strike breakdown ──────────────────────
@@ -6592,7 +6746,12 @@ async def inst_signals_detail(query, ticker):
     _oi_sig_v = (_nt.get('bias', '') or '') if _nt else ''
     # Gamma walls as key strikes
     _gw_list = sig.get('gamma_walls', []) or []
-    _key_stk = [{"label": f"Gamma Wall {'Call' if gw.get('side','') == 'call' else 'Put'}", "strike": float(gw.get('strike', 0))} for gw in _gw_list[:3] if gw.get('strike')]
+    # Gamma walls are high-OI strikes, not puts/calls — label by position vs spot
+    # (above = resistance, below = support) instead of the misleading 'Put' default.
+    _key_stk = [{"label": ("Gamma Wall (resistance)" if float(gw.get('strike', 0)) > spot
+                           else "Gamma Wall (support)"),
+                 "strike": float(gw.get('strike', 0))}
+                for gw in _gw_list[:3] if gw.get('strike')]
     _vblock = _build_verdict_block(tk, {
         'oi_sig': _oi_sig_v, 'pcr': _pcr_v, 'notional_bias': _nb,
         'mp_bias': _mp_bias, 'mp_strike': _mp_str, 'spot': spot,
@@ -9947,6 +10106,9 @@ def _positions_card_parts(trades, now_s, today):
     rows       = []
     total_pnl  = 0.0
     urgent_lines = []
+    _pc_conn   = get_conn()          # shared conn for fast BB leg marks
+    _ah_cache  = {}                  # per-ticker after-hours spot (avoid repeat fast_info)
+    _ah_any    = False               # did any leg use an extended-hours mark?
 
     for _, tr in trades.iterrows():
         tid      = int(tr.get("trade_id", 0))
@@ -9967,37 +10129,48 @@ def _positions_card_parts(trades, now_s, today):
             except Exception:
                 log.debug("suppressed exception", exc_info=True)
 
-        # Live option price + delta (probability) from chain
+        # Option mark WITHOUT a per-leg yfinance option-chain download (was the
+        # '⏳ Fetching live marks' 5-15s stall, 2026-07-19). BB DB gives IV/delta/mid
+        # (indexed, ~instant); the leg is BS-re-priced off the CURRENT stock — which is
+        # the extended-hours price when the market is closed, so 'Now' tracks the stock
+        # after 4pm even though the option itself is frozen (user ask: "take stock values
+        # if option values are frozen").
         cur_px = entry
         prob   = None
         stock_px = None
         try:
-            _tkr = _yf_ticker(tk)
-            _sh  = _tkr.history(period="1d", interval="5m")
-            if not _sh.empty:
-                stock_px = float(_sh["Close"].iloc[-1])
-            # normalise expiry to YYYY-MM-DD for yfinance
-            try:
-                _exp_yf = datetime.strptime(expiry_s[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
-            except Exception:
+            typ = "call" if otype == "CALL" else "put"
+            if tk not in _ah_cache:
                 try:
-                    _exp_yf = datetime.strptime(expiry_s[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+                    _ah_cache[tk] = _get_spot_with_ah(tk)
                 except Exception:
-                    _exp_yf = None
-            if _exp_yf:
-                _chain = _tkr.option_chain(_exp_yf)
-                _df    = _chain.calls if otype == "CALL" else _chain.puts
-                _near  = _df[abs(_df["strike"] - strike) < 0.01]
-                if not _near.empty:
-                    _lp = _near["lastPrice"].iloc[0]
-                    if _lp and float(_lp) > 0:
-                        cur_px = float(_lp)
-                    if "delta" in _near.columns:
-                        _dv = _near["delta"].iloc[0]
-                        if _dv is not None and not pd.isna(_dv):
-                            prob = abs(float(_dv)) * 100
+                    _ah_cache[tk] = {}
+            _ah = _ah_cache[tk] or {}
+            if _ah.get("is_extended"):
+                _ah_any = True
+            stock_px = float(_ah.get("spot_ext") or _ah.get("spot_reg") or 0) or (_last_price(tk) or None)
+            bbq = _bb_quote(_pc_conn, tk, strike, expiry_s[:10], typ) if strike > 0 else None
+            iv_leg = None
+            if bbq:
+                iv_leg = bbq.get("iv")
+                if bbq.get("delta"):
+                    prob = abs(float(bbq["delta"])) * 100
+                if bbq.get("mid", 0) > 0:
+                    cur_px = bbq["mid"]
+                elif bbq.get("last", 0) > 0:
+                    cur_px = bbq["last"]
+            # BS re-price off the (extended-hours) stock, holding the frozen IV — keeps
+            # 'Now' current in every session without a chain download.
+            if strike > 0 and stock_px and dte is not None and dte >= 0 and iv_leg:
+                _T = max(dte, 0) / 365.0
+                if _T > 0:
+                    _g = bs_greeks(stock_px, strike, _T, R, iv_leg, typ)
+                    if _g.get("price", 0) > 0:
+                        cur_px = _g["price"]
+                    if prob is None and _g.get("delta") is not None:
+                        prob = abs(float(_g["delta"])) * 100
         except Exception:
-            log.debug("suppressed exception", exc_info=True)
+            log.debug("positions leg BB mark failed", exc_info=True)
 
         # Rough moneyness-based probability if delta unavailable
         if prob is None and stock_px and strike:
@@ -10062,6 +10235,11 @@ def _positions_card_parts(trades, now_s, today):
         prob_s = f"{prob:.0f}%" if prob is not None else "?"
         rows.append((em, tk, otype[:4], strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s, action))
 
+    try:
+        _pc_conn.close()
+    except Exception:
+        pass
+
     # ── Action emoji map (replaces single-char badge + legend) ──────
     _action_em = {
         "EXIT NOW":    "🚨",
@@ -10106,17 +10284,20 @@ def _positions_card_parts(trades, now_s, today):
         # glyph itself, which every Telegram client renders larger than a
         # text character — that's a font fact, not fixable in the table code.
         _st_dot = {"🚨": "🔴", "🔴": "🔴", "🟢": "🟢", "⚠️": "🟡", "🟡": "🟡"}.get(em, "🟡")
-        _tbl_rows.append((_st_dot, _leg, _pnl_s, f"{pnl_pct:+.0f}%"))
+        _tbl_rows.append((_st_dot, _leg, f"{cur_px:.2f}", f"{pnl_pct:+.0f}%"))
 
+        # Card carries the FULL per-leg detail: bought price, current mark, P&L $ and %,
+        # win prob, OI (user 2026-07-19: table 'only shows P&L, not bought/last price').
         html_cards.append(
-            f"{a_em} <b>{tk} {otype} ${int(strike)}</b> {dte_disp}{urg_flag} · "
-            f"{entry:.2f}→{cur_px:.2f} · win {prob_s} · OI {oi_disp}\n"
-            f"<b>{action}</b> — {advice}"
+            f"{a_em} <b>{tk} {otype} ${int(strike)}</b> · {dte_disp}{urg_flag}\n"
+            f"   Bought <b>${entry:.2f}</b> → Now <b>${cur_px:.2f}</b> · "
+            f"P&L <b>{pnl:+,.0f}</b> ({pnl_pct:+.0f}%) · win {prob_s} · OI {oi_disp}\n"
+            f"   <b>{action}</b> — {advice}"
         )
 
-    table1 = _pipe_table(("ST", "Leg", "P&L$", "P%"), _tbl_rows,
+    table1 = _pipe_table(("ST", "Leg", "Now", "P%"), _tbl_rows,
                          right_cols={2, 3},
-                         legend="🟢 good · 🟡 watch · 🔴 bad") if _tbl_rows else ""
+                         legend="Now = current mark · 🟢 good · 🟡 watch · 🔴 bad") if _tbl_rows else ""
 
     advice_section = "\n\n".join(html_cards)
     colour_section = f"{table1}\n\n{advice_section}"
@@ -10167,8 +10348,13 @@ def _positions_card_parts(trades, now_s, today):
     except Exception as _e_hp_pm:
         log.debug(f"pos_mon hp block: {_e_hp_pm}")
 
+    _ah_banner = ""
+    if _ah_any:
+        _ah_banner = ("<i>⏳ After-hours: 'Now' re-priced from the extended-hours stock via "
+                      "Black-Scholes (IV held); the options themselves are frozen at the 4pm close.</i>\n\n")
     full_msg = (
         f"{hdr(f'💼 POSITIONS · {now_s}')}\n\n"
+        + _ah_banner
         + colour_section
         + urgent_section
         + hp_section
@@ -10176,7 +10362,7 @@ def _positions_card_parts(trades, now_s, today):
     )
 
     return {"full": full_msg,
-            "head": f"{hdr(f'💼 POSITIONS · {now_s}')}\n\n{colour_section}",
+            "head": f"{hdr(f'💼 POSITIONS · {now_s}')}\n\n{_ah_banner}{colour_section}",
             "tail": urgent_section + hp_section + footer,
             "first_tk": str(trades["ticker"].iloc[0]).upper() if not trades.empty else "SPY"}
 
@@ -11549,7 +11735,14 @@ async def quick_quote(query, ticker):
 # ═══════════════════════════════════════════════════════════
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    # answer() must NOT be fatal: a stale/expired callback (old message, or a tap that
+    # landed during one of the bot restarts) raises 'query is too old / invalid' and,
+    # since it was outside the try, killed the whole handler -> button looked dead in
+    # 'many messages' (fix 2026-07-20). Routing below still works via reply_text.
+    try:
+        await query.answer()
+    except Exception:
+        log.debug("callback answer failed (stale query?)", exc_info=True)
     data = query.data
     log.info("CB tap: %r", data)          # TRACE 2026-07-18: which button data arrives
 
@@ -15097,6 +15290,7 @@ def _hp_model_iv_rank(ticker, conn, spot):
         if len(dates) < 20 or spot <= 0:
             return {"signal": "NEUTRAL", "prob": 50, "reason": "Need 20+ days for IV rank"}
 
+        _sqrt2pi = (2.0 * np.pi) ** 0.5
         def _atm_iv(dt_str):
             opts = pd.read_sql(
                 "SELECT strike, expiry_date, lastPrice_Call_now FROM options_change"
@@ -15108,7 +15302,11 @@ def _hp_model_iv_rank(ticker, conn, spot):
                 try:
                     exp = _dt2.strptime(r["expiry_date"], "%Y-%m-%d").date()
                     T   = max((exp - today).days / 365.0, 1/365.0)
-                    iv  = _implied_vol_hp(float(r["lastPrice_Call_now"]), spot, float(r["strike"]), T)
+                    # Brenner-Subrahmanyam closed-form ATM IV: sigma ~ sqrt(2pi/T)*C/S
+                    # (2026-07-20). Replaces Newton root-finding (_implied_vol_hp) that
+                    # cost ~190k BS evals / ~60s here; the IV *rank* — all this model uses —
+                    # is preserved because the transform is monotonic in true IV at fixed T.
+                    iv  = _sqrt2pi / (T ** 0.5) * (float(r["lastPrice_Call_now"]) / spot)
                     if 0.05 < iv < 3.0:
                         ivs.append(iv * 100)
                 except Exception:
@@ -16774,6 +16972,266 @@ def _oi_multiday_conviction_text(ticker, n_days=7):
     return "\n".join(lines_out)
 
 
+def _fk_amt(n):
+    """+39K / -1.2M compact signed money/contract formatter (shared by write-up)."""
+    n = float(n or 0); s = "+" if n >= 0 else "-"; a = abs(n)
+    if a >= 1_000_000: return f"{s}{a/1_000_000:.1f}M"
+    if a >= 1_000:     return f"{s}{a/1_000:.0f}K"
+    return f"{s}{a:.0f}"
+
+
+def _ticker_chart_png(tk, levels=None):
+    """One visual to grasp a ticker fast (user ask 2026-07-19):
+      • TOP  — today's intraday move (1-min line) + volume.
+      • BOTTOM — ~2yr daily close with a VOLUME-BY-PRICE histogram (where the most
+        volume traded = 'Point of Control') and the OI call-wall / put-wall / max-pain
+        drawn as horizontal support/resistance lines.
+    Design mirrors how traders read charts (TradingView VPVR 'point of control' +
+    options max-pain as S/R). Returns PNG bytes, or None if no data."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.gridspec import GridSpec
+        import numpy as _np, os as _os, sqlite3 as _sql
+        from io import BytesIO as _BytesIO
+        tk = str(tk).upper()
+        BG="#0d1117"; GRID="#21262d"; LINE="#58a6ff"; TEXT="#c9d1d9"
+        UP="#26a641"; DN="#da3633"; CW="#f85149"; PW="#3fb950"; MP="#d29922"; VP="#6e7681"
+
+        conn = get_conn()
+        if levels is None:
+            levels = _oi_key_levels(tk, conn) or {}
+        daily = pd.read_sql("SELECT trade_date, close, volume FROM stock_history WHERE ticker=? "
+                            "ORDER BY trade_date DESC LIMIT 504", conn, params=(tk,))
+        conn.close()
+        if daily.empty:
+            return None
+        daily = daily.iloc[::-1].reset_index(drop=True)
+        d_close = pd.to_numeric(daily["close"],  errors="coerce").to_numpy()
+        d_vol   = pd.to_numeric(daily["volume"], errors="coerce").fillna(0).to_numpy()
+        spot = float(d_close[-1])
+
+        # latest intraday session
+        intra = pd.DataFrame(); idate = None
+        try:
+            ic = _sql.connect(_os.path.join(DATA_DIR, "US_intraday.db"))
+            intra = pd.read_sql("SELECT ts, close, volume FROM intraday_bars WHERE ticker=? AND "
+                                "trade_date=(SELECT MAX(trade_date) FROM intraday_bars WHERE ticker=?) "
+                                "ORDER BY ts", ic, params=(tk, tk))
+            _r = ic.execute("SELECT MAX(trade_date) FROM intraday_bars WHERE ticker=?", (tk,)).fetchone()
+            idate = _r[0] if _r else None
+            ic.close()
+        except Exception:
+            pass
+
+        fig = plt.figure(figsize=(7.2, 8.2), dpi=130, facecolor=BG)
+        gs  = GridSpec(2, 2, width_ratios=[4, 1], height_ratios=[1, 1.5],
+                       hspace=0.30, wspace=0.03, figure=fig)
+        ax_i = fig.add_subplot(gs[0, :])
+        ax_p = fig.add_subplot(gs[1, 0])
+        ax_v = fig.add_subplot(gs[1, 1], sharey=ax_p)
+        for a in (ax_i, ax_p, ax_v):
+            a.set_facecolor(BG); a.grid(True, color=GRID, lw=0.5, ls="--")
+            a.spines[:].set_visible(False); a.tick_params(colors=TEXT, labelsize=7)
+
+        # ── Panel A: today's intraday ──
+        if not intra.empty and len(intra) > 2:
+            icl = pd.to_numeric(intra["close"], errors="coerce").to_numpy()
+            xs  = list(range(len(icl)))
+            net = (icl[-1] - icl[0]) / icl[0] * 100 if icl[0] else 0
+            col = UP if net >= 0 else DN
+            ax_i.plot(xs, icl, color=col, lw=1.3)
+            ax_i.fill_between(xs, icl, _np.nanmin(icl), color=col, alpha=0.08)
+            axiv = ax_i.twinx()
+            axiv.bar(xs, pd.to_numeric(intra["volume"], errors="coerce").fillna(0).to_numpy() / 1e3,
+                     color=VP, alpha=0.30, width=1.0)
+            axiv.set_yticks([]); axiv.spines[:].set_visible(False)
+            ax_i.set_title(f"{tk}  today ({idate})   {icl[-1]:,.2f}   {net:+.2f}%",
+                           loc="left", color=TEXT, fontsize=10, fontweight="bold", pad=6)
+            ax_i.yaxis.tick_right(); ax_i.tick_params(axis="x", bottom=False, labelbottom=False)
+        else:
+            ax_i.text(0.5, 0.5, "No intraday bars for latest session",
+                      ha="center", va="center", color=TEXT, fontsize=9)
+            ax_i.set_xticks([]); ax_i.set_yticks([])
+
+        # ── Panel B: ~2yr daily close + option walls ──
+        xs2 = list(range(len(d_close)))
+        ax_p.plot(xs2, d_close, color=LINE, lw=1.1)
+        cw = float(levels.get("call_wall") or 0); pw = float(levels.get("put_wall") or 0)
+        mp = float(levels.get("max_pain")  or 0)
+        def _hl(val, color, label):
+            if val and 0.5 * spot < val < 2.0 * spot:
+                ax_p.axhline(val, color=color, lw=1.0, ls="--", alpha=0.9)
+                ax_p.text(len(d_close) * 0.995, val, f" {label} {val:,.0f}",
+                          color=color, fontsize=7, va="center", ha="right")
+        _hl(cw, CW, "Call wall"); _hl(pw, PW, "Put wall"); _hl(mp, MP, "Max pain")
+        ax_p.axhline(spot, color=TEXT, lw=0.8, ls=":", alpha=0.7)
+        lo, hi = float(_np.nanmin(d_close)), float(_np.nanmax(d_close))
+        walls_on = [v for v in (cw, pw, mp) if v and 0.5 * spot < v < 2.0 * spot]
+        ymin = min([lo] + walls_on); ymax = max([hi] + walls_on)
+        pad = (ymax - ymin) * 0.04 or 1.0
+        ax_p.set_ylim(ymin - pad, ymax + pad)
+        ax_p.set_title(f"{tk}  ~{len(d_close)/252:.1f}yr daily  ·  spot {spot:,.0f}",
+                       loc="left", color=TEXT, fontsize=9, fontweight="bold", pad=4)
+        ax_p.yaxis.tick_left(); ax_p.tick_params(axis="x", bottom=False, labelbottom=False)
+
+        # ── Panel C: volume-by-price (where volume traded) ──
+        if hi > lo:
+            nb = 40
+            histv, edges = _np.histogram(d_close, bins=nb, range=(lo, hi), weights=d_vol)
+            centers = (edges[:-1] + edges[1:]) / 2
+            if histv.max() > 0:
+                poc = int(_np.argmax(histv))
+                cols = [MP if i == poc else VP for i in range(nb)]
+                ax_v.barh(centers, histv / histv.max(), height=(hi - lo) / nb * 0.9,
+                          color=cols, alpha=0.75)
+                ax_v.text(0.02, centers[poc], f" POC {centers[poc]:,.0f}",
+                          color=MP, fontsize=6.5, va="center", ha="left")
+        # price ledger on the far-right y-axis (user 2026-07-20): ax_v shares the price
+        # axis, so its right ticks label the stock-value scale down the right edge.
+        ax_v.set_xticks([])
+        ax_v.yaxis.tick_right(); ax_v.yaxis.set_label_position("right")
+        ax_v.tick_params(axis="y", labelright=True, labelleft=False, colors=TEXT, labelsize=7)
+        try:
+            from matplotlib.ticker import FuncFormatter as _FF
+            ax_v.yaxis.set_major_formatter(_FF(lambda v, _p: f"${v:,.0f}"))
+        except Exception:
+            pass
+        ax_v.set_title("Vol@price", color=TEXT, fontsize=7, pad=4)
+
+        buf = _BytesIO(); fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+        plt.close(fig); buf.seek(0)
+        return buf.read()
+    except Exception as _e:
+        log.debug(f"_ticker_chart_png {tk} failed: {_e}", exc_info=True)
+        try:
+            import matplotlib.pyplot as _plt; _plt.close("all")
+        except Exception:
+            pass
+        return None
+
+
+def _ticker_writeup(tk, conn, spot=0.0, call_chg=0.0, put_chg=0.0, pcr=1.0,
+                    sig_lbl="", levels=None, latest_date=None):
+    """Plain-English 'what's happening -> what it means -> your trade & risk' synthesis
+    for a ticker's OI picture. Reusable across the OI-detail / OI-rolls / mirofish views
+    (user ask 2026-07-19: 'explain in simple language what happened, leading to what,
+    and the trade & risk'). Returns an HTML block (or '' on failure)."""
+    try:
+        tk = str(tk).upper()
+        # self-compute flow + signal when the caller didn't pass them (one-call reuse)
+        if not latest_date:
+            _r = pd.read_sql("SELECT DISTINCT trade_date_now FROM options_change WHERE ticker=? "
+                             "ORDER BY trade_date_now DESC LIMIT 1", conn, params=(tk,))
+            latest_date = _r["trade_date_now"].iloc[0] if not _r.empty else None
+        if (not sig_lbl) and latest_date:
+            _a = pd.read_sql("SELECT SUM(change_OI_Call) cc, SUM(change_OI_Put) pp, "
+                             "SUM(openInt_Call_now) co, SUM(openInt_Put_now) po "
+                             "FROM options_change WHERE ticker=? AND trade_date_now=?",
+                             conn, params=(tk, latest_date))
+            if not _a.empty:
+                call_chg = float(_a["cc"].iloc[0] or 0); put_chg = float(_a["pp"].iloc[0] or 0)
+                _co = float(_a["co"].iloc[0] or 0);      _po = float(_a["po"].iloc[0] or 0)
+                pcr = _po / _co if _co > 0 else 1.0
+                sig_lbl, _ = _oi_signal_light(call_chg, put_chg, pcr)
+        if levels is None:
+            levels = _oi_key_levels(tk, conn, latest_date) or {}
+        cw = float(levels.get("call_wall") or 0)
+        pw = float(levels.get("put_wall")  or 0)
+        mp = float(levels.get("max_pain")  or 0)
+        spot = float(spot or 0)
+        if spot <= 0:
+            try:
+                _sd = pd.read_sql("SELECT close FROM stock_daily WHERE ticker=? "
+                                  "ORDER BY trade_date DESC LIMIT 1", conn, params=(tk,))
+                if not _sd.empty:
+                    spot = float(_sd["close"].iloc[0])
+            except Exception:
+                pass
+
+        # ── read of the flow ──
+        if "BULL" in sig_lbl and "HEDGE" not in sig_lbl:   bias, bem = "bullish — call buyers in control", "🟢"
+        elif "BEAR" in sig_lbl:                            bias, bem = "bearish — put buyers in control", "🔴"
+        elif "HEDGE" in sig_lbl:                           bias, bem = "defensive — puts look like protection, not a crash bet", "🔵"
+        elif "STRADDLE" in sig_lbl:                        bias, bem = "two-sided — the market is pricing a big MOVE, not a direction (event/vol play)", "🟡"
+        elif "UNWIND" in sig_lbl:                          bias, bem = "unwinding — both sides closing, conviction fading", "⚪"
+        else:                                              bias, bem = "mixed — no clear edge yet", "⚪"
+
+        lines = ["\n<b>📖 What's happening (plain English)</b>"]
+        lines.append(f"{bem} <b>Read:</b> {bias}.")
+        lines.append(f"Today's option flow: calls {_fk_amt(call_chg)} vs puts {_fk_amt(put_chg)} in new OI "
+                     f"(PCR {pcr:.2f} — {'puts&gt;calls' if pcr>1.1 else ('calls&gt;puts' if pcr<0.9 else 'balanced')}).")
+
+        # ── walls vs price ──
+        if spot > 0 and cw > 0 and pw > 0:
+            up = (cw - spot) / spot * 100
+            dn = (spot - pw) / spot * 100
+            lines.append(f"Price <b>${spot:,.0f}</b> sits between the put-wall floor <b>${pw:,.0f}</b> "
+                         f"({dn:+.1f}%) and the call-wall ceiling <b>${cw:,.0f}</b> ({up:+.1f}%).")
+            if mp > 0:
+                dmp = (mp - spot) / spot * 100
+                lines.append(f"Max-pain <b>${mp:,.0f}</b> ({dmp:+.1f}%) is where most options expire worthless — "
+                             f"price often drifts toward it into Friday's expiry.")
+            if spot >= cw * 0.99:
+                lines.append("⚠️ Right at the <b>call wall</b>: heavy call OI = resistance. Needs a volume break to go higher; dealers sell strength.")
+            elif spot <= pw * 1.01:
+                lines.append("🛟 Right at the <b>put wall</b>: heavy put OI = support shelf. Bounces are common unless it breaks down on volume.")
+
+        # ── your open position + risk ──
+        try:
+            pos = pd.read_sql(
+                "SELECT strike, option_type, quantity, expiry, entry_price FROM trades "
+                "WHERE UPPER(ticker)=? AND status='OPEN' AND UPPER(option_type)<>'STOCK'",
+                conn, params=(tk,))
+        except Exception:
+            pos = pd.DataFrame()
+        if not pos.empty:
+            prows = []
+            net_dir = 0
+            for _, p in pos.iterrows():
+                typ = str(p["option_type"]).upper()[:1]
+                K   = float(p["strike"] or 0)
+                q   = int(float(p["quantity"] or 0))
+                if typ == "C": money = "ITM" if spot > K else "OTM"
+                else:          money = "ITM" if (spot and spot < K) else "OTM"
+                net_dir += (1 if typ == "C" else -1) * (1 if q >= 0 else -1)
+                prows.append((f"{'+' if q>=0 else ''}{q}", f"${K:.0f}{typ}", str(p["expiry"])[5:] or "-", money))
+            lines.append("\n<b>📌 Your position & risk</b>\n"
+                         + _pipe_table(("Qty", "Leg", "Exp", "Now"), prows, right_cols={0}))
+            # aggregate risk note (net_dir signs bullish>0 / bearish<0, leg-agnostic)
+            if net_dir > 0:
+                lines.append("<i>Net <b>bullish</b> lean: you want price UP toward the call wall "
+                             + (f"${cw:,.0f}. " if cw>0 else "the ceiling. ")
+                             + "Risk = time decay + a stall there, and max-pain pulling it back into expiry.</i>")
+            elif net_dir < 0:
+                lines.append("<i>Net <b>bearish</b> lean: you want price DOWN toward the put wall "
+                             + (f"${pw:,.0f}. " if pw>0 else "support. ")
+                             + "Risk = a bounce off support and time decay if it stalls.</i>")
+            else:
+                lines.append("<i>Mixed legs (spread/hedge): you profit from the MOVE/range, not raw direction — watch IV and the walls as your box.</i>")
+        else:
+            lines.append("\n<i>📌 No open position in this name — this is a watch, not a trade.</i>")
+
+        # ── one actionable suggestion ──
+        if "STRADDLE" in sig_lbl:
+            sug = "Both sides are loading up — favors OWNING premium (long straddle/strangle) or waiting for the break, NOT selling premium into an event."
+        elif "BULL" in sig_lbl and "HEDGE" not in sig_lbl and cw > 0:
+            sug = f"Momentum up: a break above ${cw:,.0f} on volume opens the next leg; keep a stop below the put wall ${pw:,.0f}."
+        elif "BEAR" in sig_lbl and pw > 0:
+            sug = f"Pressure down: a break below ${pw:,.0f} accelerates; watch for a bounce first if it's already stretched."
+        elif "HEDGE" in sig_lbl:
+            sug = "Puts are protection here — don't read it as an outright short signal; the underlying trend still rules."
+        else:
+            sug = "No clear edge — wait for calls or puts to clearly dominate before committing premium."
+        lines.append(f"💡 <b>Suggestion:</b> {sug}")
+        lines.append("<i>Educational, not financial advice.</i>")
+        return "\n".join(lines)
+    except Exception as _e:
+        log.debug(f"_ticker_writeup {tk} failed: {_e}", exc_info=True)
+        return ""
+
+
 async def signal_ticker_detail(query, ticker):
     """Per-ticker OI signal detail with this-week/next-week expiry split, OI walls, volume analysis."""
     tk = str(ticker).upper()
@@ -16799,7 +17257,17 @@ async def signal_ticker_detail(query, ticker):
         log.warning(f"signal_ticker_detail {tk}: {_e}")
         conn.close(); return
 
-    sig_lbl, sig_txt = _oi_signal_light(call_chg, put_chg, pcr)
+    sig_lbl, _sig_hex = _oi_signal_light(call_chg, put_chg, pcr)   # 2nd return is a hex COLOR, not text
+    _SIG_DESC = {
+        "BULLISH":    "Call OI dominating — bullish flow",
+        "BEARISH":    "Put OI dominating — bearish flow",
+        "HEDGE":      "Puts building on high PCR — likely protection",
+        "BULL+HEDGE": "Calls lead, puts hedging — net bullish",
+        "STRADDLE":   "Both sides building — event / vol play",
+        "UNWIND":     "Both sides unwinding — positions closing",
+        "NEUTRAL":    "No clear OI edge",
+    }
+    sig_txt = _SIG_DESC.get(sig_lbl, "")
     sig_em = "🟢" if "BULL" in sig_lbl else ("🔴" if "BEAR" in sig_lbl else ("🔵" if "HEDGE" in sig_lbl else "🟡"))
 
     def _fk(n):
@@ -16811,7 +17279,7 @@ async def signal_ticker_detail(query, ticker):
 
     parts = [
         hdr(f"📊 {tk} · {latest_date}"),
-        f"{sig_em} <b>{sig_lbl}</b>\n<i>{sig_txt}</i>",
+        f"{sig_em} <b>{sig_lbl}</b>" + (f"\n<i>{sig_txt}</i>" if sig_txt else ""),
         _pipe_table(("Metric", "Value"),
                     [("Call dOI", _fk(call_chg)), ("Put dOI", _fk(put_chg)),
                      ("PCR", f"{pcr:.2f}")], right_cols={1})
@@ -16831,6 +17299,15 @@ async def signal_ticker_detail(query, ticker):
                 _wtxt += f"\n<i>Γ walls: {_gws}</i>"
             parts.append(_wtxt)
     except Exception: pass
+
+    # Plain-English write-up + your-position advice (leads before the dense tables)
+    try:
+        _wu = _ticker_writeup(tk, conn, call_chg=call_chg, put_chg=put_chg,
+                              pcr=pcr, sig_lbl=sig_lbl, latest_date=latest_date)
+        if _wu:
+            parts.append(_wu)
+    except Exception:
+        log.debug("signal_ticker_detail writeup failed", exc_info=True)
 
     # Per-expiry: This Week / Next Week / Later
     try:
@@ -16931,6 +17408,15 @@ async def signal_ticker_detail(query, ticker):
     try: await _loading.delete()
     except Exception: pass
     await _safe_reply(query.message, "\n".join(parts), reply_markup=kb)
+
+    # Visual: today intraday + ~2yr line w/ volume-by-price (POC) + OI walls
+    try:
+        _png = _ticker_chart_png(tk)
+        if _png:
+            await query.message.reply_photo(
+                _png, caption=f"📈 {tk} — today + ~2yr · volume-by-price (POC) + OI walls")
+    except Exception:
+        log.debug("ticker chart send failed", exc_info=True)
 
 #  7) INSIDER / CONGRESS — table format
 
@@ -18404,14 +18890,20 @@ def _oi_key_levels(ticker: str, conn, trade_date: str = None) -> dict:
         put_wall_row  = near_agg.loc[near_agg["put_oi"].idxmax()]
         call_wall = float(call_wall_row["strike"])
         put_wall  = float(put_wall_row["strike"])
-        # Max pain = strike minimizing sum of ITM losses
-        strikes = sorted(near_agg["strike"].tolist())
-        min_pain = float("inf"); max_pain_strike = strikes[0]
-        for test in strikes:
-            pain = sum(max(0, test - s) * float(near_agg.loc[near_agg["strike"]==s,"call_oi"].iloc[0]) for s in strikes if near_agg.loc[near_agg["strike"]==s,"call_oi"].iloc[0] > 0)
-            pain += sum(max(0, s - test) * float(near_agg.loc[near_agg["strike"]==s,"put_oi"].iloc[0]) for s in strikes if near_agg.loc[near_agg["strike"]==s,"put_oi"].iloc[0] > 0)
-            if pain < min_pain:
-                min_pain = pain; max_pain_strike = test
+        # Max pain = strike minimizing sum of ITM losses.
+        # Vectorized (2026-07-19): the old O(n^3) triple loop (a full DataFrame .loc
+        # mask per strike-pair) took ~5s on wide chains like GOOG. numpy broadcast
+        # makes it O(n^2) in microseconds.
+        _ka = near_agg.sort_values("strike")
+        strikes_arr = _ka["strike"].to_numpy(dtype=float)
+        call_arr    = _ka["call_oi"].to_numpy(dtype=float)
+        put_arr     = _ka["put_oi"].to_numpy(dtype=float)
+        _tests = strikes_arr[:, None]                 # (n,1) candidate settle prices
+        _ks    = strikes_arr[None, :]                 # (1,n) strikes held
+        _pain  = (np.maximum(0.0, _tests - _ks) * call_arr[None, :]).sum(axis=1) \
+               + (np.maximum(0.0, _ks - _tests) * put_arr[None, :]).sum(axis=1)
+        max_pain_strike = float(strikes_arr[int(np.argmin(_pain))])
+        strikes = strikes_arr.tolist()
         # Gamma walls = strikes where call+put OI >= 2x mean
         near_agg["total"] = near_agg["call_oi"] + near_agg["put_oi"]
         mean_oi = near_agg["total"].mean()
@@ -18427,7 +18919,22 @@ def _classify_stock_move(ticker: str, net_call_chg: float, net_put_chg: float) -
     """Classify if price move is real stock buying vs MM delta hedging vs short cover."""
     tk = str(ticker).upper()
     try:
-        h = _yf_ticker(tk).history(period="30d")
+        # DB-first (2026-07-19): read close/volume from stock_daily instead of a live
+        # yfinance call (~2.3s network round-trip). Same data, ~1000x faster; yfinance
+        # only as a fallback when the DB is thin.
+        h = None
+        try:
+            _c = get_conn()
+            _sd = pd.read_sql("SELECT close, volume FROM stock_daily WHERE ticker=? "
+                              "ORDER BY trade_date DESC LIMIT 30", _c, params=(tk,))
+            _c.close()
+            if len(_sd) >= 5 and _sd["volume"].notna().sum() >= 5 and _sd["close"].notna().sum() >= 2:
+                _sd = _sd.iloc[::-1].reset_index(drop=True)   # chronological
+                h = _sd.rename(columns={"close": "Close", "volume": "Volume"})
+        except Exception:
+            h = None
+        if h is None:
+            h = _yf_ticker(tk).history(period="30d")
         if len(h) < 5: return {}
         today_vol  = float(h["Volume"].iloc[-1])
         avg_vol    = float(h["Volume"].iloc[-21:-1].mean()) if len(h) >= 21 else float(h["Volume"].mean())
@@ -20560,9 +21067,9 @@ def _plan_prem(conn, tk, K, exp, typ):
     col = "lastPrice_Call_now" if typ == "call" else "lastPrice_Put_now"
     try:
         pr = pd.read_sql(
-            f"SELECT {col} AS last FROM options_change WHERE UPPER(ticker)=? AND strike=? AND expiry_date=? "
+            f"SELECT {col} AS last FROM options_change WHERE ticker=? AND strike=? AND expiry_date=? "
             "ORDER BY trade_date_now DESC LIMIT 1",
-            conn, params=(tk.upper(), float(K), str(exp)[:10]))   # expiry_date is ISO (was _to_mdy → never matched)
+            conn, params=(tk.upper(), float(K), str(exp)[:10]))   # ticker is UPPER in-DB; plain '=' uses idx_oc_lookup (2026-07-19)
         if not pr.empty and pr.iloc[0]["last"] and float(pr.iloc[0]["last"]) > 0:
             return float(pr.iloc[0]["last"])
     except Exception:
@@ -20578,9 +21085,9 @@ def _bb_quote(conn, tk, K, exp, typ):
     try:
         r = conn.execute(
             f"SELECT bid_{side}, ask_{side}, lastPrice_{side}, iv_{side}, delta_{side} "
-            "FROM options_openbb WHERE UPPER(ticker)=? AND strike=? AND expiry_date=? "
+            "FROM options_openbb WHERE ticker=? AND strike=? AND expiry_date=? "
             "ORDER BY trade_date DESC LIMIT 1",
-            (tk.upper(), float(K), str(exp)[:10])).fetchone()
+            (tk.upper(), float(K), str(exp)[:10])).fetchone()   # plain '=' uses idx_oo_lookup (2026-07-19)
         if not r:
             return None
         bid, ask, last, iv, dlt = (float(x or 0) for x in r)
@@ -21043,15 +21550,18 @@ def _next_day_plan(conn):
             prem = _plan_prem(conn, tk, K, exp, typ)
             bb = _bb_quote(conn, tk, K, exp, typ)
             if bb and bb["mid"] > 0:
-                prem = bb["mid"]                 # OpenBB EOD bid/ask mid beats stale last-trade
-            # prefer the live option mid (yfinance bid/ask) so "Now"/P&L match the broker and the
-            # IV below is anchored to the live quote; fall back to BB mid / DB last when unavailable.
-            try:
-                _lm = _option_price_by_mode(tk, typ, K, exp, mode="mid", fallback=0.0)
-                if _lm and _lm > 0:
-                    prem = _lm
-            except Exception:
-                log.debug("live option mid failed", exc_info=True)
+                prem = bb["mid"]                 # OpenBB DB mid is PRIMARY (we run on BB now)
+            else:
+                # BB has no quote for this contract -> only THEN fall back to a live yfinance
+                # option mid. Gated behind BB-missing 2026-07-19: the per-leg live chain download
+                # was the /plan bottleneck (~17s cold / 8s warm); BB DB covers captured tickers,
+                # so this rarely fires and /plan drops to ~1s.
+                try:
+                    _lm = _option_price_by_mode(tk, typ, K, exp, mode="mid", fallback=0.0)
+                    if _lm and _lm > 0:
+                        prem = _lm
+                except Exception:
+                    log.debug("live option mid failed", exc_info=True)
             iv = (bb["iv"] if (bb and bb.get("iv")) else None) or (
                 _implied_vol_hp(prem, spot, K, T, R) if (prem and T > 0)
                 else (float(t["entry_iv"] or 0) or 0.30))

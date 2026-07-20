@@ -8298,6 +8298,15 @@ async def oi_detail(query, ticker):
     ])
     await _safe_reply(query.message, msg, reply_markup=kb)
 
+    # Visual: today intraday + ~2yr line w/ volume-by-price (POC) + OI walls
+    try:
+        _png = _ticker_chart_png(str(ticker).upper())
+        if _png:
+            await query.message.reply_photo(
+                _png, caption=f"📈 {str(ticker).upper()} — today + ~2yr · volume-by-price (POC) + OI walls")
+    except Exception:
+        log.debug("oi_detail chart send failed", exc_info=True)
+
 
 async def oi_compare_select_expiry(query, ctx, step=1):
     """Select expiry for comparison (step 1 or 2)"""
@@ -21602,6 +21611,13 @@ def _next_day_plan(conn):
         spot = _gex_spot(conn, tk) or _last_price(tk)
         if not spot:
             continue
+        # after-hours stock (for the 'est. at open' re-price, user 2026-07-20)
+        _ah = {}
+        try:
+            _ah = _get_spot_with_ah(tk)
+        except Exception:
+            pass
+        ah_spot = float(_ah.get("spot_ext") or 0) if _ah.get("is_extended") else 0.0
         g = {}
         try:
             g = _compute_gex(tk, conn, spot)
@@ -21610,7 +21626,7 @@ def _next_day_plan(conn):
         cw, pw = g.get("call_wall"), g.get("put_wall")
         tk_dd = tk_th = 0.0
         ivs, leglines, tk_legs = [], [], []
-        leg_rows, leg_acts = [], []      # option legs -> table (user 2026-07-19), actions -> detail
+        leg_rows, leg_acts, ah_rows = [], [], []   # option legs -> table; ah_rows -> est-open table
         for t in legs:
             typ = "call" if str(t["option_type"]).lower().startswith("c") else "put"
             K = float(t["strike"] or 0); qty = int(t["quantity"] or 0); exp = str(t["expiry"])
@@ -21658,8 +21674,12 @@ def _next_day_plan(conn):
             if pnlp >= 50: acts.append("take profit")
             elif pnlp <= -50: acts.append("cut/roll")
             a = "; ".join(acts) if acts else "hold"
-            _side_em = "🔻" if side == "short" else "🔹"
+            _side_em = "🟥" if side == "short" else "🟩"       # 🟩 long · 🟥 short
             leg_rows.append((_side_em, f"{K:.0f}{typ[0].upper()}", f"{dte}d", f"{pnlp:+.0f}%"))
+            if ah_spot and iv and T > 0:
+                _cur_ah = bs_greeks(ah_spot, K, T, R, iv, typ).get("price", cur)
+                _ah_dp = ((_cur_ah - cur) / cur * 100) if cur else 0.0
+                ah_rows.append((f"{K:.0f}{typ[0].upper()}", f"{cur:.2f}", f"{_cur_ah:.2f}", f"{_ah_dp:+.0f}%"))
             if acts:
                 leg_acts.append(f"{_side_em} {K:.0f}{typ[0].upper()} {money} → {a}")
                 checklist.append(f"{tk} ${K:.0f}{typ[0].upper()}: {a}")
@@ -21776,10 +21796,16 @@ def _next_day_plan(conn):
         # (user 2026-07-19) + action detail lines below it.
         _leg_block = "\n".join(leglines)      # stock 📦 lines (may be empty)
         if leg_rows:
-            _lt = _pipe_table(("ST", "Leg", "DTE", "P&L"), leg_rows, right_cols={3})
+            _lt = _pipe_table(("ST", "Leg", "DTE", "P&L"), leg_rows, right_cols={3},
+                              legend="🟩 long · 🟥 short")
             _leg_block += ("\n" if _leg_block else "") + "  <b>Legs</b>\n" + _lt
             if leg_acts:
                 _leg_block += "\n" + "\n".join("  " + x for x in leg_acts)
+        if ah_rows:
+            _aht = _pipe_table(("Leg", "Close", "Open", "Δ%"), ah_rows, right_cols={1, 2, 3})
+            _leg_block += ("\n" if _leg_block else "") + (
+                f"  <b>Est. at open</b> <i>(BS re-price from {_ah.get('ext_src','AH')} "
+                f"${ah_spot:.2f}, {_ah.get('ext_chg_pct',0):+.1f}% vs close; IV held)</i>\n" + _aht)
         _inner = (("\n".join(extra) + "\n" if extra else "")
                   + _leg_block + ("\n" + "\n".join(ana) if ana else ""))
         # collapse the detail under the headline (tap to expand) — modern, scannable
@@ -22199,7 +22225,20 @@ def wrap_narrative(F, html=True):
                "Record leverage + rising uncertainty = swings are here to stay.",
                "When everyone is positioned one way, the exit gets narrow.",
                "Opportunity lives in the broadening swings — if you respect the risk."]
-    L.append("\n— " + _wrap_pick(seed + 2, closers))
+    _closer_plain = {
+        "Volatility always comes with change.":
+            "Big moves mean the market is repricing something — expect more two-way swings and trade smaller.",
+        "Record leverage + rising uncertainty = swings are here to stay.":
+            "Lots of borrowed money in the market magnifies every move, so violent days like this get more frequent.",
+        "When everyone is positioned one way, the exit gets narrow.":
+            "When almost everyone is on the SAME side (all long, or all short), a reversal forces them all to sell at once — but there are few buyers left to sell to, so the drop is fast and steep. Translation: don't be the last one crowded into a popular trade.",
+        "Opportunity lives in the broadening swings — if you respect the risk.":
+            "Wider swings = bigger chances in both directions, but only worth taking if you cap your downside first.",
+    }
+    _cl = _wrap_pick(seed + 2, closers)
+    L.append("\n— " + _cl)
+    if _closer_plain.get(_cl):
+        L.append("<i>💡 In plain terms: " + _closer_plain[_cl] + "</i>")
     return "\n".join(L)
 
 

@@ -22,6 +22,15 @@ import warnings, sys, os
 
 warnings.filterwarnings("ignore")
 
+# Load the bot engine ONCE at module scope (main ScriptRunner thread) so the many lazy
+# `import telegram_bot_optimized` calls inside @st.cache_data functions don't trip CPython's
+# concurrent-import race (KeyError: 'telegram_bot_optimized') the first time the Action Board
+# (or any cached scanner) loads. This just warms sys.modules; the lazy imports then no-op.
+try:
+    import telegram_bot_optimized as _TB_ENGINE   # noqa: F401
+except Exception:
+    _TB_ENGINE = None
+
 
 def _keyvault_key(salt):
     """Derive a 64-byte key, machine/user-bound (or KEYVAULT_PASSPHRASE if set)."""
@@ -1645,8 +1654,28 @@ table td, table th{ color:var(--text)!important; border-color:var(--border)!impo
 </style>
 """.replace("__FONT__", _FONT_IMPORT)
 
-# Default to dark fintech; the sidebar toggle (key="ui_theme") flips it on rerun.
-st.session_state.setdefault("ui_theme", "🌙 Dark")
+# Theme: default LIGHT, and remember the user's last choice across reloads/sessions
+# via a tiny preference file (user 2026-07-20). Session-state alone resets on reload.
+_THEME_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dash_theme.txt")
+
+def _load_saved_theme():
+    try:
+        with open(_THEME_FILE, encoding="utf-8") as _f:
+            _v = _f.read().strip()
+            if _v in ("🌙 Dark", "☀️ Light"):
+                return _v
+    except Exception:
+        pass
+    return "☀️ Light"     # default light
+
+def _save_theme():
+    try:
+        with open(_THEME_FILE, "w", encoding="utf-8") as _f:
+            _f.write(st.session_state.get("ui_theme", "☀️ Light"))
+    except Exception:
+        pass
+
+st.session_state.setdefault("ui_theme", _load_saved_theme())
 st.markdown(_CSS_DARK if "Dark" in st.session_state["ui_theme"] else _CSS_LIGHT,
             unsafe_allow_html=True)
 
@@ -5193,8 +5222,8 @@ with st.sidebar:
     st.markdown("## 📊 RUDRARJUN")
     st.markdown("##### *Options Intelligence Terminal*")
     st.radio("Theme", ["🌙 Dark", "☀️ Light"], key="ui_theme", horizontal=True,
-             label_visibility="collapsed",
-             help="Switch between dark fintech and light minimal. Applies on the next interaction.")
+             label_visibility="collapsed", on_change=_save_theme,
+             help="Switch between dark fintech and light minimal. Your choice is remembered next time.")
     st.markdown("---")
 
     _NAV_GROUPS = {

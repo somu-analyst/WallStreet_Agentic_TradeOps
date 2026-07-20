@@ -1003,6 +1003,7 @@ try:
             try:
                 log.debug("Original caption:\n%s", orig_cap)
                 log.debug("Sanitized caption:\n%s", cap2)
+          
             except Exception:
                 log.debug("suppressed exception", exc_info=True)
             try:
@@ -1252,6 +1253,44 @@ def _spot_price(sym):
     if px > 0:
         _SPOT_LIVE_CACHE[k] = (px, _t.time())
     return px
+
+
+def _et_now():
+    """Current time in US/Eastern (falls back to a UTC-5 approximation)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=5)
+
+
+def _market_is_open():
+    """True during the US equity regular session (Mon-Fri 09:30-16:00 ET). Weekday+time
+    only (holiday-agnostic) — enough to switch a LIVE vs EOD price display."""
+    now = _et_now()
+    if now.weekday() >= 5:
+        return False
+    mins = now.hour * 60 + now.minute
+    return 570 <= mins < 960          # 09:30 .. 16:00 ET
+
+
+def _cur_price(tk, db_close=0.0):
+    """The price to DISPLAY for a ticker, resolving live-vs-EOD correctly:
+      market open  -> live last (fast_info), labelled 'LIVE HH:MM ET'
+      market closed-> the EOD close, labelled 'EOD'
+    Returns (price, is_live, asof_label). Never raises."""
+    dbc = 0.0
+    try:
+        dbc = float(db_close or 0)
+    except Exception:
+        dbc = 0.0
+    if _market_is_open():
+        px = _last_price(tk) or 0.0
+        if px > 0:
+            return (px, True, f"LIVE {_et_now().strftime('%H:%M ET')}")
+    if dbc > 0:
+        return (dbc, False, "EOD")
+    return (_last_price(tk) or 0.0, False, "EOD")
 
 
 def _iv_rank(sym):
@@ -13761,15 +13800,19 @@ def _ticker_snapshot(tk):
         if sd.empty:
             return None                       # not in our universe -> fall through to AI/search
         row = sd.iloc[0]
-        close = float(row["close"] or 0)
-        live = _last_price(tk) or close       # live if market open, else EOD close
-        prev = float(sd.iloc[1]["close"]) if len(sd) > 1 else close
-        chg = (live / prev - 1) * 100 if prev else 0.0
+        close = float(row["close"] or 0)                       # latest completed-session close
+        prior = float(sd.iloc[1]["close"]) if len(sd) > 1 else close
+        px, is_live, asof = _cur_price(tk, db_close=close)
+        # % change base: vs the LAST completed close when live, else that close vs the prior one
+        base = close if is_live else prior
+        chg = (px / base - 1) * 100 if base else 0.0
         em = "🟢" if chg > 0.3 else ("🔴" if chg < -0.3 else "🟡")
         pcr = row["pcr_oi"]
-        lines = [f"{em} <b>{tk}</b>  ${live:,.2f}  ({chg:+.2f}%)",
-                 f"<i>EOD {row['trade_date']}</i>"]
-        rows = [("Last", f"${live:,.2f}"), ("Prev close", f"${prev:,.2f}")]
+        _stamp = (f"🟢 {asof}" if is_live else f"EOD {row['trade_date']}")
+        lines = [f"{em} <b>{tk}</b>  ${px:,.2f}  ({chg:+.2f}%)",
+                 f"<i>{_stamp}</i>"]
+        rows = [("Last" if is_live else "Close", f"${px:,.2f}"),
+                ("Prev close", f"${(close if is_live else prior):,.2f}")]
         if pcr is not None:
             _pe = "🔴" if float(pcr) > 1.2 else ("🟢" if float(pcr) < 0.8 else "🟡")
             rows.append(("PCR (OI)", f"{_pe} {float(pcr):.2f}"))
@@ -17600,8 +17643,26 @@ async def signal_ticker_detail(query, ticker):
         if a >= 1_000:     return f"{s}{a/1_000:.0f}K"
         return f"{s}{abs(n):.0f}"
 
+    # Live price line (OI itself is EOD; the PRICE should be live during market hours)
+    _px_line = ""
+    try:
+        _dbc = pd.read_sql("SELECT close FROM stock_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT 1",
+                           conn, params=(tk,))
+        _dbclose = float(_dbc["close"].iloc[0]) if not _dbc.empty else 0.0
+        _pxv, _islive, _asof = _cur_price(tk, db_close=_dbclose)
+        if _pxv > 0:
+            _dl = (f" ({(_pxv/_dbclose-1)*100:+.2f}%)" if (_islive and _dbclose) else "")
+            _px_line = (f"{'🟢' if _islive else '⏺'} <b>${_pxv:,.2f}</b>{_dl}  "
+                        f"<i>{_asof}{'' if _islive else ' · OI as of '+str(latest_date)}</i>")
+    except Exception:
+        log.debug("oi-detail price line failed", exc_info=True)
+
     parts = [
         hdr(f"📊 {tk} · {latest_date}"),
+    ]
+    if _px_line:
+        parts.append(_px_line)
+    parts += [
         f"{sig_em} <b>{sig_lbl}</b>" + (f"\n<i>{sig_txt}</i>" if sig_txt else ""),
         _pipe_table(("Metric", "Value"),
                     [("Call dOI", _fk(call_chg)), ("Put dOI", _fk(put_chg)),

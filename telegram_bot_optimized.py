@@ -4752,9 +4752,9 @@ def _oi_expiry_flow_table(ticker: str, conn, latest_date: str) -> str:
         return ""
     _today = datetime.now().date()
     def _fk(n):
-        n = float(n or 0); s = "+" if n >= 0 else ""; a = abs(n)
+        n = float(n or 0); s = "+" if n >= 0 else "-"; a = abs(n)
         if a >= 1_000: return f"{s}{a/1_000:.0f}K"
-        return f"{s}{n:.0f}"
+        return f"{s}{abs(n):.0f}"
     def _bias(c, p):
         c, p = float(c or 0), float(p or 0)
         if c > 300 and p > 300:       return "STRD"
@@ -5943,10 +5943,10 @@ def _oi_trend_summary(ticker: str, conn, latest_date: str) -> str:
         return f"🟡 Mixed (C:{_fk_static(c)} P:{_fk_static(p)})"
 
     def _fk_static(n):
-        n = float(n or 0); s = "+" if n >= 0 else ""; a = abs(n)
+        n = float(n or 0); s = "+" if n >= 0 else "-"; a = abs(n)
         if a >= 1_000_000: return f"{s}{a/1_000_000:.1f}M"
         if a >= 1_000:     return f"{s}{a/1_000:.0f}K"
-        return f"{s}{n:.0f}"
+        return f"{s}{abs(n):.0f}"
 
     def _trend_short(c, p):
         if c > 0 and p > 0:   return "STRD/VOL"
@@ -6740,12 +6740,24 @@ def _build_verdict_block(ticker, sig_data: dict) -> str:
         bear_pts.append(f"Max Pain ${mp_strike:.0f} below spot — expiry gravity pulls price DOWN")
         key_stks.append(f"Max Pain target: ${mp_strike:.0f} (downside magnet)")
 
-    # Key gamma/call/put walls
+    # Key gamma/call/put walls — group into ONE resistance line + ONE support line
+    # (was 3+ repeated 'Gamma Wall (resistance)' lines, user 2026-07-20).
+    _spot_now = float(sig_data.get("spot", 0) or 0)
+    _res_walls, _sup_walls = [], []
     for ks in (sig_data.get("key_strikes") or []):
-        label = ks.get("label", "")
-        strike = ks.get("strike", 0)
-        if strike:
-            key_stks.append(f"{label}: ${strike:.0f}")
+        try:
+            strike = float(ks.get("strike", 0) or 0)
+        except (TypeError, ValueError):
+            continue                      # tolerate odd shapes from any caller
+        if not strike:
+            continue
+        (_res_walls if (_spot_now and strike >= _spot_now) else _sup_walls).append(strike)
+    if _res_walls:
+        key_stks.append("Gamma walls above (resistance): "
+                        + ", ".join(f"${s:.0f}" for s in sorted(set(_res_walls))))
+    if _sup_walls:
+        key_stks.append("Gamma walls below (support): "
+                        + ", ".join(f"${s:.0f}" for s in sorted(set(_sup_walls), reverse=True)))
 
     # Mean reversion composite
     comp = float(sig_data.get("comp_score", 0) or 0)
@@ -6794,8 +6806,24 @@ def _build_verdict_block(ticker, sig_data: dict) -> str:
         qualifier = ""
 
     spot = float(sig_data.get("spot", 0) or 0)
-    bull_tgt = sig_data.get("bull_target", 0)
-    bear_tgt = sig_data.get("bear_target", 0)
+    bull_tgt = float(sig_data.get("bull_target", 0) or 0)
+    bear_tgt = float(sig_data.get("bear_target", 0) or 0)
+    _mp = float(sig_data.get("mp_strike", 0) or 0)
+    # Derive REAL targets from the OI levels when not supplied (was a generic ±5% guess,
+    # user 2026-07-20): bull = nearest resistance wall / max-pain above; bear = nearest
+    # support wall / max-pain below; only fall back to ±5% when no OI level exists there.
+    _bull_real = _bear_real = True
+    if spot > 0:
+        if not bull_tgt:
+            _above = [s for s in _res_walls if s > spot]
+            if _above:                 bull_tgt = min(_above)
+            elif _mp > spot:           bull_tgt = _mp
+            else:                      bull_tgt = spot * 1.05; _bull_real = False
+        if not bear_tgt:
+            _below = [s for s in _sup_walls if s < spot]
+            if _below:                 bear_tgt = max(_below)
+            elif 0 < _mp < spot:       bear_tgt = _mp
+            else:                      bear_tgt = spot * 0.95; _bear_real = False
 
     lines = [
         f"\n{'═'*28}",
@@ -6815,17 +6843,15 @@ def _build_verdict_block(ticker, sig_data: dict) -> str:
     if event_flag:
         lines.append(f"\n{event_flag}")
 
-    # Summary table
-    if bull_tgt or bear_tgt or spot > 0:
-        lines.append("\n<b>🎯 Simple Answer</b>")
+    # Summary table — real levels + % move, with a note when it's only a ±5% gauge
+    if spot > 0 and (bull_tgt or bear_tgt):
+        lines.append(f"\n<b>🎯 Simple Answer</b> <i>(spot ${spot:.0f})</i>")
         if bull_tgt:
-            lines.append(f"✅ Bullish scenario → <b>${bull_tgt:.0f}</b> target")
-        elif spot > 0 and n_bull > n_bear:
-            lines.append(f"✅ Bullish scenario → <b>${spot*1.05:.0f}</b> (+5% from spot)")
+            _bt = " <i>(OI wall / max-pain)</i>" if _bull_real else " <i>(no OI wall above — ~5% gauge)</i>"
+            lines.append(f"✅ Bullish → <b>${bull_tgt:.0f}</b> ({(bull_tgt/spot-1)*100:+.1f}%){_bt}")
         if bear_tgt:
-            lines.append(f"❌ Bearish scenario → <b>${bear_tgt:.0f}</b> target")
-        elif spot > 0 and n_bear >= n_bull:
-            lines.append(f"❌ Bearish scenario → <b>${spot*0.95:.0f}</b> (-5% from spot)")
+            _brt = " <i>(OI wall / max-pain)</i>" if _bear_real else " <i>(no OI wall below — ~5% gauge)</i>"
+            lines.append(f"❌ Bearish → <b>${bear_tgt:.0f}</b> ({(bear_tgt/spot-1)*100:+.1f}%){_brt}")
 
     # Bottom line
     bottom = sig_data.get("bottom_line", "")
@@ -9740,11 +9766,11 @@ async def signal_scanner(query):
     parts = [hdr(f"🔥 OI SIGNALS · {latest_date_str}")]
 
     def _fk(n):
-        n = float(n or 0); s = "+" if n >= 0 else ""
+        n = float(n or 0); s = "+" if n >= 0 else "-"
         a = abs(n)
         if a >= 1_000_000: return f"{s}{a/1_000_000:.1f}M"
         if a >= 1_000:     return f"{s}{a/1_000:.0f}K"
-        return f"{s}{n:.0f}"
+        return f"{s}{abs(n):.0f}"
 
     # Classify each ticker using hedge-aware algorithm
     def _scan_sig(row):
@@ -9944,11 +9970,11 @@ async def market_analytics_report(query):
     def _fmt_k(n):
         """Compact OI number: +2.8M / +752K / +845  (max ~7 chars)."""
         n = float(n or 0)
-        s = "+" if n >= 0 else ""
+        s = "+" if n >= 0 else "-"
         a = abs(n)
         if a >= 1_000_000: return f"{s}{a/1_000_000:.1f}M"
         if a >= 1_000:     return f"{s}{a/1_000:.0f}K"
-        return f"{s}{n:.0f}"
+        return f"{s}{abs(n):.0f}"
 
     _loading = await query.message.reply_text("⏳ Building market analytics...", parse_mode=H)
     now_et = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=5)
@@ -17568,11 +17594,11 @@ async def signal_ticker_detail(query, ticker):
     sig_em = "🟢" if "BULL" in sig_lbl else ("🔴" if "BEAR" in sig_lbl else ("🔵" if "HEDGE" in sig_lbl else "🟡"))
 
     def _fk(n):
-        n = float(n or 0); s = "+" if n >= 0 else ""
+        n = float(n or 0); s = "+" if n >= 0 else "-"
         a = abs(n)
         if a >= 1_000_000: return f"{s}{a/1_000_000:.1f}M"
         if a >= 1_000:     return f"{s}{a/1_000:.0f}K"
-        return f"{s}{n:.0f}"
+        return f"{s}{abs(n):.0f}"
 
     parts = [
         hdr(f"📊 {tk} · {latest_date}"),
@@ -17739,11 +17765,11 @@ async def oi_build_detail(query, ticker):
         return
 
     def _fk(n):
-        n = float(n or 0); s = "+" if n >= 0 else ""
+        n = float(n or 0); s = "+" if n >= 0 else "-"
         a = abs(n)
         if a >= 1_000_000: return f"{s}{a/1_000_000:.1f}M"
         if a >= 1_000:     return f"{s}{a/1_000:.0f}K"
-        return f"{s}{n:.0f}"
+        return f"{s}{abs(n):.0f}"
 
     bias_em   = "🟢" if res["bias_5d"] == "BULL" else "🔴"
     conv_lbl  = "HIGH" if res["conviction"] > 15 else ("MED" if res["conviction"] > 5 else "LOW")
@@ -17752,8 +17778,8 @@ async def oi_build_detail(query, ticker):
     parts = [
         hdr(f"📈 {tk} OI BUILD ({res['n_days']}d)"),
         f"{bias_em} <b>{res['bias_5d']} Bias</b>  [{conv_lbl} conviction {res['conviction']:.1f}%]",
-        "\n<b>10-Day Net OI Flow</b>  <i>(left=old \u2192 right=new)</i>",
-        f"<pre>Net: {res['spark']}</pre>",
+        "\n<b>10-Day Net OI Flow</b>  <i>(oldest \u2192 newest \u00b7 net = calls minus puts)</i>",
+        _oi_flow_ledger(res),
         mono(
             f"{'5d Call\u0394':<12} {_fk(res['cum5_call']):>9}\n"
             f"{'5d Put\u0394':<12} {_fk(res['cum5_put']):>9}\n"
@@ -19046,6 +19072,31 @@ async def legends_consensus(query):
 # ═══════════════════════════════════════════════════════════
 #  8) QUICK QUOTE — full OHLCV, 52W, fundamentals
 # ═══════════════════════════════════════════════════════════
+
+
+def _oi_flow_ledger(res: dict) -> str:
+    """10-day net-OI ledger: one COLORED bar per day scaled to the 10-day max, with the
+    date and value beside it. Replaces the tiny unicode sparkline (user 2026-07-20:
+    'i want bigger with color and ledger to understand'). net = call dOI - put dOI."""
+    def _fk(n):
+        n = float(n or 0); s = "+" if n >= 0 else "-"
+        a = abs(n)
+        if a >= 1_000_000: return f"{s}{a/1_000_000:.1f}M"
+        if a >= 1_000:     return f"{s}{a/1_000:.0f}K"
+        return f"{s}{abs(n):.0f}"
+    d10 = list(reversed((res.get("daily") or [])[:10]))        # oldest -> newest
+    if not d10:
+        return ""
+    mx = max((abs(float(d.get("net", 0) or 0)) for d in d10), default=0.0) or 1.0
+    out = []
+    for d in d10:
+        n = float(d.get("net", 0) or 0)
+        bar = ("🟩" if n >= 0 else "🟥") * max(1, int(round(abs(n) / mx * 6)))
+        out.append(f"{'🟢' if n >= 0 else '🔴'} <code>{str(d.get('date',''))[5:]}</code> "
+                   f"<b>{_fk(n):>7}</b>  {bar}")
+    out.append("<i>🟩 call-heavy (bullish OI build) · 🟥 put-heavy (bearish/hedge) · "
+               f"bar = size vs 10-day max {_fk(mx)}</i>")
+    return "\n".join(out)
 
 
 def _oi_build_analysis(ticker: str, conn, n_days: int = 20) -> dict:

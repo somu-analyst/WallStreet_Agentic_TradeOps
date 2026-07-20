@@ -69,7 +69,12 @@ ARCHIVE_DIR = os.path.join(US_CHARTS_DIR, "archive")
 os.makedirs(US_CHARTS_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
-UNIVERSE_FILE = os.path.join(US_CHARTS_DIR, "ticker_universe.xlsx")
+# ticker_universe.xlsx moved into NYSE_DATA (next to the scripts) 2026-07-20; prefer that,
+# fall back to the old US_CHARTS location for safety.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+UNIVERSE_FILE = (os.path.join(_SCRIPT_DIR, "ticker_universe.xlsx")
+                 if os.path.exists(os.path.join(_SCRIPT_DIR, "ticker_universe.xlsx"))
+                 else os.path.join(US_CHARTS_DIR, "ticker_universe.xlsx"))
 UNIVERSE_SHEET_ACTIVE = "ticker_universe"
 UNIVERSE_SHEET_WHOLE = "Whole_universe"
 LOG_DIR = DATA_DIR

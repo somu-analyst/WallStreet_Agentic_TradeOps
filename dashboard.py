@@ -166,20 +166,27 @@ import re
 
 # Sanitize strings passed to Streamlit `markdown`/`write` to strip , style, and class
 # attributes so any HTML produced here is safe for downstream use (e.g., Telegram messages).
-_original_st_markdown = st.markdown
-_original_st_write = st.write
 def _sanitize_text(s):
     if not isinstance(s, str):
         return s
     s = re.sub(r'</?span[^>]*>', '', s)
     s = re.sub(r"\s*(style|class)=(\".*?\"|'.*?')", '', s)
     return s
-def _st_markdown(text, *args, **kwargs):
-    return _original_st_markdown(_sanitize_text(text), *args, **kwargs)
-def _st_write(text, *args, **kwargs):
-    return _original_st_write(_sanitize_text(text), *args, **kwargs)
-st.markdown = _st_markdown
-st.write = _st_write
+# GUARD (fix 2026-07-20): Streamlit re-executes this whole file on every rerun, but `st` is a
+# persistent module — so recapturing `st.markdown` on the 2nd run grabbed the ALREADY-patched
+# wrapper, making _st_markdown call itself forever (RecursionError, dashboard dead). Only wrap
+# the genuine original, once, and skip if already wrapped.
+if not getattr(st.markdown, "_sanitized_wrapper", False):
+    _original_st_markdown = st.markdown
+    _original_st_write = st.write
+    def _st_markdown(text, *args, **kwargs):
+        return _original_st_markdown(_sanitize_text(text), *args, **kwargs)
+    def _st_write(text, *args, **kwargs):
+        return _original_st_write(_sanitize_text(text), *args, **kwargs)
+    _st_markdown._sanitized_wrapper = True
+    _st_write._sanitized_wrapper = True
+    st.markdown = _st_markdown
+    st.write = _st_write
 
 # One-time in-place cleanup: remove remaining  tags and inline style/class
 # attributes from the source file so the dashboard source is safe for reuse.
@@ -5576,7 +5583,10 @@ if page == "🌍 Market Overview":
         st.markdown("---")
         st.markdown("#### 🟥🟩 Market Heatmap — ETFs & Stocks")
         try:
-            _tm_file = "C:/Users/srini/Options_chain_data/US_CHARTS/ticker_universe.xlsx"
+            # ticker_universe.xlsx moved into NYSE_DATA (next to this file) 2026-07-20
+            _tm_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ticker_universe.xlsx")
+            if not os.path.exists(_tm_file):
+                _tm_file = "C:/Users/srini/Options_chain_data/US_CHARTS/ticker_universe.xlsx"
             _tm_df = pd.read_excel(_tm_file, sheet_name="bk")
             _tm_df = _tm_df[["ticker", "name", "category"]].dropna(subset=["ticker"])
             _tm_df["ticker"] = _tm_df["ticker"].str.strip().str.upper()

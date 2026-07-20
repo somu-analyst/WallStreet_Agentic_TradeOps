@@ -13233,6 +13233,64 @@ async def ai_chat_menu(query):
     )
 
 
+def _ticker_snapshot(tk):
+    """Instant DB-first snapshot for a bare ticker typed in chat (no AI, no network-first).
+    Returns an HTML block or None if the symbol isn't a real ticker we can price."""
+    tk = tk.upper()
+    conn = get_conn()
+    try:
+        sd = pd.read_sql(
+            "SELECT trade_date, close, pcr_oi, high, low, volume FROM stock_daily "
+            "WHERE ticker=? ORDER BY trade_date DESC LIMIT 2", conn, params=(tk,))
+        if sd.empty:
+            return None                       # not in our universe -> fall through to AI/search
+        row = sd.iloc[0]
+        close = float(row["close"] or 0)
+        live = _last_price(tk) or close       # live if market open, else EOD close
+        prev = float(sd.iloc[1]["close"]) if len(sd) > 1 else close
+        chg = (live / prev - 1) * 100 if prev else 0.0
+        em = "🟢" if chg > 0.3 else ("🔴" if chg < -0.3 else "🟡")
+        pcr = row["pcr_oi"]
+        lines = [f"{em} <b>{tk}</b>  ${live:,.2f}  ({chg:+.2f}%)",
+                 f"<i>EOD {row['trade_date']}</i>"]
+        rows = [("Last", f"${live:,.2f}"), ("Prev close", f"${prev:,.2f}")]
+        if pcr is not None:
+            _pe = "🔴" if float(pcr) > 1.2 else ("🟢" if float(pcr) < 0.8 else "🟡")
+            rows.append(("PCR (OI)", f"{_pe} {float(pcr):.2f}"))
+        try:
+            if row["high"] and row["low"]:
+                rows.append(("Day high", f"${float(row['high']):,.2f}"))
+                rows.append(("Day low", f"${float(row['low']):,.2f}"))
+        except Exception:
+            pass
+        try:
+            ivr = _iv_rank(conn, tk)
+            if ivr:
+                _hint = "cheap→buy" if ivr["rank"] < 30 else "rich→sell" if ivr["rank"] > 70 else "mid"
+                rows.append(("IV Rank", f"{ivr['rank']:.0f} ({_hint})"))
+        except Exception:
+            pass
+        # latest OI-change bias
+        try:
+            oi = pd.read_sql(
+                "SELECT SUM(change_OI_Call) cc, SUM(change_OI_Put) pc FROM options_change "
+                "WHERE ticker=? AND trade_date_now=(SELECT MAX(trade_date_now) FROM options_change "
+                "WHERE ticker=?)", conn, params=(tk, tk))
+            if not oi.empty and oi["cc"].iloc[0] is not None:
+                cc = float(oi["cc"].iloc[0] or 0); pc = float(oi["pc"].iloc[0] or 0)
+                lbl, _ = _oi_signal_light(cc, pc, float(pcr) if pcr is not None else 1.0)
+                _oe = "🟢" if "BULL" in lbl else ("🔴" if "BEAR" in lbl else "🟡")
+                rows.append(("OI flow", f"{_oe} {lbl}"))
+        except Exception:
+            pass
+        return "\n".join(lines) + "\n" + _pipe_table(("Metric", "Value"), rows, right_cols={1}) \
+            + "\n<i>DB snapshot · tap for OI detail · not advice</i>"
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 async def ai_chat_handler(update, context):
     """Handle plain text messages — answer with Claude AI."""
     _, auth_chat_id = load_creds()
@@ -13257,6 +13315,22 @@ async def ai_chat_handler(update, context):
                 return
     except Exception:
         log.debug("posadd typed-ticker intercept failed", exc_info=True)
+
+    # ── Ticker fast-path (2026-07-19): a bare symbol (e.g. "AMD", "aapl") returns an
+    # instant DB snapshot WITHOUT the AI API — so ticker lookups keep working even when
+    # the Anthropic key is out of credits, and are faster/free for the common case. ──
+    try:
+        if re.fullmatch(r"[A-Za-z][A-Za-z.\-]{0,7}", text):
+            _snap = _ticker_snapshot(text.upper())
+            if _snap:
+                await update.message.reply_text(
+                    _snap, parse_mode=H,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(f"📊 {text.upper()} OI detail",
+                                             callback_data=f"sigtk_{text.upper()}")]]))
+                return
+    except Exception:
+        log.debug("ticker fast-path failed", exc_info=True)
 
     api_key = _load_ai_key()
     if not api_key:

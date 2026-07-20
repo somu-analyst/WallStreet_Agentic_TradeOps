@@ -1958,6 +1958,46 @@ def _get_spot_with_ah(ticker: str) -> dict:
     return result
 
 
+# ── Volatility gauge: VIX (broad market) vs VXN (Nasdaq-100 / tech) ──────────
+# For Nasdaq-100 / mega-tech names, VXN is the correct fear gauge (it usually runs
+# well above VIX). User ask 2026-07-20: use VXN for Nasdaq stocks wherever we show VIX.
+_NASDAQ_VOL_SET = {
+    "AAPL","MSFT","NVDA","GOOGL","GOOG","AMZN","META","TSLA","AVGO","AMD","NFLX","ADBE",
+    "COST","PEP","CSCO","INTC","QCOM","TXN","AMAT","MU","LRCX","KLAC","ASML","ARM","PANW",
+    "CRWD","SNPS","CDNS","MRVL","NXPI","ADI","MCHP","ON","SMCI","PLTR","MDB","DDOG","SNOW",
+    "ZS","NOW","INTU","ORCL","MSTR","COIN","ABNB","PYPL","SHOP","TTD","APP","ARM",
+    "QQQ","SOXX","SMH","TQQQ","SOXL","XLK","IXIC",
+}
+_VOL_CACHE = {"ts": 0.0, "vix": 0.0, "vxn": 0.0}
+
+def _get_vol_indices():
+    """{'vix':x, 'vxn':y} spot levels, cached 5 min (fetches ^VIX + ^VXN once)."""
+    import time as _t
+    now = _t.time()
+    if now - _VOL_CACHE["ts"] < 300 and _VOL_CACHE["vix"] > 0:
+        return {"vix": _VOL_CACHE["vix"], "vxn": _VOL_CACHE["vxn"]}
+    for key, sym in (("vix", "^VIX"), ("vxn", "^VXN")):
+        try:
+            h = _yf_ticker(sym).history(period="3d")
+            if len(h):
+                _VOL_CACHE[key] = float(h["Close"].iloc[-1])
+        except Exception:
+            log.debug(f"{sym} fetch failed", exc_info=True)
+    _VOL_CACHE["ts"] = now
+    return {"vix": _VOL_CACHE["vix"], "vxn": _VOL_CACHE["vxn"]}
+
+def _is_nasdaq_vol(ticker):
+    """True if VXN (Nasdaq-100 vol) is the better fear gauge for this ticker."""
+    return str(ticker or "").upper() in _NASDAQ_VOL_SET
+
+def _vol_for(ticker):
+    """(label, value): VXN for Nasdaq-100 / tech names, else VIX. Falls back to VIX."""
+    vi = _get_vol_indices()
+    if _is_nasdaq_vol(ticker) and vi.get("vxn", 0) > 0:
+        return ("VXN", vi["vxn"])
+    return ("VIX", vi.get("vix", 0) or 0.0)
+
+
 
 # Known FOMC meeting dates (approximate — update quarterly)
 _FOMC_DATES = [
@@ -2092,15 +2132,14 @@ def get_global_market_context():
     """Fetch comprehensive global market data for sentiment analysis."""
     tickers = {
         # US Equities & Volatility
-        "SPY": "S&P 500", "QQQ": "Nasdaq", "^VIX": "VIX",
+        "SPY": "S&P 500", "QQQ": "Nasdaq", "^VIX": "VIX", "^VXN": "VXN",
+        # International — top globally-significant indices (incl India)
+        "^FTSE": "FTSE", "^GDAXI": "DAX",
+        "^N225": "Nikkei", "^HSI": "HangSeng", "000001.SS": "Shanghai", "^NSEI": "Nifty50",
         # Commodities
-        "GC=F": "Gold", "SI=F": "Silver", "CL=F": "Crude Oil",
-        # Crypto
-        "BTC-USD": "Bitcoin",
-        # International
-        "^N225": "Japan", "^HSI": "Hong Kong", "^FTSE": "UK", "^GDAXI": "Germany",
-        # Forex
-        "EURUSD=X": "EUR/USD", "USDJPY=X": "USD/JPY",
+        "GC=F": "Gold", "CL=F": "Crude Oil",
+        # Crypto / Forex
+        "BTC-USD": "Bitcoin", "EURUSD=X": "EUR/USD",
     }
     
     ticker_list = list(tickers.keys())
@@ -2234,24 +2273,38 @@ def format_market_summary_telegram(market_data, sentiment):
     lines.append(f"📊 {sentiment['risk_mode']} | 🌪️ VIX: {sentiment['volatility']}")
     lines.append("")
     
-    # Key prices
-    tickers = ["SPY", "QQQ", "^VIX", "GC=F", "CL=F", "BTC-USD"]
-    for t in tickers:
+    # ── Tabulated markets: US + international (incl India) + commodities ──
+    _order = [
+        ("SPY", "US"), ("QQQ", "US"), ("^VIX", "US"), ("^VXN", "US"),
+        ("^FTSE", "EU"), ("^GDAXI", "EU"),
+        ("^N225", "AS"), ("^HSI", "AS"), ("000001.SS", "AS"), ("^NSEI", "IN"),
+        ("GC=F", "CM"), ("CL=F", "CM"), ("BTC-USD", "CX"),
+    ]
+    _rows = []
+    for t, _reg in _order:
         if t in prices and pd.notna(prices[t]):
-            chg = changes.get(t, 0)
-            chg_str = f"{chg:+.1f}%" if pd.notna(chg) else "N/A"
-            name = labels[t]
-            val_fmt = f"${prices[t]:,.0f}" if t == "BTC-USD" else f"{prices[t]:.2f}"
-            lines.append(f"{name}: {val_fmt} ({chg_str})")
-    
+            chg = changes.get(t, 0) or 0
+            # vol indices invert: UP = fear = red (a rising VIX/VXN is risk-off)
+            if t in ("^VIX", "^VXN"):
+                st = "🔴" if chg > 0.3 else ("🟢" if chg < -0.3 else "🟡")
+            else:
+                st = "🟢" if chg > 0.3 else ("🔴" if chg < -0.3 else "🟡")
+            val = float(prices[t])
+            val_s = f"{val:,.0f}" if val >= 100 else f"{val:.2f}"
+            _nm = {"Crude Oil": "Oil", "Bitcoin": "BTC"}.get(str(labels.get(t, t)), str(labels.get(t, t)))
+            _rows.append((st, _nm[:8], val_s, f"{chg:+.1f}%"))
+    if _rows:
+        lines.append(_pipe_table(("ST", "Market", "Level", "Chg%"), _rows,
+                                 right_cols={2, 3},
+                                 legend="🇺🇸 US · 🇬🇧🇩🇪 EU · 🇯🇵🇭🇰🇨🇳 Asia · 🇮🇳 India · Gold/Oil/BTC"))
     lines.append("")
-    
+
     # Signals
     if sentiment["signals"]:
         lines.append("<b>🔔 Key Signals:</b>")
         for sig in sentiment["signals"][:5]:
             lines.append(f"• {sig}")
-    
+
     return "\n".join(lines)
 
 # ═══════════════════════════════════════════════════════════
@@ -4736,7 +4789,7 @@ def _oi_opportunity_table(ticker: str, conn, df, spot: float) -> str:
         _edt = pd.read_sql("""SELECT DISTINCT expiry_date FROM options_change WHERE ticker=?
             AND expiry_date > ?
             ORDER BY expiry_date LIMIT 1""",
-            conn, params=(ticker, datetime.now().strftime("%Y%m%d")))
+            conn, params=(ticker, datetime.now().strftime("%Y-%m-%d")))  # ISO! was %Y%m%d -> matched nothing (2026-07-20 fix)
         if not _edt.empty:
             exp_str = _edt["expiry_date"].iloc[0]
             dte = max(1, (datetime.strptime(str(exp_str), "%Y-%m-%d") - datetime.now()).days)
@@ -4862,8 +4915,12 @@ def _oi_opportunity_table(ticker: str, conn, df, spot: float) -> str:
         _brows, _bdet = [], []
         for strat, strike, pw, rr, invest, profit, loss in buy_opps:
             _brows.append((_bem.get(strat, "⚪"), f"{strike:.0f}", f"{pw}%", _fk(invest)))
+            _px = invest / 100.0                          # premium per share
+            if strat == "BUY CALL":   _be = f", BE ${strike + _px:.0f}"
+            elif strat == "BUY PUT ": _be = f", BE ${strike - _px:.0f}"
+            else:                     _be = f", needs ±${_px:.0f} move"
             _bdet.append(f"• BUY {_typ_word.get(strat, strat)} ${strike:.0f}{_exp_leg} — "
-                         f"pay ${_fk(invest)}, target 2:1 (+${_fk(profit)}), win {pw}%")
+                         f"~${_px:.2f}/sh, pay ${_fk(invest)}/ctr{_be}, target 2:1 (+${_fk(profit)}), win {pw}%")
         lines.append("\n" + _pipe_table(
             ("ST", "Stk", "Win", "In$"), _brows, right_cols={2, 3},
             title=f"BUY (pay premium){_exp_ttl}",
@@ -4876,7 +4933,9 @@ def _oi_opportunity_table(ticker: str, conn, df, spot: float) -> str:
         for strat, strike, pw, rr, invest, profit, loss in sell_opps:
             _s = strat.replace("SELL ", "S").replace("IRON COND", "ICOND")[:5].strip()
             _srows.append((_bem.get(strat, "⚪"), f"{strike:.0f}", f"{pw}%", _fk(invest)))
-            _sdet.append(f"• {_s} ${strike:.0f}{_exp_leg} — collect ${_fk(invest)}, max risk ${_fk(loss)}")
+            _spx = invest / 100.0                         # credit per share
+            _sdet.append(f"• {_s} ${strike:.0f}{_exp_leg} — ~${_spx:.2f}/sh credit, "
+                         f"collect ${_fk(invest)}, max risk ${_fk(loss)}, win {pw}%")
         lines.append("\n" + _pipe_table(
             ("ST", "Stk", "Win", "Rcv$"), _srows, right_cols={2, 3},
             title=f"SELL (collect premium){_exp_ttl}",
@@ -9678,9 +9737,9 @@ async def market_analytics_report(query):
     # ── 1. Futures & Indices ────────────────────────────────────────
     fut_syms = [
         ("ES",      "ES=F"),     ("NQ",      "NQ=F"),
-        ("VIX",     "^VIX"),     ("Gold",    "GC=F"),
-        ("Oil",     "CL=F"),     ("BTC",     "BTC-USD"),
-        ("EUR/USD", "EURUSD=X"), ("10Y",     "^TNX"),
+        ("VIX",     "^VIX"),     ("VXN",     "^VXN"),   # Nasdaq-100 vol (tech fear gauge)
+        ("Gold",    "GC=F"),     ("Oil",     "CL=F"),
+        ("BTC",     "BTC-USD"),  ("EUR/USD", "EURUSD=X"), ("10Y", "^TNX"),
     ]
     # Each data row — compact 4-col, mobile-safe ≈28 chars (no Dir)
     _f_hdrs = ["ST", "Name", "Price", "Chg%"]
@@ -11443,14 +11502,30 @@ async def global_market_view(query):
         if cascade_lines:
             cascade_text = (f"\n\n{hdr('🌐 MACRO CASCADE MAP')}\n"
                             + "\n".join(cascade_lines))
-        # Stock relations for context
+        # Stock relations for context — driver → who moves, with names + the mechanism
         rel_text = (f"\n\n{hdr('📡 KEY STOCK RELATIONS')}\n"
-                    "NVDA↑ → SMCI/ANET/AMD (AI infra spend)\n"
-                    "AAPL↑ → TSM/QCOM/AVGO (supply chain)\n"
-                    "GOOGL↑ → META/TTD/MGNI (ad-tech floor)\n"
-                    "Oil↑ → ▼DAL/UAL  ▲XLE/CVX  ▼XRT\n"
-                    "Gold↑ → ▲GDX  ▼DXY → ▲EEM/FXI\n"
-                    "Rates↑ → ▲Banks  ▼REITs  ▼Long-tech")
+            "<i>Who moves what, and why (ticker = company).</i>\n\n"
+            "🤖 <b>AI / Semis</b>\n"
+            "NVDA↑ (Nvidia) → ▲SMCI (Super Micro), ANET (Arista), AMD, TSM (TSMC), MSFT\n"
+            "  <i>GPU demand → server build-out + cloud capex.</i>\n"
+            "AAPL↑ (Apple) → ▲TSM, QCOM (Qualcomm), AVGO (Broadcom), SWKS (Skyworks)\n"
+            "  <i>iPhone cycle pulls the whole supply chain.</i>\n\n"
+            "📱 <b>Ad-tech</b>\n"
+            "GOOGL↑ (Alphabet) → ▲META; watch TTD (Trade Desk), MGNI (Magnite), DV (DoubleVerify)\n"
+            "  <i>Digital-ad pricing sets the ceiling for every ad platform.</i>\n\n"
+            "🛢 <b>Oil / Energy</b>\n"
+            "Oil↑ → ▼DAL (Delta), UAL (United), AAL (American) <i>— jet fuel is a top cost for airlines</i>\n"
+            "     → ▲XLE (energy ETF), CVX (Chevron), XOM (Exxon), OXY (Occidental), SLB (Schlumberger)\n"
+            "     → ▼XRT (retail ETF) <i>— gas at the pump eats consumer wallets</i>\n\n"
+            "🥇 <b>Gold / Dollar</b>\n"
+            "Gold↑ → ▲GDX (miners ETF), NEM (Newmont); usually ▼DXY (US dollar)\n"
+            "     → weak $ → ▲EEM (emerging mkts), FXI (China) <i>— cheaper $ lifts EM</i>\n\n"
+            "📈 <b>Rates (10Y yield)</b>\n"
+            "Rates↑ → ▲JPM, BAC, WFC (banks) <i>— wider lending margins</i>\n"
+            "       → ▼VNQ (REITs), O (Realty Income), XLU (utilities) <i>— higher discount rate</i>\n"
+            "       → ▼ARKK <i>— long-duration / unprofitable tech hit hardest</i>\n\n"
+            "₿ <b>Crypto</b>\n"
+            "BTC↑ → ▲COIN (Coinbase), MSTR (MicroStrategy), RIOT, MARA <i>(exchanges + miners)</i>")
         full_message = (
             f"{summary}\n\n"
             f"{hdr('💡 OPTIONS STRATEGY IMPLICATIONS')}\n"
@@ -19226,10 +19301,12 @@ async def recommend_engine(query):
     vix_em = "🔴" if vix_val > 25 else ("🟡" if vix_val > 18 else "🟢")
     regime  = ("Risk-OFF — hedge first" if vix_val > 25
                else ("Caution zone" if vix_val > 18 else "Risk-ON"))
+    _vxn = _get_vol_indices().get("vxn", 0) or 0          # Nasdaq-100 fear gauge (tech names)
+    _vxn_s = f"  ·  🟣 VXN <b>{_vxn:.1f}</b> (tech)" if _vxn > 0 else ""
 
     parts = [
         hdr("🎯 RECOMMENDATION ENGINE"),
-        f"{vix_em} VIX <b>{vix_val:.1f}</b>  {regime}",
+        f"{vix_em} VIX <b>{vix_val:.1f}</b>  {regime}{_vxn_s}",
     ]
 
     # ── Scored universe summary table ────────────────────────

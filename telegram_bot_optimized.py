@@ -1998,6 +1998,217 @@ def _vol_for(ticker):
     return ("VIX", vi.get("vix", 0) or 0.0)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# MONEY-FLOW / ROTATION ENGINE  (where capital is rotating — sectors, geos,
+# commodities, bonds). Free-data proxy for institutional flow, blending three
+# standard signals: (1) Relative Strength vs SPY + RS-Momentum → de Kempenaer
+# RRG quadrant (Leading/Weakening/Lagging/Improving); (2) Chaikin Money Flow
+# (accumulation vs distribution); (3) dollar-volume participation. No paid
+# fund-flow feed needed — all from OHLCV. (Built 2026-07-20 per user request.)
+# ═══════════════════════════════════════════════════════════════════════════
+_MONEYFLOW_UNIVERSE = {
+    "US Sectors": [("XLK", "Tech"), ("XLF", "Financials"), ("XLE", "Energy"),
+                   ("XLV", "Health"), ("XLI", "Industrials"), ("XLY", "Discretionary"),
+                   ("XLP", "Staples"), ("XLU", "Utilities"), ("XLB", "Materials"),
+                   ("XLRE", "RealEstate"), ("XLC", "CommSvcs")],
+    "US Style/Size": [("QQQ", "Nasdaq100"), ("IWM", "SmallCap"), ("IWF", "Growth"),
+                      ("IWD", "Value"), ("MTUM", "Momentum")],
+    "Continents/Regions": [("EFA", "Developed"), ("EEM", "EmergMkt"), ("VGK", "Europe"),
+                           ("AAXJ", "AsiaXJapan"), ("EPP", "AsiaPacific"), ("ILF", "LatinAmer")],
+    "Countries": [("EWJ", "Japan"), ("FXI", "China"), ("INDA", "India"), ("EWZ", "Brazil"),
+                  ("EWG", "Germany"), ("EWU", "UK"), ("EWC", "Canada"), ("EWY", "Korea"),
+                  ("EWT", "Taiwan"), ("EWW", "Mexico")],
+    "Currencies": [("UUP", "USDollar"), ("FXE", "Euro"), ("FXY", "Yen"),
+                   ("FXB", "Pound"), ("CEW", "EM-FX")],
+    "Commodities": [("GLD", "Gold"), ("SLV", "Silver"), ("USO", "Oil"),
+                    ("CPER", "Copper"), ("DBA", "Agri"), ("DBC", "BroadCmdty")],
+    "Bonds": [("TLT", "LongTsy"), ("IEF", "7-10yTsy"), ("HYG", "HighYield"),
+              ("LQD", "InvGrade"), ("TIP", "TIPS")],
+    "Crypto": [("BTC-USD", "Bitcoin"), ("ETH-USD", "Ethereum")],
+}
+# Risk-on assets (money in = risk appetite) vs risk-off / defensive (money in = fear)
+_RISK_ON  = {"XLK", "XLY", "IWM", "QQQ", "IWF", "MTUM", "XLF", "XLC", "BTC-USD", "ETH-USD",
+             "FXI", "EEM", "EWZ", "EWY", "EWT", "EWW", "ILF", "AAXJ", "EPP"}
+_RISK_OFF = {"XLU", "XLP", "XLV", "TLT", "IEF", "LQD", "TIP", "GLD", "UUP", "FXY"}
+
+def _cmf_series(h, n=20):
+    """Chaikin Money Flow(n): +ve = accumulation (money in), -ve = distribution (out)."""
+    hi, lo, cl, vol = h["High"], h["Low"], h["Close"], h["Volume"]
+    rng = (hi - lo).replace(0, np.nan)
+    mfm = ((cl - lo) - (hi - cl)) / rng
+    mfv = (mfm * vol).fillna(0.0)
+    vsum = float(vol.tail(n).sum())
+    return float(mfv.tail(n).sum() / vsum) if vsum > 0 else 0.0
+
+def compute_money_flow():
+    """Rank the universe by a money-flow composite. Returns
+    {'cats': {category: [row,...]}, 'read': str, 'risk': float, 'asof': str}."""
+    syms = [s for grp in _MONEYFLOW_UNIVERSE.values() for s, _ in grp] + ["SPY"]
+    try:
+        data = _yf_download(tickers=" ".join(sorted(set(syms))), period="4mo",
+                            interval="1d", auto_adjust=False, progress=False)
+    except Exception as e:
+        log.warning(f"money_flow download failed: {e}")
+        return {"cats": {}, "read": "", "risk": 0.0, "asof": ""}
+
+    def _ohlcv(sym):
+        try:
+            if isinstance(data.columns, pd.MultiIndex):
+                d = pd.DataFrame({k: data[k][sym] for k in ("High", "Low", "Close", "Volume")})
+            else:  # single ticker
+                d = data[["High", "Low", "Close", "Volume"]].copy()
+            return d.dropna()
+        except Exception:
+            return pd.DataFrame()
+
+    spy = _ohlcv("SPY")
+    if spy.empty or len(spy) < 25:
+        return {"cats": {}, "read": "", "risk": 0.0, "asof": ""}
+    spy_c = spy["Close"]
+    def _ret(c, n):
+        return (float(c.iloc[-1]) / float(c.iloc[-1 - n]) - 1) * 100 if len(c) > n else 0.0
+    spy_r20 = _ret(spy_c, 20)
+
+    cats, risk_num, risk_den = {}, 0.0, 0.0
+    for cat, members in _MONEYFLOW_UNIVERSE.items():
+        rows = []
+        for sym, name in members:
+            h = _ohlcv(sym)
+            if h.empty or len(h) < 25:
+                continue
+            c = h["Close"]
+            r5, r20 = _ret(c, 5), _ret(c, 20)
+            rel20 = r20 - spy_r20                       # excess return vs SPY (rotation edge)
+            cmf = _cmf_series(h, 20)                    # accumulation/distribution
+            # RS line vs SPY + RRG-style ratio/momentum
+            rs = (c / spy_c.reindex(c.index).ffill()).dropna()
+            rs_ma = rs.rolling(20).mean()
+            rs_ratio = float(100 * rs.iloc[-1] / rs_ma.iloc[-1]) if rs_ma.iloc[-1] else 100.0
+            rs_prev  = float(100 * rs.iloc[-6] / rs_ma.iloc[-6]) if len(rs) > 6 and rs_ma.iloc[-6] else rs_ratio
+            rs_mom   = rs_ratio - rs_prev               # >0 = strengthening
+            quad = ("Leading"   if rs_ratio >= 100 and rs_mom >= 0 else
+                    "Weakening" if rs_ratio >= 100 and rs_mom <  0 else
+                    "Improving" if rs_ratio <  100 and rs_mom >= 0 else "Lagging")
+            # dollar-volume participation (5d vs 20d)
+            dv = (c * h["Volume"])
+            dvt = (float(dv.tail(5).mean()) / float(dv.tail(20).mean()) - 1) * 100 if float(dv.tail(20).mean()) else 0.0
+            # composite score: excess return + CMF + RS momentum + participation
+            score = rel20 * 1.0 + cmf * 60.0 + rs_mom * 1.2 + max(min(dvt, 60), -60) * 0.10
+            flow = ("IN"  if (cmf > 0.03 and rel20 > 0) else
+                    "OUT" if (cmf < -0.03 and rel20 < 0) else "MIXED")
+            rows.append({"sym": sym, "name": name, "r5": r5, "r20": r20, "rel20": rel20,
+                         "cmf": cmf, "rs_ratio": rs_ratio, "rs_mom": rs_mom, "quad": quad,
+                         "dvt": dvt, "score": score, "flow": flow})
+            if sym in _RISK_ON:
+                risk_num += score; risk_den += abs(score) + 1
+            elif sym in _RISK_OFF:
+                risk_num -= score; risk_den += abs(score) + 1
+        rows.sort(key=lambda x: x["score"], reverse=True)
+        if rows:
+            cats[cat] = rows
+
+    risk = (risk_num / risk_den * 100) if risk_den else 0.0   # -100 risk-off .. +100 risk-on
+    # rotation read
+    allrows = [r for rs in cats.values() for r in rs]
+    ins  = sorted([r for r in allrows if r["flow"] == "IN"],  key=lambda x: -x["score"])[:4]
+    outs = sorted([r for r in allrows if r["flow"] == "OUT"], key=lambda x:  x["score"])[:4]
+    tone = ("RISK-ON" if risk > 15 else "RISK-OFF" if risk < -15 else "MIXED/ROTATIONAL")
+    read = f"{tone}: "
+    if ins:  read += "money INTO " + ", ".join(r["name"] for r in ins)
+    if outs: read += "  ·  OUT of " + ", ".join(r["name"] for r in outs)
+
+    # ── data-driven relationships: what has HISTORICALLY moved together ──
+    # (daily-return correlation over the fetched window; surfaces the 'most obvious'
+    #  follow-on for whatever is leading the rotation now). User ask 2026-07-20.
+    rels = []
+    try:
+        _valid = [r["sym"] for rs in cats.values() for r in rs]
+        _closes = {}
+        for s in _valid:
+            _o = _ohlcv(s)
+            if not _o.empty:
+                _closes[s] = _o["Close"]
+        _rets = pd.DataFrame(_closes).pct_change().dropna(how="all")
+        _corr = _rets.corr()
+        _nm = {s: n for grp in _MONEYFLOW_UNIVERSE.values() for s, n in grp}
+        for r in (ins[:2] + outs[:2]):
+            s = r["sym"]
+            if s not in _corr.columns:
+                continue
+            col = _corr[s].drop(labels=[s], errors="ignore").dropna()
+            pos = col.sort_values(ascending=False).head(3)
+            neg = col.sort_values().head(2)
+            rels.append({"name": r["name"], "dir": ("▲" if r["flow"] == "IN" else "▼"),
+                         "with": [(_nm.get(k, k), float(v)) for k, v in pos.items() if v > 0.2],
+                         "opp":  [(_nm.get(k, k), float(v)) for k, v in neg.items() if v < -0.2]})
+    except Exception as _e:
+        log.debug(f"flow relationships: {_e}")
+
+    return {"cats": cats, "read": read, "risk": risk, "asof": str(spy.index[-1])[:10],
+            "ins": ins, "outs": outs, "rels": rels}
+
+
+_MF_CACHE = {"ts": 0.0, "data": None}
+
+def _money_flow_cached():
+    import time as _t
+    if _MF_CACHE["data"] and _t.time() - _MF_CACHE["ts"] < 900:   # 15-min cache (EOD-ish data)
+        return _MF_CACHE["data"]
+    d = compute_money_flow()
+    if d.get("cats"):
+        _MF_CACHE["data"] = d; _MF_CACHE["ts"] = _t.time()
+    return d
+
+def _money_flow_report(mf=None):
+    """Telegram report: rotation read + per-category flow tables (RRG quadrant + CMF vs SPY)."""
+    if mf is None:
+        mf = _money_flow_cached()
+    cats = mf.get("cats") or {}
+    if not cats:
+        return "⚠️ Money-flow data unavailable right now — feeds slow, try again shortly."
+    risk = mf.get("risk", 0.0)
+    tone_em = "🟢" if risk > 15 else ("🔴" if risk < -15 else "🟡")
+    parts = [hdr(f"💸 MONEY FLOW / ROTATION · {mf.get('asof','')}")]
+    parts.append(f"{tone_em} <b>{mf.get('read','')}</b>")
+    parts.append(f"<i>Risk-appetite {risk:+.0f} (−100 risk-off … +100 risk-on). "
+                 "Rank = Chaikin Money Flow + relative strength vs SPY + RS-momentum; "
+                 "Q = RRG quadrant.</i>")
+    if mf.get("rels"):
+        parts.append("\n<b>🔗 What moves together</b> <i>(daily-return corr, ~4mo — the 'most obvious' follow-on)</i>")
+        for rl in mf["rels"]:
+            _w = ", ".join(f"{n}({c:+.2f})" for n, c in rl["with"]) or "—"
+            _line = f"{rl['dir']} <b>{rl['name']}</b> → moves with: {_w}"
+            if rl["opp"]:
+                _line += " · opposite: " + ", ".join(f"{n}({c:+.2f})" for n, c in rl["opp"])
+            parts.append(_line)
+        parts.append("<i>When the leader moves, the 'with' names usually follow; 'opposite' names diverge.</i>")
+    _qmap = {"Leading": "Ld", "Weakening": "Wk", "Improving": "Im", "Lagging": "Lg"}
+    for cat, rows in cats.items():
+        _r = []
+        for r in rows:
+            fe = "🟢" if r["flow"] == "IN" else ("🔴" if r["flow"] == "OUT" else "🟡")
+            _r.append((fe, r["name"][:9], f"{r['rel20']:+.1f}%", _qmap.get(r["quad"], "")))
+        parts.append(_pipe_table(("", "Name", "vSPY", "Q"), _r, right_cols={2}, title=cat))
+    parts.append("<i>🟢 money in · 🔴 out · 🟡 mixed · Ld lead / Im improve / Wk weaken / Lg lag "
+                 "· vSPY = 20d return vs S&P · educational, not advice</i>")
+    return "\n".join(parts)
+
+async def flow_view(query):
+    _loading = await query.message.reply_text("💸 Computing money-flow rotation…", parse_mode=H)
+    try:
+        msg = _money_flow_report()
+    except Exception as e:
+        log.warning(f"flow_view: {e}"); msg = "⚠️ Money-flow error — try again."
+    try: await _loading.delete()
+    except Exception: pass
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="flow_view"), BACK_BTN]])
+    await _safe_reply(query.message, msg, reply_markup=kb)
+
+async def flow_cmd(update, ctx):
+    from types import SimpleNamespace
+    await flow_view(SimpleNamespace(message=update.message))
+
+
 
 # Known FOMC meeting dates (approximate — update quarterly)
 _FOMC_DATES = [
@@ -11864,6 +12075,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await plan_view(query)
         elif data == "wrap_view":
             await wrap_view(query)
+        elif data == "flow_view":
+            await flow_view(query)
         elif data == "tv_view":
             await tv_view(query)
         elif data == "hiprob_view":
@@ -29567,6 +29780,7 @@ def main():
     app.add_handler(CommandHandler("opex", opex_command))
     app.add_handler(CommandHandler("event", event_command))
     app.add_handler(CommandHandler("briefing", briefing_command))
+    app.add_handler(CommandHandler("flow", flow_cmd))          # money-flow / rotation engine
     app.add_handler(CommandHandler("plan", plan_command))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("terminal", terminal_command))

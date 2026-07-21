@@ -3289,6 +3289,9 @@ MAIN_MENU_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("🎯 Hi-Prob (≥80%)", callback_data="hiprob_view"),
      InlineKeyboardButton("📐 Spreads", callback_data="spreads_view"),
      InlineKeyboardButton("🎡 Wheel/CSP", callback_data="wheel_view")],
+    [InlineKeyboardButton("💰 Cap-Flow", callback_data="capflow_view"),
+     InlineKeyboardButton("💸 Money-Flow", callback_data="flow_view"),
+     InlineKeyboardButton("🌐 World", callback_data="world_view")],
     # ── AI + SETTINGS ────────────────────────────────────────────
     [InlineKeyboardButton("━━  AI & TOOLS  ━━━━━━━━━━━━", callback_data="noop")],
     [InlineKeyboardButton("🤖 Ask AI",     callback_data="menu_ai_chat"),

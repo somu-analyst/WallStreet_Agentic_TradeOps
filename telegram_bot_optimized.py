@@ -2603,6 +2603,63 @@ async def capflow_cmd(update, ctx):
     await capflow_view(SimpleNamespace(message=update.message), tks=args or None)
 
 
+async def news_refresh(context=None):
+    """Pull fresh company news into news_feed. Finnhub primary, keyless yfinance fallback.
+
+    The feed sat frozen at 2026-02-20 because `_lib/news_and_earnings.store_news()` was
+    never wired to a scheduler — the ingest function existed but NOTHING called it. That
+    left every narrative catalyst-blind (it missed the AMD 'Helios' news that moved the
+    semis complex). Deduped on (ticker, headline) so re-runs are idempotent.
+    """
+    import urllib.request, json as _json, datetime as _dt
+    try:
+        tks = (_positions_tickers() or []) + ["SPY", "QQQ", "NVDA", "AMD", "MU", "GOOG", "SMH"]
+        tks = list(dict.fromkeys(str(t).upper() for t in tks))[:15]
+        key = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_KEY")
+        to_d = _et_now().date(); frm_d = to_d - _dt.timedelta(days=2)
+        conn = get_conn(); cur = conn.cursor()
+        added = 0
+        for tk in tks:
+            items = []
+            if key:
+                try:
+                    u = (f"https://finnhub.io/api/v1/company-news?symbol={tk}"
+                         f"&from={frm_d}&to={to_d}&token={key}")
+                    with urllib.request.urlopen(u, timeout=15) as r:
+                        for d in _json.loads(r.read().decode())[:12]:
+                            items.append((d.get("headline"), d.get("summary"), d.get("url"),
+                                          _dt.datetime.fromtimestamp(d.get("datetime") or 0)
+                                            .strftime("%Y-%m-%d %H:%M:%S"), "finnhub"))
+                except Exception as e:
+                    log.debug(f"finnhub news {tk}: {e}")
+            if not items:                                   # keyless fallback
+                try:
+                    for it in (_yf_ticker(tk).news or [])[:8]:
+                        c = it.get("content", it) or {}
+                        items.append((c.get("title"), str(c.get("summary") or "")[:500],
+                                      (c.get("canonicalUrl") or {}).get("url", ""),
+                                      str(c.get("pubDate", ""))[:19].replace("T", " "), "yfinance"))
+                except Exception as e:
+                    log.debug(f"yf news {tk}: {e}")
+            for hl, sm, url, pub, src in items:
+                if not hl:
+                    continue
+                if cur.execute("SELECT 1 FROM news_feed WHERE ticker=? AND headline=? LIMIT 1",
+                               (tk, hl)).fetchone():
+                    continue                                # idempotent re-run
+                cur.execute("INSERT INTO news_feed(ticker, headline, summary, source, url, "
+                            "published_date, sentiment, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            (tk, hl, sm or "", src, url or "", pub or "", "",
+                             _et_now().strftime("%Y-%m-%d %H:%M:%S")))
+                added += 1
+        conn.commit(); conn.close()
+        log.info(f"news_refresh: +{added} new items across {len(tks)} tickers")
+        return added
+    except Exception as e:
+        log.warning(f"news_refresh failed: {e}")
+        return 0
+
+
 # ═══════════ AI AGENT DEBATE — TradingAgents-style layer over OUR engine ═══════════
 # Role-specialised analysts each read ONE slice of the in-house engine and take a stance
 # (-100..+100) with evidence; a bull/bear split is tallied, a trader weights it into one
@@ -30592,6 +30649,7 @@ def main():
         job_queue.run_daily(action_board_alert, time=dt_time(13, 35, 0)) # Action Board ~8:35 AM ET pre-market
         job_queue.run_daily(earnings_alert, time=dt_time(13, 45, 0)) # Earnings Radar ~8:45 AM ET pre-market
         job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # weekly sector rotation, Mondays
+        job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
         job_queue.run_once(riskoff_alert, when=25)                    # Risk-Off Radar readout ~on startup
         job_queue.run_daily(riskoff_alert, time=dt_time(21, 20, 0), data={"gate": True})  # post-close ~4:20 PM ET, only if caution+
         job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # ~4:35 PM ET — silently log anti-bubble baskets for tracking

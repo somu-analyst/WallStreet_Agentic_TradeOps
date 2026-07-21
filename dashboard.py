@@ -13411,12 +13411,13 @@ elif page == "⚡ Trade Risk Calculator":
             st.session_state["sim_strike"] = float(st.session_state.get("rc_strike", 580.0) or 580.0)
             st.session_state["sim_entry"] = float(st.session_state.get("rc_entry", 5.0) or 5.0)
             st.session_state["sim_qty"] = int(st.session_state.get("rc_qty", 1) or 1)
+            # carry DIRECTION across too — the simulator now models shorts natively
+            st.session_state["sim_side"] = ("sell (short)"
+                                            if str(st.session_state.get("rc_side", "")).startswith("sell")
+                                            else "buy (long)")
             if st.session_state.get("rc_exp"):
                 st.session_state["sim_expiry"] = st.session_state["rc_exp"]
             st.rerun()
-        if str(st.session_state.get("rc_side", "")).startswith("sell"):
-            _sc2.caption("⚠️ That trade is **short**; this simulator charts a **long** position — "
-                         "invert the P&L sign to read it.")
 
     sim_c1, sim_c2, sim_c3, sim_c4 = st.columns(4)
     sim_ticker = sim_c1.text_input("Ticker", value="SPY", key="sim_tk")
@@ -13424,12 +13425,16 @@ elif page == "⚡ Trade Risk Calculator":
     sim_strike = sim_c3.number_input("Strike", value=580.0, step=1.0, key="sim_strike")
     sim_expiry = sim_c4.date_input("Option Expiry", value=datetime.now() + timedelta(days=30), key="sim_expiry")
 
-    sim_c5, sim_c6, sim_c7 = st.columns(3)
-    sim_entry_px = sim_c5.number_input("Entry Premium ($)", value=5.0, step=0.1, key="sim_entry",
-                                        help="Price you paid/plan to pay per share")
-    sim_qty = sim_c6.number_input("Contracts", min_value=1, value=1, key="sim_qty")
-    sim_buy_date = sim_c7.date_input("Buy Date", value=datetime.now().date(), key="sim_buy_dt",
-                                      help="When you bought / plan to buy")
+    sim_c5, sim_c6, sim_c7, sim_c8 = st.columns(4)
+    sim_side = sim_c5.selectbox("Direction", ["buy (long)", "sell (short)"], key="sim_side",
+                                help="Short inverts P&L: you profit as the option DECAYS. "
+                                     "A short call has unlimited loss.")
+    _sim_sgn = 1 if str(sim_side).startswith("buy") else -1
+    sim_entry_px = sim_c6.number_input("Entry Premium ($)", value=5.0, step=0.1, key="sim_entry",
+                                        help="Premium paid (long) or collected (short) per share")
+    sim_qty = sim_c7.number_input("Contracts", min_value=1, value=1, key="sim_qty")
+    sim_buy_date = sim_c8.date_input("Entry Date", value=datetime.now().date(), key="sim_buy_dt",
+                                      help="When you opened / plan to open the position")
 
     # Auto-fetch IV + spot (AH-aware)
     _sim_iv = 0.30
@@ -13493,8 +13498,10 @@ elif page == "⚡ Trade Risk Calculator":
     _sim_T = max((sim_exp_dt - _sim_target_date).days, 0) / 365.0
     _sim_g = bs_greeks(sim_target_price, sim_strike, _sim_T, 0.045, _sim_iv, sim_opt_type)
     _sim_theo = _sim_g["price"]
-    _sim_pnl = (_sim_theo - sim_entry_px) * sim_qty * 100
-    _sim_pnl_pct = (_sim_theo - sim_entry_px) / sim_entry_px * 100 if sim_entry_px > 0 else 0
+    # _sim_sgn flips every P&L for a short: the seller gains as the option loses value.
+    _sim_pnl = (_sim_theo - sim_entry_px) * sim_qty * 100 * _sim_sgn
+    _sim_pnl_pct = ((_sim_theo - sim_entry_px) / sim_entry_px * 100 * _sim_sgn
+                    if sim_entry_px > 0 else 0)
     _pnl_c = "#00c853" if _sim_pnl >= 0 else "#ff1744"
 
     # ── Result card at slider position ──
@@ -13534,7 +13541,7 @@ elif page == "⚡ Trade Risk Calculator":
         _pnl_line = []
         for s in _s_range:
             _g = bs_greeks(s, sim_strike, _d_T, 0.045, _sim_iv, sim_opt_type)
-            _p = (_g["price"] - sim_entry_px) * sim_qty * 100
+            _p = (_g["price"] - sim_entry_px) * sim_qty * 100 * _sim_sgn
             _pnl_line.append(_p)
         _lbl = f"Day {d}" if d > 0 else "Today"
         if d == _total_dte:
@@ -13581,7 +13588,7 @@ elif page == "⚡ Trade Risk Calculator":
         row = []
         for s in _hm_prices:
             _g = bs_greeks(s, sim_strike, _d_T, 0.045, _sim_iv, sim_opt_type)
-            _p = (_g["price"] - sim_entry_px) * sim_qty * 100
+            _p = (_g["price"] - sim_entry_px) * sim_qty * 100 * _sim_sgn
             row.append(round(_p, 2))
         _hm_data.append(row)
     fig_hm = px.imshow(
@@ -13603,12 +13610,21 @@ elif page == "⚡ Trade Risk Calculator":
         if abs(_g["price"] - sim_entry_px) < 0.02:
             _be_price = s
             break
-    _max_loss = -sim_entry_px * sim_qty * 100
+    # Long: risk capped at premium. Short PUT: (strike - credit). Short CALL: UNBOUNDED.
+    if _sim_sgn > 0:
+        _max_loss = -sim_entry_px * sim_qty * 100
+    elif str(sim_opt_type).lower() == "put":
+        _max_loss = -max(0.0, float(sim_strike) - sim_entry_px) * sim_qty * 100
+    else:
+        _max_loss = None          # naked short call — unbounded
     _be_str = f"${_be_price:.2f}" if _be_price else "N/A"
     kl1, kl2, kl3, kl4, kl5 = st.columns(5)
     kl1.metric("Breakeven (at slider date)", _be_str)
-    kl2.metric("Max Loss", f"${_max_loss:,.2f}")
-    kl3.metric("Cost Basis", f"${sim_entry_px * sim_qty * 100:,.2f}")
+    # _max_loss is None for a naked short call (unbounded) — guard before formatting.
+    kl2.metric("Max Loss", "UNLIMITED" if _max_loss is None else f"${_max_loss:,.2f}",
+               delta=("LONG" if _sim_sgn > 0 else "SHORT"), delta_color="inverse")
+    kl3.metric("Credit Received" if _sim_sgn < 0 else "Cost Basis",
+               f"${sim_entry_px * sim_qty * 100:,.2f}")
     kl4.metric("Current Option Value", f"${_sim_theo:.2f}")
     if sim_opt_type == "call":
         kl5.metric("Upside if +10%", f"${bs_greeks(_sim_spot * 1.10, sim_strike, _sim_T, 0.045, _sim_iv, sim_opt_type)['price']:.2f}")

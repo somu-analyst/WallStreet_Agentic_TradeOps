@@ -59,8 +59,20 @@ Everything is committed (through `d798758`); bot + dashboard both healthy.
 4. **Alpaca free live tick** — needs the USER's Alpaca API key first (free tier, real-time IEX).
    Build `_alpaca_price()` with graceful fallback to yahoo `fast_info` when no key.
 
-DONE this session from that list: **`/capflow`** (per-ticker capital-flow score, commit 7cb1257,
-labelled NOT-yet-backtested — backtest the composite vs fwd returns before trusting it).
+DONE this session from that list: **`/capflow`** (commit 7cb1257) — and now **BACKTESTED
+(commit dec5703): it has NO directional edge.** 143 days / ~9k obs: score rank-IC ≈ 0
+(t=+0.28 @5d), the score>+20 rule UNDER-performs baseline by 3.0pp @5d, buckets are not
+monotonic, and the $-flow leg itself is flat (t=-0.07). Only vol-ratio hints (t=+2.26) but that
+dies under multiple-comparison correction (7 tests → need |t|>2.7). Matches the old Market-Radar
+result: put-flow predicts SIZE, not direction. **Both /capflow and /debate relabelled in-product.**
+- ⚠️ **Methodology trap (do not repeat):** a first pass on `stock_daily` was INVALID — that table
+  is SPARSE (median 12 dates/ticker), so 20d/forward shifts silently spanned multi-month gaps.
+  Use `stock_history` (753k rows, median 1507 dates/ticker) and compute all shifts on the full
+  dense panel BEFORE joining flow data. Re-runnable: `tools/bt_capflow.py` (gitignored).
+- 🐞 **Live bug found, NOT yet fixed:** `compute_capflow`'s `vol_ratio` reads `stock_daily` and
+  requires ≥20 rows, so it silently stays 1.0 for most of the 734-name universe (majors are fine).
+  Fix = read volume from `stock_history` instead. Ironically vol-ratio was the only leg with any
+  signal, so this is worth fixing before any re-test.
 
 ## Smaller contained items (fill-in)
 - Accuracy audit R5 (macro/narrative wording, low prio) · VXN sweep (~35 VIX sites → `_vol_for`) ·

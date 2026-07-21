@@ -45,10 +45,17 @@ Everything is committed (through `d798758`); bot + dashboard both healthy.
      Wins: routes options onto BB + kills per-ticker network latency. **TEST GATE:** POP/score must
      match the current output on AMD/GOOG/NVDA before/after (the ATM-mid IV back-out must be preserved
      — see standing rule on garbage yfinance IV). Do on fresh budget; it touches the live scanners.
-3. **AI-system integration**: adapt **TradingAgents** pattern (Claude-compatible, LangGraph multi-
-   agent) as a thin layer over OUR engine (OI-flow/`/flow`/`/world`/GEX/`/capflow`) rather than
-   importing its stack — vs **Qlib** (ML-alpha, heavier, own data pipeline). User leaned "do both"
-   → start TradingAgents-style (smaller, fits existing signals); Qlib later.
+3. **AI-system integration** — ✅ **DONE (07-21, commit ef182a4): `/debate`.** TradingAgents PATTERN
+   (role analysts → bull/bear → trader → risk mgr) implemented DETERMINISTICALLY over our own
+   engine — no LLM, no API key, no network, so it is unaffected by the pending Anthropic top-up.
+   5 weighted analysts: Flow(1.2, capflow) · Position(1.1, GEX+walls) · Technical(1.0) · Vol(0.8,
+   VIX/VXN) · Macro(0.7, SPY flow). Verified: MU alone BEAR (-21.4), GOOG/AMD/SPY NEUTRAL.
+   - ⬜ Follow-ups: **backtest the composite** (same gate as /capflow — net score vs fwd 3/5/10d
+     returns, hit-rate vs baseline) BEFORE trusting it; then optional LLM narrative layer on top
+     (feed the agent dict to Claude for prose) once a key/top-up exists; **Qlib** still later.
+   - NOTE for the backtest: `_agent_macro` uses SPY capflow, which is the SAME signal for every
+     ticker on a given day (a constant offset cross-sectionally) — fine for an absolute read, but
+     it adds no cross-sectional discrimination. Consider per-sector backdrop instead.
 4. **Alpaca free live tick** — needs the USER's Alpaca API key first (free tier, real-time IEX).
    Build `_alpaca_price()` with graceful fallback to yahoo `fast_info` when no key.
 

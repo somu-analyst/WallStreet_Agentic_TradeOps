@@ -13218,10 +13218,41 @@ elif page == "⚡ Trade Risk Calculator":
             st.markdown(_PAGE_HELP.get(page, ""))
     st.markdown("*Bloomberg-style scenario analysis before you enter a trade*")
 
-    _rc_reset_keys = ["rc_tk", "rc_type", "rc_strike", "rc_exp", "rc_entry", "rc_qty"]
+    _rc_reset_keys = ["rc_tk", "rc_type", "rc_strike", "rc_exp", "rc_entry", "rc_qty", "rc_side"]
     if st.button("🔄 Reset Fields", key="rc_reset"):
         for _k in _rc_reset_keys:
             st.session_state.pop(_k, None)
+        st.rerun()
+
+    # ── ONE selection drives every field ──────────────────────────────
+    # Previously each input was independent with fixed defaults (strike 580, entry $5.00)
+    # regardless of ticker, so analysing a real holding meant retyping all six fields.
+    _op = q("SELECT ticker, option_type, strike, expiry, quantity, entry_price "
+            "FROM trades WHERE status='OPEN' ORDER BY ticker, expiry")
+    _opts, _map = ["— manual entry —"], {}
+    if _op is not None and not _op.empty:
+        for _, _r in _op.iterrows():
+            if str(_r["option_type"]).upper() == "STOCK":
+                continue                     # shares are linear - no BS scenario to run
+            _q = int(_r["quantity"] or 0)
+            _lbl = (f"{_r['ticker']} {str(_r['option_type']).upper()} "
+                    f"${float(_r['strike'] or 0):.0f} exp {str(_r['expiry'])[:10]} "
+                    f"({'long' if _q >= 0 else 'short'} {abs(_q)} @ ${float(_r['entry_price'] or 0):.2f})")
+            _opts.append(_lbl); _map[_lbl] = _r
+    _pick = st.selectbox("Prefill from an open position", _opts, key="rc_pick",
+                         help="Fills ticker, type, strike, expiry, entry price, size and direction.")
+    if _pick in _map and st.button("⬇️ Load this position", key="rc_load"):
+        _r = _map[_pick]; _q = int(_r["quantity"] or 0)
+        st.session_state["rc_tk"] = str(_r["ticker"]).upper()
+        st.session_state["rc_type"] = str(_r["option_type"]).lower()
+        st.session_state["rc_strike"] = float(_r["strike"] or 0)
+        st.session_state["rc_entry"] = float(_r["entry_price"] or 0)
+        st.session_state["rc_qty"] = max(1, abs(_q))
+        st.session_state["rc_side"] = "sell (short)" if _q < 0 else "buy (long)"
+        try:
+            st.session_state["rc_exp"] = datetime.strptime(str(_r["expiry"])[:10], "%Y-%m-%d").date()
+        except Exception:
+            pass
         st.rerun()
 
     c1, c2, c3, c4 = st.columns(4)

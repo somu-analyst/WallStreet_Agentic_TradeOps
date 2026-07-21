@@ -2247,7 +2247,8 @@ def _money_flow_report(mf=None):
     parts.append(f"{tone_em} <b>{mf.get('read','')}</b>")
     parts.append(f"<i>Risk-appetite {risk:+.0f} (−100 risk-off … +100 risk-on). "
                  "Rank = Chaikin Money Flow + relative strength vs SPY + RS-momentum; "
-                 "Q = RRG quadrant.</i>")
+                 "Q = RRG quadrant. ⚠️ Backtest: the RS-momentum edge is real but small and "
+                 "only at ~20d (IC +0.03, t≈3) — a POSITIONING tilt, not short-term timing.</i>")
     if mf.get("rels"):
         parts.append("\n<b>🔗 What moves together</b> <i>(daily-return corr, ~4mo — the 'most obvious' follow-on)</i>")
         for rl in mf["rels"]:
@@ -2408,8 +2409,9 @@ def _world_report():
     if not regions:
         return "⚠️ Cross-market data unavailable — feeds slow, try again."
     parts = [hdr(f"🌐 CROSS-MARKET · US-LISTED WAYS TO TRADE · {cm.get('asof','')}")]
-    parts.append("<i>Foreign market moves → the US-listed ETF / leveraged / ADR / supply-chain "
-                 "bridge that carries it. Ranked weakest→strongest vs S&P (5d).</i>")
+    parts.append("<i>A CO-MOVEMENT MAP (not a leading signal): which US-listed ETF / leveraged / "
+                 "ADR / supply-chain name moves WITH a given foreign market. Ranked "
+                 "weakest→strongest vs S&P (5d).</i>")
     rows = []
     for r in regions:
         st = "🔴" if r["rel5"] < -1 else ("🟢" if r["rel5"] > 1 else "🟡")
@@ -2450,8 +2452,9 @@ def _world_report():
                      "· cash/1x → SMH/SOXX. Leverage resets daily = decay, so these are day/swing "
                      "trades, never holds.</i>")
 
-    parts.append("<i>Leveraged ETFs (2x/3x) decay — trades, never holds. ADR move = 5d%. "
-                 "Educational, not advice.</i>")
+    parts.append("<i>⚠️ Backtest (4y): US-listed Asia ETFs CO-MOVE with US semis ~0.8 same-day "
+                 "but do NOT lead them — use this to pick the VEHICLE, not to time the move. "
+                 "Leveraged ETFs (2x/3x) decay = trades, never holds. Educational, not advice.</i>")
     return "\n".join(parts)
 
 async def world_view(query):

@@ -23239,11 +23239,21 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
             for df in (puts, calls):
                 df["mid"] = ((df["bid"].fillna(0) + df["ask"].fillna(0)) / 2).where(
                     (df["bid"] > 0) & (df["ask"] > 0), df["lastPrice"])
+            # reliable ATM vol — yfinance per-strike IV is garbage (~1e-5) which collapsed POP to
+            # ~100% so EVERYTHING passed min_pop (audit 2026-07-21). Back it out of the ATM call mid.
+            iv_ref = 0.40
+            try:
+                _at = calls.iloc[(calls["strike"] - spot).abs().argsort()[:1]]
+                if len(_at) and float(_at["mid"].iloc[0]) > 0:
+                    _iv = _implied_vol_hp(float(_at["mid"].iloc[0]), spot, float(_at["strike"].iloc[0]), T, r)
+                    if _iv and 0.05 < _iv < 3.0:
+                        iv_ref = _iv
+            except Exception:
+                pass
+            iv_ref = max(iv_ref, 0.10)
             pl = puts[(puts["strike"] < spot) & (puts["mid"] > 0.05)].sort_values("strike", ascending=False).reset_index(drop=True)
             for i in range(len(pl)):
-                K = float(pl.loc[i, "strike"]); cr = float(pl.loc[i, "mid"]); iv = float(pl.loc[i, "impliedVolatility"] or 0)
-                if iv <= 0:
-                    continue
+                K = float(pl.loc[i, "strike"]); cr = float(pl.loc[i, "mid"]); iv = iv_ref
                 pop = _pa(spot, K - cr, T, iv)
                 if pop is None or pop < min_pop:
                     continue
@@ -23259,9 +23269,7 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
                 break
             cu = calls[(calls["strike"] > spot) & (calls["mid"] > 0.05)].sort_values("strike").reset_index(drop=True)
             for i in range(len(cu)):
-                K = float(cu.loc[i, "strike"]); cr = float(cu.loc[i, "mid"]); iv = float(cu.loc[i, "impliedVolatility"] or 0)
-                if iv <= 0:
-                    continue
+                K = float(cu.loc[i, "strike"]); cr = float(cu.loc[i, "mid"]); iv = iv_ref
                 pa = _pa(spot, K + cr, T, iv)
                 if pa is None:
                     continue
@@ -23781,6 +23789,19 @@ def _spreads_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=4):
                 return d.sort_values("strike").reset_index(drop=True).to_dict("records")
             C = _near(calls); P = _near(puts)
             cand = []
+            # yfinance per-strike IV is GARBAGE here (often ~1e-5 for OTM), which collapses the
+            # POP calc to ~100% (audit 2026-07-21). Back a reliable vol out of the ATM call mid
+            # (mids ARE reliable); HV/0.40 fallback; floor 0.10. Use it for ALL strikes' POP.
+            iv_ref = 0.40
+            try:
+                _atmrow = min(C, key=lambda x: abs(x["strike"] - spot)) if C else None
+                if _atmrow and _atmrow.get("mid", 0) > 0:
+                    _iv = _implied_vol_hp(_atmrow["mid"], spot, _atmrow["strike"], T, r)
+                    if _iv and 0.05 < _iv < 3.0:
+                        iv_ref = _iv
+            except Exception:
+                pass
+            iv_ref = max(iv_ref, 0.10)
 
             def add(strat, emoji, legs, net, width, be, pop, oi_min, direction):
                 if net is None or net <= 0 or width <= 0 or pop is None or not (0 < pop < 1):
@@ -23803,17 +23824,17 @@ def _spreads_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=4):
             for i in range(len(C)):
                 for j in range(i + 1, min(i + 5, len(C))):
                     a, b = C[i], C[j]
-                    width = b["strike"] - a["strike"]; iv_a = float(a.get("impliedVolatility") or 0)
+                    width = b["strike"] - a["strike"]
                     oi_min = min(a["oi"] or 0, b["oi"] or 0); net = a["mid"] - b["mid"]; be = a["strike"] + net
-                    add("Bull Call", "🟢", f"{a['strike']:g}/{b['strike']:g}C", net, width, be, _pa(spot, be, T, iv_a), oi_min, "debit")
-                    pa = _pa(spot, be, T, iv_a)
+                    add("Bull Call", "🟢", f"{a['strike']:g}/{b['strike']:g}C", net, width, be, _pa(spot, be, T, iv_ref), oi_min, "debit")
+                    pa = _pa(spot, be, T, iv_ref)
                     add("Bear Call", "🔴", f"{a['strike']:g}/{b['strike']:g}C", net, width, be, (None if pa is None else 1 - pa), oi_min, "credit")
             for i in range(len(P)):
                 for j in range(i + 1, min(i + 5, len(P))):
                     a, b = P[i], P[j]
-                    width = b["strike"] - a["strike"]; iv_b = float(b.get("impliedVolatility") or 0)
+                    width = b["strike"] - a["strike"]
                     oi_min = min(a["oi"] or 0, b["oi"] or 0); net = b["mid"] - a["mid"]; be = b["strike"] - net
-                    pa = _pa(spot, be, T, iv_b)
+                    pa = _pa(spot, be, T, iv_ref)
                     add("Bear Put", "🟣", f"{b['strike']:g}/{a['strike']:g}P", net, width, be, (None if pa is None else 1 - pa), oi_min, "debit")
 
             cand.sort(key=lambda z: -z[0])
@@ -23922,10 +23943,20 @@ def _wheel_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, otm_max=0.18, conn=N
             puts["mid"] = ((puts["bid"].fillna(0) + puts["ask"].fillna(0)) / 2).where(
                 (puts["bid"] > 0) & (puts["ask"] > 0), puts["lastPrice"])
             pl = puts[(puts["strike"] < spot) & (puts["strike"] >= spot * (1 - otm_max)) & (puts["mid"] > 0.03)]
+            # reliable ATM vol — yfinance per-strike IV is garbage (~1e-5) which collapsed CSP POP
+            # to ~100% (audit 2026-07-21). Back it out of the ATM put mid; floor 0.10.
+            iv_ref = 0.40
+            try:
+                _at = puts.iloc[(puts["strike"] - spot).abs().argsort()[:1]]
+                if len(_at) and float(_at["mid"].iloc[0]) > 0:
+                    _iv = _implied_vol_hp(float(_at["mid"].iloc[0]), spot, float(_at["strike"].iloc[0]), T, r)
+                    if _iv and 0.05 < _iv < 3.0:
+                        iv_ref = _iv
+            except Exception:
+                pass
+            iv_ref = max(iv_ref, 0.10)
             for _, row in pl.iterrows():
-                K = float(row["strike"]); cr = float(row["mid"]); iv = float(row.get("impliedVolatility") or 0)
-                if not (iv > 0):
-                    continue
+                K = float(row["strike"]); cr = float(row["mid"]); iv = iv_ref
                 pop = _pa(spot, K, T, iv)
                 if pop is None:
                     continue

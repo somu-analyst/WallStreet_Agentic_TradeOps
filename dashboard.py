@@ -13371,6 +13371,28 @@ elif page == "⚡ Trade Risk Calculator":
             st.session_state.pop(_k, None)
         st.rerun()
 
+    # Inherit the CANDIDATE trade from the Pre-Trade Risk form above (rc_* keys). Both tools
+    # analyse the same hypothetical new position, so retyping six fields between them was pure
+    # friction — and a mismatch meant the scenario table and the P&L curve described different trades.
+    if st.session_state.get("rc_tk"):
+        _rc_lbl = (f"{st.session_state.get('rc_tk')} "
+                   f"{str(st.session_state.get('rc_type', '')).upper()} "
+                   f"${float(st.session_state.get('rc_strike', 0) or 0):.0f} "
+                   f"@ ${float(st.session_state.get('rc_entry', 0) or 0):.2f}")
+        _sc1, _sc2 = st.columns([3, 2])
+        if _sc1.button(f"⬇️ Simulate the Pre-Trade Risk trade  ({_rc_lbl})", key="sim_from_rc"):
+            st.session_state["sim_tk"] = st.session_state.get("rc_tk", "SPY")
+            st.session_state["sim_otype"] = str(st.session_state.get("rc_type", "call")).lower()
+            st.session_state["sim_strike"] = float(st.session_state.get("rc_strike", 580.0) or 580.0)
+            st.session_state["sim_entry"] = float(st.session_state.get("rc_entry", 5.0) or 5.0)
+            st.session_state["sim_qty"] = int(st.session_state.get("rc_qty", 1) or 1)
+            if st.session_state.get("rc_exp"):
+                st.session_state["sim_expiry"] = st.session_state["rc_exp"]
+            st.rerun()
+        if str(st.session_state.get("rc_side", "")).startswith("sell"):
+            _sc2.caption("⚠️ That trade is **short**; this simulator charts a **long** position — "
+                         "invert the P&L sign to read it.")
+
     sim_c1, sim_c2, sim_c3, sim_c4 = st.columns(4)
     sim_ticker = sim_c1.text_input("Ticker", value="SPY", key="sim_tk")
     sim_opt_type = sim_c2.selectbox("Option Type", ["call", "put"], key="sim_otype")

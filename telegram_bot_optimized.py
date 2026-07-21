@@ -2284,6 +2284,160 @@ async def flow_cmd(update, ctx):
     await flow_view(SimpleNamespace(message=update.message))
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# CROSS-MARKET LINKAGE ENGINE  (/world) — a foreign market moves, here are the
+# US-listed ways to trade it. Each region maps to: its country ETF (1x), the
+# leveraged ETF (2x/3x amplifier), the US-listed ADRs, and the sector/supply-
+# chain 'bridge' that carries the move onto US large-caps (e.g. Taiwan->TSM,
+# Korea->MU memory, Netherlands->ASML). Moves + RS-vs-SPY are live; the trade
+# note names the liquid US vehicle. Educational, not advice. (Built 2026-07-20.)
+# ═══════════════════════════════════════════════════════════════════════════
+_CROSS_MARKET = {
+    "🇰🇷 Korea":      {"code": "KOR", "etf": "EWY", "lev": ("KORU", 3),
+                       "adr": ["KB", "SHG", "PKX", "CPNG", "LPL"], "bridge": ["MU", "SOXX"],
+                       "note": "Samsung/SK-Hynix memory → MU/SOXX; KORU=3x amplifier"},
+    "🇯🇵 Japan":      {"code": "JPN", "etf": "EWJ", "lev": None, "hedged": "DXJ",
+                       "adr": ["TM", "SONY", "MUFG", "SMFG", "HMC", "MFG", "NMR"], "bridge": [],
+                       "note": "autos TM/HMC, banks MUFG/SMFG; DXJ = yen-hedged play"},
+    "🇹🇼 Taiwan":     {"code": "TWN", "etf": "EWT", "lev": None,
+                       "adr": ["TSM", "UMC", "ASX"], "bridge": ["SOXX", "SMH", "NVDA", "ASML"],
+                       "note": "TSM is the fab for NVDA/AAPL → cleanest US semi channel"},
+    "🇨🇳 China":      {"code": "CHN", "etf": "FXI", "lev": ("YINN", 3), "internet": "KWEB",
+                       "adr": ["BABA", "PDD", "JD", "BIDU", "NIO", "LI", "NTES"], "bridge": ["KWEB", "CQQQ"],
+                       "note": "internet KWEB/BABA/PDD; EVs NIO/LI; YINN=3x"},
+    "🇮🇳 India":      {"code": "IND", "etf": "INDA", "lev": ("INDL", 2),
+                       "adr": ["INFY", "WIT", "HDB", "IBN", "RDY"], "bridge": [],
+                       "note": "IT INFY/WIT, banks HDB/IBN; oil-importer (inverse crude)"},
+    "🇭🇰 HongKong":   {"code": "HK", "etf": "EWH", "lev": None, "adr": [], "bridge": ["FXI", "KWEB"],
+                       "note": "tracks China; trade via FXI/KWEB"},
+    "🇬🇧 UK":         {"code": "UK", "etf": "EWU", "lev": None,
+                       "adr": ["SHEL", "BP", "HSBC", "BCS", "AZN", "GSK", "UL", "BTI"], "bridge": ["XLE"],
+                       "note": "energy SHEL/BP, pharma AZN/GSK, banks HSBC/BCS"},
+    "🇩🇪 Germany":    {"code": "GER", "etf": "EWG", "lev": None,
+                       "adr": ["SAP", "DB"], "bridge": [], "note": "SAP software, DB bank; export/auto proxy"},
+    "🇫🇷 France":     {"code": "FRA", "etf": "EWQ", "lev": None,
+                       "adr": ["TTE", "SNY"], "bridge": [], "note": "TotalEnergies, Sanofi; luxury is OTC"},
+    "🇳🇱 Netherlands":{"code": "NLD", "etf": "EWN", "lev": None,
+                       "adr": ["ASML", "ING", "PHG"], "bridge": ["SOXX", "SMH"],
+                       "note": "ASML = lithography monopoly → the semis bridge"},
+    "🇨🇭 Switzerland":{"code": "CHE", "etf": "EWL", "lev": None,
+                       "adr": ["NVS", "UBS"], "bridge": [], "note": "pharma NVS, bank UBS; defensive"},
+    "🇪🇸 Spain":      {"code": "ESP", "etf": "EWP", "lev": None,
+                       "adr": ["SAN", "BBVA", "TEF"], "bridge": [], "note": "banks SAN/BBVA, telecom TEF"},
+    "🇮🇹 Italy":      {"code": "ITA", "etf": "EWI", "lev": None,
+                       "adr": ["E", "STLA"], "bridge": [], "note": "Eni energy, Stellantis autos"},
+    "🇧🇷 Brazil":     {"code": "BRA", "etf": "EWZ", "lev": ("BRZU", 2),
+                       "adr": ["VALE", "PBR", "ITUB", "BBD", "NU"], "bridge": [],
+                       "note": "iron/oil VALE/PBR, banks ITUB/NU; commodity + BRL beta"},
+    "🇦🇺 Australia":  {"code": "AUS", "etf": "EWA", "lev": None,
+                       "adr": ["BHP", "RIO"], "bridge": ["CPER"], "note": "miners BHP/RIO → copper/iron"},
+    "🇪🇺 Europe":     {"code": "EU", "etf": "VGK", "lev": None, "adr": [], "bridge": ["FEZ"],
+                       "note": "broad Europe; FEZ = Euro Stoxx 50"},
+}
+
+def compute_cross_market():
+    """Live cross-market read: per-region ETF + leveraged + ADR + bridge moves and RS vs SPY.
+    Returns {'regions':[...], 'asof':str} sorted weakest→strongest by 5d-vs-SPY."""
+    syms = {"SPY"}
+    for d in _CROSS_MARKET.values():
+        syms.add(d["etf"])
+        for k in ("hedged", "internet"):
+            if d.get(k): syms.add(d[k])
+        if d.get("lev"): syms.add(d["lev"][0])
+        syms.update(d.get("adr", [])); syms.update(d.get("bridge", []))
+    try:
+        data = _yf_download(tickers=" ".join(sorted(syms)), period="1mo", interval="1d",
+                            auto_adjust=False, progress=False)
+    except Exception as e:
+        log.warning(f"cross_market download: {e}")
+        return {"regions": [], "asof": ""}
+
+    def _mv(sym):
+        try:
+            c = (data["Close"][sym] if isinstance(data.columns, pd.MultiIndex) else data["Close"]).dropna()
+            if len(c) < 2: return None
+            last = float(c.iloc[-1])
+            d1 = (last / float(c.iloc[-2]) - 1) * 100
+            d5 = (last / float(c.iloc[-6]) - 1) * 100 if len(c) > 6 else d1
+            return {"last": last, "d1": d1, "d5": d5}
+        except Exception:
+            return None
+
+    spy = _mv("SPY") or {"d5": 0.0}
+    spy5 = spy["d5"]
+    regions = []
+    for name, d in _CROSS_MARKET.items():
+        e = _mv(d["etf"])
+        if not e:
+            continue
+        rel5 = e["d5"] - spy5
+        lev = None
+        if d.get("lev"):
+            lv = _mv(d["lev"][0])
+            if lv: lev = {"sym": d["lev"][0], "x": d["lev"][1], **lv}
+        adrs = sorted([{"sym": a, **_mv(a)} for a in d.get("adr", []) if _mv(a)],
+                      key=lambda x: x["d5"])
+        bridges = [{"sym": b, **_mv(b)} for b in d.get("bridge", []) if _mv(b)]
+        regions.append({"name": name, "code": d["code"], "etf": d["etf"], "etf_d1": e["d1"],
+                        "etf_d5": e["d5"], "rel5": rel5, "lev": lev, "adrs": adrs,
+                        "bridges": bridges, "note": d["note"]})
+    regions.sort(key=lambda r: r["rel5"])
+    return {"regions": regions, "asof": str((data.index[-1] if len(data) else ""))[:10]}
+
+def _world_report():
+    """Telegram report: ranked region table + detail lines for the notable movers."""
+    cm = compute_cross_market()
+    regions = cm.get("regions") or []
+    if not regions:
+        return "⚠️ Cross-market data unavailable — feeds slow, try again."
+    parts = [hdr(f"🌐 CROSS-MARKET · US-LISTED WAYS TO TRADE · {cm.get('asof','')}")]
+    parts.append("<i>Foreign market moves → the US-listed ETF / leveraged / ADR / supply-chain "
+                 "bridge that carries it. Ranked weakest→strongest vs S&P (5d).</i>")
+    rows = []
+    for r in regions:
+        st = "🔴" if r["rel5"] < -1 else ("🟢" if r["rel5"] > 1 else "🟡")
+        rows.append((st, r["code"], f"{r['etf_d5']:+.1f}", f"{r['rel5']:+.1f}"))
+    parts.append(_pipe_table(("", "Mkt", "5d%", "vSPY"), rows, right_cols={2, 3}))
+
+    # detail lines: 3 weakest + 2 strongest
+    notable = regions[:3] + regions[-2:]
+    seen = set()
+    parts.append("\n<b>How to trade the movers</b>")
+    for r in notable:
+        if r["name"] in seen:
+            continue
+        seen.add(r["name"])
+        st = "🔴" if r["rel5"] < -1 else ("🟢" if r["rel5"] > 1 else "🟡")
+        line = f"{st} <b>{r['name']}</b> {r['etf']} {r['etf_d5']:+.0f}%"
+        if r["lev"]:
+            line += f" (<b>{r['lev']['sym']}</b> {r['lev']['x']}x {r['lev']['d5']:+.0f}%)"
+        if r["adrs"]:
+            _tops = r["adrs"][:3] if r["rel5"] < 0 else r["adrs"][-3:]
+            line += " · ADR " + ", ".join(f"{a['sym']}{a['d5']:+.0f}" for a in _tops)
+        if r["bridges"]:
+            line += " · ⇒ " + ", ".join(f"{b['sym']}{b['d5']:+.0f}" for b in r["bridges"][:2])
+        line += f"\n   <i>{r['note']}</i>"
+        parts.append(line)
+    parts.append("<i>Leveraged ETFs (2x/3x) decay — trades, never holds. ADR move = 5d%. "
+                 "Educational, not advice.</i>")
+    return "\n".join(parts)
+
+async def world_view(query):
+    _loading = await query.message.reply_text("🌐 Mapping cross-market linkages…", parse_mode=H)
+    try:
+        msg = _world_report()
+    except Exception as e:
+        log.warning(f"world_view: {e}"); msg = "⚠️ Cross-market error — try again."
+    try: await _loading.delete()
+    except Exception: pass
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="world_view"), BACK_BTN]])
+    await _safe_reply(query.message, msg, reply_markup=kb)
+
+async def world_cmd(update, ctx):
+    from types import SimpleNamespace
+    await world_view(SimpleNamespace(message=update.message))
+
+
 
 # Known FOMC meeting dates (approximate — update quarterly)
 _FOMC_DATES = [
@@ -12178,6 +12332,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await wrap_view(query)
         elif data == "flow_view":
             await flow_view(query)
+        elif data == "world_view":
+            await world_view(query)
         elif data == "tv_view":
             await tv_view(query)
         elif data == "hiprob_view":
@@ -29936,6 +30092,7 @@ def main():
     app.add_handler(CommandHandler("event", event_command))
     app.add_handler(CommandHandler("briefing", briefing_command))
     app.add_handler(CommandHandler("flow", flow_cmd))          # money-flow / rotation engine
+    app.add_handler(CommandHandler("world", world_cmd))        # cross-market linkage engine
     app.add_handler(CommandHandler("plan", plan_command))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("terminal", terminal_command))

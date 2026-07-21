@@ -2473,6 +2473,133 @@ async def world_cmd(update, ctx):
     await world_view(SimpleNamespace(message=update.message))
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# CAPITAL-FLOW score (/capflow) — per-ticker "where the big money is moving",
+# DB-first (no yfinance), fusing four free signals into one read:
+#   1) options $-notional flow: net NEW call vs put premium committed today
+#      (ΔOI × lastPrice × 100) — the closest free proxy for institutional flow.
+#   2) unusual volume: today's option volume vs total OI (fresh activity).
+#   3) relative strength vs SPY (20d) — is capital rewarding this name?
+#   4) OI positioning: PCR (put/call OI).
+# Composite → IN (accumulation) / OUT (distribution) / MIXED. Educational, not advice.
+# (Built 2026-07-21 per user request. Backtest: validate the score vs fwd returns next.)
+# ═══════════════════════════════════════════════════════════════════════════
+def compute_capflow(tk, conn=None):
+    """Per-ticker capital-flow composite. Returns dict or None (not in options universe)."""
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        tk = str(tk).upper()
+        _l = pd.read_sql("SELECT MAX(trade_date_now) m FROM options_change WHERE ticker=?",
+                         conn, params=(tk,))
+        ld = _l["m"].iloc[0] if not _l.empty else None
+        if not ld:
+            return None
+        oc = pd.read_sql("""SELECT change_OI_Call, change_OI_Put, lastPrice_Call_now, lastPrice_Put_now,
+                   openInt_Call_now, openInt_Put_now, vol_Call_now, vol_Put_now
+            FROM options_change WHERE ticker=? AND trade_date_now=?""", conn, params=(tk, ld))
+        if oc.empty:
+            return None
+        for c in oc.columns:
+            oc[c] = pd.to_numeric(oc[c], errors="coerce").fillna(0)
+        call_flow = float((oc["change_OI_Call"] * oc["lastPrice_Call_now"] * 100).sum())
+        put_flow  = float((oc["change_OI_Put"]  * oc["lastPrice_Put_now"]  * 100).sum())
+        net_flow  = call_flow - put_flow
+        call_oi = float(oc["openInt_Call_now"].sum()); put_oi = float(oc["openInt_Put_now"].sum())
+        pcr = put_oi / call_oi if call_oi else 1.0
+        tot_vol = float(oc["vol_Call_now"].sum() + oc["vol_Put_now"].sum())
+        uoa = tot_vol / max(call_oi + put_oi, 1.0)               # today's vol vs standing OI
+        # relative strength vs SPY (20d), DB-first
+        rs20 = 0.0
+        try:
+            h = _daily_history(tk, 1, conn); b = _daily_history("SPY", 1, conn)
+            if h is not None and b is not None and len(h) > 21 and len(b) > 21:
+                rs20 = ((float(h.iloc[-1]) / float(h.iloc[-21]) - 1)
+                        - (float(b.iloc[-1]) / float(b.iloc[-21]) - 1)) * 100
+        except Exception:
+            pass
+        # volume trend vs 20d
+        vol_ratio = 1.0
+        try:
+            sd = pd.read_sql("SELECT volume FROM stock_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT 21",
+                             conn, params=(tk,))
+            v = pd.to_numeric(sd["volume"], errors="coerce")
+            if len(v) >= 20 and v.iloc[1:21].mean():
+                vol_ratio = float(v.iloc[0] / v.iloc[1:21].mean())
+        except Exception:
+            pass
+        # composite (bounded contributions): $flow 40, RS 30, vol 15, PCR 15
+        fm = net_flow / 1e6
+        score = (np.sign(fm) * min(abs(fm), 500) / 500 * 40
+                 + max(min(rs20, 15), -15) / 15 * 30
+                 + max(min(vol_ratio - 1, 1), -1) * 15
+                 + (1 if pcr < 0.8 else -1 if pcr > 1.3 else 0) * 15)
+        read = ("🟢 IN — accumulation" if score > 20 else
+                "🔴 OUT — distribution" if score < -20 else "🟡 MIXED / no clear flow")
+        return {"tk": tk, "asof": str(ld), "net_flow_m": fm, "call_flow_m": call_flow / 1e6,
+                "put_flow_m": put_flow / 1e6, "pcr": pcr, "uoa": uoa, "rs20": rs20,
+                "vol_ratio": vol_ratio, "score": score, "read": read}
+    finally:
+        if own:
+            conn.close()
+
+def _capflow_report(tks):
+    """Ranked capital-flow table for a list of tickers + per-name detail."""
+    conn = get_conn()
+    try:
+        recs = [r for r in (compute_capflow(t, conn) for t in tks) if r]
+    finally:
+        conn.close()
+    if not recs:
+        return "⚠️ No capital-flow data — none of those are in the options universe."
+    recs.sort(key=lambda r: -r["score"])
+    parts = [hdr("💰 CAPITAL FLOW — where big money is moving")]
+    rows = []
+    for r in recs:
+        st = "🟢" if r["score"] > 20 else ("🔴" if r["score"] < -20 else "🟡")
+        rows.append((st, r["tk"], f"{r['net_flow_m']:+.0f}M", f"{r['score']:+.0f}"))
+    parts.append(_pipe_table(("", "Tkr", "Net$", "Score"), rows, right_cols={2, 3}))
+    parts.append("\n<b>Detail</b>")
+    for r in recs:
+        parts.append(f"{r['read']} <b>{r['tk']}</b>  score {r['score']:+.0f}\n"
+                     f"   $flow net <b>{r['net_flow_m']:+.0f}M</b> (calls {r['call_flow_m']:+.0f}M / "
+                     f"puts {r['put_flow_m']:+.0f}M) · RS20 {r['rs20']:+.1f}% · "
+                     f"vol {r['vol_ratio']:.1f}x · PCR {r['pcr']:.2f} · UOA {r['uoa']:.2f}")
+    parts.append("<i>Score = options $-flow (40) + RS-vs-SPY (30) + volume (15) + PCR (15). "
+                 "$flow = new call vs put premium committed today (ΔOI×price). DB-first, EOD. "
+                 "⚠️ NOT yet backtested — descriptive read of positioning, not a validated signal "
+                 "(note: put-$-flow often = hedging, not bearish direction). Educational, not advice.</i>")
+    return "\n".join(parts)
+
+def _positions_tickers():
+    """Distinct open-position tickers (option + stock legs)."""
+    try:
+        _c = get_conn()
+        r = _c.execute("SELECT DISTINCT UPPER(ticker) FROM trades WHERE status='OPEN'").fetchall()
+        _c.close()
+        return [x[0] for x in r if x[0]]
+    except Exception:
+        return []
+
+async def capflow_view(query, tks=None):
+    tks = tks or _positions_tickers() or ["AMD", "GOOG", "NVDA", "SPY", "QQQ"]
+    _loading = await query.message.reply_text("💰 Reading capital flow…", parse_mode=H)
+    try:
+        msg = _capflow_report(tks)
+    except Exception as e:
+        log.warning(f"capflow_view: {e}"); msg = "⚠️ Capital-flow error — try again."
+    try: await _loading.delete()
+    except Exception: pass
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="capflow_view"), BACK_BTN]])
+    await _safe_reply(query.message, msg, reply_markup=kb)
+
+async def capflow_cmd(update, ctx):
+    from types import SimpleNamespace
+    args = [a.upper() for a in (getattr(ctx, "args", []) or [])]
+    await capflow_view(SimpleNamespace(message=update.message), tks=args or None)
+
+
 
 # Known FOMC meeting dates (approximate — update quarterly)
 _FOMC_DATES = [
@@ -12369,6 +12496,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await flow_view(query)
         elif data == "world_view":
             await world_view(query)
+        elif data == "capflow_view":
+            await capflow_view(query)
         elif data == "tv_view":
             await tv_view(query)
         elif data == "hiprob_view":
@@ -30159,6 +30288,7 @@ def main():
     app.add_handler(CommandHandler("briefing", briefing_command))
     app.add_handler(CommandHandler("flow", flow_cmd))          # money-flow / rotation engine
     app.add_handler(CommandHandler("world", world_cmd))        # cross-market linkage engine
+    app.add_handler(CommandHandler("capflow", capflow_cmd))    # per-ticker capital-flow score
     app.add_handler(CommandHandler("plan", plan_command))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("terminal", terminal_command))

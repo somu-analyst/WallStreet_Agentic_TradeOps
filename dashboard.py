@@ -5352,8 +5352,24 @@ with st.sidebar:
             "📺 TradingView",
         ],
     }
-    _cat = st.selectbox("Section", list(_NAV_GROUPS), key="nav_cat")
-    page = st.radio("Navigate", _NAV_GROUPS[_cat], label_visibility="collapsed")
+    # ── Navigation: every page reachable from ONE control ──────────────────
+    # The Section->radio pair only exposes pages inside the selected section, so reaching
+    # anything else meant guessing which section owns it first. This flat jump box lists
+    # EVERY page (Streamlit selectboxes are type-to-search), with the section browser kept
+    # underneath for discovery.
+    _ALL_PAGES = [p for _ps in _NAV_GROUPS.values() for p in _ps]
+    _BROWSE = "— browse by section below —"
+    _jump = st.selectbox(f"🔍 Jump to any page ({len(_ALL_PAGES)})", [_BROWSE] + _ALL_PAGES,
+                         key="nav_jump",
+                         help="Type to search. Every page in one list — no need to find its "
+                              "section first. Set back to 'browse' to use the section picker.")
+    _cat = st.selectbox("Section", list(_NAV_GROUPS), key="nav_cat",
+                        disabled=(_jump in _ALL_PAGES))
+    _radio = st.radio("Navigate", _NAV_GROUPS[_cat], label_visibility="collapsed",
+                      disabled=(_jump in _ALL_PAGES))
+    page = _jump if _jump in _ALL_PAGES else _radio
+    if _jump in _ALL_PAGES:
+        st.caption("↑ jump active — reset it to *browse* to use the section list")
 
     st.markdown("---")
     # ── Global price source — applies to every page via _spot() ──

@@ -2600,6 +2600,211 @@ async def capflow_cmd(update, ctx):
     await capflow_view(SimpleNamespace(message=update.message), tks=args or None)
 
 
+# ═══════════ AI AGENT DEBATE — TradingAgents-style layer over OUR engine ═══════════
+# Role-specialised analysts each read ONE slice of the in-house engine and take a stance
+# (-100..+100) with evidence; a bull/bear split is tallied, a trader weights it into one
+# number, and a risk manager adjusts conviction. Deterministic and keyless — we adopt the
+# multi-agent PATTERN, not the LLM dependency, so it runs with no API key and no network.
+
+_AGENT_WEIGHTS = {"Flow": 1.2, "Position": 1.1, "Technical": 1.0, "Vol": 0.8, "Macro": 0.7}
+
+
+def _dbt_clamp(x, lo=-100.0, hi=100.0):
+    try:
+        return max(lo, min(hi, float(x)))
+    except Exception:
+        return 0.0
+
+
+def _dbt_stance(score, band=25.0):
+    """score -100..+100 -> (emoji, label).
+
+    `band` is tighter for the AGGREGATE verdict than for individual analysts: a weighted
+    mean of 5 stances has structurally lower dispersion than its components, so reusing
+    the per-agent band would pin every ticker to NEUTRAL.
+    """
+    if score >= band:
+        return "🟢", "BULL"
+    if score <= -band:
+        return "🔴", "BEAR"
+    return "🟡", "NEUTRAL"
+
+
+def _agent_flow(tk, conn, spot):
+    """Options $-flow analyst — reuses the /capflow composite."""
+    cf = compute_capflow(tk, conn) or {}
+    ev = (f"net ${cf.get('net_flow_m', 0):+.0f}M · PCR {cf.get('pcr', 0):.2f} · "
+          f"UOA {cf.get('uoa', 0):.2f} · RS20 {cf.get('rs20', 0):+.1f}%")
+    return _dbt_clamp(cf.get("score") or 0.0), ev
+
+
+def _agent_position(tk, conn, spot):
+    """Dealer-positioning analyst — GEX regime + gamma walls."""
+    g = _compute_gex(tk, conn, spot) or {}
+    zg = float(g.get("zero_gamma") or 0.0)
+    cw = float(g.get("call_wall") or 0.0)
+    pw = float(g.get("put_wall") or 0.0)
+    s, bits = 0.0, []
+    if zg > 0 and spot > 0:
+        if spot >= zg:
+            s += 18; bits.append(f"above zero-gamma {zg:.0f} (stabilising)")
+        else:
+            s -= 18; bits.append(f"below zero-gamma {zg:.0f} (moves amplified)")
+    if cw > pw > 0 and spot > 0:
+        pos = _dbt_clamp((spot - pw) / (cw - pw), 0.0, 1.0)   # 0 = put wall, 1 = call wall
+        s += (0.5 - pos) * 60                                  # near call wall -> capped upside
+        bits.append(f"walls {pw:.0f}/{cw:.0f} (spot {pos * 100:.0f}% of range)")
+    if g.get("gex_signal"):
+        bits.append(str(g["gex_signal"]))
+    return _dbt_clamp(s), " · ".join(bits) or "no GEX data"
+
+
+def _agent_technical(tk, conn, spot):
+    """Trend/momentum analyst — 12-1 momentum, 1m return, 200DMA.
+
+    12-1 momentum is a REGIME FLAG, not a linear term: across this universe it runs
+    +90%..+900%, so any fixed divisor saturates and stops discriminating. The 1-month
+    return carries the cross-sectional signal.
+    """
+    m = _momentum_signal(tk) or {}
+    r12 = float(m.get("ret_12_1") or 0.0)
+    r1m = float(m.get("ret_1m") or 0.0)
+    a200 = bool(m.get("above200"))
+    s = ((15 if r12 > 0 else -15) + _dbt_clamp(r1m / 10.0, -1, 1) * 45
+         + (20 if a200 else -20))
+    return _dbt_clamp(s), (f"12-1 mom {r12:+.0f}% · 1m {r1m:+.1f}% · "
+                           f"{'above' if a200 else 'below'} 200DMA")
+
+
+def _agent_vol(tk, conn, spot):
+    """Volatility-regime analyst — elevated vol penalises directional risk."""
+    _v = _vol_for(tk)
+    v, idx = 0.0, ""
+    if isinstance(_v, (tuple, list)):          # _vol_for returns (label, value)
+        for part in _v:
+            if isinstance(part, bool):
+                continue
+            if isinstance(part, (int, float)):
+                v = float(part)
+            elif isinstance(part, str) and part.strip():
+                idx = part.strip()
+    else:
+        try:
+            v = float(_v or 0.0)
+        except (TypeError, ValueError):
+            v = 0.0
+    if not idx:
+        vi = _get_vol_indices() or {}
+        idx = "VXN" if abs(v - float(vi.get("vxn") or -999)) < 1e-6 else "VIX"
+    s = -_dbt_clamp((v - 20.0) / 15.0, -1, 1) * 40
+    tone = "elevated" if v >= 25 else ("calm" if v <= 16 else "normal")
+    tail = "favours premium selling" if v >= 25 else "benign for directional risk"
+    return _dbt_clamp(s), f"{idx} {v:.1f} ({tone}) — {tail}"
+
+
+def _agent_macro(tk, conn, spot):
+    """Market-backdrop analyst — SPY's own capital-flow read as the tape's tone."""
+    cf = compute_capflow("SPY", conn) or {}
+    ev = (f"SPY flow {cf.get('score', 0):+.0f} (net ${cf.get('net_flow_m', 0):+.0f}M, "
+          f"PCR {cf.get('pcr', 0):.2f})")
+    return _dbt_clamp(float(cf.get("score") or 0.0) * 0.8), ev
+
+
+_DEBATE_AGENTS = (("Flow", _agent_flow), ("Position", _agent_position),
+                  ("Technical", _agent_technical), ("Vol", _agent_vol),
+                  ("Macro", _agent_macro))
+
+
+def compute_debate(tk, conn=None):
+    """Run every analyst, hold the bull/bear debate, return the full decision dict."""
+    tk = str(tk).upper().strip()
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        spot, is_live, asof = _cur_price(tk, 0.0)
+        spot = float(spot or 0.0)
+        agents = []
+        for name, fn in _DEBATE_AGENTS:
+            try:
+                s, ev = fn(tk, conn, spot)
+            except Exception as e:                      # one analyst failing != command failing
+                s, ev = 0.0, f"n/a ({str(e)[:40]})"
+            emo, lab = _dbt_stance(s)
+            agents.append({"name": name, "score": round(float(s), 1), "label": lab,
+                           "emoji": emo, "evidence": ev,
+                           "weight": _AGENT_WEIGHTS.get(name, 1.0)})
+        wsum = sum(a["weight"] for a in agents) or 1.0
+        net = sum(a["score"] * a["weight"] for a in agents) / wsum
+        bulls = [a for a in agents if a["score"] >= 25]
+        bears = [a for a in agents if a["score"] <= -25]
+        # Risk manager: a split house or an elevated-vol tape cuts conviction.
+        vol_a = next((a for a in agents if a["name"] == "Vol"), None)
+        split = bool(bulls and bears)
+        conv = abs(net) * (0.7 if split else 1.0)
+        if vol_a and vol_a["score"] <= -20:
+            conv *= 0.8
+        level = "HIGH" if conv >= 40 else ("MEDIUM" if conv >= 18 else "LOW")
+        emo, verdict = _dbt_stance(net, band=15.0)
+        risks = []
+        if split:
+            risks.append(f"house split ({len(bulls)} bull / {len(bears)} bear)")
+        if vol_a and vol_a["score"] <= -20:
+            risks.append("elevated vol - size down / prefer defined risk")
+        if abs(net) < 25:
+            risks.append("no directional edge - stand aside or sell premium")
+        return {"tk": tk, "spot": spot, "asof": asof, "is_live": bool(is_live),
+                "agents": agents, "net": round(net, 1), "verdict": verdict, "emoji": emo,
+                "conviction": level, "conv_raw": round(conv, 1),
+                "bulls": [a["name"] for a in bulls], "bears": [a["name"] for a in bears],
+                "risks": risks}
+    finally:
+        if own:
+            conn.close()
+
+
+def _debate_report(tk):
+    d = compute_debate(tk)
+    rows = [[a["emoji"], a["name"], a["label"], f"{a['score']:+.0f}"] for a in d["agents"]]
+    details = [f"<b>{a['name']}</b> {a['emoji']} {a['score']:+.0f} — {a['evidence']}"
+               for a in d["agents"]]
+    details.append(f"<b>Bull case</b>: {', '.join(d['bulls']) or 'none'}")
+    details.append(f"<b>Bear case</b>: {', '.join(d['bears']) or 'none'}")
+    details.append(f"<b>Trader</b>: weighted net <b>{d['net']:+.0f}</b> → "
+                   f"{d['emoji']} <b>{d['verdict']}</b> · conviction <b>{d['conviction']}</b>")
+    if d["risks"]:
+        details.append("<b>Risk mgr</b>: " + " · ".join(d["risks"]))
+    return _report(
+        f"⚖️ AGENT DEBATE — {d['tk']}  ${d['spot']:,.2f} ({'LIVE' if d['is_live'] else 'EOD'})",
+        ["", "Agent", "Stance", "Score"], rows, right_cols=[3],
+        legend="🟢 bull · 🔴 bear · 🟡 neutral",
+        notes=("5 role-specialised analysts over our own engine (flow/GEX/momentum/vol/macro), "
+               "weighted into one verdict. Deterministic, no LLM. ⚠️ NOT yet backtested — "
+               "educational, not advice."),
+        details=details)
+
+
+async def debate_view(query, tk=None):
+    tk = (tk or "").upper().strip()
+    if not tk:
+        pos = _positions_tickers()
+        tk = pos[0] if pos else "SPY"
+    try:
+        msg = _debate_report(tk)
+    except Exception as e:
+        log.warning(f"debate_view: {e}")
+        msg = f"⚠️ Debate error for {tk} — try again."
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh",
+                                                    callback_data=f"debate_view:{tk}"), BACK_BTN]])
+    await _safe_reply(query.message, msg, reply_markup=kb)
+
+
+async def debate_cmd(update, ctx):
+    from types import SimpleNamespace
+    args = [a.upper() for a in (getattr(ctx, "args", []) or [])]
+    await debate_view(SimpleNamespace(message=update.message), tk=(args[0] if args else None))
+
+
 
 # Known FOMC meeting dates (approximate — update quarterly)
 _FOMC_DATES = [
@@ -3295,6 +3500,7 @@ MAIN_MENU_KB = InlineKeyboardMarkup([
     # ── AI + SETTINGS ────────────────────────────────────────────
     [InlineKeyboardButton("━━  AI & TOOLS  ━━━━━━━━━━━━", callback_data="noop")],
     [InlineKeyboardButton("🤖 Ask AI",     callback_data="menu_ai_chat"),
+     InlineKeyboardButton("⚖️ Debate",    callback_data="debate_view"),
      InlineKeyboardButton("🔄 Refresh",   callback_data="menu_refresh")],
 ])
 
@@ -12501,6 +12707,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await world_view(query)
         elif data == "capflow_view":
             await capflow_view(query)
+        elif data.startswith("debate_view"):
+            await debate_view(query, tk=(data.split(":", 1)[1] if ":" in data else None))
         elif data == "tv_view":
             await tv_view(query)
         elif data == "hiprob_view":
@@ -30292,6 +30500,7 @@ def main():
     app.add_handler(CommandHandler("flow", flow_cmd))          # money-flow / rotation engine
     app.add_handler(CommandHandler("world", world_cmd))        # cross-market linkage engine
     app.add_handler(CommandHandler("capflow", capflow_cmd))    # per-ticker capital-flow score
+    app.add_handler(CommandHandler("debate", debate_cmd))      # multi-agent debate verdict
     app.add_handler(CommandHandler("plan", plan_command))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("terminal", terminal_command))

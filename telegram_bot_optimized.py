@@ -18317,7 +18317,7 @@ async def signal_ticker_detail(query, ticker):
 
     # OI walls
     try:
-        _kl = _oi_key_levels(tk, conn, latest_date)
+        _kl = _oi_key_levels(tk, conn, latest_date, spot=spot)
         if _kl:
             _cws = _kl.get("call_wall",0); _pws = _kl.get("put_wall",0); _mps = _kl.get("max_pain",0)
             _gws = " / ".join(f"${g:.0f}" for g in _kl.get("gamma_walls",[])[:3]) or "—"
@@ -19907,8 +19907,12 @@ def _oi_build_analysis(ticker: str, conn, n_days: int = 20) -> dict:
         return {}
 
 
-def _oi_key_levels(ticker: str, conn, trade_date: str = None) -> dict:
-    """OI walls: call_wall, put_wall, max_pain, gamma_walls from options_change."""
+def _oi_key_levels(ticker: str, conn, trade_date: str = None, spot: float = 0.0) -> dict:
+    """OI walls: call_wall, put_wall, max_pain, gamma_walls from options_change.
+
+    `spot` is optional — when supplied, gamma walls are ranked by OI size discounted by
+    distance from spot, so the returned walls are the ones that actually matter near price.
+    """
     tk = str(ticker).upper()
     try:
         # Get latest trade date if not provided
@@ -19959,10 +19963,24 @@ def _oi_key_levels(ticker: str, conn, trade_date: str = None) -> dict:
                + (np.maximum(0.0, _ks - _tests) * put_arr[None, :]).sum(axis=1)
         max_pain_strike = float(strikes_arr[int(np.argmin(_pain))])
         strikes = strikes_arr.tolist()
-        # Gamma walls = strikes where call+put OI >= 2x mean
+        # Gamma walls = strikes where call+put OI >= 2x mean.
+        # Rank by SIGNIFICANCE, not by strike value. The old code did
+        # sorted(qualifying_strikes) and the caller took [:3], which returned the three
+        # NUMERICALLY LOWEST strikes — i.e. the deepest OTM puts — so QQQ at $704 advertised
+        # "Γ walls: $525 / $530 / $555". Rank by OI size, discounted by distance from spot
+        # when spot is known, then sort ascending for display.
         near_agg["total"] = near_agg["call_oi"] + near_agg["put_oi"]
         mean_oi = near_agg["total"].mean()
-        gamma_walls = sorted(near_agg[near_agg["total"] >= 2 * mean_oi]["strike"].tolist())
+        _gw = near_agg[near_agg["total"] >= 2 * mean_oi].copy()
+        if not _gw.empty:
+            _sp = float(spot or 0)
+            if _sp > 0:
+                _gw["_rank"] = _gw["total"] / (1.0 + (_gw["strike"] - _sp).abs() / _sp)
+            else:
+                _gw["_rank"] = _gw["total"]
+            gamma_walls = sorted(_gw.nlargest(6, "_rank")["strike"].tolist())
+        else:
+            gamma_walls = []
         near_exp_str = near_df["expiry_date"].iloc[0] if not near_df.empty else ""
         return {"call_wall": call_wall, "put_wall": put_wall, "max_pain": max_pain_strike,
                 "gamma_walls": gamma_walls, "expiry": near_exp_str}

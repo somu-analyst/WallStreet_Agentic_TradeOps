@@ -74,6 +74,25 @@ result: put-flow predicts SIZE, not direction. **Both /capflow and /debate relab
   Fix = read volume from `stock_history` instead. Ironically vol-ratio was the only leg with any
   signal, so this is worth fixing before any re-test.
 
+## OPEN BUGS found by the 07-21 live validation (tests/ harness) — triage next
+1. **Option PRICES in tables are still EOD-captured.** The live-spot fix (42be21b/cee5ddc) fixed
+   the SPOT everywhere, but `lastPrice_*_now` / BB bid-ask are from the EOD capture. During RTH the
+   engine must re-price from **live spot + BB captured IV** (proven sound: BB iv 23.2% vs a 4.7%
+   back-out at 1 DTE) instead of printing captured premiums. This is what made "$680 call @ $16.38"
+   look below intrinsic. **Invariant: never mix a live spot with captured option prices.**
+2. **`525/530/555` Γ-wall line** — NOT from `_compute_gex` (that returns sane walls). Separate,
+   unlocated code path. Find it.
+3. **AMD + SMH GEX walls >15% from spot** (sweep flagged) — legit far OTM put wall, or same
+   anomaly as #2? Unverified.
+4. **`compute_capflow` vol_ratio is dead for most tickers** — reads `stock_daily` (median 12
+   dates/ticker) and needs ≥20 rows → silently 1.0. Read `stock_history` instead. Matters because
+   vol-ratio was the ONLY leg with any signal in the backtest.
+5. **Per-expiry PCR label is ambiguous** (math is CORRECT — it is PCR(open interest), verified to
+   match 1.28→1.3 / 2.05→2.1 / 4.12→4.1). It sits next to CdOI/PdOI columns which imply it is the
+   ΔOI ratio. Rename the column to `PCR(OI)`.
+6. Validation harness lives in **`tests/`** (`test_writeup_invariants.py`, `test_trade_invariants.py`)
+   — run against live data: price coherence, no-arb, wall sanity, PCR, POP, OPEX.
+
 ## Smaller contained items (fill-in)
 - Accuracy audit R5 (macro/narrative wording, low prio) · VXN sweep (~35 VIX sites → `_vol_for`) ·
   dashboard left-nav → dropdowns (already 2-level `_NAV_GROUPS`@dashboard.py:5288) ·

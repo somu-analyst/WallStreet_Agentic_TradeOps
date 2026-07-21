@@ -11051,6 +11051,72 @@ def _positions_card_kb(first_tk):
     ]])
 
 
+def _spread_summary(rows):
+    """Group paired legs into spreads and report COMBINED economics + exit timing.
+
+    The per-leg card advises each leg in ISOLATION, which is dangerous on a vertical:
+    "CUT LOSS" on the long leg of a credit spread leaves a NAKED SHORT with unbounded
+    risk. This pairs opposite-sign legs on the same (ticker, expiry, right) and reports
+    net debit/credit, combined P&L, max profit/loss, and how much of max is captured —
+    which is what actually drives "sell early vs hold to expiry".
+    """
+    from collections import defaultdict
+    grp = defaultdict(list)
+    for r in rows:
+        otype, strike, qty = str(r[2]).upper(), r[3], int(r[12] or 0)
+        if otype.startswith("STOCK") or not strike or not qty:
+            continue
+        grp[(r[1], r[13], otype[:1])].append(r)
+
+    blocks, tbl = [], []
+    for (tk, exp, ot), legs in grp.items():
+        longs = [l for l in legs if int(l[12] or 0) > 0]
+        shorts = [l for l in legs if int(l[12] or 0) < 0]
+        if not (longs and shorts):
+            continue                                   # not a spread — leave to per-leg advice
+        L, S = longs[0], shorts[0]
+        n = min(abs(int(L[12])), abs(int(S[12])))
+        KL, KS = float(L[3]), float(S[3])
+        width = abs(KL - KS)
+        net_entry = float(L[4]) - float(S[4])          # +debit / -credit, per share
+        pnl = sum(float(l[7] or 0) for l in legs)
+        if net_entry > 0:
+            kind, maxp, maxl = "DEBIT", (width - net_entry) * n * 100, net_entry * n * 100
+        else:
+            cr = -net_entry
+            kind, maxp, maxl = "CREDIT", cr * n * 100, (width - cr) * n * 100
+        pct = (pnl / maxp * 100) if maxp > 0 else 0.0
+        name = ({("P", True): "Bear Put", ("P", False): "Bull Put",
+                 ("C", True): "Bear Call", ("C", False): "Bull Call"}
+                .get((ot, KL > KS), "Vertical"))
+        st = "🟢" if pct >= 50 else ("🟡" if pnl >= 0 else "🔴")
+        tbl.append((st, f"{tk[:4]}{int(min(KL,KS))}/{int(max(KL,KS))}{ot}",
+                    f"{pnl:+,.0f}", f"{pct:+.0f}%"))
+        # exit guidance: credit spreads are conventionally managed at 50-75% of max
+        if pct >= 50:
+            act = (f"<b>TAKE PROFIT</b> — {pct:.0f}% of max captured. The remaining "
+                   f"${maxp - pnl:,.0f} needs {exp} to arrive; most of the edge is already banked.")
+        elif pnl < 0 and maxl > 0 and abs(pnl) >= 0.5 * maxl:
+            act = (f"<b>REVIEW</b> — down {abs(pnl)/maxl*100:.0f}% of max loss "
+                   f"(${maxl:,.0f}). Decide before gamma accelerates near expiry.")
+        else:
+            act = f"<b>HOLD</b> — {pct:+.0f}% of max captured; let time decay work."
+        blocks.append(
+            f"🔗 <b>{tk} {name} {int(min(KL,KS))}/{int(max(KL,KS))} · {n}x · exp {exp}</b>\n"
+            f"   Net {kind.lower()} <b>${abs(net_entry)*n*100:,.0f}</b> · "
+            f"combined P&L <b>{pnl:+,.0f}</b> ({pct:+.0f}% of max)\n"
+            f"   Max profit <b>${maxp:,.0f}</b> · max loss <b>${maxl:,.0f}</b> · width ${width:g}\n"
+            f"   {act}\n"
+            f"   ⚠️ <i>Paired — close BOTH legs together. Closing the "
+            f"{'long' if kind == 'CREDIT' else 'short'} leg alone leaves "
+            f"{'a NAKED SHORT (unbounded risk)' if kind == 'CREDIT' else 'an unhedged long'}.</i>")
+    if not blocks:
+        return ""
+    head = _pipe_table(("ST", "Spread", "P&L", "%Max"), tbl, right_cols={2, 3},
+                       title="🔗 PAIRED / HEDGED POSITIONS")
+    return head + "\n\n" + "\n\n".join(blocks)
+
+
 def _positions_card_parts(trades, now_s, today):
     """Build the POSITIONS health card (table + advice + urgent + HP engine) —
     SHARED by the 10-min position_monitor push and the menu positions_view
@@ -11287,7 +11353,11 @@ def _positions_card_parts(trades, now_s, today):
                          legend="Now = current mark · 🟢 good · 🟡 watch · 🔴 bad") if _tbl_rows else ""
 
     advice_section = "\n\n".join(html_cards)
-    colour_section = f"{table1}\n\n{advice_section}"
+    # Spread roll-up goes FIRST: on a vertical the combined position is the real trade,
+    # and per-leg advice below must be read in that context (never act on one leg alone).
+    _spreads = _spread_summary(rows)
+    colour_section = ((f"{_spreads}\n\n" if _spreads else "")
+                      + f"{table1}\n\n{advice_section}")
 
     urgent_section = ""
     if urgent_lines:

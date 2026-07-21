@@ -1,9 +1,16 @@
 {
-  "_comment": "Register the NYSE_DATA options engine as an MCP server. For Claude Desktop, merge this into claude_desktop_config.json (Windows: %APPDATA%/Claude/claude_desktop_config.json). Adjust the python path if you use a venv. The server imports telegram_bot_optimized as a library (read-only tools) and speaks JSON-RPC over stdio.",
+  "_comment": "Register the NYSE_DATA options engine as an MCP server. For Claude Desktop, merge one of the entries below into claude_desktop_config.json (Windows: %APPDATA%/Claude/claude_desktop_config.json). 'nyse-options' runs it natively (adjust the python path / use a venv); 'nyse-options-docker' runs it from the container image (build first: docker build -t nyse-options:latest . — see docs/DOCKER.md). Pick ONE. The server imports telegram_bot_optimized as a library (read-only tools) and speaks JSON-RPC over stdio.",
   "mcpServers": {
     "nyse-options": {
       "command": "python",
       "args": ["C:/Users/srini/Options_chain_data/NYSE_DATA/mcp_server.py"]
+    },
+    "nyse-options-docker": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm",
+               "-v", "C:/Users/srini/Options_chain_data:/data",
+               "-e", "NYSE_DB_PATH=/data/US_data_OpenBB.db",
+               "nyse-options:latest"]
     }
   }
 }

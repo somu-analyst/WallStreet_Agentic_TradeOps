@@ -5,12 +5,16 @@ pandas
 numpy
 scipy
 plotly
+matplotlib
 yfinance
 curl_cffi
 pandas_market_calendars
 pytz
 requests
 openpyxl
+
+# MCP server (mcp_server.py — exposes the engine as MCP tools over stdio)
+mcp
 
 # Optional (event writeups / LLM narratives)
 anthropic

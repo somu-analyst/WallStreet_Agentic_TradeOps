@@ -2,6 +2,35 @@
 
 > Append newest at top. Recap here every ~10–20 messages and before any context reset.
 
+## 2026-07-21 — Two new engines + data-resilience + 4-round accuracy audit (commits d310b4e→d798758)
+**New engines** (both in bot commands AND dashboard 💸Flow/🌐World tabs via `_render_tg`):
+- **`/flow`** money-flow rotation — 8 groups (US sectors/style/continents/countries/currencies/
+  commodities/bonds/crypto) ranked by CMF + RS-vs-SPY + RS-momentum + $-vol, RRG quadrant, risk
+  gauge, and a data-driven "what moves together" correlation block.
+- **`/world`** cross-market linkage — 16 regions → US country-ETF / leveraged (2x/3x) / ADRs /
+  supply-chain BRIDGE (Taiwan→TSM/SOXX, Korea→MU memory, NL→ASML). Includes the full **US semis
+  leverage ladder** (SOXS/SSG/SOXX/SMH/USD/SOXL).
+- **Backtested + HONESTLY LABELLED** (4y, 27 instr): `/flow` RS-mom edge is real but small & only
+  ~20d (rank-IC +0.03, t=3.1) → labelled "positioning, not timing"; `/world` Asia↔US-semi is
+  ~0.8 **co-movement** but **~0 predictive lead** (EWT→SOXX fwd-corr −0.009) → labelled
+  "co-movement map, not a leading signal". Corrected an earlier over-claim in-product.
+**Also shipped**: VXN everywhere-lite (`_vol_for` VXN for Nasdaq/tech) + overview; global snapshot
+  tabulated w/ international incl India; ticker charts (intraday+2yr+vol-by-price/POC+walls) on
+  OI-detail/Mirofish; plain-English write-ups; ticker fast-path; trade-ideas expiry+px+BE.
+**Data resilience** (benchmarked first — OpenBB is **3–5× SLOWER** than yahoo for OHLCV + 21.7s
+  import + paid fast-providers → **yahoo stays primary for bars/fundamentals/live; OpenBB = options
+  only**): OHLCV DB-first + yahoo→OpenBB fallback (source-stamped); live price = intraday-DB-first
+  (covered tickers, fresh) → yahoo `fast_info` (+ `_market_is_open`/`_cur_price`, EOD→LIVE fix);
+  fundamentals write-through + `yf_info_cache` snapshot fallback (dashboard survives a yahoo `.info`
+  outage). Dashboard crash fixes: `st.markdown` re-wrap **RecursionError** guard, LaTeX `$`-scramble
+  ($-escape in markdown mode), `ticker_universe.xlsx` relocated into NYSE_DATA (3 files + gitignore).
+**Accuracy audit — 4 rounds, independently recomputing every number vs DB. 2 real bugs fixed:**
+  (1) write-up **put-wall distance sign** (below-spot floor printed +% → now signed −%); (2) **bogus
+  ~100% POP** in `/spreads` `/wheel` `/hiprob` — yfinance per-strike IV is garbage (~1e-5 vs real
+  ~0.79) → collapsed N(d2); fix backs a reliable `iv_ref` out of the **ATM mid** via
+  `_implied_vol_hp`. VERIFIED clean: snapshot/OI/positions-P&L/plan-scaling/GEX/zrev/rotation/pairs/
+  momentum all reconcile. (3 of my own *test scripts* had bugs that raised false alarms — noted.)
+
 ## 2026-07-15 (late) — Intraday lane SHIPPED (P1 from the queue)
 - **`NYSE_intraday.py`** (new root entrypoint): market-hours capture loop → own `US_intraday.db`
   (no writer contention with EOD). Every 60s ONE batched `yf.download(interval="1m")` for the FOCUS

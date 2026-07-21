@@ -3531,7 +3531,7 @@ async def show_main_menu(query):
 MKT_GROUPS = {
     "📈 Indices": {"S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Dow": "^DJI", "Russell": "^RUT"},
     "🔮 Futures": {"ES": "ES=F", "NQ": "NQ=F"},
-    "⚡ Volatility": {"VIX": "^VIX"},
+    "⚡ Volatility": {"VIX": "^VIX", "VXN": "^VXN"},
     "🏦 Commodities": {"Gold": "GC=F", "Oil": "CL=F"},
     "💰 Crypto/FX": {"Bitcoin": "BTC-USD", "EUR/USD": "EURUSD=X"},
     "📉 Bonds": {"10Y Yld": "^TNX"},
@@ -3567,6 +3567,7 @@ async def market_overview(query):
         ("FUTURES",     "ES",      "ES=F",     False),
         ("FUTURES",     "NQ",      "NQ=F",     False),
         ("VOLATILITY",  "VIX",     "^VIX",     False),
+        ("VOLATILITY",  "VXN",     "^VXN",     False),
         ("COMMODITIES", "Gold",    "GC=F",     False),
         ("COMMODITIES", "Oil",     "CL=F",     False),
         ("CRYPTO/FX",   "BTC",     "BTC-USD",  False),
@@ -3720,7 +3721,7 @@ async def market_headlines(query):
 
     seen_keys: set = set()
     all_items = []
-    market_feeds = ["SPY", "QQQ", "^VIX", "^TNX", "AAPL", "NVDA", "TSLA", "AMZN", "MSFT"]
+    market_feeds = ["SPY", "QQQ", "^VIX", "^VXN", "^TNX", "AAPL", "NVDA", "TSLA", "AMZN", "MSFT"]
     for sym in market_feeds:
         try:
             feed = feedparser.parse(
@@ -4041,6 +4042,8 @@ async def run_exit_analysis(query, ticker, opt_type, strike, entry, expiry_str, 
             ("Metric", "Value"),
             [(ticker[:6], f"${spot:.2f} {day_chg:+.1f}%"),
              ("VIX", f"{vix_val:.1f} ({vix_pct:+.1f}%)"),
+             # VXN alongside VIX — the Nasdaq-100 gauge is the right fear read for tech names
+             ("VXN", f"{(_get_vol_indices() or {}).get('vxn', 0) or 0:.1f}"),
              ("ES/NQ", f"{es_pct:+.1f}%/{nq_pct:+.1f}%"),
              ("GapEst", f"{predicted_gap:+.2f}%")],
             right_cols={1}, title="📊 Market Snapshot")
@@ -4156,7 +4159,7 @@ async def positions_view(query):
         _loading = await query.message.reply_text("⏳ Fetching live marks…", parse_mode=H)
     except Exception:
         pass
-    now_et = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=5)
+    now_et = _et_now().replace(tzinfo=None)   # DST-aware (was fixed UTC-5 = 1h slow in EDT)
     card = _positions_card_parts(trades, now_et.strftime("%H:%M ET"), now_et.date())
     parts = [card["full"]]
     try:
@@ -10585,7 +10588,7 @@ async def market_analytics_report(query):
         return f"{s}{abs(n):.0f}"
 
     _loading = await query.message.reply_text("⏳ Building market analytics...", parse_mode=H)
-    now_et = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=5)
+    now_et = _et_now().replace(tzinfo=None)   # DST-aware (was fixed UTC-5 = 1h slow in EDT)
     parts = [hdr(f"📊 MARKET ANALYTICS  {now_et.strftime('%m-%d  %H:%M ET')}")]
 
     # ── 1. Futures & Indices ────────────────────────────────────────
@@ -10963,7 +10966,7 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
     if trades.empty:
         return
 
-    now_et = now_utc - timedelta(hours=5)
+    now_et = _et_now().replace(tzinfo=None)   # DST-aware (was fixed UTC-5)
     parts = _positions_card_parts(trades, now_et.strftime("%H:%M ET"), now_et.date())
     kb = _positions_card_kb(parts["first_tk"])
     try:
@@ -11561,7 +11564,7 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
         conn.close()
         return
 
-    now_et   = now_utc - timedelta(hours=5)
+    now_et   = _et_now().replace(tzinfo=None)   # DST-aware (was fixed UTC-5)
     today    = now_et.date()
     today_str = today.isoformat()
 
@@ -11953,7 +11956,7 @@ async def scanner_menu(query):
         await query.message.reply_text(f"❌ Scanner error: {e}", parse_mode=H)
         return
 
-    now_et = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=5)
+    now_et = _et_now().replace(tzinfo=None)   # DST-aware (was fixed UTC-5 = 1h slow in EDT)
     parts  = [hdr(f"🚀 MOMENTUM SCANNER · {now_et.strftime('%H:%M ET')}")]
     parts.append("<i>Live data · 60+ tickers · yfinance</i>")
     if bull:
@@ -12001,7 +12004,7 @@ async def intraday_alert(ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     _, chat_id = load_creds()
-    now_et = now_utc - timedelta(hours=5)
+    now_et = _et_now().replace(tzinfo=None)   # DST-aware (was fixed UTC-5)
     parts = [hdr(f"⚡ INTRADAY ALERT · {now_et.strftime('%H:%M ET')}")]
 
     # ── Futures snapshot ──────────────────────────────────────────
@@ -26110,7 +26113,7 @@ async def building_alert(ctx: ContextTypes.DEFAULT_TYPE):
         _ensure_alert_dedup_table(conn)
         _update_scanner_outcomes(conn)          # mature scn_* fires -> actual_ret/correct
         rows = _positioning_scan(conn)
-        today_str = (now_utc - timedelta(hours=5)).date().isoformat()
+        today_str = _et_now().date().isoformat()   # DST-aware ET date
         fresh = [r for r in rows if r["stage"] in ("I", "C")
                  and not _alert_already_sent(
                      conn, today_str, f"{r['ticker']}|{r['bias']}|{r['stage']}", "building")]
@@ -26129,7 +26132,7 @@ async def building_alert(ctx: ContextTypes.DEFAULT_TYPE):
                   f"{r['build_pct']*100:.0f}", r["stage"], f"{r['ret5']*100:+.1f}") for r in rs]
         return _pipe_table(("ST", "Tkr", "OI+%", "Stg", "5d%"), _data, right_cols={2, 4}, title=title)
 
-    now_et = now_utc - timedelta(hours=5)
+    now_et = _et_now().replace(tzinfo=None)   # DST-aware (was fixed UTC-5)
     parts = [hdr(f"🧭 POSITIONING BUILDING · {now_et.strftime('%H:%M ET')}"),
              f"<i>{len(fresh)} new build(s) · Stg I=increasing / C=confirmed</i>"]
     if longs:
@@ -30375,7 +30378,7 @@ async def wan_streamer_alert(ctx: ContextTypes.DEFAULT_TYPE):
         # Force a fresh scan and refresh the shared cache for AI chat.
         _WAN_SNAPSHOT["ts"] = None
         signals = _wan_get_snapshot(conn, spy_ret)
-        today_str = (now_utc - timedelta(hours=5)).date().isoformat()
+        today_str = _et_now().date().isoformat()   # DST-aware ET date
         fresh = [r for r in signals
                  if not _alert_already_sent(
                      conn, today_str, f"{r['ticker']}|{r['signal']}|{r['conf']}", "wan_stream")]
@@ -30396,7 +30399,7 @@ async def wan_streamer_alert(ctx: ContextTypes.DEFAULT_TYPE):
     if not fresh:
         return
 
-    now_et = now_utc - timedelta(hours=5)
+    now_et = _et_now().replace(tzinfo=None)   # DST-aware (was fixed UTC-5)
     parts = [hdr(f"📡 WAN-STREAMER · {now_et.strftime('%H:%M ET')}"),
              f"<i>{len(fresh)} new signal(s)</i>",
              _wan_table(fresh)]

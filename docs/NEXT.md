@@ -1,4 +1,4 @@
-﻿[RESUME AFTER] 2026-07-21 04:00  (limit-guard: block at 100682232 tokens >= 80000000)
+﻿[RESUME AFTER] 2026-07-21 04:00  (limit-guard: block at 101846068 tokens >= 80000000)
 # NEXT — switch-over note (2026-07-21)
 
 **Single most useful next step: verify the two market-hours-only fixes on a LIVE session** — they
@@ -18,9 +18,14 @@ Everything is committed (through `d798758`); bot + dashboard both healthy.
      tools (get_positions/scan_premium/oi_breakdown/capital_flow/backtest_signal) wrapping the engine.
      Verified vs live DB (GOOG spread, AMD capflow -11, POP 70.6%). Register via
      `mcp_client_config.example.json`. Imports bot as library; stdout muted during import.
-   - ⬜ **Phase 2 = RAG** over event_journal + news + LOG.md (retrieval tool `search_notes(query)`
-     added to the same server; embed with a local/keyless model or sqlite FTS5 to stay free).
-   - ⬜ **Phase 3 = Dockerfile + compose** (secrets via env mounts, NOT baked); then README + arch diagram.
+   - ✅ **Phase 2 DONE (07-21, commit 98db2c3): `search_notes`** — 6th MCP tool, local SQLite FTS5
+     RAG over event_writeups + news_feed + event_catalog + journal/bookmarks + docs/*.md (114-doc
+     corpus, BM25, snippet highlight, source filter, AND→OR recall). Keyless/offline; index =
+     `rag_index.db` (gitignored, rebuilt on demand). Verified vs real corpus.
+   - ⬜ **Phase 3 = Dockerfile + compose** (secrets via env mounts, NOT baked); then README + arch
+     diagram. NOTE the image must run `mcp_server.py` (stdio) — needs python + the bot's deps; the
+     ~23k-line bot imports heavy libs (pandas/numpy/matplotlib/yfinance/telegram), so pin a
+     requirements set. Secrets (token.txt, api_keys.env) stay OUT — mount at runtime.
 2. **OpenBB migration** — but re-scoped this session: yahoo STAYS primary for bars/fundamentals/
    live (it's faster + fundamentals are free); "migration" = finish routing OPTIONS fully onto BB
    + retire the yahoo EOD fallback lane where BB coverage is proven. Do NOT move bars to BB.

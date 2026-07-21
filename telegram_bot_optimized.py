@@ -1274,9 +1274,41 @@ def _market_is_open():
     return 570 <= mins < 960          # 09:30 .. 16:00 ET
 
 
+def _intraday_last(tk, max_age_min=3.0):
+    """Latest 1m bar (close, age_min) for tk from US_intraday.db, or None. The bars are
+    yfinance data already captured each minute for positions + leaders, so reading them is
+    a free, batched cache — no redundant per-ticker live call. Only returns a value that is
+    FRESH (bar age <= max_age_min); ts in the DB is ET market time."""
+    try:
+        import os as _os, sqlite3 as _sql
+        _p = _os.path.join(DATA_DIR, "US_intraday.db")
+        if not _os.path.exists(_p):
+            return None
+        _c = _sql.connect(_p, timeout=2)
+        row = _c.execute(
+            "SELECT ts, close FROM intraday_bars WHERE ticker=? AND "
+            "trade_date=(SELECT MAX(trade_date) FROM intraday_bars WHERE ticker=?) "
+            "ORDER BY ts DESC LIMIT 1", (tk.upper(), tk.upper())).fetchone()
+        _c.close()
+        if not row or not row[1]:
+            return None
+        px = float(row[1])
+        if px <= 0:
+            return None
+        try:
+            bar_ts = datetime.strptime(str(row[0])[:16], "%Y-%m-%d %H:%M")
+            age = (_et_now().replace(tzinfo=None) - bar_ts).total_seconds() / 60.0
+        except Exception:
+            age = 1e9
+        return (px, age) if age <= max_age_min else None
+    except Exception:
+        return None
+
+
 def _cur_price(tk, db_close=0.0):
     """The price to DISPLAY for a ticker, resolving live-vs-EOD correctly:
-      market open  -> live last (fast_info), labelled 'LIVE HH:MM ET'
+      market open  -> intraday-DB last bar (covered tickers, fresh) else live fast_info,
+                      labelled 'LIVE HH:MM ET'
       market closed-> the EOD close, labelled 'EOD'
     Returns (price, is_live, asof_label). Never raises."""
     dbc = 0.0
@@ -1285,9 +1317,13 @@ def _cur_price(tk, db_close=0.0):
     except Exception:
         dbc = 0.0
     if _market_is_open():
-        px = _last_price(tk) or 0.0
+        _stamp = f"LIVE {_et_now().strftime('%H:%M ET')}"
+        _id = _intraday_last(tk)                     # covered ticker, fresh bar -> free & fast
+        if _id and _id[0] > 0:
+            return (_id[0], True, _stamp)
+        px = _last_price(tk) or 0.0                  # else pull the live tick from yahoo
         if px > 0:
-            return (px, True, f"LIVE {_et_now().strftime('%H:%M ET')}")
+            return (px, True, _stamp)
     if dbc > 0:
         return (dbc, False, "EOD")
     return (_last_price(tk) or 0.0, False, "EOD")

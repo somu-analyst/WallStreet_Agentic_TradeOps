@@ -8,6 +8,10 @@ us_bot_token.txt
 us_bot_id.txt
 us_chat_id.txt
 
+# Data files (kept out of git like *.db) — universe workbook moved into NYSE_DATA 2026-07-20
+ticker_universe.xlsx
+*.xlsx
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

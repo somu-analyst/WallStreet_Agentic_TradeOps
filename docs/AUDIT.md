@@ -60,8 +60,18 @@ is running is not.
 
 ## D. DATA ISSUES
 
-- **D1.** `stock_daily` sparse (median 12 dates/ticker) vs `stock_history` (median 1507).
-  **Any code reading `stock_daily` for HISTORY is suspect** — A7 was one instance; there may be more.
+- **D1.** `stock_daily` is SHALLOW, not gappy: recent dates carry **733 tickers each**, but the
+  full-universe capture started recently, so median depth is only ~12 dates/ticker vs
+  `stock_history`'s 1507. **Any code reading `stock_daily` for HISTORY is suspect** — A7 was one
+  instance; there may be more. It will mature into a real panel over time.
+- **D1b. THREE independent price lanes, no reconciliation between them:**
+  `stock_daily` <- NYSE_OpenBB EOD capture (733/day, permanent) ·
+  `stock_history` <- bot `_daily_history` from **yfinance** on demand (permanent, multi-year) ·
+  `intraday_bars` <- NYSE_intraday, **only ~32 tickers** (open positions + leaders) and
+  **PURGED at KEEP_DAYS=45** (currently holds 5 days). `stock_daily` and `stock_history` describe
+  the same quantity from DIFFERENT SOURCES (OpenBB vs yfinance) and nothing checks they agree.
+- **D1c. The intraday DB is a ROLLING WINDOW, not an archive** — it cannot serve as intraday
+  backtest history. Use yfinance's ~3yr of 1h bars (verified: 5,070 rows, 2023-08-22->today).
 - **D2.** ✅ `VIX`/`^VIX` + `VXN`/`^VXN` duplicates merged losslessly, then backfilled:
   **VXN 252 → 6,410 rows (2001→)**, **VIX 515 → 9,219 (1990→)**.
 - **D3.** AMD returns `zero_gamma=None` — `/debate`'s Position analyst silently loses that input.

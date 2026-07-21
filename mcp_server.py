@@ -43,7 +43,10 @@ from __future__ import annotations
 
 import os
 import sys
+import re
+import time
 import math
+import sqlite3
 import logging
 import contextlib
 
@@ -271,6 +274,153 @@ def backtest_signal(ticker: str, model: str | None = None) -> dict:
         "rows": _json_safe(df.to_dict("records")),
         "note": "hit_pct over graded fires only; low n is weak evidence.",
     }
+
+
+# ─────────────────────── RAG retrieval (search_notes) ───────────────────────
+# Local SQLite FTS5 index over the engine's notes corpus — no external API/embeddings.
+_RAG_DB = os.path.join(HERE, "rag_index.db")
+_RAG_TTL = 600  # rebuild the index if it is older than this many seconds
+
+
+def _chunk_md(text: str, max_chars: int = 1200) -> list[str]:
+    """Split a markdown doc into heading/dated-entry chunks for retrieval."""
+    parts = re.split(r"\n(?=#{1,3}\s|\d{4}-\d\d-\d\d)", text)
+    out: list[str] = []
+    for p in parts:
+        p = p.strip("\n")
+        if len(p) <= max_chars:
+            out.append(p)
+        else:
+            out.extend(p[i:i + max_chars] for i in range(0, len(p), max_chars))
+    return out
+
+
+def _rag_docs() -> list[tuple]:
+    """Collect (source, ref, date, title, body) docs from DB tables + docs/*.md."""
+    docs: list[tuple] = []
+    conn = bot.get_conn()
+
+    def _q(sql):
+        try:
+            return list(conn.execute(sql))
+        except Exception:  # noqa: BLE001  (table may not exist on some DBs)
+            return []
+
+    try:
+        for r in _q("SELECT id, event_id, phase, writeup_text, generated_at FROM event_writeups "
+                    "WHERE writeup_text IS NOT NULL AND writeup_text != ''"):
+            docs.append(("event_writeup", f"ew{r[0]}/evt{r[1]}/{r[2]}", str(r[4] or ""),
+                         f"Event {r[1]} · {r[2]}", r[3]))
+        for r in _q("SELECT news_id, ticker, headline, summary, source, published_date, sentiment "
+                    "FROM news_feed"):
+            body = f"[{r[4] or ''} · {r[6] or ''}] {(r[2] or '')} — {(r[3] or '')}".strip()
+            docs.append(("news", f"news{r[0]}/{r[1] or ''}", str(r[5] or ""),
+                         f"{r[1] or ''}: {r[2] or ''}", body))
+        for r in _q("SELECT event_id, name, category, event_date, impact, related_tickers, "
+                    "estimate, actual, prior, unit FROM event_catalog"):
+            body = (f"{r[1]} ({r[2]}, impact {r[4]}). tickers={r[5]}. "
+                    f"est={r[6]} actual={r[7]} prior={r[8]} {r[9] or ''}")
+            docs.append(("event_catalog", f"cat{r[0]}", str(r[3] or ""), r[1] or "", body))
+        for r in _q("SELECT id, ticker, direction, note, entry_date, status FROM event_journal "
+                    "WHERE note IS NOT NULL AND note != ''"):
+            docs.append(("journal", f"jrn{r[0]}/{r[1] or ''}", str(r[4] or ""),
+                         f"{r[1] or ''} {r[2] or ''} {r[5] or ''}", r[3]))
+        for r in _q("SELECT id, kind, label, content, created FROM bookmarks "
+                    "WHERE content IS NOT NULL AND content != ''"):
+            docs.append(("bookmark", f"bm{r[0]}/{r[1] or ''}", str(r[4] or ""), r[2] or "", r[3]))
+    finally:
+        conn.close()
+
+    for fn in ("LOG.md", "NEXT.md", "PLAN.md"):
+        p = os.path.join(HERE, "docs", fn)
+        if not os.path.exists(p):
+            continue
+        try:
+            text = open(p, encoding="utf-8").read()
+        except Exception:  # noqa: BLE001
+            continue
+        for i, chunk in enumerate(_chunk_md(text)):
+            if chunk.strip():
+                docs.append((f"doc:{fn}", f"{fn}#{i}", "", fn, chunk))
+    return docs
+
+
+def _rag_index(force: bool = False) -> sqlite3.Connection:
+    """Open rag_index.db, (re)building the FTS5 table if missing or stale. Returns the conn."""
+    rc = sqlite3.connect(_RAG_DB)
+    rc.execute("CREATE TABLE IF NOT EXISTS rag_meta(k TEXT PRIMARY KEY, v TEXT)")
+    fresh = False
+    if not force:
+        built = rc.execute("SELECT v FROM rag_meta WHERE k='built_at'").fetchone()
+        has = rc.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='notes'").fetchone()
+        fresh = bool(built and has and (time.time() - float(built[0])) < _RAG_TTL)
+    if not fresh:
+        rc.execute("DROP TABLE IF EXISTS notes")
+        rc.execute("CREATE VIRTUAL TABLE notes USING fts5("
+                   "source, ref, date, title, body, tokenize='porter unicode61')")
+        docs = _rag_docs()
+        rc.executemany("INSERT INTO notes(source, ref, date, title, body) VALUES (?,?,?,?,?)",
+                       [(d[0], d[1], d[2], d[3], d[4] or "") for d in docs])
+        rc.execute("INSERT OR REPLACE INTO rag_meta(k,v) VALUES('built_at',?)", (str(time.time()),))
+        rc.execute("INSERT OR REPLACE INTO rag_meta(k,v) VALUES('n_docs',?)", (str(len(docs)),))
+        rc.commit()
+    return rc
+
+
+def _fts_query(q: str) -> str:
+    """Turn free text into a safe FTS5 MATCH expression (strip syntax-breaking punctuation)."""
+    q2 = re.sub(r'[^\w\s"*]', ' ', q)
+    return re.sub(r'\s+', ' ', q2).strip()
+
+
+@mcp.tool()
+def search_notes(query: str, top_k: int = 6, source: str | None = None) -> dict:
+    """Full-text search across the engine's notes corpus (RAG retrieval).
+
+    Indexes event write-ups, the news_feed, the macro/earnings event_catalog, trade
+    journal + bookmarks, and the docs/*.md continuity logs (LOG/NEXT/PLAN) into a local
+    SQLite FTS5 index, rebuilt on demand — no external API or embeddings, fully free and
+    offline. Returns the top matches ranked by BM25, each with source, ref, date, title
+    and a snippet.
+
+    Args:
+        query: free text; FTS5 operators work (e.g. 'semis OR memory', '"max pain"').
+        top_k: number of results (default 6).
+        source: optional exact source filter (e.g. 'news', 'event_writeup', 'doc:LOG.md').
+    """
+    q = (query or "").strip()
+    if not q:
+        return {"query": query, "results": [], "error": "empty query"}
+    rc = _rag_index()
+    try:
+        def run(expr):
+            sql = ("SELECT source, ref, date, title, "
+                   "snippet(notes, 4, '<<', '>>', ' … ', 12) AS snip, bm25(notes) AS rank "
+                   "FROM notes WHERE notes MATCH ? ")
+            params: list = [expr]
+            if source:
+                sql += "AND source = ? "
+                params.append(source)
+            sql += "ORDER BY rank LIMIT ?"
+            params.append(int(top_k))
+            return rc.execute(sql, params).fetchall()
+
+        expr = _fts_query(q)
+        rows: list = []
+        if expr:
+            try:
+                rows = run(expr)
+                if not rows and " " in expr:   # recall fallback: strict AND -> OR of terms
+                    rows = run(" OR ".join(expr.split()))
+            except Exception as e:  # noqa: BLE001
+                return {"query": q, "results": [], "error": f"fts: {str(e)[:150]}"}
+        meta = rc.execute("SELECT v FROM rag_meta WHERE k='n_docs'").fetchone()
+    finally:
+        rc.close()
+    results = [{"source": r[0], "ref": r[1], "date": r[2], "title": r[3], "snippet": r[4]}
+               for r in rows]
+    return {"query": q, "matched_query": expr,
+            "corpus_docs": int(meta[0]) if meta else None, "results": results}
 
 
 if __name__ == "__main__":

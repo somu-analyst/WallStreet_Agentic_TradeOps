@@ -1,4 +1,4 @@
-﻿[RESUME AFTER] 2026-07-21 04:00  (limit-guard: block at 103683784 tokens >= 80000000)
+﻿[RESUME AFTER] 2026-07-21 04:00  (limit-guard: block at 106643993 tokens >= 80000000)
 # NEXT — switch-over note (2026-07-21)
 
 **Single most useful next step: verify the two market-hours-only fixes on a LIVE session** — they
@@ -31,9 +31,20 @@ Everything is committed (through `d798758`); bot + dashboard both healthy.
      deps the engine already runs mcp_server.py on, so import is correct-by-construction.
    → **Portfolio-track COMPLETE (Phases 1-3).** Optional Phase 4 later = k8s manifest + CI. Next
      build below is #2 OpenBB migration.
-2. **OpenBB migration** — but re-scoped this session: yahoo STAYS primary for bars/fundamentals/
-   live (it's faster + fundamentals are free); "migration" = finish routing OPTIONS fully onto BB
-   + retire the yahoo EOD fallback lane where BB coverage is proven. Do NOT move bars to BB.
+2. **OpenBB migration** — re-scoped: yahoo STAYS primary for bars/fundamentals/live; migrate OPTIONS.
+   - ✅ **EOD lane: DONE + PROVEN (verified 07-21).** `run_all_offhours.py:362` already runs BB-primary
+     and SKIPS the yahoo lane entirely when `bb_capture_ok` (≥300 tickers) passes. Coverage is proven:
+     **734 tickers EVERY trading day** for 2+ weeks (`options_change`). The fallback CODE stays on
+     purpose — a free safety net; do NOT delete NYSE_YFin.py.
+   - ⬜ **Read-side: SCOPED, not started (risky — live-bot core paths; deferred at ~106M tokens).**
+     ~15 live `yfinance` option_chain() sites. Keep LIVE ones on yahoo (position marks @11389,
+     `_option_chain_snapshot` live views). MIGRATE the EOD-analytics SCANNERS to BB: `_hiprob_scan`
+     (23337), `_spreads_scan_bot` (23880), `_wheel_scan_bot` (24021), + the 2 at ~24190/24722 —
+     source strikes + real bid/ask/iv/delta from `options_openbb` (already captured, 734 tkrs) via a
+     `_bb_chain(tk, exp)` helper; fall back to yfinance ONLY when the ticker/expiry is absent from BB.
+     Wins: routes options onto BB + kills per-ticker network latency. **TEST GATE:** POP/score must
+     match the current output on AMD/GOOG/NVDA before/after (the ATM-mid IV back-out must be preserved
+     — see standing rule on garbage yfinance IV). Do on fresh budget; it touches the live scanners.
 3. **AI-system integration**: adapt **TradingAgents** pattern (Claude-compatible, LangGraph multi-
    agent) as a thin layer over OUR engine (OI-flow/`/flow`/`/world`/GEX/`/capflow`) rather than
    importing its stack — vs **Qlib** (ML-alpha, heavier, own data pipeline). User leaned "do both"

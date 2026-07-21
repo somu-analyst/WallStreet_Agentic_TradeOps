@@ -93,6 +93,21 @@ result: put-flow predicts SIZE, not direction. **Both /capflow and /debate relab
 6. Validation harness lives in **`tests/`** (`test_writeup_invariants.py`, `test_trade_invariants.py`)
    — run against live data: price coherence, no-arb, wall sanity, PCR, POP, OPEX.
 
+
+## /debate leg backtest (2026-07-21) — Technical REAL, Vol INVERTED
+- Panel: stock_history, 318k rows / 550 tickers / 613 dates.
+- **Technical leg HAS edge** (and it grows with horizon): mean daily rank-IC +0.0131 (t=+1.83) @3d,
+  +0.0166 (t=+2.43) @5d, +0.0285 (**t=+4.28**) @10d. Contrast Flow: t=-0.07 (dead).
+- **Vol leg is SIGN-INVERTED.** `_agent_vol` scores elevated vol bearish, but elevated VIX preceded
+  **+4.65%** SPY fwd-10d vs **+0.46%** when calm (rank-IC -0.194; VXN agrees, -0.132). Classic
+  buy-fear mean reversion. NOT flipped unilaterally: 628 obs span ~2.5y of one recovering regime and
+  this is precisely the rule that breaks in a 2008. USER DECISION: flip, neutralise, or leave.
+- Vol must be tested as TIME-SERIES, not cross-section — it is ~identical across tickers each day
+  (same structural flaw as `_agent_macro`, which uses SPY flow for every name).
+- Position/GEX leg still unbacktested — needs a full chain rebuild per historical date.
+- VXN/VIX history backfilled: VXN 252 -> **6,410 rows (2001->today)**, VIX 515 -> **9,219 (1990->)**;
+  caret duplicates merged and removed (lossless). Vol work is now properly testable.
+
 ## Smaller contained items (fill-in)
 - Accuracy audit R5 (macro/narrative wording, low prio) · VXN sweep (~35 VIX sites → `_vol_for`) ·
   dashboard left-nav → dropdowns (already 2-level `_NAV_GROUPS`@dashboard.py:5288) ·

@@ -1,0 +1,30 @@
+# ── Secrets — NEVER bake these into an image ─────────────────────────
+token.txt
+dash_token.txt
+us_bot_*.txt
+api_keys.env
+api_keys.env.enc
+*.pem
+*.key
+
+# ── Data & derived artifacts — mounted at runtime, not copied ────────
+*.db
+*.db-journal
+*.db-wal
+rag_index.db
+logs/
+tools/
+archive/
+
+# ── VCS / caches / scratch ──────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+graphify-out/
+.claude/
+*.log

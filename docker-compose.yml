@@ -1,0 +1,43 @@
+# docker-compose — long-running services (Telegram bot + Streamlit dashboard).
+#
+# The MCP server is NOT a compose service: MCP stdio servers are spawned on demand by
+# the client over stdin/stdout, not run as daemons. Launch it with `docker run -i`
+# (see docs/DOCKER.md and mcp_client_config.example.json).
+#
+# Secrets are bind-mounted read-only at runtime — never baked into the image.
+# Adjust the host paths marked  # <-- EDIT  to your machine.
+
+services:
+  bot:
+    build: .
+    image: nyse-options:latest
+    command: ["python", "telegram_bot_optimized.py"]
+    restart: unless-stopped
+    environment:
+      NYSE_DB_PATH: /data/US_data_OpenBB.db
+      TZ: America/New_York
+    volumes:
+      # Host dir holding the .db files (US_data_OpenBB.db, US_intraday.db, US_data.db).
+      - ../:/data                                   # <-- EDIT: parent of NYSE_DATA (Options_chain_data)
+      - ./token.txt:/app/token.txt:ro               # secret, mounted at runtime
+      - ./api_keys.env:/app/api_keys.env:ro         # secret, mounted at runtime
+      - ./ticker_universe.xlsx:/app/ticker_universe.xlsx:ro
+      - ./logs:/app/logs
+
+  dashboard:
+    image: nyse-options:latest
+    command: ["streamlit", "run", "dashboard.py",
+              "--server.port=8502", "--server.address=0.0.0.0"]
+    restart: unless-stopped
+    depends_on:
+      - bot
+    ports:
+      - "8502:8502"
+    environment:
+      NYSE_DB_PATH: /data/US_data_OpenBB.db
+      TZ: America/New_York
+    volumes:
+      - ../:/data                                   # <-- EDIT: same host DB dir as above
+      - ./token.txt:/app/token.txt:ro
+      - ./api_keys.env:/app/api_keys.env:ro
+      - ./logs:/app/logs

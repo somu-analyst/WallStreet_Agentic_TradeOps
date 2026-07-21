@@ -4795,10 +4795,15 @@ def oi_weekly_strike_analysis(ticker, td1, td2):
 # ──  LOSS PREDICTION ENGINE
 # ===================================================================
 @st.cache_data(ttl=180, show_spinner=False)
-def predict_trade_risk(ticker, option_type, strike, expiry_str, entry_price, qty=1):
+def predict_trade_risk(ticker, option_type, strike, expiry_str, entry_price, qty=1, side="buy"):
     """
     Before-trade risk analysis: predict max loss scenarios,
     probability of loss, escape difficulty, and OI-based crowd positioning.
+
+    side: "buy" (long/debit) or "sell" (short/credit). This function previously assumed
+    LONG only. Short is not just a sign flip - it inverts the risk shape: a short CALL has
+    UNDEFINED (unbounded) max loss, and a short PUT risks (strike - credit) per share,
+    while the gain is capped at the credit collected.
     """
     try:
         stock = yf.Ticker(ticker)
@@ -4817,6 +4822,7 @@ def predict_trade_risk(ticker, option_type, strike, expiry_str, entry_price, qty
         r = 0.045
 
         greeks = bs_greeks(S, strike, T, r, sigma, option_type.lower())
+        _sgn = 1 if str(side).lower().startswith("b") else -1   # +1 long, -1 short
 
         # 1-day, 3-day, 5-day scenario analysis
         scenarios = []
@@ -4826,8 +4832,9 @@ def predict_trade_risk(ticker, option_type, strike, expiry_str, entry_price, qty
                 new_S = S * (1 + move_pct / 100)
                 new_T = max(T - days / 365, 0.001)
                 new_greeks = bs_greeks(new_S, strike, new_T, r, sigma, option_type.lower())
-                pnl = (new_greeks["price"] - greeks["price"]) * qty * 100
-                pnl_pct = (new_greeks["price"] - greeks["price"]) / greeks["price"] * 100 if greeks["price"] > 0 else 0
+                pnl = (new_greeks["price"] - greeks["price"]) * qty * 100 * _sgn
+                pnl_pct = ((new_greeks["price"] - greeks["price"]) / greeks["price"] * 100 * _sgn
+                           if greeks["price"] > 0 else 0)
                 scenarios.append(dict(
                     timeframe=label, scenario=move_label,
                     stock_move=f"{move_pct:+.1f}%",
@@ -4835,12 +4842,21 @@ def predict_trade_risk(ticker, option_type, strike, expiry_str, entry_price, qty
                     pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 1),
                 ))
 
-        # Max loss
-        max_loss = -entry_price * qty * 100  # Total premium paid
+        # Max loss / max gain — depends on BOTH direction and option type. None = unbounded.
+        _ot = option_type.lower()
+        _notional = qty * 100
+        if _sgn > 0:                       # LONG (debit): loss capped at premium paid
+            max_loss = -entry_price * _notional
+            max_gain = None if _ot == "call" else (strike - entry_price) * _notional
+        else:                              # SHORT (credit): gain capped, loss is the tail
+            max_gain = entry_price * _notional
+            max_loss = None if _ot == "call" else -max(0.0, strike - entry_price) * _notional
 
         # Probability of profit (simplified: prob stock > strike for call)
         d2 = (np.log(S / strike) + (r - 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-        prob_itm = norm.cdf(d2) if option_type.lower() == "call" else norm.cdf(-d2)
+        prob_itm = norm.cdf(d2) if _ot == "call" else norm.cdf(-d2)
+        # A short wins when the option expires OTM — the complement of the long's ITM odds.
+        prob_profit = prob_itm if _sgn > 0 else (1.0 - prob_itm)
 
         # OI-based crowd positioning
         conn = get_conn()
@@ -4871,8 +4887,11 @@ def predict_trade_risk(ticker, option_type, strike, expiry_str, entry_price, qty
         return dict(
             current_price=S, strike=strike, theo_price=round(greeks["price"], 2),
             greeks=greeks, sigma=round(sigma * 100, 1),
-            max_loss=round(max_loss, 2),
+            side=("LONG" if _sgn > 0 else "SHORT"),
+            max_loss=(None if max_loss is None else round(max_loss, 2)),   # None = unbounded
+            max_gain=(None if max_gain is None else round(max_gain, 2)),
             prob_itm=round(prob_itm * 100, 1),
+            prob_profit=round(prob_profit * 100, 1),
             scenarios=pd.DataFrame(scenarios),
             crowd=crowd, escape=escape,
             daily_vol_pct=round(daily_vol * 100, 2),
@@ -13211,14 +13230,21 @@ elif page == "⚡ Trade Risk Calculator":
     rc_strike = c3.number_input("Strike", value=580.0, key="rc_strike")
     rc_expiry = c4.date_input("Expiry", value=datetime.now() + timedelta(days=30), key="rc_exp")
 
-    c5, c6 = st.columns(2)
-    rc_entry = c5.number_input("Entry Price (per contract)", value=5.0, step=0.5, key="rc_entry")
-    rc_qty = c6.number_input("Quantity", min_value=1, value=1, key="rc_qty")
+    c5, c6, c7 = st.columns(3)
+    rc_side = c5.selectbox("Direction", ["buy (long)", "sell (short)"], key="rc_side",
+                           help="Short flips the risk shape: a short CALL has unbounded loss.")
+    rc_entry = c6.number_input("Entry Price (per contract)", value=5.0, step=0.5, key="rc_entry")
+    rc_qty = c7.number_input("Quantity", min_value=1, value=1, key="rc_qty")
+    _rc_side = "sell" if rc_side.startswith("sell") else "buy"
+    if _rc_side == "sell" and rc_type == "call":
+        st.error("⚠️ **Naked short call — loss is theoretically UNLIMITED.** "
+                 "Only size this against stock you own (covered call) or a long call above it.")
 
     if st.button("🔍 Analyze Risk", type="primary"):
         with st.spinner("Running scenario analysis..."):
             risk = predict_trade_risk(rc_ticker, rc_type, rc_strike,
-                                      rc_expiry.strftime("%Y-%m-%d"), rc_entry, rc_qty)
+                                      rc_expiry.strftime("%Y-%m-%d"), rc_entry, rc_qty,
+                                      side=_rc_side)
 
         if risk is None or "error" in risk:
             st.error(f"Error: {risk.get('error', 'Unknown')}" if risk else "Could not analyze.")
@@ -13228,9 +13254,15 @@ elif page == "⚡ Trade Risk Calculator":
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Stock Price", f"${risk['current_price']:.2f}")
             c2.metric("Theo Price", f"${risk['theo_price']:.2f}")
-            c3.metric("Max Loss", f"${risk['max_loss']:,.2f}", delta="Total premium", delta_color="inverse")
-            c4.metric("P(ITM)", f"{risk['prob_itm']:.1f}%")
+            _ml, _mg = risk.get("max_loss"), risk.get("max_gain")
+            c3.metric("Max Loss", "UNLIMITED" if _ml is None else f"${_ml:,.2f}",
+                      delta=risk.get("side", "LONG"), delta_color="inverse")
+            c4.metric("P(profit)", f"{risk.get('prob_profit', risk['prob_itm']):.1f}%")
             c5.metric("Hist Vol", f"{risk['sigma']:.1f}%")
+            st.caption(f"**Max gain:** {'Unlimited' if _mg is None else f'${_mg:,.2f}'} · "
+                       f"**P(ITM):** {risk['prob_itm']:.1f}% · direction **{risk.get('side','LONG')}**"
+                       + ("  ·  ⚠️ short call: loss is unbounded — hedge or cover it."
+                          if _ml is None else ""))
 
             # Greeks
             st.markdown("<div>Greeks</div>", unsafe_allow_html=True)

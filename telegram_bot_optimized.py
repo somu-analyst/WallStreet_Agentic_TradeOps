@@ -2522,8 +2522,12 @@ def compute_capflow(tk, conn=None):
         # volume trend vs 20d
         vol_ratio = 1.0
         try:
-            sd = pd.read_sql("SELECT volume FROM stock_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT 21",
-                             conn, params=(tk,))
+            # stock_history, NOT stock_daily: the latter is sparse (median 12 dates/ticker),
+            # so the len(v)>=20 gate below silently failed for most of the 734-name universe
+            # and vol_ratio stayed pinned at 1.0 — killing the one leg of the capflow
+            # composite that showed any signal in the 2026-07-21 backtest.
+            sd = pd.read_sql("SELECT volume FROM stock_history WHERE ticker=? "
+                             "ORDER BY trade_date DESC LIMIT 21", conn, params=(tk,))
             v = pd.to_numeric(sd["volume"], errors="coerce")
             if len(v) >= 20 and v.iloc[1:21].mean():
                 vol_ratio = float(v.iloc[0] / v.iloc[1:21].mean())

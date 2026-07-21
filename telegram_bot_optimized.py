@@ -433,6 +433,14 @@ NYSE_DIR  = os.path.join(DATA_DIR, "NYSE_DATA")
 # PRIMARY DB = OpenBB (US_data_OpenBB.db): 734 tickers + real IV/greeks, state synced from Yahoo.
 # Override via env NYSE_DB_PATH (e.g. point to US_data.db to revert to the Yahoo feed).
 DB_PATH   = os.environ.get("NYSE_DB_PATH") or os.path.join(DATA_DIR, "US_data_OpenBB.db")
+
+# Risk-free rate. MUST be module-level: _positions_card_parts references a bare `R` when
+# BS-re-pricing each leg off the current stock, but `R` was only ever a LOCAL in three other
+# functions. That raised NameError on every leg, was swallowed by a bare `except Exception`,
+# and silently left position marks at the stale EOD capture — so "Now" never tracked the live
+# stock at all (found 2026-07-21: AMD rallied 7.6% and the marks did not move, inverting the
+# sign of the spread's P&L).
+R = 0.045
 logging.getLogger(__name__).info(f"DB source: {os.path.basename(DB_PATH)}")
 
 TOKEN_FILE  = os.path.join(NYSE_DIR, "token.txt")
@@ -11213,7 +11221,12 @@ def _positions_card_parts(trades, now_s, today):
                     if prob is None and _g.get("delta") is not None:
                         prob = abs(float(_g["delta"])) * 100
         except Exception:
-            log.debug("positions leg BB mark failed", exc_info=True)
+            # WARNING, not debug: this block is what keeps "Now" tracking the live stock.
+            # It silently swallowed a NameError on `R` for its entire life, leaving every
+            # position mark frozen at the EOD capture. A failure here corrupts displayed
+            # P&L, so it must be loud.
+            log.warning(f"positions leg re-price FAILED for {tk} {strike}{otype[:1]} "
+                        f"— mark falls back to stale capture", exc_info=True)
 
         # Rough moneyness-based probability if delta unavailable
         if prob is None and stock_px and strike:

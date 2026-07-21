@@ -172,6 +172,15 @@ def _sanitize_text(s):
     s = re.sub(r'</?span[^>]*>', '', s)
     s = re.sub(r"\s*(style|class)=(\".*?\"|'.*?')", '', s)
     return s
+
+def _esc_md_dollars(s):
+    """Escape literal $ so Streamlit's markdown does NOT parse '$…$' as LaTeX math and
+    scramble dollar amounts (fix 2026-07-20). Skips already-escaped \\$ (no double-up).
+    Applied only in MARKDOWN mode — never to unsafe_allow_html HTML, where $ is literal."""
+    if not isinstance(s, str):
+        return s
+    return re.sub(r'(?<!\\)\$', r'\\$', s)
+
 # GUARD (fix 2026-07-20): Streamlit re-executes this whole file on every rerun, but `st` is a
 # persistent module — so recapturing `st.markdown` on the 2nd run grabbed the ALREADY-patched
 # wrapper, making _st_markdown call itself forever (RecursionError, dashboard dead). Only wrap
@@ -179,14 +188,24 @@ def _sanitize_text(s):
 if not getattr(st.markdown, "_sanitized_wrapper", False):
     _original_st_markdown = st.markdown
     _original_st_write = st.write
+    _original_st_caption = st.caption
+    def _prep(text, kwargs):
+        t = _sanitize_text(text)
+        if not kwargs.get("unsafe_allow_html"):     # markdown mode -> protect $ from LaTeX
+            t = _esc_md_dollars(t)
+        return t
     def _st_markdown(text, *args, **kwargs):
-        return _original_st_markdown(_sanitize_text(text), *args, **kwargs)
+        return _original_st_markdown(_prep(text, kwargs), *args, **kwargs)
     def _st_write(text, *args, **kwargs):
-        return _original_st_write(_sanitize_text(text), *args, **kwargs)
+        return _original_st_write(_prep(text, kwargs), *args, **kwargs)
+    def _st_caption(text, *args, **kwargs):
+        return _original_st_caption(_prep(text, kwargs), *args, **kwargs)
     _st_markdown._sanitized_wrapper = True
     _st_write._sanitized_wrapper = True
+    _st_caption._sanitized_wrapper = True
     st.markdown = _st_markdown
     st.write = _st_write
+    st.caption = _st_caption
 
 # One-time in-place cleanup: remove remaining  tags and inline style/class
 # attributes from the source file so the dashboard source is safe for reuse.
@@ -8543,7 +8562,11 @@ elif page == "💼 Portfolio & Suggestions":
                             f"</div>", unsafe_allow_html=True)
 
                         # ── Metric row ───────────────────────────────────────────
-                        _show_live = _ah_opt is not None
+                        # Only show the 🌙 live/after-hours columns when there is REAL
+                        # extended-hours movement — otherwise it printed 'Stock +0.0% EOD'
+                        # (the AH change vs the EOD close, which is 0), reading as if the
+                        # stock never moved on the day (fix 2026-07-20).
+                        _show_live = (_ah_opt is not None) and _spv_has_ah
                         _ncols = 6 if _show_live else 5
                         _mc = st.columns(_ncols)
                         _mc[0].metric("Entry Premium", f"${pos['Entry']:.2f}",
@@ -8588,13 +8611,17 @@ elif page == "💼 Portfolio & Suggestions":
                             _mv1 = pos["Delta"] * 100                                    # $ P&L per $1 stock move
                             _th_d = abs(pos["Theta"]) * 100                              # $ decay per day
                             _vg1 = abs(pos["Vega"]) * 100                                # $ per 1 IV pt
-                            st.caption(
+                            _pe_txt = (
                                 f"💡 **Plain English:** worth **${_intr:.2f} real** (intrinsic) + **${_timev:.2f} time value**"
                                 + (" — *all* time value: the stock must move or this decays to $0" if _intr <= 0 else "")
                                 + f" · stock ±$1 → position ≈ **${abs(_mv1):,.0f}** (Δ {_dps:+.2f}/sh)"
                                   f" · decay ≈ **${_th_d:,.2f}/day** "
                                 + ("*for* you (short premium)" if pos["Qty"] < 0 else "*against* you")
                                 + f" · IV ±1pt ≈ ${_vg1:,.0f} · gamma {pos['Gamma']:.4f} (Δ speeds up near the strike)")
+                            # Escape $ so Streamlit doesn't parse '$..$' as LaTeX math and
+                            # scramble the sentence (fix 2026-07-20). Markdown/caption only —
+                            # NOT the unsafe_allow_html blocks where $ is literal HTML.
+                            st.caption(_pe_txt.replace("$", "\\$"))
                         if _roll_hint:
                             st.markdown(
                                 f"<div style='border-left:5px solid {_lc};padding:4px 12px;"

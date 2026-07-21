@@ -24965,8 +24965,15 @@ def _daily_history(ticker, years=6, conn=None):
         df = pd.read_sql(q, conn, params=(tk,))
         if len(df) < years * 252 * 0.7 and tk not in _HIST_FETCHED:
             _HIST_FETCHED.add(tk)
-            rows = _fetch_yf_history(tk, years)   # yfinance only in the live bot; OpenBB is a parallel test lane (NYSE_OpenBB*.py)
+            # Fallback chain so a yfinance outage still fills the DB: yahoo primary, then
+            # OpenBB (only if installed; heavier import, so last-resort for a rare new-ticker
+            # backfill when yahoo is down). Stooq's daily-history CSV is JS-gated now (dead).
+            # Source stamped in the log so we can see which served.
+            rows = _fetch_yf_history(tk, years); _src = "yahoo"
+            if not rows:
+                rows = _fetch_openbb_history(tk, years); _src = "openbb"
             if rows:
+                log.info("stock_history backfill %s <- %s (%d rows)", tk, _src, len(rows))
                 try:
                     conn.executemany(
                         "INSERT OR REPLACE INTO stock_history "

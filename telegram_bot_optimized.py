@@ -26479,9 +26479,34 @@ def _fmt_action_board(rows, top=8):
     longs = [r for r in rows if r["side"] == "LONG"][:top]
     shorts = [r for r in rows if r["side"] == "SHORT"][:top]
 
+    # LIVE price + % vs the EOD close for every listed name (the board previously showed no
+    # price at all, so an "ready to act" list gave no idea where the name was actually trading).
+    _px, _any_live = {}, False
+    try:
+        _c = get_conn()
+        try:
+            for _r in (longs + shorts):
+                _tk = _r["tk"]
+                if _tk in _px:
+                    continue
+                _h = pd.read_sql("SELECT close FROM stock_history WHERE ticker=? "
+                                 "ORDER BY trade_date DESC LIMIT 1", _c, params=(_tk,))
+                _eod = float(_h["close"].iloc[0]) if not _h.empty else 0.0
+                _lv, _islive, _ = _cur_price(_tk, _eod)
+                _lv = float(_lv or _eod)
+                _any_live = _any_live or bool(_islive)
+                _px[_tk] = (_lv, ((_lv / _eod - 1) * 100 if _eod else 0.0))
+        finally:
+            _c.close()
+    except Exception as e:
+        log.debug(f"action_board prices: {e}")
+
     def _block(rs, emoji, title):
-        data = [(emoji, r["tk"], str(r["win"]), f"{r['conf']:.0f}") for r in rs]
-        tbl = _pipe_table(("ST", "Tkr", "#", "Conf"), data, right_cols={2, 3})
+        data = [(emoji, r["tk"],
+                 f"{_px.get(r['tk'], (0.0, 0.0))[0]:,.0f}",
+                 f"{_px.get(r['tk'], (0.0, 0.0))[1]:+.1f}",
+                 f"{r['conf']:.0f}") for r in rs]
+        tbl = _pipe_table(("ST", "Tkr", "Px", "Chg", "Cf"), data, right_cols={2, 3, 4})
         src = " · ".join(f"{r['tk']}:{'+'.join(_BOARD_LABELS.get(s, s) for s in r['srcs'])}"
                          for r in rs[:5])
         return f"<b>{title}</b>\n{tbl}\n<i>{src}</i>"
@@ -26491,6 +26516,10 @@ def _fmt_action_board(rows, top=8):
         parts.append(_block(longs, "🟢", "🟢 CONSENSUS LONGS"))
     if shorts:
         parts.append(_block(shorts, "🔴", "🔴 CONSENSUS SHORTS"))
+    if parts:
+        _stamp = (f"🟢 LIVE {_et_now().strftime('%H:%M ET')}" if _any_live else "EOD")
+        parts.append(f"<i>Px = {_stamp} · Chg = % vs prior close · Cf = consensus confidence. "
+                     f"Signals themselves are EOD (open interest publishes once daily).</i>")
     return "\n\n".join(parts) if parts else None
 
 

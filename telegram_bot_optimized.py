@@ -2568,8 +2568,11 @@ def _capflow_report(tks):
                      f"vol {r['vol_ratio']:.1f}x · PCR {r['pcr']:.2f} · UOA {r['uoa']:.2f}")
     parts.append("<i>Score = options $-flow (40) + RS-vs-SPY (30) + volume (15) + PCR (15). "
                  "$flow = new call vs put premium committed today (ΔOI×price). DB-first, EOD. "
-                 "⚠️ NOT yet backtested — descriptive read of positioning, not a validated signal "
-                 "(note: put-$-flow often = hedging, not bearish direction). Educational, not advice.</i>")
+                 "⚠️ <b>BACKTESTED 2026-07-21 (143 days, ~9k obs): NO directional edge.</b> Score "
+                 "rank-IC ≈ 0 (t=+0.28 @5d); the $-flow component itself is flat (t=-0.07); the "
+                 "score&gt;+20 rule UNDER-performs baseline by 3.0pp @5d and is not monotonic. "
+                 "Read this as a DESCRIPTION OF POSITIONING, never a direction call "
+                 "(put-$-flow is usually hedging, not a bearish bet). Educational, not advice.</i>")
     return "\n".join(parts)
 
 def _positions_tickers():
@@ -2779,8 +2782,11 @@ def _debate_report(tk):
         ["", "Agent", "Stance", "Score"], rows, right_cols=[3],
         legend="🟢 bull · 🔴 bear · 🟡 neutral",
         notes=("5 role-specialised analysts over our own engine (flow/GEX/momentum/vol/macro), "
-               "weighted into one verdict. Deterministic, no LLM. ⚠️ NOT yet backtested — "
-               "educational, not advice."),
+               "weighted into one verdict. Deterministic, no LLM. ⚠️ <b>Partly backtested "
+               "2026-07-21:</b> the Flow analyst (heaviest, 1.2) has NO proven directional edge "
+               "(rank-IC ≈ 0, t=-0.07 over 143 days) — so treat the verdict as a structured "
+               "summary of positioning, NOT a validated forecast. Position/Technical/Vol legs are "
+               "still unvalidated. Educational, not advice."),
         details=details)
 
 

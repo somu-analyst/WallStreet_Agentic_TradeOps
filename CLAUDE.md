@@ -10,7 +10,8 @@
 - Dates: ALL DB date columns are ISO `YYYY-MM-DD` (censused 07-14/16-2026) → plain string sort/`MAX()`. substr tricks + positional `split('-')` parsing are RETIRED; use `_exp_iso` (bot) / `_exp_to_date` (dashboard).
 - `datetime.utcnow()` → `datetime.now(timezone.utc).replace(tzinfo=None)` (3.12+).
 - Dead/NULL cols: `vol_rank_call/put`, `money_coi_*`. SPY PCR spikes 11+ on expiry (not signal).
-- Secrets gitignored, never commit/print: `token.txt`, `us_bot_*.txt`, `api_keys.env/.enc`, `dash_token.txt`; also `*.db`, `logs/`, `tools/`.
+- Secrets gitignored, never commit/print: `token.txt`, `us_bot_*.txt`, `api_keys.enc`, `dash_token.txt`; also `*.db`, `logs/`, `tools/`.
+- **Keys live in `api_keys.enc`** (encrypted, machine-bound, THE store). Add one by dropping a plaintext `api_keys.env` (`NAME=value` lines) next to the bot — `_load_api_keys()` merges it in, re-encrypts, and DELETES the plaintext, so `api_keys.env` being absent is normal, not a fault. Currently SET: `ANTHROPIC_API_KEY`, `FINNHUB_API_KEY` (verified live), `ALPHAVANTAGE_KEY`. Every Finnhub reader already falls back `FINNHUB_API_KEY or FINNHUB_KEY` — no alias bug. Macro/`/flow`/`/world`/`/capflow`/`/debate`/OI/scanners are all keyless.
 - Git: commit to `main` directly, only when asked. Console prints ASCII-only (Windows cp1252 crashes on ✔/σ/–).
 - "test" = validate signal vs DB history (hit-rate vs baseline), not "it runs". Recipe in `.claude/rules/bot-conventions.md`.
 

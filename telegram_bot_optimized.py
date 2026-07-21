@@ -2335,9 +2335,19 @@ _CROSS_MARKET = {
                        "note": "broad Europe; FEZ = Euro Stoxx 50"},
 }
 
+# US semiconductor ETF complex — the FULL leverage ladder so a semi move can be traded with the
+# right vehicle. Ordered bear → 1x → bull. (The current Asia-led semi selloff = MU/SMH/SOXX;
+# these are the leveraged US expressions.) SOXL/SOXS = Direxion 3x, USD/SSG = ProShares 2x.
+_SEMI_LADDER = [
+    ("SOXS", -3, "3x Bear"), ("SSG", -2, "2x Bear"),
+    ("SOXX",  1, "1x"),      ("SMH",  1, "1x"),
+    ("USD",   2, "2x Bull"), ("SOXL", 3, "3x Bull"),
+]
+
+
 def compute_cross_market():
-    """Live cross-market read: per-region ETF + leveraged + ADR + bridge moves and RS vs SPY.
-    Returns {'regions':[...], 'asof':str} sorted weakest→strongest by 5d-vs-SPY."""
+    """Live cross-market read: per-region ETF + leveraged + ADR + bridge moves and RS vs SPY,
+    plus the US semis leverage ladder. Returns {'regions':[...], 'semi':[...], 'asof':str}."""
     syms = {"SPY"}
     for d in _CROSS_MARKET.values():
         syms.add(d["etf"])
@@ -2345,6 +2355,7 @@ def compute_cross_market():
             if d.get(k): syms.add(d[k])
         if d.get("lev"): syms.add(d["lev"][0])
         syms.update(d.get("adr", [])); syms.update(d.get("bridge", []))
+    syms.update(s for s, _x, _l in _SEMI_LADDER)   # US semis leverage ladder
     try:
         data = _yf_download(tickers=" ".join(sorted(syms)), period="1mo", interval="1d",
                             auto_adjust=False, progress=False)
@@ -2382,7 +2393,13 @@ def compute_cross_market():
                         "etf_d5": e["d5"], "rel5": rel5, "lev": lev, "adrs": adrs,
                         "bridges": bridges, "note": d["note"]})
     regions.sort(key=lambda r: r["rel5"])
-    return {"regions": regions, "asof": str((data.index[-1] if len(data) else ""))[:10]}
+    semi = []
+    for s, x, lbl in _SEMI_LADDER:
+        m = _mv(s)
+        if m:
+            semi.append({"sym": s, "x": x, "lbl": lbl, **m})
+    return {"regions": regions, "semi": semi,
+            "asof": str((data.index[-1] if len(data) else ""))[:10]}
 
 def _world_report():
     """Telegram report: ranked region table + detail lines for the notable movers."""
@@ -2418,6 +2435,21 @@ def _world_report():
             line += " · ⇒ " + ", ".join(f"{b['sym']}{b['d5']:+.0f}" for b in r["bridges"][:2])
         line += f"\n   <i>{r['note']}</i>"
         parts.append(line)
+
+    # US semis leverage ladder — pick the vehicle for the semi move (Asia-led theme)
+    semi = cm.get("semi") or []
+    if semi:
+        _srows = []
+        for s in semi:
+            # emoji = the vehicle's OWN 5d move (a bear ETF green = it rose = semis fell)
+            _em = ("🟢" if s["d5"] > 1 else "🔴" if s["d5"] < -1 else "🟡")
+            _srows.append((_em, s["sym"], s["lbl"], f"{s['d5']:+.1f}"))
+        parts.append("\n<b>🔺 US Semis — leverage ladder</b>")
+        parts.append(_pipe_table(("", "ETF", "Lev", "5d%"), _srows, right_cols={3}))
+        parts.append("<i>Bull bounce → SOXL(3x)/USD(2x) · bear continuation → SOXS(3x)/SSG(2x) "
+                     "· cash/1x → SMH/SOXX. Leverage resets daily = decay, so these are day/swing "
+                     "trades, never holds.</i>")
+
     parts.append("<i>Leveraged ETFs (2x/3x) decay — trades, never holds. ADR move = 5d%. "
                  "Educational, not advice.</i>")
     return "\n".join(parts)

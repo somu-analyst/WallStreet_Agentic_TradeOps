@@ -21208,10 +21208,11 @@ if page == "📡 Macro/Event Hub":
     if _tbmod is not None:
         _hub_conn = get_conn()
         (_tb_brief, _tb_opex, _tb_sq, _tb_gex, _tb_van, _tb_mom, _tb_ev, _tb_jr, _tb_mac,
-         _tb_live, _tb_heat, _tb_skew, _tb_cat, _tb_reg) = st.tabs(
+         _tb_live, _tb_heat, _tb_skew, _tb_cat, _tb_reg, _tb_flow, _tb_world) = st.tabs(
             ["☀️ Briefing", "🗓️ OpEx", "🩳 Squeeze", "📐 GEX", "🌀 Vanna", "🚀 Momentum",
              "🌍 Events", "📓 Journal", "📊 Macro",
-             "🔴 Live", "🔥 Heat", "📉 Skew", "⚡ Catalysts", "🌡️ Regime"])
+             "🔴 Live", "🔥 Heat", "📉 Skew", "⚡ Catalysts", "🌡️ Regime",
+             "💸 Flow", "🌐 World"])
 
         with _tb_live:
             st.caption("Minute-level intraday writeup (bot /live) — VWAP dislocation, volume pace, "
@@ -21281,6 +21282,28 @@ if page == "📡 Macro/Event Hub":
                 _render_tg(_tbmod._fmt_regime())
             except Exception as e:
                 st.error(f"Regime error: {e}")
+
+        with _tb_flow:
+            st.caption("Money-flow / rotation across US sectors, style, continents, countries, "
+                       "currencies, commodities, bonds, crypto (bot /flow) — Chaikin Money Flow + "
+                       "relative strength + RRG quadrant, plus 'what moves together' correlations.")
+            if st.button("🔄 Refresh", key="hub_flow_btn"):
+                st.rerun()
+            try:
+                _render_tg(_tbmod._money_flow_report())
+            except Exception as e:
+                st.error(f"Flow error: {e}")
+
+        with _tb_world:
+            st.caption("Cross-market linkages (bot /world) — a foreign market moves, here's the "
+                       "US-listed ETF / leveraged / ADR / supply-chain bridge to trade it. "
+                       "Ranked weakest→strongest vs S&P.")
+            if st.button("🔄 Refresh", key="hub_world_btn"):
+                st.rerun()
+            try:
+                _render_tg(_tbmod._world_report())
+            except Exception as e:
+                st.error(f"World error: {e}")
 
         with _tb_brief:
             st.caption("Daily macro brief — optimistic / pessimistic / balanced, with live news.")

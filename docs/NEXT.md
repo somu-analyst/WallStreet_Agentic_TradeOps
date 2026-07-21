@@ -1,4 +1,4 @@
-﻿[RESUME AFTER] 2026-07-21 04:00  (limit-guard: block at 99624235 tokens >= 80000000)
+﻿[RESUME AFTER] 2026-07-21 04:00  (limit-guard: block at 100682232 tokens >= 80000000)
 # NEXT — switch-over note (2026-07-21)
 
 **Single most useful next step: verify the two market-hours-only fixes on a LIVE session** — they
@@ -13,10 +13,14 @@ were only testable off-hours this session.
 Everything is committed (through `d798758`); bot + dashboard both healthy.
 
 ## USER-APPROVED build order (2026-07-21, do these next — multi-session, deferred at usage reset)
-1. **Portfolio-track: MCP + RAG + Docker/k8s** (PLAN.md #31, job-hunt showcase). Phase 1 = MCP
-   server exposing engine tools (get_positions/scan_premium/oi_breakdown/backtest_signal) over
-   stdio — the ~1-session headline. Then RAG over event_journal+news+LOG, then Dockerfile+compose,
-   then README+diagram. Secrets stay OUT of images (env mounts).
+1. **Portfolio-track: MCP + RAG + Docker/k8s** (PLAN.md #31, job-hunt showcase).
+   - ✅ **Phase 1 DONE (07-21, commit 66808f1): `mcp_server.py`** — FastMCP stdio server, 5 read-only
+     tools (get_positions/scan_premium/oi_breakdown/capital_flow/backtest_signal) wrapping the engine.
+     Verified vs live DB (GOOG spread, AMD capflow -11, POP 70.6%). Register via
+     `mcp_client_config.example.json`. Imports bot as library; stdout muted during import.
+   - ⬜ **Phase 2 = RAG** over event_journal + news + LOG.md (retrieval tool `search_notes(query)`
+     added to the same server; embed with a local/keyless model or sqlite FTS5 to stay free).
+   - ⬜ **Phase 3 = Dockerfile + compose** (secrets via env mounts, NOT baked); then README + arch diagram.
 2. **OpenBB migration** — but re-scoped this session: yahoo STAYS primary for bars/fundamentals/
    live (it's faster + fundamentals are free); "migration" = finish routing OPTIONS fully onto BB
    + retire the yahoo EOD fallback lane where BB coverage is proven. Do NOT move bars to BB.

@@ -11210,7 +11210,11 @@ def _positions_card_parts(trades, now_s, today):
 
         dte_s  = f"D{dte}"  if dte  is not None else "D?"
         prob_s = f"{prob:.0f}%" if prob is not None else "?"
-        rows.append((em, tk, otype[:4], strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s, action))
+        # qty + expiry carried through so the card can show LONG/SHORT and the expiry date
+        # (user 2026-07-21: "which is long and which is short not showing also expiry" —
+        # on a spread the side IS the risk, so a leg list without it is unreadable).
+        rows.append((em, tk, otype[:4], strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s,
+                     action, qty, expiry_s[:10]))
 
     try:
         _pc_conn.close()
@@ -11243,7 +11247,10 @@ def _positions_card_parts(trades, now_s, today):
     _tbl_rows  = []
     html_cards = []
 
-    for (em, tk, otype, strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s, action) in rows:
+    for (em, tk, otype, strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s, action,
+         qty, expiry_s) in rows:
+        _is_long = int(qty or 0) >= 0
+        _side_w  = "LONG" if _is_long else "SHORT"
         a_em   = _action_em.get(action, "✅")
         advice = _action_advice.get(action, "Monitor position.")
         dte_num  = int(dte_s[1:]) if dte_s.startswith("D") and dte_s[1:].isdigit() else None
@@ -11251,7 +11258,9 @@ def _positions_card_parts(trades, now_s, today):
         urg_flag = "⚠" if dte_num is not None and dte_num <= 3 else ""
         oi_disp  = oi_s if oi_s and oi_s != "?" else "-"
 
-        _leg = f"{tk[:4]}{int(strike)}{otype[:1]}"
+        # +/- prefix = long/short. One char, and it is the single most important fact on a
+        # spread (which leg you are short determines the whole risk profile).
+        _leg = f"{'+' if _is_long else '-'}{tk[:4]}{int(strike)}{otype[:1]}"
         _pnl_s = f"{pnl:+,.0f}" if abs(pnl) < 1000 else f"{'+' if pnl >= 0 else '-'}{abs(pnl)/1000:.1f}K"
         # 3-state colored circle (user wants real green/yellow/red 2026-07-17;
         # this is the only way to get genuine color in Telegram — solid emoji
@@ -11266,7 +11275,8 @@ def _positions_card_parts(trades, now_s, today):
         # Card carries the FULL per-leg detail: bought price, current mark, P&L $ and %,
         # win prob, OI (user 2026-07-19: table 'only shows P&L, not bought/last price').
         html_cards.append(
-            f"{a_em} <b>{tk} {otype} ${int(strike)}</b> · {dte_disp}{urg_flag}\n"
+            f"{a_em} <b>{_side_w} {abs(int(qty or 0))}x {tk} {otype} ${int(strike)}</b> · "
+            f"exp {expiry_s or '?'} ({dte_disp}){urg_flag}\n"
             f"   Bought <b>${entry:.2f}</b> → Now <b>${cur_px:.2f}</b> · "
             f"P&L <b>{pnl:+,.0f}</b> ({pnl_pct:+.0f}%) · win {prob_s} · OI {oi_disp}\n"
             f"   <b>{action}</b> — {advice}"

@@ -69,22 +69,22 @@ result: put-flow predicts SIZE, not direction. **Both /capflow and /debate relab
   is SPARSE (median 12 dates/ticker), so 20d/forward shifts silently spanned multi-month gaps.
   Use `stock_history` (753k rows, median 1507 dates/ticker) and compute all shifts on the full
   dense panel BEFORE joining flow data. Re-runnable: `tools/bt_capflow.py` (gitignored).
-- 🐞 **Live bug found, NOT yet fixed:** `compute_capflow`'s `vol_ratio` reads `stock_daily` and
+- ✅ **FIXED (54acbc6):** `compute_capflow`'s `vol_ratio` reads `stock_daily` and
   requires ≥20 rows, so it silently stays 1.0 for most of the 734-name universe (majors are fine).
   Fix = read volume from `stock_history` instead. Ironically vol-ratio was the only leg with any
   signal, so this is worth fixing before any re-test.
 
-## OPEN BUGS found by the 07-21 live validation (tests/ harness) — triage next
-1. **Option PRICES in tables are still EOD-captured.** The live-spot fix (42be21b/cee5ddc) fixed
+## 07-21 validation bugs — ALL RESOLVED (kept for the record)
+1. ✅ **RESOLVED (verified, no code change needed).** Option prices in tables — The live-spot fix (42be21b/cee5ddc) fixed
    the SPOT everywhere, but `lastPrice_*_now` / BB bid-ask are from the EOD capture. During RTH the
    engine must re-price from **live spot + BB captured IV** (proven sound: BB iv 23.2% vs a 4.7%
    back-out at 1 DTE) instead of printing captured premiums. This is what made "$680 call @ $16.38"
    look below intrinsic. **Invariant: never mix a live spot with captured option prices.**
-2. **`525/530/555` Γ-wall line** — NOT from `_compute_gex` (that returns sane walls). Separate,
+2. ✅ **FIXED (5b716f8).** `525/530/555` Γ-walls — cause was `sorted(strikes)[:3]` returning the three LOWEST strikes; now ranked by OI x nearness-to-spot. NOT from `_compute_gex` (that returns sane walls). Separate,
    unlocated code path. Find it.
-3. **AMD + SMH GEX walls >15% from spot** (sweep flagged) — legit far OTM put wall, or same
+3. ✅ **TRIAGED — not a bug.** AMD/SMH walls are real OI concentrations (SMH put wall 475 = 45,378 OI); the ±15% check was too tight for names that rallied 7-13%. Real gap found instead: AMD returns zero_gamma=None. Original note: (sweep flagged) — legit far OTM put wall, or same
    anomaly as #2? Unverified.
-4. **`compute_capflow` vol_ratio is dead for most tickers** — reads `stock_daily` (median 12
+4. ✅ **FIXED (54acbc6)** — now reads stock_history; verified real values 0.56-0.79 incl. long-tail (ZTS/ZBRA). Was: **`compute_capflow` vol_ratio is dead for most tickers** — reads `stock_daily` (median 12
    dates/ticker) and needs ≥20 rows → silently 1.0. Read `stock_history` instead. Matters because
    vol-ratio was the ONLY leg with any signal in the backtest.
 5. **Per-expiry PCR label is ambiguous** (math is CORRECT — it is PCR(open interest), verified to

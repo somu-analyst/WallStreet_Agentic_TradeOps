@@ -10827,7 +10827,7 @@ def _positions_card_parts(trades, now_s, today):
         "ROLL/EXIT":   "Expiry is very close. Either close it now or move to a later date.",
         "ROLL SOON":   "Expiry approaching in ~1 week. Plan to roll or close before it decays further.",
         "REVIEW":      "OI flow is not supporting this trade. Review and decide whether to hold or exit.",
-        "HOLD":        "Trade is on track. Keep holding and monitor.",
+        "HOLD":        "Within normal range — no action trigger hit; keep holding and monitor.",
     }
 
     # ── /earnvol standard: ONE narrow table (ST emoji col 0, ≤28 chars)
@@ -17758,8 +17758,8 @@ def _ticker_writeup(tk, conn, spot=0.0, call_chg=0.0, put_chg=0.0, pcr=1.0,
 
         # ── walls vs price ──
         if spot > 0 and cw > 0 and pw > 0:
-            up = (cw - spot) / spot * 100
-            dn = (spot - pw) / spot * 100
+            up = (cw - spot) / spot * 100      # +% : call wall above spot
+            dn = (pw - spot) / spot * 100      # signed vs spot: put wall below spot -> negative
             lines.append(f"Price <b>${spot:,.0f}</b> sits between the put-wall floor <b>${pw:,.0f}</b> "
                          f"({dn:+.1f}%) and the call-wall ceiling <b>${cw:,.0f}</b> ({up:+.1f}%).")
             if mp > 0:

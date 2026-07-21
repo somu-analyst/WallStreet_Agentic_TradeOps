@@ -13365,17 +13365,26 @@ elif page == "⚡ Trade Risk Calculator":
 
             # Bottom-line recommendation
             st.markdown("---")
-            prob = risk["prob_itm"]
+            # NOTE: max_loss is None when risk is UNBOUNDED (naked short call) — never abs() it
+            # blindly, and never let an unbounded trade render as a "favorable setup".
+            prob = risk.get("prob_profit", risk["prob_itm"])
             escape = risk["escape"]
-            max_loss = abs(risk["max_loss"])
-            if prob > 60 and escape != "DIFFICULT":
-                st.success(f"✅ **FAVORABLE SETUP** — {prob:.0f}% probability ITM, {escape.lower()} exit. Max risk: ${max_loss:,.0f}")
+            _ml_raw = risk.get("max_loss")
+            _unbounded = _ml_raw is None
+            max_loss = abs(_ml_raw) if not _unbounded else None
+            _risk_s = "UNLIMITED" if _unbounded else f"${max_loss:,.0f}"
+            if _unbounded:
+                st.error(f"⛔ **UNDEFINED RISK** — naked short call: loss is theoretically "
+                         f"unlimited. P(profit) {prob:.0f}%, {escape.lower()} exit. "
+                         f"Cover it with stock or a long call above the strike before sizing.")
+            elif prob > 60 and escape != "DIFFICULT":
+                st.success(f"✅ **FAVORABLE SETUP** — {prob:.0f}% probability of profit, {escape.lower()} exit. Max risk: {_risk_s}")
             elif prob > 40 and escape != "DIFFICULT":
-                st.info(f"📊 **MODERATE SETUP** — {prob:.0f}% probability ITM. Consider position sizing. Max risk: ${max_loss:,.0f}")
+                st.info(f"📊 **MODERATE SETUP** — {prob:.0f}% probability of profit. Consider position sizing. Max risk: {_risk_s}")
             elif escape == "DIFFICULT":
-                st.error(f"⛔ **CAUTION** — Low liquidity. P(ITM): {prob:.0f}%. Hard to exit if wrong. Max risk: ${max_loss:,.0f}")
+                st.error(f"⛔ **CAUTION** — Low liquidity. P(profit): {prob:.0f}%. Hard to exit if wrong. Max risk: {_risk_s}")
             else:
-                st.warning(f"⚠️ **LOW PROBABILITY** — Only {prob:.0f}% chance ITM. Speculative. Max risk: ${max_loss:,.0f}")
+                st.warning(f"⚠️ **LOW PROBABILITY** — Only {prob:.0f}% chance of profit. Speculative. Max risk: {_risk_s}")
 
     # ── What-If Option Profit/Loss Simulator ──
     st.markdown("---")

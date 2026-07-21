@@ -18376,7 +18376,11 @@ async def signal_ticker_detail(query, ticker):
                     _erows.append((str(er["expiry_date"])[5:], _fk(cc2), _fk(pp2),
                                    f"{min(ep2, 9.9):.1f}"))
                 exp_parts.append(f"\n<b>{_lbl}</b>\n"
-                                 + _pipe_table(("Expiry", "CdOI", "PdOI", "PCR"), _erows,
+                                 # "PCR(OI)" not "PCR": this column is put/call OPEN INTEREST,
+                                 # not the ratio of the CdOI/PdOI (change) columns beside it —
+                                 # verified 07-21 (1.28->1.3, 2.05->2.1, 4.12->4.1). The bare
+                                 # label made the table look self-contradictory.
+                                 + _pipe_table(("Expiry", "CdOI", "PdOI", "PCR(OI)"), _erows,
                                                right_cols={1, 2, 3}))
             parts.append("\n".join(exp_parts))
     except Exception as _ex_e:

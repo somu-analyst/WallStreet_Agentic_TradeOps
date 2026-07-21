@@ -1,4 +1,4 @@
-﻿[RESUME AFTER] 2026-07-21 04:00  (limit-guard: block at 96340206 tokens >= 80000000)
+﻿[RESUME AFTER] 2026-07-21 04:00  (limit-guard: block at 99624235 tokens >= 80000000)
 # NEXT — switch-over note (2026-07-21)
 
 **Single most useful next step: verify the two market-hours-only fixes on a LIVE session** — they
@@ -32,8 +32,18 @@ labelled NOT-yet-backtested — backtest the composite vs fwd returns before tru
 
 ## Smaller contained items (fill-in)
 - Accuracy audit R5 (macro/narrative wording, low prio) · VXN sweep (~35 VIX sites → `_vol_for`) ·
-  dashboard left-nav → dropdowns (already 2-level `_NAV_GROUPS`@dashboard.py:5288) · `/flow`/`/world`/
-  `/capflow` menu buttons · NSE India lane (`/india`, endpoints verified) · whale/13F (112 rows).
+  dashboard left-nav → dropdowns (already 2-level `_NAV_GROUPS`@dashboard.py:5288) ·
+  NSE India lane (`/india`, endpoints verified) · whale/13F (112 rows).
+- DONE 07-21b: `/flow`/`/world`/`/capflow` now have MAIN_MENU_KB buttons (commit 52c015d) —
+  MACRO & EVENTS row, mapped to existing capflow_view/flow_view/world_view callbacks.
+
+## Session note 2026-07-21b (near-limit, ~99.6M tokens)
+- Bot was DOWN on resume (overnight reset killed pid 122772) → restarted, now **pid 126996**.
+- `mcp` package NOT installed — Portfolio-track Phase 1 needs `pip install mcp` first.
+- Deliberately did NOT start the multi-week builds (Portfolio-track MCP / OpenBB migration /
+  AI-agent) — we're over the 80M guard threshold; starting one risks a half-finished mid-build
+  cutoff (same call as last night). Did one contained win (menu buttons) instead. Build order
+  below is unchanged and still the plan for a fresh-budget session.
 
 ## Standing rules learned this session
 - **yfinance per-strike IV is GARBAGE** (~1e-5 for OTM). Any new option-probability code must back

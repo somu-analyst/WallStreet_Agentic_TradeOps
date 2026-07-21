@@ -431,11 +431,44 @@ def _cached_price(ticker: str) -> float:
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _cached_info(ticker: str) -> dict:
-    """yfinance .info dict — cached 15 min (it's a slow call; reruns shouldn't refetch)."""
+    """yfinance .info (15-min cache) with a DB write-through + fallback (2026-07-21): every
+    successful pull is snapshotted to fundamentals_cache, so a yahoo .info outage doesn't blank
+    the dashboard — it serves the last good snapshot (marked _snapshot_stale) instead. The cache
+    self-populates as the dashboard is used; no separate pipeline job needed."""
+    import json as _json
+    from datetime import datetime as _dtm
+    info = {}
     try:
-        return dict(yf.Ticker(ticker).info or {})
+        info = dict(yf.Ticker(ticker).info or {})
     except Exception:
-        return {}
+        info = {}
+    if info and len(info) > 5:                    # good live pull -> write through
+        try:
+            with get_conn() as _c:
+                # separate table (NOT the curated fundamentals_cache, which stores different keys)
+                _c.execute("CREATE TABLE IF NOT EXISTS yf_info_cache "
+                           "(ticker TEXT PRIMARY KEY, asof TEXT, info_json TEXT)")
+                _c.execute("INSERT OR REPLACE INTO yf_info_cache VALUES (?,?,?)",
+                           (ticker.upper(), _dtm.now().strftime("%Y-%m-%d %H:%M"),
+                            _json.dumps(info, default=str)))
+        except Exception:
+            pass
+        return info
+    # yahoo .info failed/empty -> serve the last good snapshot so the page still renders
+    try:
+        with get_conn() as _c:
+            _c.execute("CREATE TABLE IF NOT EXISTS yf_info_cache "
+                       "(ticker TEXT PRIMARY KEY, asof TEXT, info_json TEXT)")
+            _row = _c.execute("SELECT asof, info_json FROM yf_info_cache WHERE ticker=?",
+                              (ticker.upper(),)).fetchone()
+        if _row and _row[1]:
+            _d = _json.loads(_row[1])
+            _d["_snapshot_stale"] = True
+            _d["_snapshot_asof"] = _row[0]
+            return _d
+    except Exception:
+        pass
+    return {}
 
 
 @st.cache_data(ttl=21600, show_spinner=False)

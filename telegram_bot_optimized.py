@@ -18084,8 +18084,15 @@ def _ticker_writeup(tk, conn, spot=0.0, call_chg=0.0, put_chg=0.0, pcr=1.0,
             try:
                 _sd = pd.read_sql("SELECT close FROM stock_daily WHERE ticker=? "
                                   "ORDER BY trade_date DESC LIMIT 1", conn, params=(tk,))
-                if not _sd.empty:
-                    spot = float(_sd["close"].iloc[0])
+                _dbc = float(_sd["close"].iloc[0]) if not _sd.empty else 0.0
+                # LIVE-first: every caller omits `spot`, so this fallback decides the price the
+                # whole write-up is built on — narrative, wall distances, BS prices and trade
+                # ideas. Taking the EOD close here meant that during RTH the header showed a
+                # live quote while the body priced off YESTERDAY's close (e.g. QQQ header
+                # $704.16 vs body $696, which made a $680 call print BELOW intrinsic).
+                # _cur_price() serves intraday when the market is open and falls back to this
+                # same close off-hours, so this is strictly better in both states.
+                spot = float((_cur_price(tk, _dbc) or (0,))[0] or _dbc)
             except Exception:
                 pass
 

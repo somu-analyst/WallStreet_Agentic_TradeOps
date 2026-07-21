@@ -7245,7 +7245,26 @@ elif page == "🔥 OI Analytics & Prediction":
         # ── Should I hold ─────────────────────────────────────────
         elif any(w in q_low for w in ["should i hold", "hold my", "keep my", "should i keep"]):
             if _pos_df.empty:
-                return f"You don't have any open {tk} positions recorded. Add them in the Portfolio page first."
+                # _pos_df is scoped to the SELECTED ticker, so "empty" only means "none in {tk}".
+                # Saying "you have no positions" here is flat wrong when the user holds legs in
+                # another name (reported 2026-07-21: real GOOG spread, page defaulted to 'A').
+                _all = q("SELECT ticker, option_type, strike, expiry, quantity "
+                         "FROM trades WHERE status='OPEN'")
+                if _all is None or _all.empty:
+                    return ("You have no open positions recorded in any ticker. "
+                            "Add them in the Portfolio page first.")
+                _by = {}
+                for _, _r in _all.iterrows():
+                    _by.setdefault(str(_r["ticker"]).upper(), []).append(_r)
+                _lines = [f"No open **{tk}** positions — but you *do* hold **{len(_all)}** open "
+                          f"leg(s) in **{', '.join(sorted(_by))}**.", "",
+                          "Switch the ticker selector above to analyse them:"]
+                for _t, _rows in sorted(_by.items()):
+                    for _r in _rows:
+                        _side = "BUY" if int(_r["quantity"] or 0) >= 0 else "SELL"
+                        _lines.append(f"- **{_t}** {_side} {str(_r['option_type']).upper()} "
+                                      f"${float(_r['strike'] or 0):.0f} exp {_r['expiry']}")
+                return "\n".join(_lines)
             _ans = []
             for _, _tr in _pos_df.iterrows():
                 _s = "BUY" if int(_tr.get("quantity",1)) >= 0 else "SELL"

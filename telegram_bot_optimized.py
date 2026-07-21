@@ -9118,7 +9118,8 @@ async def oi_detail(query, ticker):
         _sd3 = pd.read_sql("""SELECT close FROM stock_daily WHERE ticker=?
             ORDER BY trade_date DESC
             LIMIT 1""", conn3, params=(str(ticker).upper(),))
-        _spot3 = float(_sd3["close"].iloc[0]) if not _sd3.empty else 0.0
+        _dbc3 = float(_sd3["close"].iloc[0]) if not _sd3.empty else 0.0
+        _spot3 = float((_cur_price(str(ticker).upper(), _dbc3) or (0,))[0] or _dbc3)  # LIVE-first
         _oc_date3 = pd.read_sql("""SELECT DISTINCT trade_date_now FROM options_change WHERE ticker=?
             ORDER BY trade_date_now DESC
             LIMIT 1""", conn3, params=(str(ticker).upper(),))
@@ -10427,7 +10428,8 @@ async def signal_scanner(query):
         _sd2 = pd.read_sql("""SELECT close FROM stock_daily WHERE ticker=?
             ORDER BY trade_date DESC
             LIMIT 1""", conn2, params=(_tk,))
-        _spot2 = float(_sd2["close"].iloc[0]) if not _sd2.empty else 0.0
+        _dbc2 = float(_sd2["close"].iloc[0]) if not _sd2.empty else 0.0
+        _spot2 = float((_cur_price(_tk, _dbc2) or (0,))[0] or _dbc2)                  # LIVE-first
         if _spot2 <= 0:
             continue     # indexes w/o stock_daily close (VIX) — ±20% window is meaningless
         _breakdown = _oi_strike_breakdown(_tk, conn2, _spot2, latest_date, compact=True)

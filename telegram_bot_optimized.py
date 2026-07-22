@@ -11065,8 +11065,16 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
     now_utc  = datetime.now(timezone.utc).replace(tzinfo=None)
     if now_utc.weekday() >= 5:
         return
-    hour_min = now_utc.hour * 60 + now_utc.minute
-    if not (14 * 60 + 30 <= hour_min <= 21 * 60):   # 9:30 AM – 4:00 PM ET
+    # Gate on ET, not fixed UTC offsets. The old window was 14:30-21:00 UTC, which is
+    # 9:30-16:00 ET only while EDT is in force (it silently slides an hour under EST), and it
+    # stopped dead at the close — so no alert ever fired after hours even though the marks
+    # move most on earnings nights. Now runs through the after-hours session (to 20:00 ET),
+    # matching the 16:00-20:00 window _get_spot_with_ah uses for post-market prices.
+    _now_et = _et_now()
+    if _now_et.weekday() >= 5:
+        return
+    hour_min = _now_et.hour * 60 + _now_et.minute
+    if not (9 * 60 + 30 <= hour_min <= 20 * 60):    # 9:30 AM – 8:00 PM ET (RTH + after-hours)
         return
 
     _close_expired_positions()   # auto-close anything past expiry before showing
@@ -28025,6 +28033,9 @@ def _lane_heartbeat_age():
     return (datetime.now(timezone.utc).replace(tzinfo=None) - ts).total_seconds()
 
 
+_LAST_LANE_SPAWN = 0.0         # epoch of the last NYSE_intraday.py spawn (duplicate guard)
+
+
 async def intraday_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
     """5-min job: keep NYSE_intraday.py alive during market hours (same auto-launch
     pattern as the dashboard). Heartbeat-gated → a manual start is never duplicated;
@@ -28038,6 +28049,15 @@ async def intraday_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
     age = _lane_heartbeat_age()
     if age is not None and age < 180:
         return                                       # lane alive (manual or spawned)
+    # Spawn cooldown. The heartbeat gate alone is NOT enough: a just-spawned lane has not
+    # written its first heartbeat yet, and a batched yf.download across the universe easily
+    # takes longer than the 180s staleness window — so the next 5-min tick saw "stale" and
+    # spawned a SECOND copy. Observed 2026-07-22: two NYSE_intraday.py at 09:28:20 and
+    # 09:33:20, both sweeping 1m bars, doubling rate-limit load on a lane /live and /heat
+    # depend on. Cooldown must exceed worst-case time-to-first-heartbeat.
+    global _LAST_LANE_SPAWN
+    if time.time() - _LAST_LANE_SPAWN < 900:
+        return
     here = os.path.dirname(os.path.abspath(__file__))
     script = os.path.join(here, "NYSE_intraday.py")
     if not os.path.exists(script):
@@ -28049,6 +28069,7 @@ async def intraday_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
         subprocess.Popen([sys.executable, script], cwd=here,
                          stdout=out, stderr=subprocess.STDOUT,
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        _LAST_LANE_SPAWN = time.time()
         log.info("intraday lane heartbeat stale/missing - spawned NYSE_intraday.py")
     except Exception as e:
         log.warning(f"intraday lane spawn failed: {e}")

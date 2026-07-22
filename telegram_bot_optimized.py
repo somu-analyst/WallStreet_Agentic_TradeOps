@@ -11056,6 +11056,133 @@ def _positions_card_kb(first_tk):
     ]])
 
 
+def _rec_payoff(strategy, k1, k2, net, S):
+    """Settlement P&L per contract (x100) for a hiprob_recs row at underlying price S.
+
+    Stored convention (verified 2026-07-21): `net` is ALWAYS POSITIVE — a credit for
+    sells, a debit for buys. k1 = primary/short strike, k2 = protection (0 for CSP).
+    Cross-checked against the stored `capital`: UNH 460/470 call credit ->
+    (470-460-1.90)*100 = 810 = capital.
+    """
+    s = (strategy or "").lower()
+    if "call credit" in s:
+        return (net - max(0.0, min(S, k2) - k1)) * 100
+    if "put credit" in s:
+        return (net - max(0.0, k1 - max(S, k2))) * 100
+    if "cash-secured put" in s or "csp" in s:
+        return (net - max(0.0, k1 - S)) * 100
+    if "debit" in s:                      # long k1 / short k2
+        return (max(0.0, min(S, k2) - k1) - net) * 100
+    return 0.0
+
+
+def _settle_recs(conn):
+    """Settle any OPEN recommendation whose expiry has passed, against the real close.
+
+    Was never implemented: hiprob_recs shipped with status/settle_px/pnl columns but
+    nothing ever wrote them, so every rec sat 'OPEN' forever and the track record was
+    unmeasurable (user 2026-07-21: "I asked you created an indicator to show performance
+    of recommendations, is it not done").
+    """
+    today = _et_now().date().isoformat()
+    n = 0
+    try:
+        rows = conn.execute(
+            "SELECT rec_id, ticker, strategy, k1, k2, net, expiry FROM hiprob_recs "
+            "WHERE (status IS NULL OR status='OPEN') AND expiry <= ?", (today,)).fetchall()
+        for rid, tk, strat, k1, k2, net, exp in rows:
+            px = conn.execute(
+                "SELECT close FROM stock_history WHERE ticker=? AND trade_date<=? "
+                "ORDER BY trade_date DESC LIMIT 1", (tk, exp)).fetchone()
+            if not px or not px[0]:
+                continue                       # no settle price yet — leave OPEN, retry later
+            S = float(px[0])
+            pnl = _rec_payoff(strat, float(k1 or 0), float(k2 or 0), float(net or 0), S)
+            conn.execute("UPDATE hiprob_recs SET status='SETTLED', settle_px=?, pnl=? "
+                         "WHERE rec_id=?", (S, pnl, rid))
+            n += 1
+        conn.commit()
+    except Exception as e:
+        log.warning(f"_settle_recs failed: {e}")
+    return n
+
+
+def _recs_performance(conn, limit_open=200):
+    """Track record: SETTLED results + mark-to-market on still-open recs.
+
+    MTM matters because nothing has expired yet — settlement alone would report nothing.
+    Open positions are marked with real OpenBB quotes (cost-to-close), not a model.
+    """
+    _settle_recs(conn)
+    out = {"settled": [], "open": [], "asof": _et_now().strftime("%Y-%m-%d %H:%M ET")}
+    for rid, tk, strat, k1, k2, net, exp, st, spx, pnl in conn.execute(
+            "SELECT rec_id,ticker,strategy,k1,k2,net,expiry,status,settle_px,pnl "
+            "FROM hiprob_recs ORDER BY rec_id DESC LIMIT ?", (limit_open,)):
+        k1 = float(k1 or 0); k2 = float(k2 or 0); net = float(net or 0)
+        if st == "SETTLED" and pnl is not None:
+            out["settled"].append({"tk": tk, "strat": strat, "pnl": float(pnl)})
+            continue
+        try:                                   # mark-to-market from real BB quotes
+            is_put = "put" in (strat or "").lower()
+            typ = "put" if is_put else "call"
+            q1 = _bb_quote(conn, tk, k1, str(exp)[:10], typ) if k1 else None
+            q2 = _bb_quote(conn, tk, k2, str(exp)[:10], typ) if k2 else None
+            m1 = float((q1 or {}).get("mid") or 0)
+            m2 = float((q2 or {}).get("mid") or 0)
+            if not m1:
+                continue
+            cost_to_close = m1 - m2            # spread; m2=0 for a naked CSP
+            mtm = ((net - cost_to_close) if "debit" not in (strat or "").lower()
+                   else (cost_to_close - net)) * 100
+            out["open"].append({"tk": tk, "strat": strat, "mtm": mtm, "exp": str(exp)[:10]})
+        except Exception:
+            log.debug("rec MTM failed", exc_info=True)
+    return out
+
+
+def _recs_perf_report(conn):
+    d = _recs_performance(conn)
+    se, op = d["settled"], d["open"]
+    if not se and not op:
+        return "No recommendations recorded yet."
+    parts = [hdr("📊 RECOMMENDATION TRACK RECORD")]
+    rows = []
+    if se:
+        w = sum(1 for r in se if r["pnl"] > 0)
+        rows.append(("✅", "Settled", str(len(se)), f"{w/len(se)*100:.0f}%"))
+        rows.append(("💵", "Net P&L", f"${sum(r['pnl'] for r in se):,.0f}", ""))
+    if op:
+        w = sum(1 for r in op if r["mtm"] > 0)
+        rows.append(("⏳", "Open (MTM)", str(len(op)), f"{w/len(op)*100:.0f}%"))
+        rows.append(("📈", "Unrealised", f"${sum(r['mtm'] for r in op):,.0f}", ""))
+    parts.append(_pipe_table(("", "Metric", "Value", "Win%"), rows, right_cols={2, 3}))
+    # per-strategy breakdown on the marked book
+    if op:
+        agg = {}
+        for r in op:
+            a = agg.setdefault(r["strat"][:22], [0, 0.0])
+            a[0] += 1; a[1] += r["mtm"]
+        srows = [("🟢" if v[1] > 0 else "🔴", k[:18], str(v[0]), f"{v[1]:+,.0f}")
+                 for k, v in sorted(agg.items(), key=lambda x: -x[1][1])]
+        parts.append("\n<b>By strategy (open, marked to market)</b>")
+        parts.append(_pipe_table(("", "Strategy", "#", "P&L$"), srows, right_cols={2, 3}))
+    parts.append(f"<i>As of {d['asof']}. Open legs marked with real OpenBB quotes "
+                 f"(cost-to-close), settled rows against the actual close at expiry. "
+                 f"Educational, not advice.</i>")
+    return "\n".join(parts)
+
+
+async def recperf_cmd(update, ctx):
+    conn = get_conn()
+    try:
+        msg = _recs_perf_report(conn)
+    except Exception as e:
+        log.warning(f"recperf: {e}"); msg = "⚠️ Track-record error — try again."
+    finally:
+        conn.close()
+    await _safe_reply(update.message, msg)
+
+
 def _spread_summary(rows):
     """Group paired legs into spreads and report COMBINED economics + exit timing.
 
@@ -30729,6 +30856,7 @@ def main():
     app.add_handler(CommandHandler("world", world_cmd))        # cross-market linkage engine
     app.add_handler(CommandHandler("capflow", capflow_cmd))    # per-ticker capital-flow score
     app.add_handler(CommandHandler("debate", debate_cmd))      # multi-agent debate verdict
+    app.add_handler(CommandHandler("recperf", recperf_cmd))    # recommendation track record
     app.add_handler(CommandHandler("plan", plan_command))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("terminal", terminal_command))

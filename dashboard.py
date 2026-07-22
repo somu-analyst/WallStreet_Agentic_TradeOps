@@ -14636,7 +14636,22 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                                         "EV": st.column_config.NumberColumn(format="$%d")})
 
             st.markdown("**🧾 Per-leg detail**")
-            _fdf = pd.DataFrame(_flat).sort_values(["Ticker", "DTE"])
+            _fdf = pd.DataFrame(_flat)
+            # Column order (user 2026-07-22): move the Ex-Div..Shorts block to sit AFTER
+            # Est Open, so the price columns (Entry/Now/Prev Cls/Est Open) stay adjacent and
+            # the context columns follow. Done once on the frame instead of editing both
+            # _flat.append literals — those two branches have already drifted apart once.
+            try:
+                _c = list(_fdf.columns)
+                _a, _b, _anchor = _c.index("Ex-Div"), _c.index("Shorts"), _c.index("Est Open")
+                if _a <= _b and _anchor > _b:
+                    _blk = _c[_a:_b + 1]
+                    _rest = _c[:_a] + _c[_b + 1:]
+                    _at = _rest.index("Est Open") + 1
+                    _fdf = _fdf[_rest[:_at] + _blk + _rest[_at:]]
+            except (ValueError, KeyError):
+                pass                               # column missing — leave order untouched
+            _fdf = _fdf.sort_values(["Ticker", "DTE"])
             # TOTAL row (user 2026-07-22): every aggregatable number populated, not blanks.
             # Entry/Now/Prev Cls are SIGNED net dollar values (a short leg's entry is a
             # CREDIT, qty<0), so Now - Entry == P&L $ exactly. Unsigned sums would look

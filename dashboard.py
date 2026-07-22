@@ -8205,10 +8205,27 @@ elif page == "🔄 Rotation Tracker":
 elif page == "🫧 Anti-Bubble Radar":
     _page_header("🫧 Anti-Bubble Radar", _PAGE_HELP["🫧 Anti-Bubble Radar"])
     import telegram_bot_optimized as _ab_tbo
-    _ab_in = st.text_input("Tickers (space/comma separated · blank = default ~80-name universe)",
-                           "", key="ab_tks")
+    _abu1, _abu2 = st.columns([2, 3])
+    _ab_scope = _abu1.radio("Universe", ["Curated (~78)", "ALL tickers + ETFs (~734)", "Custom"],
+                            key="ab_scope", horizontal=False,
+                            help="ALL screens the full captured options universe including ETFs. "
+                                 "First run pulls fundamentals per name — slower, then cached daily.")
+    _ab_in = _abu2.text_input("Custom tickers (space/comma separated)", "", key="ab_tks")
+    if _ab_scope.startswith("ALL"):
+        st.caption("⚠️ ~734 names — the first run of the day fetches fundamentals per ticker "
+                   "and can take several minutes. Subsequent runs use the daily cache.")
     if st.button("▶️ Run screen", type="primary", key="ab_run"):
-        _tks = [x.strip().upper() for x in re.split(r"[ ,]+", _ab_in) if x.strip()] or None
+        _typed = [x.strip().upper() for x in re.split(r"[ ,]+", _ab_in) if x.strip()]
+        if _typed:
+            _tks = _typed
+        elif _ab_scope.startswith("ALL"):
+            _acx = _ab_tbo.get_conn()
+            try:
+                _tks = _ab_tbo._ab_full_universe(_acx)
+            finally:
+                _acx.close()
+        else:
+            _tks = None
         with st.spinner("Screening (first run today pulls fundamentals, ~1 min; cached after)…"):
             _ac = _ab_tbo.get_conn()
             try:
@@ -8220,6 +8237,39 @@ elif page == "🫧 Anti-Bubble Radar":
             st.session_state["_ab_res"] = _res
             st.session_state["_ab_sb"] = _sb
     _res = st.session_state.get("_ab_res"); _sb = st.session_state.get("_ab_sb")
+    # ── Filter on EVERY available column (market cap / sector / valuation / quality) ──
+    if _res and _res.get("all"):
+        _adf = pd.DataFrame(_res["all"])
+        with st.expander("🔎 Filters — market cap, sector, valuation, quality", expanded=True):
+            _f1, _f2, _f3 = st.columns(3)
+            _secs = sorted({s for s in _adf.get("sector", pd.Series(dtype=str)).dropna() if s})
+            _sel_sec = _f1.multiselect("Sector", _secs, default=[], key="ab_f_sec")
+            _mc = pd.to_numeric(_adf.get("mcap"), errors="coerce").dropna()
+            _mc_min = _f2.number_input("Min market cap ($B)", 0.0,
+                                       float(_mc.max()/1e9) if len(_mc) else 5000.0,
+                                       0.0, step=1.0, key="ab_f_mcap")
+            _cls_sel = _f3.multiselect("Class", sorted(_adf["cls"].dropna().unique().tolist()),
+                                       default=[], key="ab_f_cls")
+            _g1, _g2, _g3 = st.columns(3)
+            _pe_max  = _g1.number_input("Max fwd PE (0 = any)", 0.0, 500.0, 0.0, key="ab_f_pe")
+            _roe_min = _g2.number_input("Min ROE (0 = any)", 0.0, 2.0, 0.0, step=0.05, key="ab_f_roe")
+            _de_max  = _g3.number_input("Max debt/equity (0 = any)", 0.0, 1000.0, 0.0, key="ab_f_de")
+        _fdf = _adf.copy()
+        if _sel_sec: _fdf = _fdf[_fdf["sector"].isin(_sel_sec)]
+        if _cls_sel: _fdf = _fdf[_fdf["cls"].isin(_cls_sel)]
+        if _mc_min > 0:
+            _fdf = _fdf[pd.to_numeric(_fdf["mcap"], errors="coerce").fillna(0) >= _mc_min * 1e9]
+        if _pe_max > 0:
+            _fdf = _fdf[pd.to_numeric(_fdf["fpe"], errors="coerce").fillna(9e9) <= _pe_max]
+        if _roe_min > 0:
+            _fdf = _fdf[pd.to_numeric(_fdf["roe"], errors="coerce").fillna(-9) >= _roe_min]
+        if _de_max > 0:
+            _fdf = _fdf[pd.to_numeric(_fdf["de"], errors="coerce").fillna(9e9) <= _de_max]
+        _show = _fdf.assign(**{"MktCap $B": (pd.to_numeric(_fdf["mcap"], errors="coerce")/1e9).round(1)})
+        _cols = [c for c in ["tk","cls","sector","MktCap $B","px","ret1y","ext200","fpe","tpe",
+                             "peg","roe","margin","de","rev","beta","up","Q","V","T"] if c in _show]
+        st.caption(f"**{len(_fdf)}** of {len(_adf)} screened names match the filters")
+        st.dataframe(_show[_cols], hide_index=True, use_container_width=True)
     if _res:
         _ct1, _ct2 = st.columns(2)
         with _ct1:

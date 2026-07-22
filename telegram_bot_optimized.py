@@ -11620,6 +11620,138 @@ def _atm_iv_term(conn, tk, spot):
     return {e: v[1] for e, v in best.items()}
 
 
+_SI_CACHE = {}                 # ticker -> (fetched_ts, dict) — .info is slow, SI moves 2x/month
+
+
+def _si_ensure(conn):
+    """short_interest history table. Exchanges publish SI TWICE MONTHLY with a ~2 week lag,
+    and yfinance exposes only `current` + `prior month` — so there is no way to backtest a
+    short-interest rule until a history exists. This is the hiprob_recs lesson again: no
+    writer, no history, no validation. Start capturing now so it becomes testable later."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS short_interest(
+        ticker TEXT, asof_date TEXT, captured_at TEXT,
+        shares_short REAL, shares_short_prior REAL, short_ratio REAL,
+        pct_float REAL, float_shares REAL, avg_volume REAL,
+        PRIMARY KEY (ticker, asof_date))""")
+    conn.commit()
+
+
+def _si_fetch(ticker, max_age=21600):
+    """Raw short-interest fields for one ticker (yfinance .info, cached 6h)."""
+    tk = str(ticker).upper()
+    hit = _SI_CACHE.get(tk)
+    now = time.time()
+    if hit and (now - hit[0]) < max_age:
+        return hit[1]
+    try:
+        info = _yf_ticker(tk).info or {}
+    except Exception:
+        log.warning(f"_si_fetch({tk}) failed", exc_info=True)
+        return None
+    ss, sp = info.get("sharesShort"), info.get("sharesShortPriorMonth")
+    if not ss:
+        _SI_CACHE[tk] = (now, None)
+        return None
+    asof = info.get("dateShortInterest")
+    try:
+        asof = (datetime.utcfromtimestamp(int(asof)).date().isoformat() if asof else "")
+    except Exception:
+        asof = ""
+    d = {"ticker": tk, "asof": asof, "shares_short": float(ss),
+         "shares_short_prior": float(sp) if sp else None,
+         "short_ratio": info.get("shortRatio"),
+         "pct_float": info.get("shortPercentOfFloat"),
+         "float_shares": info.get("floatShares"),
+         "avg_volume": info.get("averageVolume")}
+    if not d["pct_float"] and d["float_shares"]:
+        d["pct_float"] = d["shares_short"] / float(d["float_shares"])
+    if not d["short_ratio"] and d["avg_volume"]:
+        d["short_ratio"] = d["shares_short"] / float(d["avg_volume"])
+    _SI_CACHE[tk] = (now, d)
+    return d
+
+
+def _si_read(d):
+    """Rule-based short-interest read. Returns dict or None.
+
+    Thresholds are the published conventions, not invented ones:
+      days-to-cover  <2 low · 2-5 moderate · 5-7 high · >7 extreme
+      % of float     <5 low · 5-10 elevated · 10-20 high · >20 extreme
+    Direction is month-over-month share count: >+10% BUILDING, <-10% COVERING.
+
+    HONESTY: this is a documented heuristic, NOT a model validated on this database. It
+    cannot be validated yet — see _si_ensure. Treat it as descriptive until `short_interest`
+    has enough history to run the hit-rate-vs-baseline recipe. This repo has already found
+    that plausible-looking flow signals (/building, /uoa) FAIL as direction predictors.
+    """
+    if not d or not d.get("shares_short"):
+        return None
+    ss, sp = d["shares_short"], d.get("shares_short_prior")
+    chg = ((ss - sp) / sp) if (sp and sp > 0) else None
+    dtc = float(d["short_ratio"] or 0)
+    pf = float(d["pct_float"] or 0) * 100.0
+    if chg is None:
+        state = "—"
+    elif chg > 0.10:
+        state = "BUILDING"
+    elif chg < -0.10:
+        state = "COVERING"
+    else:
+        state = "STABLE"
+    crowd = ("extreme" if pf > 20 else "high" if pf > 10 else
+             "elevated" if pf > 5 else "low")
+    cover = ("extreme" if dtc > 7 else "high" if dtc > 5 else
+             "moderate" if dtc > 2 else "low")
+    # 0-100 squeeze-fuel score: how much short stock exists (crowding) x how hard it is to
+    # buy back (days-to-cover), nudged by whether shorts are still adding.
+    score = 0.45 * min(pf / 20.0, 1.0) * 100 + 0.40 * min(dtc / 7.0, 1.0) * 100
+    if chg is not None:
+        score += 0.15 * max(min(chg / 0.20, 1.0), -1.0) * 100
+    return {"state": state, "chg": chg, "dtc": dtc, "pct_float": pf,
+            "crowd": crowd, "cover": cover, "score": max(0.0, min(100.0, score)),
+            "asof": d.get("asof", "")}
+
+
+def _si_capture(conn, tickers):
+    """Persist today's short-interest snapshot for `tickers` (idempotent per asof_date)."""
+    _si_ensure(conn)
+    n = 0
+    for tk in dict.fromkeys(str(t).upper() for t in tickers if t):
+        d = _si_fetch(tk)
+        if not d or not d.get("asof"):
+            continue
+        conn.execute(
+            "INSERT OR REPLACE INTO short_interest (ticker,asof_date,captured_at,shares_short,"
+            "shares_short_prior,short_ratio,pct_float,float_shares,avg_volume) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (d["ticker"], d["asof"], datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             d["shares_short"], d["shares_short_prior"], d["short_ratio"],
+             d["pct_float"], d["float_shares"], d["avg_volume"]))
+        n += 1
+    conn.commit()
+    return n
+
+
+async def record_short_interest(context=None):
+    """Daily short-interest snapshot for the open book + index proxies.
+
+    SI only changes twice a month, but capturing daily is cheap (cached 6h) and means the
+    `asof_date` transition is caught the day it publishes. Universe is kept small on purpose:
+    .info is a per-ticker network call, so this is the open positions plus SPY/QQQ/IWM, not
+    all 734 names.
+    """
+    try:
+        conn = get_conn()
+        tks = _hiprob_default_tickers()          # open-position tickers + SPY/QQQ/IWM
+        n = _si_capture(conn, tks)
+        conn.close()
+        log.info(f"record_short_interest: stored {n} snapshots")
+        return n
+    except Exception as e:
+        log.warning(f"record_short_interest failed: {e}", exc_info=True)
+        return 0
+
+
 def _post_event_leg(conn, tk, strike, typ, expiry_s, spot, iv_now, dte, ev):
     """Re-price ONE leg for the day after its next event — the IV-crush projection.
 
@@ -31481,6 +31613,7 @@ def main():
         job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # weekly sector rotation, Mondays
         job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
         job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs ~4:30pm ET
+        job_queue.run_daily(record_short_interest, time=dt_time(21, 40, 0))  # SI snapshot ~4:40pm ET
         job_queue.run_once(riskoff_alert, when=25)                    # Risk-Off Radar readout ~on startup
         job_queue.run_daily(riskoff_alert, time=dt_time(21, 20, 0), data={"gate": True})  # post-close ~4:20 PM ET, only if caution+
         job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # ~4:35 PM ET — silently log anti-bubble baskets for tracking

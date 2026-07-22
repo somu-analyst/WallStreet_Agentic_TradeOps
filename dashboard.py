@@ -14534,24 +14534,47 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
 
             st.markdown("**🧾 Per-leg detail**")
             _fdf = pd.DataFrame(_flat).sort_values(["Ticker", "DTE"])
-            # TOTAL row (user 2026-07-22). Capital at risk respects the contract multiplier:
-            # STOCK legs are 1x, options 100x — mixing them would misstate the % return.
-            _ftot = sum(r["P&L $"] for r in _flat)
-            _fcost = 0.0
+            # TOTAL row (user 2026-07-22): every aggregatable number populated, not blanks.
+            # Entry/Now/Prev Cls are SIGNED net dollar values (a short leg's entry is a
+            # CREDIT, qty<0), so Now - Entry == P&L $ exactly. Unsigned sums would look
+            # tidier and silently contradict the P&L column. Multiplier respected: STOCK 1x,
+            # options 100x. DTE and Win % are capital-weighted, not naive means, so a 2-lot
+            # $10k leg does not count the same as a 1-lot $200 leg.
+            _fnet_e = _fnet_n = _fnet_p = _fcost = _fdtew = _fwinw = _fwcap = 0.0
             for _lgs in _by_tk.values():
                 for _l in _lgs:
                     _mult = 1 if str(_l.get("typ", "")).lower() == "stock" else 100
-                    _fcost += abs(float(_l.get("entry") or 0) * float(_l.get("qty") or 0) * _mult)
+                    _q = float(_l.get("qty") or 0)
+                    _e = float(_l.get("entry") or 0)
+                    _c = float(_l.get("cur") or 0)
+                    _cap = abs(_e * _q * _mult)
+                    _fnet_e += _e * _q * _mult
+                    _fnet_n += _c * _q * _mult
+                    _fnet_p += (float(_l["prev_close"]) if _l.get("prev_close") else _c) * _q * _mult
+                    _fcost += _cap
+                    if _l.get("dte") is not None:
+                        _fdtew += float(_l["dte"]) * _cap
+            for _r in _flat:                       # Win % is a display string like "🟢 68%"
+                _m = re.search(r"(\d+(?:\.\d+)?)\s*%", str(_r.get("Win %", "")))
+                if _m:
+                    _fwinw += float(_m.group(1)); _fwcap += 1
+            _ftot = _fnet_n - _fnet_e              # identical to sum of per-leg P&L $
             _trow = {c: "" for c in _fdf.columns}
-            for _nc in ("Spot", "Entry", "Now", "Prev Cls", "DTE", "P&L %", "P&L $"):
-                if _nc in _trow:
-                    _trow[_nc] = None
-            _trow["Ticker"] = "TOTAL"
-            _trow["Leg"] = f"{len(_flat)} legs · {len(_by_tk)} tickers"
-            _trow["P&L $"] = round(_ftot)
-            if _fcost > 0:
-                _trow["P&L %"] = round(_ftot / _fcost * 100)
-                _trow["Action"] = f"cost basis ${_fcost:,.0f}"
+            _trow.update({
+                "Ticker": "TOTAL",
+                "Leg": f"{len(_flat)} legs · {len(_by_tk)} tickers",
+                "Spot": None,                      # prices of different stocks do not add up
+                "Exp": "—",
+                "DTE": round(_fdtew / _fcost) if _fcost > 0 else None,
+                "Entry": round(_fnet_e, 2), "Now": round(_fnet_n, 2),
+                "Prev Cls": round(_fnet_p, 2),
+                "Max P": "Unlimited" if _spup else f"${_spmaxp:,.0f}",
+                "Max L": "Unlimited" if _spdn else f"${_spmaxl:,.0f}",
+                "Win %": f"{_fwinw / _fwcap:.0f}%" if _fwcap else "—",
+                "P&L $": round(_ftot),
+                "P&L %": round(_ftot / _fcost * 100) if _fcost > 0 else None,
+                "Action": f"capital ${_fcost:,.0f}",
+            })
             _fdf = pd.concat([_fdf, pd.DataFrame([_trow])], ignore_index=True)
             # Full column set (user 2026-07-18: keep ALL columns); height sized to every
             # row so there's no inner vertical scroll — the page scrolls naturally instead.

@@ -11061,17 +11061,194 @@ _REC_KIND = {"PS": "Put credit spread (sell)", "CS": "Call credit spread (sell)"
              "PUT": "Cash-secured put (sell)"}
 
 
+def _recs_ensure_src(conn):
+    """Add the `src` provenance column if missing. LIVE = issued that day by the scanner;
+    BACKFILL = reconstructed after the fact from captured chains. They must never be pooled:
+    a reconstructed rec was never actually issued, so counting it in the track record would
+    report hindsight as performance."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(hiprob_recs)")]
+    if "src" not in cols:
+        conn.execute("ALTER TABLE hiprob_recs ADD COLUMN src TEXT DEFAULT 'LIVE'")
+        conn.execute("UPDATE hiprob_recs SET src='LIVE' WHERE src IS NULL")
+        conn.commit()
+
+
+def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
+    """`_hiprob_scan` replayed as-of a past date, from captured data instead of live yfinance.
+
+    The live scanner is unusable for history: it calls `yf.Ticker(...).option_chain()` and
+    `date.today()`, and yfinance only ever serves the CURRENT chain. This reads the same
+    quantities out of `options_openbb` (real per-side bid/ask) + `stock_daily.close`.
+
+    Verified 2026-07-22: replaying 2026-07-21 reproduced all 15 rows the live scanner wrote
+    that day — same strikes, same expiry, same credit to the cent, same POP. Keep the maths
+    below in lockstep with `_hiprob_scan`; if that changes, this must change with it.
+    """
+    from scipy.stats import norm as _nm
+
+    def _pa(S, X, T, iv):
+        if min(S, X, T, iv) <= 0:
+            return None
+        return float(_nm.cdf((np.log(S / X) + (r - 0.5 * iv * iv) * T) / (iv * np.sqrt(T))))
+
+    def _mid(bid, ask, last):
+        b, a = float(bid or 0), float(ask or 0)
+        return (b + a) / 2.0 if (b > 0 and a > 0) else float(last or 0)
+
+    td = _exp_iso(trade_date)
+    td_d = datetime.strptime(td, "%Y-%m-%d").date()
+    out = []
+    for tk in tickers:
+        tk = str(tk).strip().upper()
+        if not tk:
+            continue
+        try:
+            px = conn.execute("SELECT close FROM stock_daily WHERE ticker=? AND trade_date=?",
+                              (tk, td)).fetchone()
+            if not px or not px[0]:
+                continue
+            spot = float(px[0])
+            exp = dte = None
+            for (e,) in conn.execute(
+                    "SELECT DISTINCT expiry_date FROM options_openbb WHERE ticker=? AND "
+                    "trade_date=? ORDER BY expiry_date", (tk, td)):
+                d = (datetime.strptime(_exp_iso(e), "%Y-%m-%d").date() - td_d).days
+                if dte_lo <= d <= dte_hi:
+                    exp, dte = _exp_iso(e), d
+                    break
+            if not exp:
+                continue
+            T = max(dte, 1) / 365.0
+            chain = conn.execute(
+                "SELECT strike, bid_Call, ask_Call, lastPrice_Call, bid_Put, ask_Put, "
+                "lastPrice_Put FROM options_openbb WHERE ticker=? AND trade_date=? AND "
+                "expiry_date=? ORDER BY strike", (tk, td, exp)).fetchall()
+            if not chain:
+                continue
+            calls = [(float(s), _mid(bc, ac, lc)) for s, bc, ac, lc, _, _, _ in chain]
+            puts = [(float(s), _mid(bp, ap, lp)) for s, _, _, _, bp, ap, lp in chain]
+
+            iv_ref = 0.40                      # ATM-backed IV — same ladder as the live scanner
+            atm = min(calls, key=lambda c: abs(c[0] - spot)) if calls else None
+            if atm and atm[1] > 0:
+                _iv = _implied_vol_hp(atm[1], spot, atm[0], T, r)
+                if _iv and 0.05 < _iv < 3.0:
+                    iv_ref = _iv
+            iv_ref = max(iv_ref, 0.10)
+
+            pl = sorted([p for p in puts if p[0] < spot and p[1] > 0.05], key=lambda p: -p[0])
+            for i in range(len(pl)):
+                K, cr = pl[i]
+                pop = _pa(spot, K - cr, T, iv_ref)
+                if pop is None or pop < min_pop:
+                    continue
+                out.append({"tk": tk, "kind": "CSP", "setup": f"{K:g}P", "credit": cr,
+                            "risk": None, "be": K - cr, "pop": pop, "dte": dte, "exp": exp,
+                            "spot": spot, "ret": cr / max(K - cr, 0.01) * 100})
+                if i + 2 < len(pl):
+                    Kl, cl = pl[i + 2]
+                    net, width = cr - cl, K - Kl
+                    if 0.03 < net < width:
+                        out.append({"tk": tk, "kind": "PS", "setup": f"{K:g}/{Kl:g}P",
+                                    "credit": net, "risk": (width - net) * 100, "be": None,
+                                    "pop": pop, "dte": dte, "exp": exp, "spot": spot,
+                                    "ret": net / max(width - net, 0.01) * 100})
+                break
+
+            cu = sorted([c for c in calls if c[0] > spot and c[1] > 0.05], key=lambda c: c[0])
+            for i in range(len(cu)):
+                K, cr = cu[i]
+                pa = _pa(spot, K + cr, T, iv_ref)
+                if pa is None:
+                    continue
+                pop = 1 - pa
+                if pop < min_pop:
+                    continue
+                if i + 2 < len(cu):
+                    Kl, cl = cu[i + 2]
+                    net, width = cr - cl, Kl - K
+                    if 0.03 < net < width:
+                        out.append({"tk": tk, "kind": "CS", "setup": f"{K:g}/{Kl:g}C",
+                                    "credit": net, "risk": (width - net) * 100, "be": None,
+                                    "pop": pop, "dte": dte, "exp": exp, "spot": spot,
+                                    "ret": net / max(width - net, 0.01) * 100})
+                break
+        except Exception:
+            log.warning(f"_hiprob_scan_asof {tk} @ {td} failed", exc_info=True)
+            continue
+    out.sort(key=lambda d: (-d["pop"], -d["ret"]))
+    return out
+
+
+def backfill_hiprob_recs(conn=None, tickers=None, start=None, end=None):
+    """Reconstruct the rec history for every captured date that has no rows yet.
+
+    Bounded by `options_openbb` coverage (real bid/ask/IV). `options_daily` reaches back much
+    further but carries lastPrice only — no bid/ask, no IV — and POP here is computed off an
+    ATM-backed IV, so recs built from it would be fiction. That is the fidelity line: this
+    refuses to cross it rather than manufacture a longer track record.
+
+    Rows land with src='BACKFILL' and are reported separately from live recs.
+    """
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        _recs_ensure_src(conn)
+        tks = list(tickers or _hiprob_default_tickers())
+        have = {r[0] for r in conn.execute("SELECT DISTINCT rec_date FROM hiprob_recs")}
+        dates = [r[0] for r in conn.execute(
+            "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
+        dates = [d for d in dates if d not in have
+                 and (not start or d >= start) and (not end or d <= end)]
+        total = 0
+        for d in dates:
+            rows = _hiprob_scan_asof(conn, d, tks) or []
+            for it in rows:
+                strat = _REC_KIND.get(it["kind"], it["kind"])
+                if conn.execute("SELECT 1 FROM hiprob_recs WHERE rec_date=? AND ticker=? AND "
+                                "strategy=? AND legs=? LIMIT 1",
+                                (d, it["tk"], strat, it["setup"])).fetchone():
+                    continue
+                conn.execute(
+                    "INSERT INTO hiprob_recs (rec_date,ticker,strategy,legs,expiry,dte,pop,ror,"
+                    "k1,k2,net,spot0,capital,status,src) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN','BACKFILL')",
+                    (d, it["tk"], strat, it["setup"], it["exp"], it["dte"],
+                     float(it["pop"]) * 100, float(it["ret"]), *_rec_strikes(it["setup"]),
+                     float(it["credit"]), float(it["spot"]), float(it["risk"] or 0)))
+                total += 1
+            log.info(f"backfill_hiprob_recs: {d} -> +{len(rows)} recs")
+        _settle_recs(conn)
+        conn.commit()
+        log.info(f"backfill_hiprob_recs: {total} recs across {len(dates)} dates")
+        return total, len(dates)
+    finally:
+        if own:
+            conn.close()
+
+
+def _rec_strikes(setup):
+    """('450/440P') -> (450.0, 440.0); ('450P') -> (450.0, 0.0)."""
+    import re as _re
+    ks = [float(x) for x in _re.findall(r"\d+(?:\.\d+)?", str(setup or ""))]
+    return (ks[0] if ks else 0.0), (ks[1] if len(ks) > 1 else 0.0)
+
+
 async def record_hiprob_recs(context=None):
     """Persist today's high-probability setups into hiprob_recs.
 
-    There was NO writer at all — `grep "INSERT INTO hiprob_recs"` returned nothing, so the
-    table froze at 2026-07-08 (its 261 rows came from code that no longer exists) and the
-    track record could never grow. Deduped on (rec_date, ticker, strategy, legs) so
-    re-runs in the same day are idempotent.
+    There was no SCHEDULED writer — the only one, `_hiprob_persist` (dashboard.py), fires as a
+    side-effect of rendering the Streamlit HiProb page, so rows existed only on days a human
+    opened it. That is why the table held exactly one date (2026-07-08, 261 rows). Corrected
+    2026-07-22: an earlier note here claimed that code "no longer exists" — it does, and still
+    runs on every dashboard visit. Deduped on (rec_date, ticker, strategy, legs) so re-runs in
+    the same day are idempotent.
     """
     import re as _re
     try:
         conn = get_conn()
+        _recs_ensure_src(conn)
         today = _et_now().date()
         rows = _hiprob_scan(tuple(_hiprob_default_tickers()[:40])) or []
         added = 0
@@ -11091,7 +11268,8 @@ async def record_hiprob_recs(context=None):
                 continue
             conn.execute(
                 "INSERT INTO hiprob_recs (rec_date,ticker,strategy,legs,expiry,dte,pop,ror,"
-                "k1,k2,net,spot0,capital,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN')",
+                "k1,k2,net,spot0,capital,status,src) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN','LIVE')",
                 (today.isoformat(), tk, strat, setup, exp, dte,
                  float(d.get("pop") or 0) * 100, float(d.get("ret") or 0), k1, k2,
                  float(d.get("credit") or 0), float(_cur_price(tk, 0.0)[0] or 0),
@@ -11157,20 +11335,26 @@ def _settle_recs(conn):
     return n
 
 
-def _recs_performance(conn, limit_open=200):
+def _recs_performance(conn, limit_open=1000):
     """Track record: SETTLED results + mark-to-market on still-open recs.
 
     MTM matters because nothing has expired yet — settlement alone would report nothing.
     Open positions are marked with real OpenBB quotes (cost-to-close), not a model.
     """
+    _recs_ensure_src(conn)
     _settle_recs(conn)
-    out = {"settled": [], "open": [], "asof": _et_now().strftime("%Y-%m-%d %H:%M ET")}
-    for rid, tk, strat, k1, k2, net, exp, st, spx, pnl in conn.execute(
-            "SELECT rec_id,ticker,strategy,k1,k2,net,expiry,status,settle_px,pnl "
-            "FROM hiprob_recs ORDER BY rec_id DESC LIMIT ?", (limit_open,)):
+    out = {"settled": [], "open": [], "bf_settled": [], "bf_open": [],
+           "asof": _et_now().strftime("%Y-%m-%d %H:%M ET")}
+    for rid, tk, strat, k1, k2, net, exp, st, spx, pnl, src in conn.execute(
+            "SELECT rec_id,ticker,strategy,k1,k2,net,expiry,status,settle_px,pnl,"
+            "COALESCE(src,'LIVE') FROM hiprob_recs ORDER BY rec_id DESC LIMIT ?", (limit_open,)):
         k1 = float(k1 or 0); k2 = float(k2 or 0); net = float(net or 0)
+        # reconstructed recs were never actually issued — kept in their own buckets so the
+        # headline track record stays a record of real calls, not of hindsight
+        bf = (src == "BACKFILL")
         if st == "SETTLED" and pnl is not None:
-            out["settled"].append({"tk": tk, "strat": strat, "pnl": float(pnl)})
+            out["bf_settled" if bf else "settled"].append(
+                {"tk": tk, "strat": strat, "pnl": float(pnl)})
             continue
         try:                                   # mark-to-market from real BB quotes
             is_put = "put" in (strat or "").lower()
@@ -11184,7 +11368,8 @@ def _recs_performance(conn, limit_open=200):
             cost_to_close = m1 - m2            # spread; m2=0 for a naked CSP
             mtm = ((net - cost_to_close) if "debit" not in (strat or "").lower()
                    else (cost_to_close - net)) * 100
-            out["open"].append({"tk": tk, "strat": strat, "mtm": mtm, "exp": str(exp)[:10]})
+            out["bf_open" if bf else "open"].append(
+                {"tk": tk, "strat": strat, "mtm": mtm, "exp": str(exp)[:10]})
         except Exception:
             log.debug("rec MTM failed", exc_info=True)
     return out
@@ -11193,7 +11378,8 @@ def _recs_performance(conn, limit_open=200):
 def _recs_perf_report(conn):
     d = _recs_performance(conn)
     se, op = d["settled"], d["open"]
-    if not se and not op:
+    bse, bop = d.get("bf_settled") or [], d.get("bf_open") or []
+    if not se and not op and not bse and not bop:
         return "No recommendations recorded yet."
     parts = [hdr("📊 RECOMMENDATION TRACK RECORD")]
     rows = []
@@ -11216,6 +11402,17 @@ def _recs_perf_report(conn):
                  for k, v in sorted(agg.items(), key=lambda x: -x[1][1])]
         parts.append("\n<b>By strategy (open, marked to market)</b>")
         parts.append(_pipe_table(("", "Strategy", "#", "P&L$"), srows, right_cols={2, 3}))
+    if bse or bop:                             # reconstructed — NOT part of the track record
+        brows = []
+        if bse:
+            w = sum(1 for r in bse if r["pnl"] > 0)
+            brows.append(("✅", "Settled", str(len(bse)), f"{w/len(bse)*100:.0f}%"))
+        if bop:
+            w = sum(1 for r in bop if r["mtm"] > 0)
+            brows.append(("⏳", "Open (MTM)", str(len(bop)), f"{w/len(bop)*100:.0f}%"))
+            brows.append(("📈", "Unrealised", f"${sum(r['mtm'] for r in bop):,.0f}", ""))
+        parts.append("\n<b>Reconstructed history (hindsight — not a track record)</b>")
+        parts.append(_pipe_table(("", "Metric", "Value", "Win%"), brows, right_cols={2, 3}))
     parts.append(f"<i>As of {d['asof']}. Open legs marked with real OpenBB quotes "
                  f"(cost-to-close), settled rows against the actual close at expiry. "
                  f"Educational, not advice.</i>")

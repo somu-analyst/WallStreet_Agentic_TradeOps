@@ -24107,8 +24107,28 @@ def _ab_score(m, f):
     return round(Q), round(V), round(T), cls
 
 
+def _ab_full_universe(conn, min_oi=0):
+    """Every ticker in the options universe (~734 incl. ETFs), not the hard-coded 78.
+
+    User 2026-07-21: "why only 80 names, include all and ETF also". _AB_UNIVERSE is a
+    curated list; this returns the real captured universe so the screen can cover it.
+    """
+    try:
+        d = conn.execute("SELECT MAX(trade_date_now) FROM options_change").fetchone()[0]
+        rows = conn.execute(
+            "SELECT ticker FROM options_change WHERE trade_date_now=? "
+            "GROUP BY ticker HAVING SUM(CAST(openInt_Call_now AS REAL)+"
+            "CAST(openInt_Put_now AS REAL)) >= ? ORDER BY ticker", (d, min_oi)).fetchall()
+        return [r[0].upper() for r in rows] or list(_AB_UNIVERSE)
+    except Exception:
+        return list(_AB_UNIVERSE)
+
+
 def _antibubble_scan(conn, tickers=None):
-    """Screen ANY tickers into cyclical traps vs anti-bubble quality. Universal."""
+    """Screen ANY tickers into cyclical traps vs anti-bubble quality. Universal.
+
+    tickers=None keeps the curated default; pass _ab_full_universe(conn) for everything.
+    """
     tks = list(dict.fromkeys([t.upper() for t in (tickers or _AB_UNIVERSE)]))
     rows = []
     for tk in tks:
@@ -24118,9 +24138,17 @@ def _antibubble_scan(conn, tickers=None):
             if not m or not f:
                 continue
             Q, V, T, cls = _ab_score(m, f)
+            # Surface EVERY cached fundamental so the UI can filter on them (user
+            # 2026-07-21: "add filters for all available columns ... net worth of
+            # company, sector, etc"). These were already fetched and cached — just
+            # never returned.
             rows.append({"tk": tk, "Q": Q, "V": V, "T": T, "cls": cls, "px": m["px"],
                          "ret1y": m["ret1y"], "ext200": m["ext200"], "up": f.get("upside"),
-                         "fpe": f.get("fpe"), "beta": f.get("beta"), "sector": f.get("sector")})
+                         "fpe": f.get("fpe"), "beta": f.get("beta"), "sector": f.get("sector"),
+                         "mcap": f.get("mcap"), "tpe": f.get("tpe"), "peg": f.get("peg"),
+                         "roe": f.get("roe"), "margin": f.get("margin"), "de": f.get("de"),
+                         "rev": f.get("rev"), "fcf": f.get("fcf"),
+                         "cyclical": f.get("cyclical")})
         except Exception:
             continue
     return {"traps": sorted([r for r in rows if r["cls"] == "TRAP"], key=lambda r: -r["T"]),

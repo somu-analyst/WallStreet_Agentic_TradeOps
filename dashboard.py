@@ -44,6 +44,28 @@ def _si_for(ticker):
         return None
 
 
+def _spot_src(ticker, leg):
+    """Which price the leg's Spot actually is: Live / AH / PM / EOD.
+
+    Legs carry BOTH `spot` (live-or-AH) and `eod_spot` (confirmed close), so the source is
+    derived from the leg itself rather than re-deciding it here — if they match, no extended
+    price was applied and it is the EOD close. Only when they differ do we ask _get_ah_price
+    (20s cache) for the session label. Without this column "price hasn't moved" and "we are
+    not showing you a live price" look identical on screen.
+    """
+    try:
+        _s = float(leg.get("spot") or 0)
+        _e = float(leg.get("eod_spot") or 0)
+    except (TypeError, ValueError):
+        return "EOD"
+    if _s <= 0 or _e <= 0 or abs(_s - _e) < 1e-9:
+        return "EOD"
+    try:
+        return (_get_ah_price(ticker) or {}).get("label") or "Live"
+    except Exception:
+        return "Live"
+
+
 def _si_cells(ticker):
     """(SI %, DTC, Shorts) display cells — '—' when the ticker has no short-interest feed."""
     r = _si_for(ticker)
@@ -14519,8 +14541,9 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                                  f"{_fpa['pop']:.0f}%") if _fpa else "—"
                         _fearn, _fdiv = _next_events(_ftk)
                         _fsi = _si_cells(_ftk)
+                        _fsrc = _spot_src(_ftk, l)
                         _flat.append({
-                            "Ticker": _ftk, "Spot": round(l["spot"], 2),
+                            "Ticker": _ftk, "Spot": round(l["spot"], 2), "Src": _fsrc,
                             "Leg": f"{l['side']} {abs(l['qty']):g} sh",
                             "Exp": "—", "DTE": None, "Earnings": _fearn, "Ex-Div": _fdiv, "Money": "—",
                         "SI %": _fsi[0], "DTC": _fsi[1], "Shorts": _fsi[2],
@@ -14570,8 +14593,9 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                              f"{_fpa['pop']:.0f}%") if _fpa else "—"
                     _fearn, _fdiv = _next_events(_ftk)
                     _fsi = _si_cells(_ftk)
+                    _fsrc = _spot_src(_ftk, l)
                     _flat.append({
-                        "Ticker": _ftk, "Spot": round(l["spot"], 2),
+                        "Ticker": _ftk, "Spot": round(l["spot"], 2), "Src": _fsrc,
                         "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
                         "Exp": l["exp"][:10], "DTE": l["dte"], "Earnings": _fearn, "Ex-Div": _fdiv, "Money": _fm,
                         "SI %": _fsi[0], "DTC": _fsi[1], "Shorts": _fsi[2],

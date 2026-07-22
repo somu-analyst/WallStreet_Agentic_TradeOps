@@ -24276,7 +24276,7 @@ async def rotation_view(query, level="sector"):
     await _do_rotation(query.message, level)
 
 
-# ── Spreads scanner (Bull Call · Bear Call · Bear Put), composite-scored ──────
+# ── Spreads scanner (Bull Call · Bear Call · Bear Put · Bull Put), composite-scored ──────
 def _spreads_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=4):
     """Ranked vertical spreads. Returns list of structured dicts (rendered by _send_spreads)."""
     import datetime as _dt
@@ -24368,6 +24368,13 @@ def _spreads_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=4):
                     oi_min = min(a["oi"] or 0, b["oi"] or 0); net = b["mid"] - a["mid"]; be = b["strike"] - net
                     pa = _pa(spot, be, T, iv_ref)
                     add("Bear Put", "🟣", f"{b['strike']:g}/{a['strike']:g}P", net, width, be, (None if pa is None else 1 - pa), oi_min, "debit")
+                    # Bull Put (put CREDIT spread) — the missing 4th vertical. Same two
+                    # strikes as the Bear Put and the same breakeven, but sold instead of
+                    # bought, so it profits when price stays ABOVE be => POP is `pa`
+                    # itself, NOT 1-pa. The engine already produces these (80 rows of
+                    # "Put credit spread" in hiprob_recs); only the scanner omitted them.
+                    add("Bull Put", "🔵", f"{b['strike']:g}/{a['strike']:g}P", net, width, be,
+                        pa, oi_min, "credit")
 
             cand.sort(key=lambda z: -z[0])
             seen = {}
@@ -24382,7 +24389,7 @@ def _spreads_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=4):
 
 
 async def spreads_command(update, ctx):
-    """/spreads [TICKERS] — Bull Call / Bear Call / Bear Put setups ranked by composite score."""
+    """/spreads [TICKERS] — Bull Call / Bear Call / Bear Put / Bull Put ranked by composite score."""
     args = list(getattr(ctx, "args", []) or [])
     tks = [a.upper() for a in args] if args else _hiprob_default_tickers()
     await update.message.reply_text("📐 Scanning vertical spreads…", parse_mode=H)
@@ -24404,7 +24411,7 @@ async def _send_spreads(msg, rows):
     data = [(r["emoji"], r["tk"], f"{r['dte']}d", f"{r['pop']:.0f}", f"{r['rr']:.1f}")
             for r in rows]
     tbl = _pipe_table(("ST", "Tkr", "DTE", "P%", "RR"), data, right_cols={2, 3, 4},
-                      legend="🟢 Bull Call · 🔴 Bear Call · 🟣 Bear Put · P% = prob of profit")
+                      legend="🟢 Bull Call · 🔴 Bear Call · 🟣 Bear Put · 🔵 Bull Put · P% = prob of profit")
     details = []
     for r in rows:
         cost = (f"debit ${r['net']:.2f}" if r["dir"] == "debit" else f"credit ${r['net']:.2f}")

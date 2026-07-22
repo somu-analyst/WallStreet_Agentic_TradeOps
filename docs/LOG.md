@@ -1,4 +1,62 @@
-# LOG — completed work, decisions, blockers
+# LOG
+
+## 2026-07-21 — live-data correctness session (LARGE)
+
+**Headline: three separate bugs were silently corrupting displayed prices/P&L.** All found
+by *executing* code, not reading it. Everything below is committed and verified.
+
+### Bugs fixed (16)
+| Area | Bug | Commit |
+|---|---|---|
+| Time | ET stamps 1h behind ~8 months/yr — 10 sites hardcoded `utc-5h` (EST) in EDT | `e081bdb` |
+| Price | Write-up priced off YESTERDAY's close during RTH (all 3 call sites omit `spot`) | `42be21b` |
+| Price | Same stale-spot in 2 more OI paths (`_spot3`, `_spot2`) | `cee5ddc` |
+| **P&L** | **Position marks FROZEN at EOD capture** — `bs_greeks(..., R, ...)` where `R` was undefined; NameError swallowed by a bare except. AMD spread showed **+$255 when it was -$189** (sign inverted) | `3225879` |
+| Wiring | `news_feed` dead 5 months — `store_news()` orphaned, nothing called it | `cb29c15` |
+| Wiring | **No hiprob_recs writer existed at all** — table frozen 13 days | `9f22ace` |
+| Scoring | Rec performance never computed (`settle_px` 0/261, `pnl` 0/261) | `963a728` |
+| Levels | Γ-walls returned the 3 LOWEST strikes (`sorted()[:3]`) — QQQ showed $525 at spot $704 | `5b716f8` |
+| Static | 6 undefined-name bugs via pyflakes (incl. 2 of my own) | `b1f1f97` |
+| Signals | Bull Put (put credit spread) missing from the spreads scanner entirely | `4f7b9e2` |
+| UX | Positions: no long/short, no expiry; legs advised in isolation | `51ba6a0`, `bedbb51` |
+| UX | Dashboard "you have no positions" while holding a real GOOG spread | `cee5ddc` |
+| UX | Pre-Trade Risk + P&L Simulator were long-only; `abs(None)` crash (mine) | `ddc713b`, `266348c`, `3891c46` |
+| UX | Nav reached only one section; Action Board had no price | `7bd7d31`, `d550e89` |
+| Scope | Anti-Bubble 78 -> 734 tickers incl. ETFs + filters on all 19 columns | `414e41f` |
+| Data | VXN added end-to-end; VIX/VXN deduped + backfilled (VXN 252->6,410; VIX->9,219) | — |
+
+### Validation results (these change how much to trust the tools)
+- **`/capflow` has NO directional edge.** 143 days/~9k obs: rank-IC ~0 (t=+0.28@5d); the
+  `score>+20` rule UNDER-performs baseline by 3.0pp@5d; buckets non-monotonic; the $-flow
+  leg itself t=-0.07. Relabelled in-product. (`dec5703`)
+- **`/debate` Technical leg IS real**: IC +0.0285, **t=+4.28 @10d**.
+- **`/debate` Vol leg is SIGN-INVERTED**: elevated VIX preceded **+4.65%** SPY fwd-10d vs
+  +0.46% calm. NOT flipped — 628 obs, one regime. **User decision.**
+- `/debate` weights contradict evidence: Flow has the HIGHEST weight (1.2) and zero edge.
+- **Methodology trap:** `stock_daily` is shallow (median 12 dates/ticker). A first backtest
+  built on it was INVALID. Use `stock_history`; compute shifts on the dense panel BEFORE
+  joining sparse data.
+
+### Measured facts worth keeping
+- CBOE chain fetch: **0.26s/ticker**, ~3MB, ~6.7k contracts. Full 734 = **99s @16 threads**.
+  Fetch is 85% of cost; SQLite insert is negligible.
+- ±30% strikes + <=90 DTE cuts contracts 63%. Top 100 = **94% of all option volume**;
+  top 25 = 82%.
+- CBOE `delayed_quotes` refreshes ~every minute (`s-maxage=5`), so 5-min polling is useful.
+- Option liquidity is the right filter, NOT market cap (universe is already large-cap).
+
+### The pattern behind most of this
+**`except Exception` hiding a failure that changed a displayed number.** Three defects came
+from exactly that. `pyflakes` found 6 in seconds. **Run it first next session.**
+
+### My own errors (recorded deliberately)
+Claimed broken-and-wasn't: 8 dead API keys (test never loaded the vault), FINNHUB_KEY alias
+(fallback already existed), `_compute_gex` walls, per-expiry PCR maths, AMD/SMH walls, 68
+undefined routes (my regex). Shipped 2 real bugs: `abs(None)` crash and a `spot=spot` fix
+applied to the WRONG function. **Everything I verified by running held; everything I
+asserted from reading did not.**
+
+ — completed work, decisions, blockers
 
 > Append newest at top. Recap here every ~10–20 messages and before any context reset.
 

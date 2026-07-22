@@ -11056,6 +11056,56 @@ def _positions_card_kb(first_tk):
     ]])
 
 
+_REC_KIND = {"PS": "Put credit spread (sell)", "CS": "Call credit spread (sell)",
+             "CSP": "Cash-secured put (sell)", "CD": "ITM call debit spread (buy)",
+             "PUT": "Cash-secured put (sell)"}
+
+
+async def record_hiprob_recs(context=None):
+    """Persist today's high-probability setups into hiprob_recs.
+
+    There was NO writer at all — `grep "INSERT INTO hiprob_recs"` returned nothing, so the
+    table froze at 2026-07-08 (its 261 rows came from code that no longer exists) and the
+    track record could never grow. Deduped on (rec_date, ticker, strategy, legs) so
+    re-runs in the same day are idempotent.
+    """
+    import re as _re
+    try:
+        conn = get_conn()
+        today = _et_now().date()
+        rows = _hiprob_scan(tuple(_hiprob_default_tickers()[:40])) or []
+        added = 0
+        for it in rows:
+            d = it[1] if isinstance(it, tuple) else it
+            tk = str(d.get("tk") or "").upper()
+            setup = str(d.get("setup") or "")
+            strat = _REC_KIND.get(str(d.get("kind") or "").upper(), str(d.get("kind") or "?"))
+            ks = [float(x) for x in _re.findall(r"\d+(?:\.\d+)?", setup)]
+            k1 = ks[0] if ks else 0.0
+            k2 = ks[1] if len(ks) > 1 else 0.0
+            dte = int(d.get("dte") or 0)
+            exp = (today + timedelta(days=dte)).isoformat()
+            if conn.execute("SELECT 1 FROM hiprob_recs WHERE rec_date=? AND ticker=? AND "
+                            "strategy=? AND legs=? LIMIT 1",
+                            (today.isoformat(), tk, strat, setup)).fetchone():
+                continue
+            conn.execute(
+                "INSERT INTO hiprob_recs (rec_date,ticker,strategy,legs,expiry,dte,pop,ror,"
+                "k1,k2,net,spot0,capital,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN')",
+                (today.isoformat(), tk, strat, setup, exp, dte,
+                 float(d.get("pop") or 0) * 100, float(d.get("ret") or 0), k1, k2,
+                 float(d.get("credit") or 0), float(_cur_price(tk, 0.0)[0] or 0),
+                 float(d.get("risk") or 0)))
+            added += 1
+        _settle_recs(conn)              # close out anything that expired since last run
+        conn.commit(); conn.close()
+        log.info(f"record_hiprob_recs: +{added} new recs")
+        return added
+    except Exception as e:
+        log.warning(f"record_hiprob_recs failed: {e}")
+        return 0
+
+
 def _rec_payoff(strategy, k1, k2, net, S):
     """Settlement P&L per contract (x100) for a hiprob_recs row at underlying price S.
 
@@ -30959,6 +31009,7 @@ def main():
         job_queue.run_daily(earnings_alert, time=dt_time(13, 45, 0)) # Earnings Radar ~8:45 AM ET pre-market
         job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # weekly sector rotation, Mondays
         job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
+        job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs ~4:30pm ET
         job_queue.run_once(riskoff_alert, when=25)                    # Risk-Off Radar readout ~on startup
         job_queue.run_daily(riskoff_alert, time=dt_time(21, 20, 0), data={"gate": True})  # post-close ~4:20 PM ET, only if caution+
         job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # ~4:35 PM ET — silently log anti-bubble baskets for tracking

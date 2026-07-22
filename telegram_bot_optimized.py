@@ -2037,9 +2037,32 @@ def _get_spot_with_ah(ticker: str) -> dict:
     try:
         tkr = _yf_ticker(ticker)
         fi = tkr.fast_info
-        reg = float(fi.get("regularMarketPrice") or fi.get("lastPrice") or 0)
-        post = float(fi.get("postMarketPrice") or 0)
-        pre  = float(fi.get("preMarketPrice") or 0)
+        # fast_info exposes snake_case ATTRIBUTES and carries NO pre/post-market fields --
+        # those live on .info. The old code called fi.get("regularMarketPrice") /
+        # fi.get("postMarketPrice") / fi.get("preMarketPrice"), none of which are fast_info
+        # keys, so post/pre were ALWAYS 0 and is_extended ALWAYS False: after-hours support
+        # never worked (verified 2026-07-22 16:24 ET -- TSLA printed 374.01 while the real
+        # post-market was 361.39, a -3.4% earnings move that never reached the screen).
+        reg = 0.0
+        for _k in ("last_price", "previous_close"):
+            try:
+                reg = float(getattr(fi, _k, 0) or 0)
+            except Exception:
+                reg = 0.0
+            if reg > 0:
+                break
+        # .info is slow, so only pay for it inside an actual extended session (ET 04:00-09:30
+        # pre, 16:00-20:00 post, weekdays) -- during RTH last_price already IS the live price.
+        post = pre = 0.0
+        _ny = _et_now()
+        _tm = _ny.hour * 60 + _ny.minute
+        if _ny.weekday() < 5 and (4 * 60 <= _tm < 9 * 60 + 30 or 16 * 60 <= _tm < 20 * 60):
+            try:
+                _inf = tkr.info or {}
+                post = float(_inf.get("postMarketPrice") or 0)
+                pre = float(_inf.get("preMarketPrice") or 0)
+            except Exception:
+                log.debug("extended-hours .info fetch failed", exc_info=True)
         if reg <= 0:
             h = tkr.history(period="5d")
             reg = float(h["Close"].iloc[-1]) if len(h) >= 1 else 0.0

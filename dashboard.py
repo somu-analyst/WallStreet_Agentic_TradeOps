@@ -14534,6 +14534,25 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
 
             st.markdown("**🧾 Per-leg detail**")
             _fdf = pd.DataFrame(_flat).sort_values(["Ticker", "DTE"])
+            # TOTAL row (user 2026-07-22). Capital at risk respects the contract multiplier:
+            # STOCK legs are 1x, options 100x — mixing them would misstate the % return.
+            _ftot = sum(r["P&L $"] for r in _flat)
+            _fcost = 0.0
+            for _lgs in _by_tk.values():
+                for _l in _lgs:
+                    _mult = 1 if str(_l.get("typ", "")).lower() == "stock" else 100
+                    _fcost += abs(float(_l.get("entry") or 0) * float(_l.get("qty") or 0) * _mult)
+            _trow = {c: "" for c in _fdf.columns}
+            for _nc in ("Spot", "Entry", "Now", "Prev Cls", "DTE", "P&L %", "P&L $"):
+                if _nc in _trow:
+                    _trow[_nc] = None
+            _trow["Ticker"] = "TOTAL"
+            _trow["Leg"] = f"{len(_flat)} legs · {len(_by_tk)} tickers"
+            _trow["P&L $"] = round(_ftot)
+            if _fcost > 0:
+                _trow["P&L %"] = round(_ftot / _fcost * 100)
+                _trow["Action"] = f"cost basis ${_fcost:,.0f}"
+            _fdf = pd.concat([_fdf, pd.DataFrame([_trow])], ignore_index=True)
             # Full column set (user 2026-07-18: keep ALL columns); height sized to every
             # row so there's no inner vertical scroll — the page scrolls naturally instead.
             st.dataframe(_fdf, hide_index=True, use_container_width=True,
@@ -14544,7 +14563,6 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                              "Now": st.column_config.NumberColumn(format="$%.2f"),
                              "P&L %": st.column_config.NumberColumn(format="%d%%"),
                              "P&L $": st.column_config.NumberColumn(format="$%d")})
-            _ftot = sum(r["P&L $"] for r in _flat)
             st.caption(f"All **{len(_flat)}** legs across **{len(_by_tk)}** tickers · total open "
                        f"P&L **${_ftot:,.0f}**.  **Now** = live option mid (bid/ask) when the market's "
                        "open, else the last close.  **Prev Cls** = prior session close · **Hi/Lo** = that "

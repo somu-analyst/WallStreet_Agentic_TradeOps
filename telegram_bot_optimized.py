@@ -16188,6 +16188,30 @@ def _setup_hp_tables(conn):
     conn.commit()
 
 
+def _score_signal(sig, ret, dead=0.003, band=0.012):
+    """Score ONE ensemble prediction against a realised return. 1 hit, 0 miss, None unscoreable.
+
+    THE bug this replaces (found 2026-07-22): both resolvers ended in a bare `else: correct = 0`,
+    so SELL_PREMIUM — which every vol model emits — could never be marked correct. 546 resolved
+    rows sat at EXACTLY 0.0% hit-rate, which is not a market outcome, it is a scoring error. It
+    dragged the ensemble from ~45% to 40.0% and, worse, fed `signal_weights`: models were being
+    down-weighted for making volatility calls (rv_iv 0.2, iv_skew 0.4). The second resolver was
+    stricter still and scored NEUTRAL as wrong every time too.
+
+    SELL_PREMIUM is a VOLATILITY call, not a direction — "the realised move stays inside the
+    implied one". It is scored like NEUTRAL: correct when the move is contained. Unknown labels
+    return None so they stay pending instead of being silently booked as misses.
+    """
+    s = str(sig or "").upper().strip()
+    if s == "BULL":
+        return 1 if ret > dead else 0
+    if s == "BEAR":
+        return 1 if ret < -dead else 0
+    if s in ("NEUTRAL", "SELL_PREMIUM"):
+        return 1 if abs(ret) < band else 0
+    return None
+
+
 def _update_hp_outcomes(ticker, conn):
     """Fill actual_ret + correct for prior predictions; recalc adaptive weights."""
     try:
@@ -16210,14 +16234,9 @@ def _update_hp_outcomes(ticker, conn):
             if m.empty or pd.isna(m.iloc[0]["next_ret"]):
                 continue
             ret = float(m.iloc[0]["next_ret"])
-            if row["signal"] == "BULL":
-                correct = 1 if ret > 0.003 else 0
-            elif row["signal"] == "BEAR":
-                correct = 1 if ret < -0.003 else 0
-            elif row["signal"] == "NEUTRAL":
-                correct = 1 if abs(ret) < 0.012 else 0
-            else:
-                correct = 0
+            correct = _score_signal(row["signal"], ret)
+            if correct is None:
+                continue                       # unknown label — leave pending, never score 0
             conn.execute(
                 "UPDATE signal_accuracy SET actual_ret=?, correct=?"
                 " WHERE ticker=? AND trade_date=? AND model_name=?",
@@ -27134,7 +27153,9 @@ def _update_scanner_outcomes(conn, horizon=5):
                     continue                     # not matured yet
                 ret = float(h.iloc[i + horizon] / h.iloc[i] - 1)
                 sig = str(r["signal"])
-                correct = 1 if ((sig == "BULL" and ret > 0) or (sig == "BEAR" and ret < 0)) else 0
+                correct = _score_signal(sig, ret)
+                if correct is None:
+                    continue                   # unknown label — stays pending, not a miss
                 conn.execute("UPDATE signal_accuracy SET actual_ret=?, correct=? WHERE rowid=?",
                              (ret, correct, int(r["rowid"])))
                 n += 1

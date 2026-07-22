@@ -1177,32 +1177,81 @@ def _market_state():
 
 
 @st.fragment(run_every=5)
+def _gp_live_strip():
+    """THE live-values block — a RENDERING fragment, which is what makes the page behave like a
+    broker screen instead of freezing.
+
+    Why this exists (profiled 2026-07-22): the old design used a heartbeat fragment that called
+    `st.rerun(scope="app")`. That is a FULL SCRIPT rerun — it re-executes this entire ~20k-line
+    module: every DB read, every yfinance call, every table rebuild. The positions card alone
+    measured 14s. So "refresh" meant a multi-second freeze, which is exactly the symptom.
+
+    A fragment that RENDERS instead only re-executes itself and patches its own DOM subtree.
+    The numbers tick, nothing else on the page moves, scroll position is kept, and no heavy
+    work is repeated. That is the broker feel: quotes update, the page does not reload.
+    """
+    if not st.session_state.get("use_ah", True):
+        return                                    # EOD / frozen mode — nothing live to show
+    _tks = st.session_state.get("_live_tickers") or []
+    if not _tks:
+        return
+    _prev = st.session_state.get("_live_last_px") or {}
+    _now = {}
+    _cols = st.columns(min(len(_tks), 6))
+    for _i, _tk in enumerate(_tks[:6]):
+        try:
+            _d = _get_ah_price(_tk) or {}
+            # contract: spot_reg = confirmed EOD close, spot_ah = extended-hours print,
+            # ah_chg_pct = AH move vs that close. There is NO prev_close key.
+            _base = float(_d.get("spot_reg") or 0.0)
+            _px = float(_d.get("spot_ah") or 0.0) or _base
+        except Exception:
+            continue
+        if _px <= 0:
+            continue
+        _now[_tk] = _px
+        _chg = (_px - _base) if (_base > 0 and abs(_px - _base) > 1e-9) else None
+        _pct = float(_d.get("ah_chg_pct") or 0.0) or (
+            (_chg / _base * 100.0) if (_chg is not None and _base > 0) else None)
+        # delta vs the LAST TICK, so you can see which quote just moved
+        _tick = _px - float(_prev.get(_tk, _px))
+        _arrow = "▲" if _tick > 0 else ("▼" if _tick < 0 else "·")
+        _cols[_i].metric(f"{_arrow} {_tk}", f"${_px:,.2f}",
+                         (f"{_chg:+.2f} ({_pct:+.2f}%)" if _pct is not None else None))
+    st.session_state["_live_last_px"] = _now
+    st.caption(f"live · {datetime.now().strftime('%H:%M:%S')} — quotes update in place; "
+               "tables below refresh on the slower interval")
+
+
+@st.fragment(run_every=5)
 def _gp_live_tick():
-    """Lightweight 5s heartbeat fragment. When the chosen refresh interval has elapsed it triggers
-    a full SCRIPT rerun (st.rerun) — NOT a browser reload — so charts/tables/values update in place,
-    the old values stay on screen until the new ones render, and there's no flash or scroll reset."""
+    """Slow heartbeat for the HEAVY page content only.
+
+    Live quotes are handled by `_gp_live_strip` above without touching the rest of the page.
+    A full-app rerun is only worth its cost for the expensive tables/analysis, so this now
+    fires on a much longer cadence (>=5x the quote interval, floor 5 min) instead of on every
+    price move. Previously any tick past the interval triggered a whole-script rerun, which
+    is what made the page freeze.
+    """
     import time as _t
     if not st.session_state.get("use_ah", True):
-        return  # EOD / frozen mode — nothing live to refresh
+        return
     interval = int(st.session_state.get("global_refresh_int",
                                         st.session_state.get("gp_refresh_int", 60)))
-    if _t.time() - st.session_state.get("_app_run_ts", 0.0) < max(interval, 5):
+    heavy = max(interval * 5, 300)               # heavy refresh cadence, never tighter than 5 min
+    if _t.time() - st.session_state.get("_app_run_ts", 0.0) < heavy:
         return
-    # interval elapsed — only rerun if live prices actually MOVED, so an open analysis isn't
-    # disrupted when nothing has changed.
     _tks = st.session_state.get("_live_tickers") or []
     if _tks:
         try:
-            _cur = []
-            for _t2 in _tks:
-                _d = _get_ah_price(_t2)
-                _cur.append((_t2, round((_d.get("spot_ah") or _d.get("spot_reg") or 0.0), 2)))
-            _sig = tuple(_cur)
+            _sig = tuple((_t2, round(float((_get_ah_price(_t2) or {}).get("spot_ah")
+                                           or (_get_ah_price(_t2) or {}).get("spot_reg") or 0.0), 2))
+                         for _t2 in _tks)
         except Exception:
             _sig = None
         if _sig is not None:
             if _sig == st.session_state.get("_live_sig_live"):
-                st.session_state["_app_run_ts"] = _t.time()   # unchanged → reset timer, skip rerun
+                st.session_state["_app_run_ts"] = _t.time()   # unchanged → skip the rerun
                 return
             st.session_state["_live_sig_live"] = _sig
     st.rerun(scope="app")
@@ -14419,6 +14468,9 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
             _checklist += _bchk
         # register tickers so the live heartbeat only reruns when these prices actually move
         st.session_state["_live_tickers"] = list(_by_tk)
+        # Live quote strip — a RENDERING fragment, so these numbers tick every 5s while the
+        # heavy tables below stay put. This is the part that replaces the old freeze-on-refresh.
+        _gp_live_strip()
 
         _gp_layout = st.radio(
             "Layout", ["📋 All positions (one table)", "📊 By stock"],

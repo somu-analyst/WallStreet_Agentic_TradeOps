@@ -17870,12 +17870,33 @@ def _hp_model_put_call_wall(ticker, conn, spot):
         return {"signal": "NEUTRAL", "prob": 50, "reason": str(e)[:60]}
 
 
-def high_prob_signals_engine(ticker, conn, spy_ret=0.0):
+_HP_ENGINE_CACHE = {}          # (ticker, latest_trade_date, spy_ret) -> engine dict
+
+
+def high_prob_signals_engine(ticker, conn, spy_ret=0.0, use_cache=True):
     """
     Run all 24 models (incl. VRVP, VWAP, VRP, Put/Call Wall, Left Skew, EM),
     apply adaptive weights, return calibrated ensemble signal.
     Votes: ≥6/24 agree → MEDIUM CONF; ≥9/24 → HIGH CONF.
+
+    MEMOISED per (ticker, latest trade_date) — profiled 2026-07-22 as 14.5s of a 14.7s
+    positions-card build (98.5%), of which `_implied_vol_hp` alone was 5.3s across 28,547
+    pure-Python `_bs_call_hp` evaluations. Every input is the LATEST DAILY DB SNAPSHOT
+    (`spot` is the stock_daily close, not a live quote), so the answer cannot change until
+    the next EOD capture — recomputing it on a 60s dashboard refresh was pure waste, and it
+    is the single biggest cause of the page freezing. Pass use_cache=False to force a rerun.
     """
+    tk_u = str(ticker).upper()
+    _ck = None
+    if use_cache:
+        try:
+            _ltd = conn.execute("SELECT MAX(trade_date) FROM stock_daily WHERE ticker=?",
+                                (tk_u,)).fetchone()
+            _ck = (tk_u, (_ltd[0] if _ltd else None), round(float(spy_ret or 0.0), 4))
+            if _ck in _HP_ENGINE_CACHE:
+                return _HP_ENGINE_CACHE[_ck]
+        except Exception:
+            _ck = None
     _setup_hp_tables(conn)
     _update_hp_outcomes(ticker, conn)
     weights = _get_hp_weights(ticker, conn)
@@ -18026,7 +18047,7 @@ def high_prob_signals_engine(ticker, conn, spy_ret=0.0):
     except Exception:
         log.debug("suppressed exception", exc_info=True)
 
-    return {
+    _out = {
         "ticker": ticker.upper(), "spot": round(spot, 2),
         "signal": ens_sig, "prob": round(ens_prob, 1), "conf": conf,
         "bull_v": bull_v, "bear_v": bear_v, "neut_v": neut_v,
@@ -18039,6 +18060,11 @@ def high_prob_signals_engine(ticker, conn, spy_ret=0.0):
             "poc": vrvp_m.get("poc"), "val": vrvp_m.get("val"), "vah": vrvp_m.get("vah"),
         } if vrvp_sell or vrvp_m.get("poc") else {},
     }
+    if _ck is not None:
+        if len(_HP_ENGINE_CACHE) > 400:        # bounded — universe is ~734 tickers
+            _HP_ENGINE_CACHE.clear()
+        _HP_ENGINE_CACHE[_ck] = _out
+    return _out
 
 
 async def high_prob_detail(query, ticker):

@@ -32,6 +32,29 @@ except Exception:
     _TB_ENGINE = None
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def _si_for(ticker):
+    """Short-interest read for one ticker. 6h TTL: exchanges publish SI twice a month with a
+    ~2 week lag, so anything tighter is wasted network. Returns None for ETFs (no SI feed)."""
+    if not _TB_ENGINE:
+        return None
+    try:
+        return _TB_ENGINE._si_read(_TB_ENGINE._si_fetch(ticker))
+    except Exception:
+        return None
+
+
+def _si_cells(ticker):
+    """(SI %, DTC, Shorts) display cells — '—' when the ticker has no short-interest feed."""
+    r = _si_for(ticker)
+    if not r:
+        return "—", None, "—"
+    arrow = {"BUILDING": "🔺", "COVERING": "🔻", "STABLE": "▪"}.get(r["state"], "")
+    chg = f" {r['chg'] * 100:+.0f}%" if r.get("chg") is not None else ""
+    return (f"{r['pct_float']:.1f}%", round(r["dtc"], 1),
+            f"{arrow} {r['state'].title()}{chg}")
+
+
 def _keyvault_key(salt):
     """Derive a 64-byte key, machine/user-bound (or KEYVAULT_PASSPHRASE if set)."""
     import hashlib, getpass, platform
@@ -14495,10 +14518,12 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                         _fwin = (f"{'🟢' if _fpa['pop'] >= 60 else '🟡' if _fpa['pop'] >= 40 else '🔴'} "
                                  f"{_fpa['pop']:.0f}%") if _fpa else "—"
                         _fearn, _fdiv = _next_events(_ftk)
+                        _fsi = _si_cells(_ftk)
                         _flat.append({
                             "Ticker": _ftk, "Spot": round(l["spot"], 2),
                             "Leg": f"{l['side']} {abs(l['qty']):g} sh",
                             "Exp": "—", "DTE": None, "Earnings": _fearn, "Ex-Div": _fdiv, "Money": "—",
+                        "SI %": _fsi[0], "DTC": _fsi[1], "Shorts": _fsi[2],
                             "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
                             "Prev Cls": None,
                             "Est Open": f"${l['spot']:.2f}",
@@ -14544,10 +14569,12 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     _fwin = (f"{'🟢' if _fpa['pop'] >= 60 else '🟡' if _fpa['pop'] >= 40 else '🔴'} "
                              f"{_fpa['pop']:.0f}%") if _fpa else "—"
                     _fearn, _fdiv = _next_events(_ftk)
+                    _fsi = _si_cells(_ftk)
                     _flat.append({
                         "Ticker": _ftk, "Spot": round(l["spot"], 2),
                         "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
                         "Exp": l["exp"][:10], "DTE": l["dte"], "Earnings": _fearn, "Ex-Div": _fdiv, "Money": _fm,
+                        "SI %": _fsi[0], "DTC": _fsi[1], "Shorts": _fsi[2],
                         "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
                         "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
                         "Est Open": _ftopen_disp, "Day L–H": f"${_folo:.2f}–${_fohi:.2f}",

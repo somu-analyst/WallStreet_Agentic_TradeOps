@@ -1658,8 +1658,34 @@ def _close_expired_positions() -> list:
             entry = _safe_float(tr["entry_price"], 0)
             qty   = _safe_int(tr["quantity"], 0)
             cost  = entry * abs(qty) * 100
-            pnl   = -cost          # expired worthless = full loss
-            pnl_pct = -100.0 if cost > 0 else 0.0
+
+            # Settle at INTRINSIC with a SIGNED quantity.
+            # Two bugs lived here (fixed 2026-07-22, both found by auditing CLOSED rows):
+            #  1. `pnl = -(entry * abs(qty) * 100)` booked every expiry as a full loss. For a
+            #     SHORT leg, expiring worthless is a full PROFIT -- that is the entire point of
+            #     selling premium. It mis-booked AMZN 260C short as -$960 when it made +$960,
+            #     and would have done the same to the open TSLA 365P / AMD 640C shorts.
+            #  2. It assumed "worthless" regardless of moneyness, so an ITM expiry was wrong
+            #     too. Settle off the real close at expiry, the same way _settle_recs does.
+            strike = _safe_float(tr.get("strike", 0), 0)
+            is_call = str(tr.get("option_type", "")).upper().startswith("C")
+            intrinsic, settled_on = 0.0, None
+            try:
+                _px = conn.execute(
+                    "SELECT close FROM stock_history WHERE ticker=? AND trade_date<=? "
+                    "ORDER BY trade_date DESC LIMIT 1", (tk.upper(), expd)).fetchone()
+                if _px and _px[0] and strike > 0:
+                    S = float(_px[0])
+                    intrinsic = max(0.0, S - strike) if is_call else max(0.0, strike - S)
+                    settled_on = S
+            except Exception:
+                log.warning(f"expiry settle price lookup failed for {tk} {tid}", exc_info=True)
+
+            pnl = (intrinsic - entry) * qty * 100          # qty carries the sign
+            pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+            reason = ("Expired worthless" if intrinsic <= 0 else
+                      f"Expired ITM (settled ${intrinsic:.2f}"
+                      + (f" @ ${settled_on:.2f})" if settled_on else ")"))
             days_held = 0
             try:
                 ed = datetime.strptime(str(tr.get("entry_date", ""))[:10], "%Y-%m-%d").date()
@@ -1672,14 +1698,15 @@ def _close_expired_positions() -> list:
                 SET status='CLOSED',
                     exit_date=?,
                     exit_time='16:00:00',
-                    exit_price=0,
-                    exit_reason='Expired worthless',
+                    exit_price=?,
+                    exit_reason=?,
                     pnl=?,
                     pnl_pct=?,
                     days_held=?,
                     updated_at=?
                 WHERE trade_id=?
-            """, (expd, float(round(pnl, 2)), float(round(pnl_pct, 2)),
+            """, (expd, float(round(intrinsic, 2)), reason,
+                  float(round(pnl, 2)), float(round(pnl_pct, 2)),
                   days_held, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), tid))
             conn.commit()
             closed.append((tid, tk))
@@ -11428,6 +11455,67 @@ async def recperf_cmd(update, ctx):
     finally:
         conn.close()
     await _safe_reply(update.message, msg)
+
+
+def _reopen_trade(conn, trade_id):
+    """Undo a close: put the row back to OPEN and clear every exit field.
+
+    Mirrors the dashboard's Re-open button so an accidental close is reversible from
+    wherever it happened (user 2026-07-22 closed AMD 640/680C by mistake). Leaves an audit
+    note on the row rather than pretending the close never occurred.
+    """
+    row = conn.execute("SELECT ticker, option_type, strike, expiry, status FROM trades "
+                       "WHERE trade_id=?", (trade_id,)).fetchone()
+    if not row:
+        return None, f"No trade with id {trade_id}."
+    tk, ot, k, exp, st = row
+    label = (f"{tk} {str(ot).upper()} ${float(k or 0):g} exp {str(exp)[:10]}"
+             if str(ot).upper() != "STOCK" else f"{tk} STOCK")
+    if str(st).upper() == "OPEN":
+        return None, f"{label} (id {trade_id}) is already OPEN."
+    conn.execute(
+        "UPDATE trades SET status='OPEN', exit_date=NULL, exit_time=NULL, exit_price=NULL, "
+        "exit_reason=NULL, pnl=NULL, pnl_pct=NULL, days_held=NULL, updated_at=?, "
+        "notes=COALESCE(notes,'')||? WHERE trade_id=?",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+         f" | reopened {datetime.now().strftime('%Y-%m-%d')}", trade_id))
+    conn.commit()
+    return label, f"↩️ Reopened <b>{label}</b> (id {trade_id})."
+
+
+async def reopen_cmd(update, ctx):
+    """/reopen [trade_id] — undo an accidental close. No id lists what can be reopened."""
+    args = list(getattr(ctx, "args", []) or [])
+    conn = get_conn()
+    try:
+        if not args:
+            rows = conn.execute(
+                "SELECT trade_id, ticker, option_type, strike, expiry, exit_date, pnl "
+                "FROM trades WHERE status='CLOSED' ORDER BY COALESCE(exit_date,'') DESC, "
+                "trade_id DESC LIMIT 12").fetchall()
+            if not rows:
+                await _safe_reply(update.message, "No closed positions to reopen.")
+                return
+            trs = [(str(t), f"{tk} {str(ot).upper()[:1]}{float(k or 0):g}"
+                    if str(ot).upper() != "STOCK" else f"{tk} STK",
+                    str(xd or "")[5:10], f"{(p or 0):+,.0f}") for t, tk, ot, k, _e, xd, p in rows]
+            await _safe_reply(update.message, _report(
+                "↩️ REOPEN — recently closed", ("Id", "Leg", "Exit", "P&L"), trs,
+                right_cols={3}, legend="Send /reopen <Id> to restore one",
+                notes="Reopening clears the exit price and P&L for that leg."))
+            return
+        try:
+            tid = int(str(args[0]).strip())
+        except ValueError:
+            await _safe_reply(update.message, "Usage: <code>/reopen 76</code>")
+            return
+        label, msg = _reopen_trade(conn, tid)
+        await _safe_reply(update.message, msg)
+    except Exception as e:
+        log.warning(f"reopen_cmd failed: {e}", exc_info=True)
+        await _safe_reply(update.message, "⚠️ Reopen failed — check the id with /reopen.")
+    finally:
+        conn.close()
 
 
 def _spread_summary(rows):
@@ -31270,6 +31358,7 @@ def main():
     app.add_handler(CommandHandler("capflow", capflow_cmd))    # per-ticker capital-flow score
     app.add_handler(CommandHandler("debate", debate_cmd))      # multi-agent debate verdict
     app.add_handler(CommandHandler("recperf", recperf_cmd))    # recommendation track record
+    app.add_handler(CommandHandler("reopen", reopen_cmd))      # undo an accidental close
     app.add_handler(CommandHandler("plan", plan_command))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("terminal", terminal_command))

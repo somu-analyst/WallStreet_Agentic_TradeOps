@@ -13973,21 +13973,41 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                         _cl_px = _c1.number_input("Exit premium", min_value=0.0, step=0.05, key=f"cl_px_{_tid}")
                         _cl_date = _c2.date_input("Exit date", value=datetime.now().date(), key=f"cl_date_{_tid}")
                         _cl_reason = _c3.text_input("Exit reason", value="manual (planner)", key=f"cl_rsn_{_tid}")
+                        # A $0 exit must be DELIBERATE. The old code closed on `if _cl_px > 0`
+                        # else wrote NULL price AND NULL pnl — so clicking Close with the
+                        # premium left at its default 0 silently destroyed the realised P&L
+                        # (trade 77, 2026-07-22). Refuse instead, unless worthless is ticked.
+                        _cl_zero = _c1.checkbox("Exit at $0 (expired/worthless)", key=f"cl_zero_{_tid}")
                         if st.button("✖️ Close position", key=f"cl_btn_{_tid}"):
-                            try:
-                                _pnl = None
-                                if _cl_px > 0:
-                                    _pnl = (float(_cl_px) - _sv("entry_price")) * _cur_qty * 100
-                                _gp_conn.execute(
-                                    "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, exit_reason=?, "
-                                    "pnl=?, updated_at=? WHERE trade_id=?",
-                                    ((float(_cl_px) or None), _cl_date.strftime("%Y-%m-%d"),
-                                     _cl_reason or "manual", _pnl, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _tid))
-                                _gp_conn.commit()
-                                st.success(f"Closed (P&L ${_pnl:,.0f})." if _pnl is not None else "Closed.")
-                                st.cache_data.clear(); st.rerun()
-                            except Exception as _e:
-                                st.error(f"Could not close: {_e}")
+                            if _cl_px <= 0 and not _cl_zero:
+                                st.error("Enter an exit premium, or tick **Exit at $0** to confirm "
+                                         "it closed worthless. Refusing to close without a price.")
+                            else:
+                                try:
+                                    _px0  = float(_cl_px)
+                                    _ent  = _sv("entry_price") or 0.0
+                                    # _cur_qty is SIGNED: a short bought back cheaper is a PROFIT.
+                                    _pnl  = (_px0 - _ent) * _cur_qty * 100
+                                    _cost = abs(_ent * _cur_qty * 100)
+                                    _pnlp = (_pnl / _cost * 100) if _cost > 0 else 0.0
+                                    _dh = None
+                                    try:
+                                        _ed0 = str(_sv("entry_date"))[:10]   # DB dates are ISO
+                                        _dh = (_cl_date - datetime.strptime(_ed0, "%Y-%m-%d").date()).days
+                                    except Exception:
+                                        _dh = None
+                                    _gp_conn.execute(
+                                        "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, "
+                                        "exit_reason=?, pnl=?, pnl_pct=?, days_held=?, updated_at=? "
+                                        "WHERE trade_id=?",
+                                        (_px0, _cl_date.strftime("%Y-%m-%d"), _cl_reason or "manual",
+                                         round(_pnl, 2), round(_pnlp, 2), _dh,
+                                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _tid))
+                                    _gp_conn.commit()
+                                    st.success(f"Closed at ${_px0:.2f} · P&L ${_pnl:,.0f} ({_pnlp:+.1f}%).")
+                                    st.cache_data.clear(); st.rerun()
+                                except Exception as _e:
+                                    st.error(f"Could not close: {_e}")
                     else:
                         if st.button("↩️ Re-open position", key=f"reopen_{_tid}"):
                             try:

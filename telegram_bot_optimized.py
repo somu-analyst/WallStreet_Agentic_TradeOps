@@ -11496,6 +11496,106 @@ def _spread_summary(rows):
     return head + "\n\n" + "\n\n".join(blocks)
 
 
+def _atm_iv_term(conn, tk, spot):
+    """{expiry_iso: ATM IV} for `tk` from the latest OpenBB capture — the IV term structure.
+
+    Used to size event premium empirically instead of guessing a haircut: an expiry that
+    straddles earnings prices the event's whole move into a short window, so its ATM IV sits
+    above expiries far enough out that the same event is a small share of total variance.
+    """
+    out = {}
+    if not spot or spot <= 0:
+        return out
+    try:
+        rows = conn.execute(
+            "SELECT expiry_date, strike, iv_Call, iv_Put FROM options_openbb "
+            "WHERE ticker=? AND trade_date=(SELECT MAX(trade_date) FROM options_openbb "
+            "WHERE ticker=?)", (tk, tk)).fetchall()
+    except Exception:
+        log.debug("atm_iv_term query failed", exc_info=True)
+        return out
+    best = {}
+    for exp, k, ivc, ivp in rows:
+        try:
+            k = float(k or 0)
+            if k <= 0:
+                continue
+            ivs = [float(x) for x in (ivc, ivp) if x and float(x) > 0]
+            if not ivs:
+                continue
+            d = abs(k - spot)
+            e = _exp_iso(exp)
+            if e not in best or d < best[e][0]:
+                best[e] = (d, sum(ivs) / len(ivs))
+        except (TypeError, ValueError):
+            continue
+    return {e: v[1] for e, v in best.items()}
+
+
+def _post_event_leg(conn, tk, strike, typ, expiry_s, spot, iv_now, dte, ev):
+    """Re-price ONE leg for the day after its next event — the IV-crush projection.
+
+    User ask 2026-07-22: "some stock like google and AMD have more premium, so i want what
+    be price after event". This isolates the VOL component only: spot fixed AND time fixed,
+    with just the event premium removed from IV. Deliberately NOT the calendar price on the
+    day after the event -- on a 9-DTE leg that number is dominated by seven days of theta and
+    tells you nothing about event risk (first cut did exactly that and printed a -100% leg).
+
+    Crush size comes from the ATM IV term structure as a RATIO, not a level: front-expiry ATM
+    IV vs the median ATM IV of expiries >=30d past the event. Applying the ratio to the leg's
+    own IV preserves skew -- comparing an OTM leg's IV directly against ATM IV is apples to
+    oranges (AMD 640C at spot 555 carries 86% from skew, not from earnings). Falls back to the
+    documented crush bands (EARNINGS 20-40%, FOMC 10-20% -> 0.70x/0.85x, matching the premarket
+    model) only when the term structure is unusable.
+
+    Returns None when there is no event before expiry, or the move is too small to be worth a
+    line (<1% and <$0.05) -- printing "IV 38%->38% +0%" is noise.
+    """
+    if not (ev and ev.get("has_event")) or not iv_now or iv_now <= 0:
+        return None
+    if not spot or spot <= 0 or not strike or strike <= 0 or dte is None or dte <= 0:
+        return None
+    ev_days = ev.get("event_days")
+    if ev_days is None or ev_days > dte:        # event lands after expiry -> no crush to model
+        return None
+
+    etype = ev.get("event_type") or "EVENT"
+    term = _atm_iv_term(conn, tk, spot)
+    ratio, src = None, "band"
+    try:
+        front_atm = term.get(_exp_iso(expiry_s[:10]))
+        base = [iv for e, iv in term.items()
+                if (datetime.strptime(e, "%Y-%m-%d").date() - _et_now().date()).days
+                >= (ev_days + 30)]
+        if front_atm and front_atm > 0 and base:
+            base_atm = sorted(base)[len(base) // 2]
+            # ratio >= 1 means THIS expiry carries no event premium (GOOG Aug-28 sits at the
+            # floor of an 83%->37% earnings curve). That is a real answer: no crush. Falling
+            # back to a band here would invent a 30% haircut the market is not pricing.
+            ratio, src = min(base_atm / front_atm, 1.0), "term"
+    except Exception:
+        log.debug("term-structure baseline failed", exc_info=True)
+    if ratio is None:                            # term structure genuinely unavailable
+        ratio = 0.70 if etype == "EARNINGS" else 0.85
+    iv_post = max(iv_now * ratio, 0.01)
+
+    T_now = dte / 365.0                          # time HELD FIXED -- vol effect only
+    try:
+        px_now  = bs_price(spot, strike, T_now, R, iv_now,  opt=typ)
+        px_post = bs_price(spot, strike, T_now, R, iv_post, opt=typ)
+    except Exception:
+        log.warning(f"post-event reprice FAILED {tk} {strike}{typ[:1]}", exc_info=True)
+        return None
+    if px_now is None or px_post is None or px_now <= 0:
+        return None
+    d = px_post - px_now
+    if abs(d) < 0.05 and abs(d / px_now) < 0.01:
+        return None                              # immaterial -- do not clutter the card
+    return {"px": float(px_post), "px_now": float(px_now), "iv_now": float(iv_now),
+            "iv_post": float(iv_post), "etype": etype,
+            "edate": ev.get("event_date_str") or "", "edays": int(ev_days), "src": src}
+
+
 def _positions_card_parts(trades, now_s, today):
     """Build the POSITIONS health card (table + advice + urgent + HP engine) —
     SHARED by the 10-min position_monitor push and the menu positions_view
@@ -11531,6 +11631,8 @@ def _positions_card_parts(trades, now_s, today):
     _pc_conn   = get_conn()          # shared conn for fast BB leg marks
     _ah_cache  = {}                  # per-ticker after-hours spot (avoid repeat fast_info)
     _ah_any    = False               # did any leg use an extended-hours mark?
+    _ev_cache  = {}                  # per-ticker event risk (yfinance calendar — cache it)
+    _post_ev   = {}                  # (tk,otype,strike,expiry) -> post-event reprice dict
 
     for _, tr in trades.iterrows():
         tid      = int(tr.get("trade_id", 0))
@@ -11560,6 +11662,7 @@ def _positions_card_parts(trades, now_s, today):
         cur_px = entry
         prob   = None
         stock_px = None
+        iv_leg = None                # MUST pre-exist: _bb_quote can raise before it is bound
         try:
             typ = "call" if otype == "CALL" else "put"
             if tk not in _ah_cache:
@@ -11598,6 +11701,20 @@ def _positions_card_parts(trades, now_s, today):
             # P&L, so it must be loud.
             log.warning(f"positions leg re-price FAILED for {tk} {strike}{otype[:1]} "
                         f"— mark falls back to stale capture", exc_info=True)
+
+        # Post-event (IV-crush) reprice — what the leg is worth once the event premium is gone,
+        # spot held fixed. Priced off the SAME iv_leg the mark above uses, so the two numbers
+        # are directly comparable.
+        try:
+            if tk not in _ev_cache:
+                _ev_cache[tk] = _get_event_risk(tk)
+            _pe = _post_event_leg(_pc_conn, tk, strike,
+                                  "call" if otype == "CALL" else "put",
+                                  expiry_s, stock_px, iv_leg, dte, _ev_cache[tk])
+            if _pe:
+                _post_ev[(tk, otype, strike, expiry_s)] = _pe
+        except Exception:
+            log.warning(f"post-event calc failed for {tk} {strike}{otype[:1]}", exc_info=True)
 
         # Rough moneyness-based probability if delta unavailable
         if prob is None and stock_px and strike:
@@ -11724,11 +11841,32 @@ def _positions_card_parts(trades, now_s, today):
 
         # Card carries the FULL per-leg detail: bought price, current mark, P&L $ and %,
         # win prob, OI (user 2026-07-19: table 'only shows P&L, not bought/last price').
+        # Post-event line: only when an event actually sits before expiry. Shows the IV
+        # collapse and what it does to THIS leg — a short leg gains what a long leg loses.
+        _pe = _post_ev.get((tk, otype, strike, expiry_s))
+        _crush_line = ""
+        if _pe:
+            # Apply the MODELLED vol delta to the real mark, so the projection stays anchored
+            # to the price actually quoted rather than drifting to a pure model number.
+            _d_px  = _pe["px"] - _pe["px_now"]
+            _proj  = max(cur_px + _d_px, 0.0)
+            _d_pnl = _d_px * (qty or 0) * 100
+            _pct   = (_d_px / cur_px * 100) if cur_px > 0 else 0
+            _em_c  = "🟢" if _d_pnl >= 0 else "🔴"
+            _appr  = "~" if _pe["src"] == "band" else ""
+            _crush_line = (
+                f"\n   {_em_c} If {'Earnings' if _pe['etype'] == 'EARNINGS' else _pe['etype']} "
+                f"premium gone ({_pe['edate']}, "
+                f"{_pe['edays']}d): IV {_pe['iv_now']*100:.0f}%→{_appr}{_pe['iv_post']*100:.0f}%"
+                f" · leg <b>${_proj:.2f}</b> ({_pct:+.0f}%) · P&L <b>{_d_pnl:+,.0f}</b>"
+            )
+
         html_cards.append(
             f"{a_em} <b>{_side_w} {abs(int(qty or 0))}x {tk} {otype} ${int(strike)}</b> · "
             f"exp {expiry_s or '?'} ({dte_disp}){urg_flag}\n"
             f"   Bought <b>${entry:.2f}</b> → Now <b>${cur_px:.2f}</b> · "
-            f"P&L <b>{pnl:+,.0f}</b> ({pnl_pct:+.0f}%) · win {prob_s} · OI {oi_disp}\n"
+            f"P&L <b>{pnl:+,.0f}</b> ({pnl_pct:+.0f}%) · win {prob_s} · OI {oi_disp}"
+            f"{_crush_line}\n"
             f"   <b>{action}</b> — {advice}"
         )
 

@@ -55,6 +55,18 @@ Options-trading edge system: Telegram bot + dashboard + our own capture-forward 
 - [ ] (gated: ~1 mo of OpenBB bid/ask captures) Dispersion (#14) + a skew *backtest* on the OpenBB `skew_snapshot` panel (does high 25Δ skew / put-flow predict fwd downside? need ~15-20 dates)
 - [x] Catalyst Radar — `/catalysts [TICKERS]` + `catalyst_alert` (8:20 AM ET, ≤3d): earnings (per-ticker yfinance) + macro (FOMC in-code · CPI/PCE hardcoded 2026 · Jobs/NFP computed first-Friday) on the open book. The one intraday-ish nudge so EOD signals aren't blindsided by scheduled events. `_macro_events/_upcoming_catalysts/_fmt_catalysts`.
 
+## PENDING USER DECISIONS (carried 2026-07-21 → open)
+- [ ] **Vol analyst sign flip** (`_agent_vol`). Evidence 2026-07-22: rank-IC of VIX level vs SPY fwd-10d is POSITIVE in **every regime 1990–2026** (n=9,194) — 1990s +0.092, dotcom +0.271, 2003-07 +0.106, **GFC +0.026**, 2009-19 +0.208, 2020-26 +0.159. Full-sample elevated(≥25) **+0.77%** vs calm(≤16) **+0.25%**. The "buy-fear breaks in 2008" objection FAILED the test: in the GFC crash elevated-VIX entries lost (−2.01%, worst −25.88%) but calm-side entries lost MORE OFTEN (−1.63%, 69% neg vs 56%). Current code scores elevated VIX bearish = backwards. **Recommendation: flip AND dampen** (edge is real but modest). Awaiting user.
+- [ ] **`/debate` weight rebalance.** Flow = highest weight (1.2) w/ zero edge (t=−0.07); Technical t=+4.28 at weight 1.0. Rebalancing on one backtest risks overfitting. Awaiting user.
+- [ ] **`_lib` orphan triage** (~31 dead public fns; `options_tracker` 8/9 dead incl. whole `enter_trade`/`exit_trade`/`check_exit_conditions` lifecycle). Wire up or delete? Awaiting user.
+
+## Kronos foundation model (user ask 2026-07-22 — RESEARCHED, not built)
+- [ ] Evaluate **Kronos** (`github.com/shiyu-coder/Kronos`, MIT, AAAI 2026) — first open-source foundation model for K-lines (OHLCV), 45 exchanges. Family: mini 4.1M/2048ctx · small 24.7M/512 · base 102.3M/512 · large 499.2M (weights NOT public). Probabilistic: `sample_count` paths via temperature/top_p.
+  - **Fit:** `stock_history` (multi-year OHLCV, 734 tickers) is already exactly the input format. Path ensembles map onto POP / expected-move / 1σ ranges — currently computed from a single ATM-backed IV under a lognormal assumption (`_hiprob_scan`).
+  - **Machine reality (verified 2026-07-22):** NO GPU, no torch/transformers installed, Python 3.13.14, 12 cores/16.6GB RAM, 24GB disk free. CPU-only ⇒ favour **mini/small**; base is feasible but slow; large unavailable anyway.
+  - **BLOCKER for validation — pretraining leakage.** Kronos was pretrained on historical market data through an unpublished cutoff. Backtesting it on `stock_history` 2016–2026 is CONTAMINATED and will manufacture a fake edge. Any test must be strictly out-of-sample vs that cutoff (or forward-tested live). This is the single biggest trap.
+  - Note repo's own caveat: its backtest demo is "not a production-ready quantitative trading system"; no accuracy benchmarks published. Qlib is needed only for their fine-tune demo — **inference does not require Qlib** (which stays out of scope).
+
 ## Constraints / decisions locked in
 - CLAUDE.md rules win: edit `telegram_bot_optimized.py`/`dashboard.py` directly (no patch scripts), single-engine (dashboard imports the bot), dates now ISO YYYY-MM-DD everywhere (substr sort trick retired 07-14-2026), secrets never committed/printed, `US_data.db` never written by NYSE_OpenBB.py.
 - "Tested" = validated vs DB history (hit-rate vs baseline), not "it runs".

@@ -134,7 +134,7 @@ async def group_stock_detail(query, ticker):
                                  callback_data=f"exitmc|{ticker}|{ot.lower()}|{st}|{entry}|{exp}|{qty}")
         ]
 
-        par.append(
+        parts.append(
             f"{em} <b>L{leg_idx+1}: {side_label} {ot} ${st:.0f}  exp {exp}  ×{abs_qty}</b>  DTE:{dte}\n"
             f"   {em} P&L <b>{pnl_s}</b>\n"
          f"   📌 {price_context}\n"
@@ -4407,9 +4407,6 @@ def _parent_child_payoff(parent_trade, child_cfg):
     total = p_pay + c_pay
     be = _breakeven_points(spots, total)
     return spots, total, be
-
-
-    return ok, msg
 
 
 # ═══════════════════════════════════════════════════════════
@@ -18234,7 +18231,7 @@ def _ticker_writeup(tk, conn, spot=0.0, call_chg=0.0, put_chg=0.0, pcr=1.0,
                 pcr = _po / _co if _co > 0 else 1.0
                 sig_lbl, _ = _oi_signal_light(call_chg, put_chg, pcr)
         if levels is None:
-            levels = _oi_key_levels(tk, conn, latest_date) or {}
+            levels = _oi_key_levels(tk, conn, latest_date, spot=spot) or {}
         cw = float(levels.get("call_wall") or 0)
         pw = float(levels.get("put_wall")  or 0)
         mp = float(levels.get("max_pain")  or 0)
@@ -18384,6 +18381,7 @@ async def signal_ticker_detail(query, ticker):
 
     # Live price line (OI itself is EOD; the PRICE should be live during market hours)
     _px_line = ""
+    _pxv = 0.0            # must exist even if the price lookup below fails
     try:
         _dbc = pd.read_sql("SELECT close FROM stock_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT 1",
                            conn, params=(tk,))
@@ -18410,7 +18408,7 @@ async def signal_ticker_detail(query, ticker):
 
     # OI walls
     try:
-        _kl = _oi_key_levels(tk, conn, latest_date, spot=spot)
+        _kl = _oi_key_levels(tk, conn, latest_date, spot=_pxv)
         if _kl:
             _cws = _kl.get("call_wall",0); _pws = _kl.get("put_wall",0); _mps = _kl.get("max_pain",0)
             _gws = " / ".join(f"${g:.0f}" for g in _kl.get("gamma_walls",[])[:3]) or "—"
@@ -20527,7 +20525,7 @@ async def recommend_engine(query):
 
 async def smart_money_hub_report(query):
     # ── single unified report body starts here ──
-    conn = get_db_connection()
+    conn = get_conn()
     _loading = await query.message.reply_text("⏳ Building Smart Money report…")
     try:
         today = datetime.now(timezone.utc).replace(tzinfo=None)

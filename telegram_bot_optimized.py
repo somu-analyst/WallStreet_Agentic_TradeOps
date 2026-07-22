@@ -11060,6 +11060,9 @@ async def market_analytics_report(query):
     await _safe_reply(query.message, "\n".join(parts), reply_markup=kb)
 
 
+_LAST_OFFHOURS_PUSH = 0.0      # epoch of the last off-hours position push (15-min throttle)
+
+
 async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
     """10-min position table — ALL open positions every cycle during market hours."""
     now_utc  = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -11071,11 +11074,20 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
     # move most on earnings nights. Now runs through the after-hours session (to 20:00 ET),
     # matching the 16:00-20:00 window _get_spot_with_ah uses for post-market prices.
     _now_et = _et_now()
-    if _now_et.weekday() >= 5:
+    if _now_et.weekday() >= 5:                      # markets shut all weekend — nothing moves
         return
     hour_min = _now_et.hour * 60 + _now_et.minute
-    if not (9 * 60 + 30 <= hour_min <= 20 * 60):    # 9:30 AM – 8:00 PM ET (RTH + after-hours)
+    # Cadence is throttled HERE, not by the job interval, so one code path serves both
+    # sessions: RTH every 10 min (unchanged), off-hours every 15 min straight through to the
+    # next open (user ask 2026-07-22). The job ticks every 5 min so both periods land exactly
+    # — at the old 10-min tick a 15-min throttle actually fired every 20 min. 30s of slack
+    # absorbs tick jitter so a period is never missed by a second or two.
+    _rth = (9 * 60 + 30 <= hour_min < 16 * 60)      # 9:30 AM - 4:00 PM ET
+    global _LAST_OFFHOURS_PUSH
+    _period = (10 if _rth else 15) * 60 - 30
+    if time.time() - _LAST_OFFHOURS_PUSH < _period:
         return
+    _LAST_OFFHOURS_PUSH = time.time()
 
     _close_expired_positions()   # auto-close anything past expiry before showing
     _, chat_id = load_creds()
@@ -31670,7 +31682,7 @@ def main():
         job_queue.run_repeating(intraday_alert, interval=900, first=30)
         log.info("Scheduled 15-min intraday OI alert")
         # 10-min position monitor (fires during market hours; deduplicates via bot_data state)
-        job_queue.run_repeating(position_monitor, interval=600, first=60)
+        job_queue.run_repeating(position_monitor, interval=300, first=60)   # 5-min tick; cadence throttled inside (RTH 10min, off-hours 15min)
         job_queue.run_repeating(position_alerts, interval=300, first=90)
         log.info("Scheduled 5-min smart position alerts")
         log.info("Scheduled 10-min position health monitor")

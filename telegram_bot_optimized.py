@@ -11731,6 +11731,155 @@ def _atm_iv_term(conn, tk, spot):
 _SI_CACHE = {}                 # ticker -> (fetched_ts, dict) — .info is slow, SI moves 2x/month
 
 
+def _tx_ensure(conn):
+    """Earnings-call transcripts. AlphaVantage's EARNINGS_CALL_TRANSCRIPT works on the key we
+    ALREADY hold (verified 2026-07-23: TSLA 2026Q1 = 61 segments / 38k chars / 12 speakers),
+    so no new subscription is needed. The free tier is rate-limited (~25 req/day), which is
+    exactly why these are stored: fetch a quarter once, reuse it forever."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS earnings_transcripts(
+        ticker TEXT, quarter TEXT, n_segments INTEGER, n_chars INTEGER,
+        highlights TEXT, full_text TEXT, captured_at TEXT,
+        PRIMARY KEY (ticker, quarter))""")
+    conn.commit()
+
+
+_TX_GUIDE_KW = ("guidance", "outlook", "we expect", "we anticipate", "next quarter",
+                "full year", "full-year", "margin", "capex", "capital expenditure",
+                "demand", "headwind", "tailwind", "we forecast", "target")
+
+
+def _tx_highlights(segments, limit=6):
+    """Pull the sentences that actually move a stock: forward-looking statements from
+    management. A 40k-char transcript cannot go in a Telegram card, and the market does not
+    trade the pleasantries — it trades guidance. Operator/analyst chatter is skipped."""
+    out = []
+    for seg in segments or []:
+        who = str(seg.get("speaker") or "")
+        title = str(seg.get("title") or "").lower()
+        # Skip the operator and Investor-Relations hosts: they read the disclaimer and relay
+        # analyst questions, so they match the keywords without ever saying anything the
+        # market trades on ("The next question is: what milestones are you targeting...").
+        if who.lower().startswith("operator") or "investor relations" in title:
+            continue
+        body = str(seg.get("content") or "")
+        for sent in re.split(r"(?<=[.!?])\s+", body):
+            s = sent.strip()
+            if not (40 <= len(s) <= 240):
+                continue
+            if s.endswith("?") or s.lower().startswith(("the next question",
+                                                        "and what", "what are", "how ")):
+                continue                    # a question is not guidance
+            if "forward-looking statement" in s.lower():
+                continue                    # boilerplate disclaimer
+            if any(k in s.lower() for k in _TX_GUIDE_KW):
+                out.append(f"{who.split()[0] if who else '?'}: {s}")
+                break                       # one per segment keeps speakers varied
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _tx_fetch(symbol, quarter):
+    """(segments, raw) for one ticker-quarter from AlphaVantage; ([], None) if unavailable."""
+    import urllib.request, json as _json
+    key = os.environ.get("ALPHAVANTAGE_KEY") or os.environ.get("ALPHA_VANTAGE_KEY")
+    if not key:
+        return [], None
+    try:
+        u = ("https://www.alphavantage.co/query?function=EARNINGS_CALL_TRANSCRIPT"
+             f"&symbol={symbol}&quarter={quarter}&apikey={key}")
+        with urllib.request.urlopen(u, timeout=30) as r:
+            d = _json.loads(r.read().decode())
+        # AlphaVantage answers a throttle with 200 + a Note/Information body and NO
+        # transcript key. Without this the caller cannot tell "rate limited" from "no such
+        # call" and silently stores nothing (observed 2026-07-23: a 9-call burst returned
+        # zero transcripts while the same call in isolation returned 61 segments).
+        if isinstance(d, dict) and not d.get("transcript"):
+            msg = d.get("Note") or d.get("Information") or d.get("Error Message")
+            if msg:
+                log.warning(f"AlphaVantage throttled/err on {symbol} {quarter}: {str(msg)[:120]}")
+                return [], {"_throttled": True}
+        return (d.get("transcript") or []), d
+    except Exception:
+        log.warning(f"transcript fetch {symbol} {quarter} failed", exc_info=True)
+        return [], None
+
+
+def _tx_capture(conn, tickers, quarters=None, budget=6):
+    """Store any missing ticker-quarter transcripts, POSITION TICKERS FIRST.
+
+    AlphaVantage free tier is ~25 requests/day and ~5/min, so this runs in tranches
+    (user 2026-07-23): `tickers` is consumed in order — callers pass open-position names
+    first — and `budget` caps fetches per run so one sweep can never burn the day's quota.
+    Quarters already stored are skipped, so each daily run naturally advances to new ground.
+    """
+    _tx_ensure(conn)
+    if not quarters:
+        _n = _et_now()
+        _q = (_n.month - 1) // 3 + 1
+        quarters = [f"{_n.year}Q{_q}"]
+        for _ in range(2):                          # plus the two prior quarters
+            _q -= 1
+            _y = _n.year
+            if _q == 0:
+                _q, _y = 4, _n.year - 1
+            quarters.append(f"{_y}Q{_q}")
+    n = fetched = 0
+    for tk in dict.fromkeys(str(t).upper() for t in tickers if t):
+        for q in quarters:
+            if fetched >= budget:
+                log.info(f"_tx_capture: budget {budget} reached — resuming next run")
+                conn.commit()
+                return n
+            if conn.execute("SELECT 1 FROM earnings_transcripts WHERE ticker=? AND quarter=?",
+                            (tk, q)).fetchone():
+                continue
+            fetched += 1
+            segs, _raw = _tx_fetch(tk, q)
+            if not segs:
+                if isinstance(_raw, dict) and _raw.get("_throttled"):
+                    time.sleep(15)          # free tier is ~5 req/min — back off, keep the quota
+                continue
+            time.sleep(13)                  # pace under the 5-req/min free-tier ceiling
+            txt = " ".join(str(s.get("content") or "") for s in segs)
+            hl = _tx_highlights(segs)
+            conn.execute(
+                "INSERT OR REPLACE INTO earnings_transcripts "
+                "(ticker,quarter,n_segments,n_chars,highlights,full_text,captured_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (tk, q, len(segs), len(txt), "\n".join(hl), txt,
+                 datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            n += 1
+    conn.commit()
+    return n
+
+
+def _tx_latest(conn, tk):
+    """(quarter, highlights) for the most recent stored transcript, or None."""
+    _tx_ensure(conn)
+    r = conn.execute("SELECT quarter, highlights FROM earnings_transcripts "
+                     "WHERE ticker=? ORDER BY quarter DESC LIMIT 1", (tk,)).fetchone()
+    return r if r and r[1] else None
+
+
+async def record_transcripts(context=None):
+    """Daily transcript capture for the open book (quota-friendly: skips stored quarters)."""
+    try:
+        conn = get_conn()
+        # tranche order: open positions first, index proxies after — if the budget runs out
+        # it runs out on names we do not hold.
+        _pos = [r[0] for r in conn.execute(
+            "SELECT DISTINCT UPPER(ticker) FROM trades WHERE status='OPEN' "
+            "AND UPPER(option_type)<>'STOCK'").fetchall()]
+        n = _tx_capture(conn, _pos + [t for t in _hiprob_default_tickers() if t not in _pos])
+        conn.close()
+        log.info(f"record_transcripts: stored {n} new transcripts")
+        return n
+    except Exception as e:
+        log.warning(f"record_transcripts failed: {e}", exc_info=True)
+        return 0
+
+
 def _earn_ensure(conn):
     """Earnings expectations vs actuals. yfinance carries the consensus EPS estimate, the
     reported EPS and the surprise % per quarter — the single most explanatory number for a
@@ -19699,6 +19848,37 @@ async def signal_ticker_detail(query, ticker):
             conn, params=(tk,))
         if not _sd.empty: spot = float(_sd["close"].iloc[0])
     except Exception: pass
+
+    # ── Earnings (est vs actual) + call highlights + filtered news for THIS ticker ──
+    # Same context the positions card carries: the print explains the move, the guidance
+    # explains the print, and the news explains how the street read it.
+    try:
+        _l, _nx = _earn_context(conn, tk)
+        _ebits = []
+        if _l and _l[2] is not None:
+            _v = "BEAT" if (_l[3] or 0) > 0 else ("MISS" if (_l[3] or 0) < 0 else "INLINE")
+            _ebits.append(f"{str(_l[0])[5:]} EPS <b>{_l[2]:.2f}</b> vs {_l[1]:.2f} est "
+                          f"(<b>{_l[3]:+.0f}% {_v}</b>)" if _l[1] is not None
+                          else f"{str(_l[0])[5:]} EPS {_l[2]:.2f}")
+        if _nx and _nx[1] is not None:
+            _ebits.append(f"next {str(_nx[0])[5:]} est {_nx[1]:.2f}")
+        if _ebits:
+            parts.append("\n<b>📊 Earnings:</b> " + " · ".join(_ebits))
+        _tx = _tx_latest(conn, tk)
+        if _tx:
+            _hl = [h for h in str(_tx[1]).split("\n") if h.strip()][:3]
+            if _hl:
+                parts.append(f"\n<b>🎙 Call highlights ({_tx[0]}):</b>\n"
+                             + "\n".join(f"• <i>{h[:150]}</i>" for h in _hl))
+    except Exception:
+        log.debug("ticker earnings/transcript block failed", exc_info=True)
+    try:
+        _nw = _position_news([tk], per_tk=3)
+        if _nw.get(tk):
+            parts.append("\n<b>📰 News:</b>\n"
+                         + "\n".join(f"• {h[:120]}" for h in _nw[tk]))
+    except Exception:
+        log.debug("ticker news block failed", exc_info=True)
 
     bd = _oi_strike_breakdown(tk, conn, spot, latest_date)
     if bd: parts.append(f"\n<b>🔍 Strike Activity:</b>\n{bd}")
@@ -32186,6 +32366,7 @@ def main():
         job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs ~4:30pm ET
         job_queue.run_daily(record_short_interest, time=dt_time(21, 40, 0))  # SI snapshot ~4:40pm ET
         job_queue.run_daily(record_earnings_history, time=dt_time(21, 45, 0))  # est/actual EPS
+        job_queue.run_daily(record_transcripts, time=dt_time(22, 5, 0))     # call transcripts (tranched)
         job_queue.run_once(riskoff_alert, when=25)                    # Risk-Off Radar readout ~on startup
         job_queue.run_daily(riskoff_alert, time=dt_time(21, 20, 0), data={"gate": True})  # post-close ~4:20 PM ET, only if caution+
         job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # ~4:35 PM ET — silently log anti-bubble baskets for tracking

@@ -12035,6 +12035,26 @@ def _positions_card_parts(trades, now_s, today):
     _ev_cache  = {}                  # per-ticker event risk (yfinance calendar — cache it)
     _post_ev   = {}                  # (tk,otype,strike,expiry) -> post-event reprice dict
 
+    # Which legs belong to a DEFINED-RISK vertical (same ticker+type+expiry with both a long
+    # and a short leg). Their risk is the spread, not the leg -- so the per-leg action logic
+    # must NOT emit a solo "EXIT NOW / cut loss" that contradicts the spread roll-up. Grouped
+    # here, up front, so the guard is available inside the leg loop below.
+    _spread_keys = set()
+    try:
+        _grp = {}
+        for _, _t in trades.iterrows():
+            _ot = str(_t.get("option_type", "")).upper()
+            if _ot == "STOCK":
+                continue
+            _k = (str(_t.get("ticker", "")).upper(), _ot.startswith("C"),
+                  str(_t.get("expiry", ""))[:10])
+            _grp.setdefault(_k, []).append(int(_t.get("quantity", 0) or 0))
+        for _k, _qs in _grp.items():
+            if any(q > 0 for q in _qs) and any(q < 0 for q in _qs):
+                _spread_keys.add(_k)
+    except Exception:
+        log.debug("spread-key precompute failed", exc_info=True)
+
     for _, tr in trades.iterrows():
         tid      = int(tr.get("trade_id", 0))
         tk       = str(tr.get("ticker", "?")).upper()
@@ -12139,7 +12159,27 @@ def _positions_card_parts(trades, now_s, today):
         oi_align = not ((otype == "CALL" and oi_s == "BEA") or (otype == "PUT" and oi_s == "BUL"))
 
         # ── Action logic ──────────────────────────────────────────
-        if dte is not None and dte <= 2:
+        # A leg inside a defined-risk vertical is governed by the SPREAD roll-up, not by its
+        # own DTE/P&L. Emitting a solo "EXIT NOW" or "cut loss" here contradicts it (TSLA
+        # bear-put at +43% of max was screaming exit on both legs). For spread legs, defer.
+        _in_spread = (tk, str(otype).upper().startswith("C"), str(expiry_s)[:10]) in _spread_keys
+        if _in_spread:
+            if dte is not None and dte <= 2:
+                action = "SPREAD ⚠"
+                em     = "🟡"
+            elif pnl_pct <= -40:
+                action = "SPREAD"
+                em     = "🟡"
+            elif pnl_pct >= 50:
+                action = "SPREAD"
+                em     = "🟢"
+            elif dte is not None and dte <= 10:
+                action = "SPREAD"
+                em     = "🟡"
+            else:
+                action = "SPREAD"
+                em     = "🟢" if pnl_pct >= 0 else "🟡"
+        elif dte is not None and dte <= 2:
             action = "EXIT NOW"
             em     = "🚨"
             urgent_lines.append(f"🚨 #{tid} {tk} {otype[:1]} ${strike:.0f} — {dte}d left, exit immediately")
@@ -12198,9 +12238,13 @@ def _positions_card_parts(trades, now_s, today):
         "ROLL SOON":   "🔄",
         "REVIEW":      "👁",
         "HOLD":        "✅",
+        "SPREAD":      "🔗",
+        "SPREAD ⚠":    "🔗",
     }
     # Plain-English action advice (no jargon)
     _action_advice = {
+        "SPREAD":      "Part of a defined-risk spread — act on the spread roll-up above, not this leg alone.",
+        "SPREAD ⚠":    "Spread near expiry — decide on the WHOLE spread above; never leg out of it.",
         "EXIT NOW":    "Exit immediately — this position is at critical risk.",
         "CUT LOSS":    "Close this trade. The loss is large enough to cut now rather than risk more.",
         "TAKE PROFIT": "Lock in your profit — sell to close and bank the gain.",

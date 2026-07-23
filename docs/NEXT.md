@@ -85,3 +85,35 @@ Full detail: **`docs/AUDIT.md`**.
 `docker build` on a Docker host · weekly offsite copy of `openbb_chains\*.parquet`
 (`PLAN #42`, unrebuildable) · BotFather `/setinline` placeholder:
 `Type a ticker — e.g. AMD, SPY, NVDA`
+
+---
+## 2026-07-23 late — EVENTS table: ATTEMPTED, REVERTED, still TODO
+
+**Ask:** merge the prose `EVENTS:` line + `LAST EARNINGS` table into ONE table:
+`Tkr | Event | Date | In | Est/Act` — `In` signed (−d passed / +d upcoming, T−2…T+2),
+Est/Act only shown once the value is actually held (never claim "released" on a
+scheduled-but-unconfirmed event).
+
+**Status: REVERTED.** Two attempts blanked the whole EVENTS section. Table logic
+VERIFIED GOOD in isolation (43 chars, rows build fine):
+```
+Tkr  | Event | Date  |   In |   Est/Act
+GOOG | Earn  | 07-22 |  -1d | 2.91/9.11
+AMD  | Earn  | 05-05 | -79d | 1.29/1.37
+```
+so the bug is in the FOMC/`_ev_bits` loop, not the earnings rows. Reverted to
+`1a7cecc` (working prose EVENTS + LAST EARNINGS table) rather than ship a blank
+section.
+
+**Next session — do this first, it is nearly done:**
+1. `_ev_bits` was changed from strings to 5-tuples in the same edit; confirm EVERY
+   producer/consumer agrees. A leftover string entry unpacking into 5 names is the
+   most likely killer.
+2. Build the table from EARNINGS ROWS ONLY first (proven to work), commit that,
+   THEN add calendar events as a second pass.
+3. `event_date_str` is NOT ISO — `[5:10]` on it yielded "9" for FOMC. Derive the
+   date from `today + timedelta(days=event_days)`.
+4. Target ≤40 chars. `Est/Act` merged into one cell is what got it from 46 → 43.
+
+**Lesson:** I patched two things at once (row shape + width) and could not tell
+which broke it. Change ONE and render each time.

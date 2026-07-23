@@ -130,3 +130,39 @@ call, deep-OTM put = hedge).
 **Also asked:** roll the read ACROSS EXPIRIES — same-week vs multi-week builds are
 different animals (event play vs calendar roll vs sustained positioning).
 `_oi_expiry_flow_table` already has per-expiry CdOI/PdOI to key off.
+
+# ══ FULL AUDIT of 2026-07-23 session asks (user: "you missed many") ══
+Compiled by re-reading the whole session. NOT DONE items are the real backlog.
+
+## ❌ NOT DONE — asked, never built
+| # | Ask | Where it stalled |
+|---|-----|------------------|
+| A1 | **Post-earnings IV crush in "Now" price** | GOOG 300P shows ~7.03 vs ~6.50 real. Holds pre-earnings IV 38.6%. We already compute `iv_post` for the warning — the reprice must USE it once the event passes. **Wrong number you trade on.** |
+| A2 | **HP engine spot is EOD, not live** | Engine reads stock_daily internally, ignores passed spot; memoised per trade_date. GOOG card showed 341.91 while spot was ~316. |
+| A3 | **Sell-side LIMIT prices** ("set option price while selling to make money") | Current `Close @` is a MARKETABLE limit (concedes away). Needs start=ask/mid+⅓spread, floor=mid, from `_bb_quote` bid/ask. Designed, never coded. |
+| A4 | **Hedge/spread exit advice for max price** | Only prose given. Needs net-debit combo limit + work-down ladder. |
+| A5 | **OI buy-vs-write classifier** | Wording fixed only. Needs OI×PRICE (up/up=buy-to-open, up/down=write). `lastPrice_*_prev` NOT stored → self-join or add to derive. |
+| A6 | **Same-week vs multi-week OI read** | Never started. `_oi_expiry_flow_table` has per-expiry ΔOI to key off. |
+| A7 | **Calendar events (FOMC/CPI) into EVENTS table** | Earnings rows landed; calendar loop blanked the section twice, reverted. `_ev_bits` tuple conversion is the hazard. |
+| A8 | **Timeline event-state (T−2…T+2)** | "08:30 Jobless Claims" prints as if released with no data. Needs upcoming/awaiting/released tags. |
+| A9 | **Read-through / narrative as LINKS** | Not started. |
+| A10 | **Single consolidated alert message** | Planned only (editMessageText design in PLAN). ~5 recurring pushes still separate. |
+| A11 | **Dashboard: Summary + Per-leg detail at TOP** (no scrolling) | Not started. |
+| A12 | **Dashboard: market overview collapsible dropdown at top** | Not started. |
+| A13 | **Portfolio Greeks as dropdown** | Not started. |
+| A14 | **Wire PEAD into a command** | Signal VALIDATED (t=+3.62, OOS-survives, 57%) but no command uses it. |
+| A15 | **Dashboard Portfolio page render-check** | ~12 commits touched it; NEVER once opened. |
+| A16 | `_lib` orphan triage (B: position lifecycle, C: forex/crypto) | Only the news orphans were wired. |
+| A17 | `/debate` weight rebalance | HELD — my validation contradicted the premise (Technical IC −0.039, not +4.28). Needs a proper agent-level backtest. |
+| A18 | SI buildup/covering validation vs baseline | Blocked ~2-3 months on `short_interest` history accruing. |
+
+## ✅ DONE (for the record)
+AH prices (fast_info bug) · AH all-evening · AH alerts after close · manual button
+throttle · /freq picker · vol-analyst flip · SELL_PREMIUM 0.0% scoring bug ·
+BOOK RISK · EXPIRY/ASSIGNMENT · per-leg Buy→EOD→AH+TOTAL · Greeks per leg ·
+CLOSED TODAY · spread/HP/OI/earnings tables · paired-warning once · news filtered ·
+earnings est/actual stored · transcripts (AlphaVantage, on disk, go-forward) ·
+2 orphan charts wired · volume panel · heatmap axis · sparklines · OPEX column ·
+yield curve · mobile width sweep · OI PCR column · spy_ret param bug ·
+Mag-7 study · PEAD validated · TSLA close recorded · dashboard AH fix ·
+dashboard default page · Src column · SI columns

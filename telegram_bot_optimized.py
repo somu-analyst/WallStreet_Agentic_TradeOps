@@ -6616,13 +6616,12 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
     ]
     summary_str = "\n".join(summary_lines)
 
-    # ── Expiry-level flow table (skipped in compact mode) ────────────
+    # Expiry-level flow table REMOVED 2026-07-23: it duplicated the "Expiry Breakdown" table
+    # the ticker card already prints (same CdOI/PdOI per expiry, capped at 6 rows vs all).
+    # Its only unique column — the call-build/put-build/straddle ST emoji — was folded into
+    # Expiry Breakdown first, so nothing was lost. `_oi_expiry_flow_table` is left in place
+    # for any other caller.
     _exp_tbl = ""
-    if not compact:
-        try:
-            _exp_tbl = _oi_expiry_flow_table(ticker, conn, latest_date)
-        except Exception:
-            _exp_tbl = ""
 
     # ── Opportunity table (kept in compact mode — the actionable idea) ─
     try:
@@ -19835,21 +19834,33 @@ async def signal_ticker_detail(query, ticker):
             # tables — THIS WEEK / NEXT WEEK / LATER — over identical columns, which tripled
             # the headers and separators for no extra information.
             _wlbl = {_bk_tw: "wk1", _bk_nw: "wk2", _bk_lt: "later"}
+
+            def _ebias(c, p):
+                """Same call/put-build read the old separate 'By Expiry' table carried —
+                folded in here so that duplicate table could be deleted without losing it."""
+                if c > 300 and p > 300:      return "🟡"   # straddle
+                if c > abs(p) * 1.5 and c > 0: return "🟢" # call build
+                if p > abs(c) * 1.5 and p > 0: return "🔴" # put build
+                if c < -200 and p < -200:    return "⚪"   # unwind
+                return "⚪"
+
             _erows = []
             for _lbl, _rows in _bk.items():
                 for er in _rows:
                     cc2 = float(er["cc"] or 0); pp2 = float(er["pp"] or 0)
                     ep2 = float(er["po"] or 0) / max(float(er["co"] or 0), 1)
-                    _erows.append((_wlbl.get(_lbl, ""), str(er["expiry_date"])[5:],
+                    _erows.append((_ebias(cc2, pp2), _wlbl.get(_lbl, ""),
+                                   str(er["expiry_date"])[5:],
                                    _fk(cc2), _fk(pp2), f"{min(ep2, 9.9):.1f}"))
             if _erows:
                 # "PCR(OI)" not "PCR": this column is put/call OPEN INTEREST, not the ratio of
                 # the CdOI/PdOI (change) columns beside it — verified 07-21. The bare label
                 # made the table look self-contradictory.
                 parts.append("\n<b>📅 Expiry Breakdown</b>\n"
-                             + _pipe_table(("When", "Expiry", "CdOI", "PdOI", "PCR(OI)"),
-                                           _erows, right_cols={2, 3, 4},
-                                           legend="wk1=this week · wk2=next · PCR(OI)=put/call open interest"))
+                             + _pipe_table(("ST", "When", "Expiry", "CdOI", "PdOI", "PCR(OI)"),
+                                           _erows, right_cols={3, 4, 5},
+                                           legend="🟢 call-build · 🔴 put-build · 🟡 straddle · ⚪ flat/unwind · "
+                                                  "wk1=this week · PCR(OI)=put/call open interest"))
     except Exception as _ex_e:
         log.warning(f"signal_ticker_detail expiry {tk}: {_ex_e}")
 

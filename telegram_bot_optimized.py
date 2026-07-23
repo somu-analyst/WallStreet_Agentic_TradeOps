@@ -5936,13 +5936,16 @@ def _oi_week_heatmap(ticker: str, conn, spot: float, latest_date: str):
 
         # 30d: bucket into ~6 weekly groups (label = newest date in bucket, MM-DD)
         def _make_buckets(dates, n=6):
+            # Labels are MM-DD: dates are ISO 'YYYY-MM-DD', so the old d[0:5] sliced the YEAR
+            # and every column on the chart read "2026-" (user report 2026-07-23). Exactly the
+            # positional-date-slicing trap CLAUDE.md retires — take [5:10] for month-day.
             if len(dates) <= n:
-                return [(d[0:5], [d]) for d in dates]
+                return [(d[5:10], [d]) for d in dates]
             chunk = max(1, len(dates) // n)
             bkts = []
             for i in range(0, len(dates), chunk):
                 grp = dates[i:i+chunk]
-                bkts.append((grp[-1][0:5], grp))
+                bkts.append((grp[-1][5:10], grp))
             return bkts[-n:]
         bkts_30 = _make_buckets(all_dates, n=6)
 
@@ -6028,8 +6031,10 @@ def _oi_week_heatmap(ticker: str, conn, spot: float, latest_date: str):
                                  gridspec_kw={"wspace": 0.06, "hspace": 0.40})
 
         timeframes = [
-            (c5,  p5,  [d[0:5] for d in dates_5d],   "5-DAY"),
-            (c10, p10, [d[0:5] for d in dates_10d],  "10-DAY"),
+            # MM-DD, not the year: [0:5] on ISO 'YYYY-MM-DD' yields "2026-" and every column
+            # on the 5/10-day panels read the same thing (user 2026-07-23).
+            (c5,  p5,  [d[5:10] for d in dates_5d],   "5-DAY"),
+            (c10, p10, [d[5:10] for d in dates_10d],  "10-DAY"),
             (c30, p30, [b[0]   for b in bkts_30],    "30-DAY (wk)"),
         ]
 
@@ -6123,7 +6128,9 @@ def _oi_money_flow_chart(ticker: str, conn, spot: float, latest_date: str):
         df = pd.read_sql("""
             SELECT strike,
                    SUM(change_OI_Call) AS call_chg,
-                   SUM(change_OI_Put)  AS put_chg
+                   SUM(change_OI_Put)  AS put_chg,
+                   SUM(COALESCE(vol_Call_now,0)) AS call_vol,
+                   SUM(COALESCE(vol_Put_now,0))  AS put_vol
             FROM options_change
             WHERE ticker=? AND trade_date_now=?
             GROUP BY strike
@@ -6163,10 +6170,10 @@ def _oi_money_flow_chart(ticker: str, conn, spot: float, latest_date: str):
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8),
-                                    gridspec_kw={"height_ratios": [3, 1.2]},
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 11),
+                                    gridspec_kw={"height_ratios": [3, 1.2, 1.4]},
                                     facecolor="#0D1117")
-    for ax in [ax1, ax2]:
+    for ax in [ax1, ax2, ax3]:
         ax.set_facecolor("#161B22")
         ax.tick_params(colors="#8B949E", labelsize=8)
         for sp in ax.spines.values():
@@ -6246,6 +6253,26 @@ def _oi_money_flow_chart(ticker: str, conn, spot: float, latest_date: str):
     ax2.set_ylabel("Net $M", color="#8B949E", fontsize=8)
     ax2.set_title("Net Flow (Call$ − Put$)  ▲=Bull bias  ▼=Bear bias",
                   color="#8B949E", fontsize=8, pad=3)
+
+    # ── Panel 3: contract VOLUME per strike, green calls / red puts (user 2026-07-23).
+    # Volume is TODAY's trading; OI change is what stuck. Side by side they separate real
+    # positioning from churn: heavy volume with little OI change = day-trading, not new risk.
+    _cv = df["call_vol"].fillna(0).values
+    _pv = df["put_vol"].fillna(0).values
+    ax3.bar([i - bw / 2 for i in x], _cv, bw * 0.9, color="#3FB950", alpha=0.88,
+            label="Call volume")
+    ax3.bar([i + bw / 2 for i in x], -_pv, bw * 0.9, color="#F85149", alpha=0.88,
+            label="Put volume")
+    ax3.axhline(0, color="#8B949E", linewidth=0.8, alpha=0.5)
+    if 0 <= spot_x <= len(x) - 1:
+        ax3.axvline(spot_x, color="#FFFFFF", linestyle="--", linewidth=1.2, alpha=0.7)
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
+    ax3.set_ylabel("Contracts", color="#8B949E", fontsize=8)
+    ax3.set_title("Volume traded today (calls above / puts below)",
+                  color="#8B949E", fontsize=8, pad=3)
+    ax3.legend(fontsize=7, facecolor="#161B22", edgecolor="#30363D",
+               labelcolor="#8B949E", loc="upper right")
 
     plt.tight_layout(pad=0.9)
     buf = BytesIO()

@@ -412,3 +412,36 @@ PENDING (PLAN.md): intraday 1-min lane + heat-seeking/reversal + live writeups �
   universal _report() macro + format sweep (momentum/opex/squeeze/macro/gex/OI-flow).
 - **Trades**: UNH closed (+$483 net); AMD −2×400P 7/31 + GOOGL collar + GOOG 100sh@167 open.
 - **Verify method**: everything tested against live DB before commit; bot restarted on final code.
+
+## 2026-07-23 — Positions/ticker card rebuild, earnings+transcripts, Mag-7 study
+
+**Bugs found by EXECUTING (all silent, all produced plausible-but-wrong numbers):**
+| Bug | Impact | Commit |
+|---|---|---|
+| `fast_info` has NO post/pre-market fields | after-hours NEVER worked; hid TSLA −3.4% earnings move | `a74636e` |
+| AH window capped at 20:00 ET (bot + dashboard) | reverted to stale 4pm close all evening | `69477e5`,`4b71bfe` |
+| `position_monitor` gated 9:30–16:00 | no alert ever fired after hours | `fb6a973` |
+| Cadence throttle blocked the MANUAL button | positions button looked dead → "still old message" | `fb6a973` |
+| `_LAST_OFFHOURS_PUSH`: 15-min throttle on 10-min tick | fired every **20** min, not 15 | `aceaa91` |
+| `eod_px` computed in loop 1, table built in loop 2 | every row showed the LAST leg's EOD (6.86) | `c2acdeb` |
+| Heatmap labels `d[0:5]` on ISO date | x-axis read "2026-" (3 places) | `6b0a2b6` |
+| Intraday lane spawned twice | 2× rate-limit load | `fb6a973` |
+
+**Corrections to my own claims:** transcripts do NOT need a paid key — AlphaVantage
+`EARNINGS_CALL_TRANSCRIPT` works on the key we already hold. I concluded too early from
+testing only `earningscall`. Also marked "event/news header" done when only the *events*
+half existed.
+
+**Built:** BOOK RISK (concentration + assignment) · EXPIRY/ASSIGNMENT walk-through ·
+per-leg Buy→EOD→AH + TOTAL · everything→tables · `/freq` cadence picker ·
+`short_interest` + `earnings_history` tables · transcripts on DISK (`transcripts/`) ·
+coloured OI sparklines · volume panel · 2 orphaned OI charts wired.
+
+**Mag-7 earnings study (584 events, 2002-2026):** direction ~unpredictable. Only real
+effect = fade the 5-day run-up (rankIC −0.122, t=−2.97; ran-up names up 43.8% vs 58.9%
+for sold-off) BUT it **weakens out-of-sample** (t=−2.51 → −1.46). SIZE is far more
+predictable: rvol20→|move| t=+6.12. Survivorship caveat: Mag-7 = today's winners.
+Script: scratchpad `mag7_earnings.py`.
+
+**4th orphan pattern today** — news fns, position lifecycle, transcripts, OI charts all
+existed unwired. `_lib` orphan triage is overdue.

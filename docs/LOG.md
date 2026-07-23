@@ -445,3 +445,35 @@ Script: scratchpad `mag7_earnings.py`.
 
 **4th orphan pattern today** — news fns, position lifecycle, transcripts, OI charts all
 existed unwired. `_lib` orphan triage is overdue.
+
+### 2026-07-23 (late) — VALIDATED directional signal: post-earnings drift (PEAD)
+
+Earlier conclusion "direction is unpredictable" was answering the WRONG question. Predicting
+the earnings REACTION fails. Predicting the DRIFT AFTER it works.
+
+**599 events, 7 tickers, 2001-10-18 → 2026-05-20.**
+
+| hypothesis | d5 | d10 | d20 |
+|---|---|---|---|
+| EPS surprise → drift | IC +0.101 t+2.47 | +0.101 t+2.47 | +0.123 **t+3.03** |
+| **Reaction → drift** | +0.141 t+3.48 | +0.111 t+2.72 | +0.147 **t+3.62** |
+
+**OUT-OF-SAMPLE — SURVIVES** (this is what killed the run-up signal):
+- reaction→d20 1st half (2001-15) IC +0.157 t=+2.74 · 2nd half (2015-26) IC +0.129 t=+2.24
+- surprise→d20 DECAYS: t=+2.46 → +1.56 (no longer significant) — use REACTION, not surprise
+
+**Economic size (quintile by reaction, fwd 20d):**
+Q1 worst −0.87% · Q2 +1.26% · Q3 +0.11% · Q4 +1.47% · Q5 best **+3.77%** → **Q5−Q1 = +4.63%/20d**
+Long Q5 / short Q1: mean **+2.32%**, **t=+3.29**, hit-rate **57.1%** (n=240)
+
+**Read:** you cannot predict the gap; once it happens it PERSISTS ~20 days. This is classic
+PEAD, the most-documented anomaly in finance, and it holds on Mag-7 out-of-sample.
+
+**Caveats:** Mag-7 = survivorship-selected. Q3 breaks monotonicity (tails are clean, middle
+noisy). Not yet tested with transaction costs or on non-Mag7 names.
+
+**Live implication 2026-07-23:** TSLA just printed a large NEGATIVE reaction (−38% EPS miss,
+stock ~326 from 374). PEAD says drift continues LOWER ~20d. User closed their bearish TSLA
+spread today at +$1,361 — signal says the directional thesis had further to run.
+
+Scripts: scratchpad `mag7_earnings.py`, `pead.csv`.

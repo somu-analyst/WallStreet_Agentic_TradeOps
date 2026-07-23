@@ -11665,31 +11665,28 @@ def _spread_summary(rows):
                  ("C", True): "Bear Call", ("C", False): "Bull Call"}
                 .get((ot, KL > KS), "Vertical"))
         st = "🟢" if pct >= 50 else ("🟡" if pnl >= 0 else "🔴")
-        tbl.append((st, f"{tk[:4]}{int(min(KL,KS))}/{int(max(KL,KS))}{ot}",
-                    f"{pnl:+,.0f}", f"{pct:+.0f}%"))
         # exit guidance: credit spreads are conventionally managed at 50-75% of max
         if pct >= 50:
-            act = (f"<b>TAKE PROFIT</b> — {pct:.0f}% of max captured. The remaining "
-                   f"${maxp - pnl:,.0f} needs {exp} to arrive; most of the edge is already banked.")
+            act = "TAKE PROFIT"
         elif pnl < 0 and maxl > 0 and abs(pnl) >= 0.5 * maxl:
-            act = (f"<b>REVIEW</b> — down {abs(pnl)/maxl*100:.0f}% of max loss "
-                   f"(${maxl:,.0f}). Decide before gamma accelerates near expiry.")
+            act = "REVIEW"
         else:
-            act = f"<b>HOLD</b> — {pct:+.0f}% of max captured; let time decay work."
-        blocks.append(
-            f"🔗 <b>{tk} {name} {int(min(KL,KS))}/{int(max(KL,KS))} · {n}x · exp {exp}</b>\n"
-            f"   Net {kind.lower()} <b>${abs(net_entry)*n*100:,.0f}</b> · "
-            f"combined P&L <b>{pnl:+,.0f}</b> ({pct:+.0f}% of max)\n"
-            f"   Max profit <b>${maxp:,.0f}</b> · max loss <b>${maxl:,.0f}</b> · width ${width:g}\n"
-            f"   {act}\n"
-            f"   ⚠️ <i>Paired — close BOTH legs together. Closing the "
-            f"{'long' if kind == 'CREDIT' else 'short'} leg alone leaves "
-            f"{'a NAKED SHORT (unbounded risk)' if kind == 'CREDIT' else 'an unhedged long'}.</i>")
+            act = "HOLD"
+        # ONE row per spread: everything that drove the old 5-line block (user 2026-07-23 —
+        # "make it a table"). Net/MaxP/MaxL/%Max/action all inline; the paired-leg warning is
+        # identical for every spread so it is printed ONCE under the table, not per row.
+        tbl.append((st, f"{tk[:4]}{int(min(KL,KS))}/{int(max(KL,KS))}{ot}",
+                    f"{abs(net_entry)*n*100:,.0f}", f"{pnl:+,.0f}", f"{pct:+.0f}%",
+                    f"{maxp:,.0f}", f"{maxl:,.0f}", act))
+        blocks.append(True)
     if not blocks:
         return ""
-    head = _pipe_table(("ST", "Spread", "P&L", "%Max"), tbl, right_cols={2, 3},
-                       title="🔗 PAIRED / HEDGED POSITIONS")
-    return head + "\n\n" + "\n\n".join(blocks)
+    head = _pipe_table(("ST", "Spread", "Net", "P&L", "%Max", "MaxP", "MaxL", "Do"),
+                       tbl, right_cols={2, 3, 4, 5, 6},
+                       title="🔗 PAIRED / HEDGED POSITIONS",
+                       legend="Net=cost · %Max=of max profit · Do: TAKE PROFIT ≥50% · REVIEW ≥½ max loss")
+    return head + "\n⚠️ <i>Every spread above is PAIRED — close both legs together. Closing one " \
+                  "leg alone leaves a naked short (credit) or an unhedged long (debit).</i>"
 
 
 def _atm_iv_term(conn, tk, spot):
@@ -12299,8 +12296,11 @@ def _positions_card_parts(trades, now_s, today):
         # Buy -> EOD -> AH -> P&L (user 2026-07-22). eod_px is the EOD-close reprice; cur_px
         # the AH mark; pnl the current (AH) P&L. _leg_ah_rows also feeds the TOTAL row below.
         _eod_pnl = (eod_px - entry) * (qty or 0) * 100
+        _act_short = {"SPREAD": "sprd", "SPREAD ⚠": "sprd⚠", "EXIT NOW": "EXIT",
+                      "CUT LOSS": "CUT", "TAKE PROFIT": "TAKE", "ROLL/EXIT": "roll",
+                      "ROLL SOON": "roll", "REVIEW": "rev", "HOLD": "hold"}.get(action, "hold")
         _leg_ah_rows.append((_st_dot, _leg, f"{entry:.2f}", f"{eod_px:.2f}",
-                             f"{cur_px:.2f}", f"{pnl:+,.0f}"))
+                             f"{cur_px:.2f}", f"{pnl:+,.0f}", _act_short))
         _leg_tot_eodpnl += _eod_pnl
         _leg_tot_ahpnl  += pnl
         _leg_cap        += abs(entry * (qty or 0) * 100)
@@ -12328,14 +12328,13 @@ def _positions_card_parts(trades, now_s, today):
                 f" · leg <b>${_proj:.2f}</b> ({_pct:+.0f}%) · P&L <b>{_d_pnl:+,.0f}</b>"
             )
 
-        html_cards.append(
-            f"{a_em} <b>{_side_w} {abs(int(qty or 0))}x {tk} {otype} ${int(strike)}</b> · "
-            f"exp {expiry_s or '?'} ({dte_disp}){urg_flag}\n"
-            f"   Bought <b>${entry:.2f}</b> → Now <b>${cur_px:.2f}</b> · "
-            f"P&L <b>{pnl:+,.0f}</b> ({pnl_pct:+.0f}%) · win {prob_s} · OI {oi_disp}"
-            f"{_crush_line}\n"
-            f"   <b>{action}</b> — {advice}"
-        )
+        # Everything that used to be a 4-line card per leg now lives in the table above
+        # (buy/EOD/AH/P&L/action). Only genuinely per-leg extras survive as one short line:
+        # the event IV-crush projection, and non-routine actions worth a sentence.
+        if _crush_line:
+            html_cards.append(f"<b>{_leg}</b>{_crush_line}")
+        elif action not in ("HOLD", "SPREAD"):
+            html_cards.append(f"<b>{_leg}</b> — {advice}")
 
     # Per-leg table: Buy -> EOD -> AH -> P&L, with a TOTAL row. P&L columns sum (EOD vs AH);
     # price columns don't (different strikes). Capital respects the 100x multiplier.
@@ -12343,8 +12342,8 @@ def _positions_card_parts(trades, now_s, today):
         _rr = list(_leg_ah_rows)
         _tp = (_leg_tot_ahpnl / _leg_cap * 100) if _leg_cap > 0 else 0.0
         _rr.append(("", "TOTAL", "", f"{_leg_tot_eodpnl:+,.0f}", "",
-                    f"{_leg_tot_ahpnl:+,.0f}"))
-        table1 = _pipe_table(("", "Leg", "Buy", "EOD", "AH", "P&L"), _rr,
+                    f"{_leg_tot_ahpnl:+,.0f}", ""))
+        table1 = _pipe_table(("", "Leg", "Buy", "EOD", "AH", "P&L", "Do"), _rr,
                              right_cols={2, 3, 4, 5},
                              legend=f"Buy→EOD→AH marks · P&L=live(AH) · TOTAL EOD {_leg_tot_eodpnl:+,.0f} "
                                     f"→ AH {_leg_tot_ahpnl:+,.0f} ({_tp:+.0f}% on ${_leg_cap:,.0f})")
@@ -12391,7 +12390,7 @@ def _positions_card_parts(trades, now_s, today):
         urgent_section = "\n\n<b>⚡ ACTION REQUIRED</b>\n" + "\n".join(urgent_lines)
 
     net_em  = "🟢" if total_pnl >= 0 else "🔴"
-    n_pos   = len(html_cards)
+    n_pos   = len(_leg_ah_rows)   # legs, not advice lines (html_cards is no longer 1-per-leg)
     footer  = f"\n{net_em} <b>Portfolio total: ${total_pnl:+,.0f}</b>  ({n_pos} open position{'s' if n_pos != 1 else ''})"
 
     # ── High-Prob Engine — compact ST table + per-ticker detail lines ──
@@ -12418,23 +12417,22 @@ def _positions_card_parts(trades, now_s, today):
                     _pull = f"{_pl:+.0f}%{'↑' if _pl > 0 else '↓'}"
                 else:
                     _pull = "—"
-                _hp_rows.append((_ic_pm, _htk_pm[:5], f"${_sp_pm:.0f}", _pull))
-                _dt = (f"{_ic_pm} <b>{_htk_pm}</b> ${_sp_pm:.0f} — {_hr_pm['signal']} "
-                       f"{_pb_pm:.0f}% {_cf_pm} · votes 🟢{_bv}/🔴{_rv}/💰{_sv}")
-                if _vb.get("lo"):
-                    _dt += f" · range ${_vb['lo']:.0f}–{_vb['hi']:.0f} (POC ${_pocv:.0f})"
+                # One ROW per ticker — bias, conviction votes, expected range and OI walls all
+                # inline (user 2026-07-23: this belongs in the table, not prose underneath).
+                _rng = (f"{_vb['lo']:.0f}-{_vb['hi']:.0f}" if _vb.get("lo") else "—")
                 _wl = _hr_pm.get("models", {}).get("put_call_wall", {})
-                if _wl.get("call_wall") and _wl.get("prob", 0) >= 65:
-                    _dt += f" · walls P${_wl['put_wall']:.0f} C${_wl['call_wall']:.0f}"
-                _hp_details.append(_dt)
+                _wls = (f"{_wl['put_wall']:.0f}/{_wl['call_wall']:.0f}"
+                        if (_wl.get("call_wall") and _wl.get("prob", 0) >= 65) else "—")
+                _hp_rows.append((_ic_pm, _htk_pm[:5], f"${_sp_pm:.0f}", f"{_pb_pm:.0f}%",
+                                 f"{_bv}/{_rv}/{_sv}", _pull, _rng, _wls))
             except Exception as _e_pm:
                 log.debug(f"pos_mon hp {_htk_pm}: {_e_pm}")
         if _hp_rows:
-            _hp_tbl = _pipe_table(("ST", "Tkr", "Spot", "Pull"), _hp_rows,
-                                  right_cols={2, 3},
-                                  legend="Pull = volume magnet (POC) vs spot · 💰 sell-prem 🟢 bull 🔴 bear")
-            hp_section = ("\n\n<b>🧠 HP Engine</b>\n" + _hp_tbl + "\n"
-                          + "\n".join(_hp_details))
+            _hp_tbl = _pipe_table(("ST", "Tkr", "Spot", "Prob", "Votes", "Pull", "Range", "Walls"),
+                                  _hp_rows, right_cols={2, 3, 5},
+                                  legend="Votes=🟢bull/🔴bear/💰sell-prem · Pull=POC vs spot · "
+                                         "Walls=put/call OI")
+            hp_section = "\n\n<b>🧠 HP Engine</b>\n" + _hp_tbl
         conn_hp_pm.close()
     except Exception as _e_hp_pm:
         log.debug(f"pos_mon hp block: {_e_hp_pm}")

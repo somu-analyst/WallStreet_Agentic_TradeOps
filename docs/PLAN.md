@@ -111,3 +111,22 @@ is coming and what just passed.
 ### Notes
 - Telegram edit has a rate limit — do not edit more often than ~1/5s per chat.
 - Editing loses history; that is the trade-off and why event alerts stay separate.
+
+## OI intent: separate BUYING from WRITING (user 2026-07-23)
+"call OI building — bullish bets" is an unjustified leap: rising OI = contracts
+OPENED, and every option has a buyer AND a writer. A call build 10% OTM is
+usually covered-call WRITING, not a bullish bet. (Same error already fixed on the
+money-flow chart labels; the text descriptions still carried it.)
+
+**Build:** classify each strike by OI change x PRICE change — data is already in
+`options_change` (`lastPrice_Call_now` + prior close):
+  OI up + price up   -> BUY-TO-OPEN   (directional)
+  OI up + price down -> WRITE/SELL-TO-OPEN (income/premium, NOT directional)
+  OI dn + price up   -> SHORT COVERING
+  OI dn + price down -> LONG LIQUIDATION
+Combine with `_oi_intent_algo` zones (ATM = directional, >7% OTM call = covered
+call, deep-OTM put = hedge).
+
+**Also asked:** roll the read ACROSS EXPIRIES — same-week vs multi-week builds are
+different animals (event play vs calendar roll vs sustained positioning).
+`_oi_expiry_flow_table` already has per-expiry CdOI/PdOI to key off.

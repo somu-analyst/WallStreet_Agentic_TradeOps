@@ -12906,26 +12906,27 @@ def _positions_card_parts(trades, now_s, today):
             # REPORTED: signed `In` (−d = already passed) + Est/Act merged into one cell.
             # Only rendered when the actual is HELD — a scheduled time that has passed with
             # no data never reads as released.
+            # ONE ROW PER TICKER (user 2026-07-23: two rows read as "different dates for the
+            # same stock"). Last reported and next scheduled belong side by side — they are
+            # two facts about one name, not two events to scan.
+            if not ((_last and _last[2] is not None) or (_next and _next[1] is not None)):
+                continue
+            _em2, _lastd, _res = "🟡", "—", "—"
             if _last and _last[2] is not None:
                 _sp = _last[3]
                 _em2 = "🟢" if (_sp or 0) > 0 else ("🔴" if (_sp or 0) < 0 else "⚪")
-                try:
-                    _dd = (datetime.strptime(str(_last[0])[:10], "%Y-%m-%d").date() - today).days
-                except Exception:
-                    _dd = None
-                _erows.append((_etk2[:4], f"{_em2}Earn", str(_last[0])[5:],
-                               f"{_dd:+d}d" if _dd is not None else "—",
-                               (f"{_last[1]:.2f}/{_last[2]:.2f}" if _last[1] is not None
-                                else f"{_last[2]:.2f}")))
-            # UPCOMING: estimate only, positive day count
+                _lastd = str(_last[0])[5:]
+                _res = (f"{_last[1]:.2f}/{_last[2]:.2f}" if _last[1] is not None
+                        else f"{_last[2]:.2f}")
+            _nextd, _nin = "—", "—"
             if _next and _next[1] is not None:
+                _nextd = str(_next[0])[5:]
                 try:
                     _dd2 = (datetime.strptime(str(_next[0])[:10], "%Y-%m-%d").date() - today).days
+                    _nin = f"+{_dd2}d"
                 except Exception:
-                    _dd2 = None
-                _erows.append((_etk2[:4], "🟡Earn", str(_next[0])[5:],
-                               f"+{_dd2}d" if _dd2 is not None else "—",
-                               f"est {_next[1]:.2f}"))
+                    pass
+            _erows.append((f"{_em2}{_etk2[:4]}", _lastd, _res, _nextd, _nin))
         _ec.close()
         if _erows:
             _events_section += ("\n" + _pipe_table(

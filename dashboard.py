@@ -14559,6 +14559,8 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                             "Hi\\Lo": "—",
                             "Close @": _fclimit, "Max P": _fmt_maxp(_flb), "Max L": _fmt_maxl(_flb),
                             "Win %": _fwin,
+                            "Δ/1%": round(l["ddelta_1pct"]), "Theta": round(l["pos_theta"]),
+                            "Vega": round(l["pos_vega"]),
                             "P&L %": round(_fpp), "P&L $": round(l["pnl"]), "Action": _faction,
                         })
                         continue
@@ -14609,6 +14611,8 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                         "Stk ±1σ": f"{l['spot'] + _fsig:,.0f}/{max(l['spot'] - _fsig, 0):,.0f}",
                         "Hi/Lo": (f"${l['day_hi']:.2f}/${l['day_lo']:.2f}" if l.get("day_hi") and l.get("day_lo") else "—"),
                         "Close @": _fclimit, "Max P": _fmt_maxp(_flb), "Max L": _fmt_maxl(_flb), "Win %": _fwin,
+                        "Δ/1%": round(l["ddelta_1pct"]), "Theta": round(l["pos_theta"]),
+                        "Vega": round(l["pos_vega"]),
                         "P&L %": round(_fpp), "P&L $": round(l["pnl"]), "Action": _faction,
                     })
             # ── ticker + portfolio summary (max P/L, P&L, POP, EV) ──
@@ -14693,6 +14697,11 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                 "Max P": "Unlimited" if _spup else f"${_spmaxp:,.0f}",
                 "Max L": "Unlimited" if _spdn else f"${_spmaxl:,.0f}",
                 "Win %": f"{_fwinw / _fwcap:.0f}%" if _fwcap else "—",
+                # Greeks are additive across legs (unlike Spot), so the portfolio total is
+                # the honest sum — this is the same net exposure as the Greeks strip above.
+                "Δ/1%": round(sum(l["ddelta_1pct"] for gg in _by_tk.values() for l in gg)),
+                "Theta": round(sum(l["pos_theta"] for gg in _by_tk.values() for l in gg)),
+                "Vega": round(sum(l["pos_vega"] for gg in _by_tk.values() for l in gg)),
                 "P&L $": round(_ftot),
                 "P&L %": round(_ftot / _fcost * 100) if _fcost > 0 else None,
                 "Action": f"capital ${_fcost:,.0f}",

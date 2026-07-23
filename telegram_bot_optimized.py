@@ -12316,12 +12316,19 @@ def _positions_card_parts(trades, now_s, today):
                 _bv   = _hr_pm["bull_v"]; _rv = _hr_pm["bear_v"]
                 _sv   = _hr_pm.get("sell_v", 0)
                 _vb = _hr_pm.get("vrvp_box", {})
-                _poc = f"${_vb['poc']:.0f}" if _vb.get("poc") else "—"
-                _hp_rows.append((_ic_pm, _htk_pm[:6], f"{_pb_pm:.0f}%", _poc))
+                _pocv = float(_vb.get("poc") or 0)
+                # POC alone is unreadable without spot — show the PULL: how far the volume
+                # magnet sits from spot, and which way. Magnet above spot = upward pull.
+                if _pocv > 0 and _sp_pm > 0:
+                    _pl = (_pocv - _sp_pm) / _sp_pm * 100
+                    _pull = f"{_pl:+.0f}%{'↑' if _pl > 0 else '↓'}"
+                else:
+                    _pull = "—"
+                _hp_rows.append((_ic_pm, _htk_pm[:5], f"${_sp_pm:.0f}", _pull))
                 _dt = (f"{_ic_pm} <b>{_htk_pm}</b> ${_sp_pm:.0f} — {_hr_pm['signal']} "
                        f"{_pb_pm:.0f}% {_cf_pm} · votes 🟢{_bv}/🔴{_rv}/💰{_sv}")
                 if _vb.get("lo"):
-                    _dt += f" · range ${_vb['lo']:.0f}–{_vb['hi']:.0f} (POC ${_vb.get('poc',0):.0f})"
+                    _dt += f" · range ${_vb['lo']:.0f}–{_vb['hi']:.0f} (POC ${_pocv:.0f})"
                 _wl = _hr_pm.get("models", {}).get("put_call_wall", {})
                 if _wl.get("call_wall") and _wl.get("prob", 0) >= 65:
                     _dt += f" · walls P${_wl['put_wall']:.0f} C${_wl['call_wall']:.0f}"
@@ -12329,9 +12336,9 @@ def _positions_card_parts(trades, now_s, today):
             except Exception as _e_pm:
                 log.debug(f"pos_mon hp {_htk_pm}: {_e_pm}")
         if _hp_rows:
-            _hp_tbl = _pipe_table(("ST", "Tkr", "Prob", "POC"), _hp_rows,
+            _hp_tbl = _pipe_table(("ST", "Tkr", "Spot", "Pull"), _hp_rows,
                                   right_cols={2, 3},
-                                  legend="💰 sell-prem · 🟢 bull · 🔴 bear · ⚪ neutral")
+                                  legend="Pull = volume magnet (POC) vs spot · 💰 sell-prem 🟢 bull 🔴 bear")
             hp_section = ("\n\n<b>🧠 HP Engine</b>\n" + _hp_tbl + "\n"
                           + "\n".join(_hp_details))
         conn_hp_pm.close()

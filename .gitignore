@@ -267,3 +267,6 @@ dash_theme.txt
 research/kronos-venv/
 research/kronos/
 research/models/
+
+# Earnings-call transcripts — kept on disk, not in the DB (2026-07-23)
+transcripts/

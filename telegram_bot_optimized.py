@@ -11930,6 +11930,73 @@ def _post_event_leg(conn, tk, strike, typ, expiry_s, spot, iv_now, dte, ev):
             "edate": ev.get("event_date_str") or "", "edays": int(ev_days), "src": src}
 
 
+def _book_risk_flags(rows, spot_of):
+    """Book-level risk lines for the positions card: directional concentration + assignment.
+
+    rows = the per-leg tuples the card builds; spot_of(tk) -> current spot (AH-aware).
+    Two risks the per-leg view structurally cannot show:
+      1. CONCENTRATION — if every leg leans the same way, one market gap the wrong way hits
+         them all at once. A bearish book that just won on an earnings drop is exactly when
+         this gets ignored.
+      2. ASSIGNMENT — a SHORT option that is ITM near expiry can be exercised early.
+    Directional sign per leg: long call / short put = bullish (+); short call / long put =
+    bearish (-). qty carries the long/short sign.
+    """
+    # Direction is per POSITION, not per leg. A bear-put spread has one long + one short leg
+    # whose per-leg signs cancel, so leg-counting wrongly reads "balanced". Group into
+    # verticals by (ticker, put/call) and classify each by its long-vs-short strike; count
+    # unpaired legs on their own. bull/bear are counts of POSITIONS, the unit that carries risk.
+    lines, assign = [], []
+    groups = {}
+    for r in rows:
+        try:
+            _, tk, otype, strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s, action, qty, exp = r
+        except Exception:
+            continue
+        q = int(qty or 0)
+        if q == 0 or float(strike or 0) <= 0:
+            continue
+        is_call = str(otype).upper().startswith("C")
+        groups.setdefault((tk, is_call, str(exp)[:10]), []).append((float(strike), q))
+        sp = float(spot_of(tk) or 0)
+        if q < 0 and sp > 0:                     # short leg — assignment check
+            itm = (sp > float(strike)) if is_call else (sp < float(strike))
+            dte_n = int(dte_s[1:]) if str(dte_s).startswith("D") and dte_s[1:].isdigit() else None
+            if itm and (dte_n is None or dte_n <= 7):
+                depth = (sp - float(strike)) if is_call else (float(strike) - sp)
+                assign.append(f"{tk} {int(float(strike))}{'C' if is_call else 'P'} "
+                              f"short ITM ${depth:+.2f}" + (f", {dte_n}d" if dte_n is not None else ""))
+
+    bull = bear = 0
+    for (tk, is_call, _e), legs in groups.items():
+        longs = [k for k, q in legs if q > 0]
+        shorts = [k for k, q in legs if q < 0]
+        if longs and shorts:                     # vertical — classify by long vs short strike
+            lo_long = min(longs) if is_call else max(longs)
+            # bullish if: long call BELOW short call (bull call) / long put BELOW short put (bull put)
+            bullish = (lo_long < min(shorts)) if is_call else (max(longs) < max(shorts))
+        else:                                    # single leg
+            q = legs[0][1]
+            bullish = (is_call and q > 0) or ((not is_call) and q < 0)
+        if bullish:
+            bull += 1
+        else:
+            bear += 1
+
+    tot = bull + bear
+    if tot >= 2 and (bull == 0 or bear == 0):
+        side = "bullish" if bear == 0 else "bearish"
+        lines.append(f"⚠️ <b>Book is 100% {side}</b> ({tot} positions) — a market gap the "
+                     f"other way hits every one at once.")
+    elif tot >= 3 and (max(bull, bear) / tot) >= 0.75:
+        side = "bullish" if bull > bear else "bearish"
+        lines.append(f"⚠️ <b>Book leans {side}</b> ({max(bull,bear)}/{tot} positions) — "
+                     f"concentrated one-way risk.")
+    for a in assign[:4]:
+        lines.append(f"🔔 {a} — early-assignment risk.")
+    return lines
+
+
 def _positions_card_parts(trades, now_s, today):
     """Build the POSITIONS health card (table + advice + urgent + HP engine) —
     SHARED by the 10-min position_monitor push and the menu positions_view
@@ -12212,7 +12279,17 @@ def _positions_card_parts(trades, now_s, today):
     # Spread roll-up goes FIRST: on a vertical the combined position is the real trade,
     # and per-leg advice below must be read in that context (never act on one leg alone).
     _spreads = _spread_summary(rows)
-    colour_section = ((f"{_spreads}\n\n" if _spreads else "")
+    # Book-level risk (concentration + assignment) — pull spot from the AH cache we already
+    # populated per ticker so this adds no new network calls.
+    try:
+        _risk = _book_risk_flags(rows, lambda t: float((_ah_cache.get(t) or {}).get("spot_ext")
+                                 or (_ah_cache.get(t) or {}).get("spot_reg") or 0.0))
+    except Exception:
+        _risk = []
+        log.debug("book risk flags failed", exc_info=True)
+    _risk_section = ("<b>⚡ BOOK RISK</b>\n" + "\n".join(_risk) + "\n\n") if _risk else ""
+    colour_section = (_risk_section
+                      + (f"{_spreads}\n\n" if _spreads else "")
                       + f"{table1}\n\n{advice_section}")
 
     urgent_section = ""

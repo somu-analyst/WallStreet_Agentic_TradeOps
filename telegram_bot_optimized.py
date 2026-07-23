@@ -6363,10 +6363,13 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
         if p < -300:                                   return "HOFF", zone
         return "FLAT", zone
 
-    # ── Standard _pipe_table rows (universal format 2026-07-16) ───────
-    _t1_rows = []   # (Stk, CΔ, PΔ, Sig)
-    _t2_rows = []   # (Stk, Zone, C$, P$)
-    _t3_rows = []   # (Stk, Pat, C$, P$)
+    # ── ONE strike table (merged 2026-07-23) ──────────────────────────
+    # Was three separate tables — OI change, BS prices, $ premium — all keyed by the SAME
+    # strikes, so the reader had to cross-reference three grids to read one strike. Merged
+    # into a single row per strike: nothing dropped, ~2/3 fewer lines in the message.
+    _t1_rows = []   # (ST, Stk, CΔ, PΔ, Cpx, Ppx, C$in, P$in)
+    _t2_rows = []   # kept for compact-mode callers
+    _t3_rows = []
 
     for _, r in df.sort_values("strike").iterrows():
         _c   = float(r["call_chg"] or 0)
@@ -6378,7 +6381,7 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
         _sig = _sig_short(_c, _p, spot, _sk, agg_pcr)
         _sig_em = {"BULL": "🟢", "SPEC": "🟢", "BEAR": "🔴", "SHRT": "🔴",
                    "STRD": "🟡", "HEDG": "🟡", "UNWD": "⚪", "HOFF": "⚪"}.get(_sig, "⚪")
-        _t1_rows.append((_sig_em, _stk_lbl, _fk2(_c).strip(), _fk2(_p).strip()))
+        _oi_cells = (_sig_em, _stk_lbl, _fk2(_c).strip(), _fk2(_p).strip())
 
         # BS option prices
         try:
@@ -6404,23 +6407,22 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
         _pat_em = {"BULL": "🟢", "INST": "🟢", "SPEC": "🟢", "PUT": "🔴", "SHRT": "🔴",
                    "STRD": "🟡", "HEDG": "🟡", "UNWD": "⚪", "HOFF": "⚪"}.get(_pat, "⚪")
         _t3_rows.append((_pat_em, _stk_lbl, _prm_fmt(_c_prm), _prm_fmt(_p_prm)))
+        # one merged row: OI change + BS price + real premium for this strike
+        _t1_rows.append(_oi_cells + (_px_fmt(_cpx).strip(), _px_fmt(_ppx).strip(),
+                                     _prm_fmt(_c_prm), _prm_fmt(_p_prm)))
 
-    table_str = _pipe_table(
-        ("ST", "Stk", "CΔ", "PΔ"), _t1_rows, right_cols={2, 3},
-        legend="🟢 call-build · 🔴 put-build · 🟡 straddle/hedge · ⚪ flat/unwind")
-
-    # compact mode (signal_scanner, 2026-07-18): skip BS-price/premium filler tables —
-    # keep only the core OI-change signal table + verdict + trade idea.
-    detail_tbl = "" if compact else (
-        "\n"
-        + _pipe_table(("ST", "Stk", "C$", "P$"), _t2_rows, right_cols={2, 3},
-                      title="Option Prices (BS est.)",
-                      legend="🟡 ATM · 🟢 above spot · 🔴 below")
-        + "\n"
-        + _pipe_table(("ST", "Stk", "C$", "P$"), _t3_rows, right_cols={2, 3},
-                      title="$ Paid Today (real premium)",
-                      legend="+$=new money IN · -$=leaving")
-    )
+    if compact:
+        # compact mode (signal_scanner): OI-change columns only
+        table_str = _pipe_table(
+            ("ST", "Stk", "CΔ", "PΔ"), [r[:4] for r in _t1_rows], right_cols={2, 3},
+            legend="🟢 call-build · 🔴 put-build · 🟡 straddle/hedge · ⚪ flat/unwind")
+    else:
+        table_str = _pipe_table(
+            ("ST", "Stk", "CΔ", "PΔ", "C$", "P$", "C$in", "P$in"), _t1_rows,
+            right_cols={2, 3, 4, 5, 6, 7},
+            legend="CΔ/PΔ=new OI · C$/P$=BS price · C$in/P$in=real premium (+in/−out) · "
+                   "🟢 call-build 🔴 put-build 🟡 straddle ⚪ flat")
+    detail_tbl = ""
 
     # ── OI Timeline: 5d / 10d / 30d per strike ─────────────────────
     # Three timeframes let you see short/medium/long-term accumulation.
@@ -6514,21 +6516,22 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                     _ct  = _trend3(_sk_data, "c_oi"); _pt  = _trend3(_sk_data, "p_oi")
                     _sg3 = _sig3(_c5p, _p5p)
                     _em  = {"BUY":"🟢","SEL":"🔴","HDG":"🟡","UNW":"🔴","NEU":"⚪"}.get(_sg3,"⚪")
-                    _c_rows.append((_em, _stk4 + _tarw.get(_ct.strip(), ""),
-                                    _ps4(_c5p).strip(), _ps4(_c30p).strip()))
-                    _p_rows.append((_em, _stk4 + _tarw.get(_pt.strip(), ""),
-                                    _ps4(_p5p).strip(), _ps4(_p30p).strip()))
+                    # ONE row per strike: call AND put timelines side by side (merged
+                    # 2026-07-23 — two stacked tables over identical strikes read worse
+                    # and doubled the line count for no extra information).
+                    _c_rows.append((_em, _stk4,
+                                    _ps4(_c5p).strip() + _tarw.get(_ct.strip(), ""),
+                                    _ps4(_c30p).strip(),
+                                    _ps4(_p5p).strip() + _tarw.get(_pt.strip(), ""),
+                                    _ps4(_p30p).strip()))
 
                 if _c_rows:
                     week_tbl = (
                         "\n\n"
-                        + _pipe_table(("ST", "Stk", "5d%", "30d%"), _c_rows,
-                                      right_cols={2, 3}, title="CALL OI Timeline")
-                        + "\n"
-                        + _pipe_table(("ST", "Stk", "5d%", "30d%"), _p_rows,
-                                      right_cols={2, 3}, title="PUT OI Timeline",
-                                      legend=("🟢 call-buy · 🔴 put-sell/unwind · "
-                                              "🟡 hedged · ⚪ flat · ^bld v unwnd"))
+                        + _pipe_table(("ST", "Stk", "C5d", "C30d", "P5d", "P30d"), _c_rows,
+                                      right_cols={2, 3, 4, 5}, title="OI Timeline (call | put)",
+                                      legend=("🟢 call-buy · 🔴 put-sell/unwind · 🟡 hedged · "
+                                              "⚪ flat · ^built v unwound"))
                     )
     except Exception as _wk_e:
         pass  # week trend is optional
@@ -19556,23 +19559,25 @@ async def signal_ticker_detail(query, ticker):
                     else:                   _bk[_bk_lt].append(er)
                 except Exception:
                     _bk[_bk_lt].append(er)
-            exp_parts = ["\n<b>Expiry Breakdown:</b>"]
+            # ONE expiry table with a When column (merged 2026-07-23). Was three separate
+            # tables — THIS WEEK / NEXT WEEK / LATER — over identical columns, which tripled
+            # the headers and separators for no extra information.
+            _wlbl = {_bk_tw: "wk1", _bk_nw: "wk2", _bk_lt: "later"}
+            _erows = []
             for _lbl, _rows in _bk.items():
-                if not _rows: continue
-                _erows = []
                 for er in _rows:
                     cc2 = float(er["cc"] or 0); pp2 = float(er["pp"] or 0)
                     ep2 = float(er["po"] or 0) / max(float(er["co"] or 0), 1)
-                    _erows.append((str(er["expiry_date"])[5:], _fk(cc2), _fk(pp2),
-                                   f"{min(ep2, 9.9):.1f}"))
-                exp_parts.append(f"\n<b>{_lbl}</b>\n"
-                                 # "PCR(OI)" not "PCR": this column is put/call OPEN INTEREST,
-                                 # not the ratio of the CdOI/PdOI (change) columns beside it —
-                                 # verified 07-21 (1.28->1.3, 2.05->2.1, 4.12->4.1). The bare
-                                 # label made the table look self-contradictory.
-                                 + _pipe_table(("Expiry", "CdOI", "PdOI", "PCR(OI)"), _erows,
-                                               right_cols={1, 2, 3}))
-            parts.append("\n".join(exp_parts))
+                    _erows.append((_wlbl.get(_lbl, ""), str(er["expiry_date"])[5:],
+                                   _fk(cc2), _fk(pp2), f"{min(ep2, 9.9):.1f}"))
+            if _erows:
+                # "PCR(OI)" not "PCR": this column is put/call OPEN INTEREST, not the ratio of
+                # the CdOI/PdOI (change) columns beside it — verified 07-21. The bare label
+                # made the table look self-contradictory.
+                parts.append("\n<b>📅 Expiry Breakdown</b>\n"
+                             + _pipe_table(("When", "Expiry", "CdOI", "PdOI", "PCR(OI)"),
+                                           _erows, right_cols={2, 3, 4},
+                                           legend="wk1=this week · wk2=next · PCR(OI)=put/call open interest"))
     except Exception as _ex_e:
         log.warning(f"signal_ticker_detail expiry {tk}: {_ex_e}")
 

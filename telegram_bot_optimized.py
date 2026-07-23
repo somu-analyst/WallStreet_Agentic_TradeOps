@@ -12185,6 +12185,46 @@ async def record_short_interest(context=None):
         return 0
 
 
+_LIVE_CHAIN_CACHE = {}         # (tk, expiry) -> (epoch, {(strike, typ): mid})
+
+
+def _live_opt_mid(tk, strike, typ, expiry_s, max_age=90):
+    """REAL market mid for one contract during RTH — no model.
+
+    A model is only needed when options are not trading. During regular hours a live quote
+    exists and is strictly better: the card was BS-repricing off a captured (stale) IV and
+    printing GOOG 300P at 6.99 while the market said 6.10 (user 2026-07-23: "during live
+    hours show real price, why to calculate").
+
+    ONE chain download per (ticker, expiry), cached 90s and shared across every leg on that
+    expiry — which is why the old per-leg download was too slow to leave on.
+    Returns None outside RTH or when the contract is not quoted, so callers fall back to the
+    BS reprice (correct after hours, when the option market is shut).
+    """
+    try:
+        _n = _et_now()
+        _t = _n.hour * 60 + _n.minute
+        if _n.weekday() >= 5 or not (9 * 60 + 30 <= _t < 16 * 60):
+            return None                                   # not RTH — BS reprice is right
+        key = (str(tk).upper(), str(expiry_s)[:10])
+        hit = _LIVE_CHAIN_CACHE.get(key)
+        if not hit or (time.time() - hit[0]) > max_age:
+            ch = _yf_ticker(key[0]).option_chain(key[1])
+            book = {}
+            for _df, _ty in ((ch.calls, "call"), (ch.puts, "put")):
+                for _r in _df.itertuples():
+                    b, a = float(_r.bid or 0), float(_r.ask or 0)
+                    mid = ((b + a) / 2 if (b > 0 and a > 0) else float(_r.lastPrice or 0))
+                    if mid > 0:
+                        book[(round(float(_r.strike), 2), _ty)] = mid
+            _LIVE_CHAIN_CACHE[key] = (time.time(), book)
+            hit = _LIVE_CHAIN_CACHE[key]
+        return hit[1].get((round(float(strike), 2), str(typ).lower()))
+    except Exception:
+        log.debug(f"live chain {tk} {expiry_s} failed", exc_info=True)
+        return None
+
+
 def _post_event_leg(conn, tk, strike, typ, expiry_s, spot, iv_now, dte, ev):
     """Re-price ONE leg for the day after its next event — the IV-crush projection.
 
@@ -12471,6 +12511,7 @@ def _positions_card_parts(trades, now_s, today):
     _pc_conn   = get_conn()          # shared conn for fast BB leg marks
     _ah_cache  = {}                  # per-ticker after-hours spot (avoid repeat fast_info)
     _ah_any    = False               # did any leg use an extended-hours mark?
+    _live_mark_any = False           # did any leg use a REAL live market mid?
     _ev_cache  = {}                  # per-ticker event risk (yfinance calendar — cache it)
     _post_ev   = {}                  # (tk,otype,strike,expiry) -> post-event reprice dict
 
@@ -12576,6 +12617,20 @@ def _positions_card_parts(trades, now_s, today):
                         eod_px = _ge["price"]
         except Exception:
             log.debug("EOD leg reprice failed", exc_info=True)
+
+        # DURING RTH prefer the REAL market mid over any model (user 2026-07-23). The BS
+        # reprice above uses a CAPTURED IV, which goes stale after an event and printed GOOG
+        # 300P at 6.99 against a 6.10 market. One cached chain download per (ticker, expiry)
+        # serves every leg on it. Outside RTH this returns None and the model stands, which
+        # is correct — the option market is shut then.
+        try:
+            if strike > 0 and expiry_s:
+                _lm = _live_opt_mid(tk, strike, typ, expiry_s)
+                if _lm and _lm > 0:
+                    cur_px = _lm
+                    _live_mark_any = True
+        except Exception:
+            log.debug("live mid failed", exc_info=True)
 
         # Post-event (IV-crush) reprice — what the leg is worth once the event premium is gone,
         # spot held fixed. Priced off the SAME iv_leg the mark above uses, so the two numbers
@@ -12988,6 +13043,8 @@ def _positions_card_parts(trades, now_s, today):
         log.debug(f"pos_mon hp block: {_e_hp_pm}")
 
     _ah_banner = ""
+    if _live_mark_any:
+        _ah_banner += "<i>🟢 Live market mids (real bid/ask), not model prices.</i>\n\n"
     if _ah_any:
         _ah_banner = ("<i>⏳ After-hours: 'Now' re-priced from the extended-hours stock via "
                       "Black-Scholes (IV held); the options themselves are frozen at the 4pm close.</i>\n\n")

@@ -12021,6 +12021,7 @@ def _positions_card_parts(trades, now_s, today):
 
     # ── Per-position data collection ─────────────────────────────
     rows       = []
+    _eod_list  = []                  # EOD mark per leg, parallel to rows (2nd loop builds table)
     total_pnl  = 0.0
     urgent_lines = []
     _pc_conn   = get_conn()          # shared conn for fast BB leg marks
@@ -12116,6 +12117,21 @@ def _positions_card_parts(trades, now_s, today):
             # P&L, so it must be loud.
             log.warning(f"positions leg re-price FAILED for {tk} {strike}{otype[:1]} "
                         f"— mark falls back to stale capture", exc_info=True)
+
+        # EOD mark = the SAME leg repriced off the regular-session close, so the card can show
+        # buy -> EOD -> AH side by side (user 2026-07-22). cur_px above is the AH mark; here we
+        # BS-reprice with spot_reg holding the same IV. When there's no AH move eod_px == cur_px.
+        eod_px = cur_px
+        try:
+            _reg = float((_ah_cache.get(tk) or {}).get("spot_reg") or 0)
+            if strike > 0 and _reg > 0 and dte is not None and dte >= 0 and iv_leg:
+                _Te = max(dte, 0) / 365.0
+                if _Te > 0:
+                    _ge = bs_greeks(_reg, strike, _Te, R, iv_leg, typ)
+                    if _ge.get("price", 0) > 0:
+                        eod_px = _ge["price"]
+        except Exception:
+            log.debug("EOD leg reprice failed", exc_info=True)
 
         # Post-event (IV-crush) reprice — what the leg is worth once the event premium is gone,
         # spot held fixed. Priced off the SAME iv_leg the mark above uses, so the two numbers
@@ -12217,6 +12233,7 @@ def _positions_card_parts(trades, now_s, today):
         # on a spread the side IS the risk, so a leg list without it is unreadable).
         rows.append((em, tk, otype[:4], strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s,
                      action, qty, expiry_s[:10]))
+        _eod_list.append(eod_px)     # parallel to rows; consumed by the table loop below
 
     try:
         _pc_conn.close()
@@ -12252,9 +12269,12 @@ def _positions_card_parts(trades, now_s, today):
     #    + per-leg detail lines below (entry→now, DTE, win, OI, advice) ──
     _tbl_rows  = []
     html_cards = []
+    _leg_ah_rows = []                # (dot, leg, buy, eod, ah, pnl$) for the buy->EOD->AH table
+    _leg_tot_eodpnl = _leg_tot_ahpnl = _leg_cap = 0.0
 
-    for (em, tk, otype, strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s, action,
-         qty, expiry_s) in rows:
+    for _ri, (em, tk, otype, strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s, action,
+              qty, expiry_s) in enumerate(rows):
+        eod_px = _eod_list[_ri] if _ri < len(_eod_list) else cur_px   # per-leg EOD mark
         _is_long = int(qty or 0) >= 0
         _side_w  = "LONG" if _is_long else "SHORT"
         a_em   = _action_em.get(action, "✅")
@@ -12276,6 +12296,14 @@ def _positions_card_parts(trades, now_s, today):
         # glyph itself, which every Telegram client renders larger than a
         # text character — that's a font fact, not fixable in the table code.
         _st_dot = {"🚨": "🔴", "🔴": "🔴", "🟢": "🟢", "⚠️": "🟡", "🟡": "🟡"}.get(em, "🟡")
+        # Buy -> EOD -> AH -> P&L (user 2026-07-22). eod_px is the EOD-close reprice; cur_px
+        # the AH mark; pnl the current (AH) P&L. _leg_ah_rows also feeds the TOTAL row below.
+        _eod_pnl = (eod_px - entry) * (qty or 0) * 100
+        _leg_ah_rows.append((_st_dot, _leg, f"{entry:.2f}", f"{eod_px:.2f}",
+                             f"{cur_px:.2f}", f"{pnl:+,.0f}"))
+        _leg_tot_eodpnl += _eod_pnl
+        _leg_tot_ahpnl  += pnl
+        _leg_cap        += abs(entry * (qty or 0) * 100)
         _tbl_rows.append((_st_dot, _leg, f"{cur_px:.2f}", f"{pnl_pct:+.0f}%"))
 
         # Card carries the FULL per-leg detail: bought price, current mark, P&L $ and %,
@@ -12309,9 +12337,19 @@ def _positions_card_parts(trades, now_s, today):
             f"   <b>{action}</b> — {advice}"
         )
 
-    table1 = _pipe_table(("ST", "Leg", "Now", "P%"), _tbl_rows,
-                         right_cols={2, 3},
-                         legend="Now = current mark · 🟢 good · 🟡 watch · 🔴 bad") if _tbl_rows else ""
+    # Per-leg table: Buy -> EOD -> AH -> P&L, with a TOTAL row. P&L columns sum (EOD vs AH);
+    # price columns don't (different strikes). Capital respects the 100x multiplier.
+    if _leg_ah_rows:
+        _rr = list(_leg_ah_rows)
+        _tp = (_leg_tot_ahpnl / _leg_cap * 100) if _leg_cap > 0 else 0.0
+        _rr.append(("", "TOTAL", "", f"{_leg_tot_eodpnl:+,.0f}", "",
+                    f"{_leg_tot_ahpnl:+,.0f}"))
+        table1 = _pipe_table(("", "Leg", "Buy", "EOD", "AH", "P&L"), _rr,
+                             right_cols={2, 3, 4, 5},
+                             legend=f"Buy→EOD→AH marks · P&L=live(AH) · TOTAL EOD {_leg_tot_eodpnl:+,.0f} "
+                                    f"→ AH {_leg_tot_ahpnl:+,.0f} ({_tp:+.0f}% on ${_leg_cap:,.0f})")
+    else:
+        table1 = ""
 
     advice_section = "\n\n".join(html_cards)
     # Spread roll-up goes FIRST: on a vertical the combined position is the real trade,

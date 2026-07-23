@@ -11731,6 +11731,76 @@ def _atm_iv_term(conn, tk, spot):
 _SI_CACHE = {}                 # ticker -> (fetched_ts, dict) — .info is slow, SI moves 2x/month
 
 
+def _earn_ensure(conn):
+    """Earnings expectations vs actuals. yfinance carries the consensus EPS estimate, the
+    reported EPS and the surprise % per quarter — the single most explanatory number for a
+    post-earnings move (TSLA 2026-07-22: $0.33 vs $0.54 est = -38% miss -> -5.8% AH). It is
+    NOT retained indefinitely upstream, so capture it; a stored history also lets us backtest
+    'does a beat/miss predict the drift' later."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS earnings_history(
+        ticker TEXT, earn_date TEXT, eps_est REAL, eps_actual REAL, surprise_pct REAL,
+        captured_at TEXT, PRIMARY KEY (ticker, earn_date))""")
+    conn.commit()
+
+
+def _earn_capture(conn, tickers, limit=12):
+    """Store estimate/actual/surprise per quarter. Idempotent on (ticker, earn_date):
+    a future quarter lands estimate-only and is filled in once it reports."""
+    _earn_ensure(conn)
+    n = 0
+    for tk in dict.fromkeys(str(t).upper() for t in tickers if t):
+        try:
+            d = _yf_ticker(tk).get_earnings_dates(limit=limit)
+        except Exception:
+            log.debug(f"earnings dates {tk} failed", exc_info=True)
+            continue
+        if d is None or not len(d):
+            continue
+        for ts, row in d.iterrows():
+            try:
+                ed = pd.Timestamp(ts).date().isoformat()
+                _g = lambda k: (None if pd.isna(row.get(k)) else float(row.get(k)))
+                conn.execute(
+                    "INSERT OR REPLACE INTO earnings_history "
+                    "(ticker,earn_date,eps_est,eps_actual,surprise_pct,captured_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (tk, ed, _g("EPS Estimate"), _g("Reported EPS"), _g("Surprise(%)"),
+                     datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                n += 1
+            except Exception:
+                continue
+    conn.commit()
+    return n
+
+
+def _earn_context(conn, tk):
+    """(last_reported, next_expected) for the card. last = most recent quarter WITH an
+    actual; next = nearest future date carrying only an estimate."""
+    _earn_ensure(conn)
+    today = _et_now().date().isoformat()
+    last = conn.execute(
+        "SELECT earn_date,eps_est,eps_actual,surprise_pct FROM earnings_history "
+        "WHERE ticker=? AND eps_actual IS NOT NULL ORDER BY earn_date DESC LIMIT 1",
+        (tk,)).fetchone()
+    nxt = conn.execute(
+        "SELECT earn_date,eps_est FROM earnings_history WHERE ticker=? AND earn_date>? "
+        "AND eps_actual IS NULL ORDER BY earn_date LIMIT 1", (tk, today)).fetchone()
+    return last, nxt
+
+
+async def record_earnings_history(context=None):
+    """Daily capture of earnings estimates/actuals for the open book + index proxies."""
+    try:
+        conn = get_conn()
+        n = _earn_capture(conn, _hiprob_default_tickers())
+        conn.close()
+        log.info(f"record_earnings_history: stored {n} rows")
+        return n
+    except Exception as e:
+        log.warning(f"record_earnings_history failed: {e}", exc_info=True)
+        return 0
+
+
 def _si_ensure(conn):
     """short_interest history table. Exchanges publish SI TWICE MONTHLY with a ~2 week lag,
     and yfinance exposes only `current` + `prior month` — so there is no way to backtest a
@@ -12382,7 +12452,33 @@ def _positions_card_parts(trades, now_s, today):
                if _ah.get("is_extended") and _ed == 0 else "")
         _when = "today" if _ed == 0 else (f"{_ed}d" if _ed is not None else "")
         _ev_bits.append(f"{_etk} {_lbl} {_when}{_mv}".strip())
-    _events_section = ("📅 <b>EVENTS</b>: " + " · ".join(_ev_bits) + "\n\n") if _ev_bits else ""
+    _events_section = ("📅 <b>EVENTS</b>: " + " · ".join(_ev_bits) + "\n") if _ev_bits else ""
+
+    # 📊 EARNINGS — the estimate-vs-actual that EXPLAINS the move the marks are showing
+    # (TSLA $0.33 vs $0.54 est = -38% miss -> -5.8% AH). Stored in earnings_history.
+    try:
+        _ec = get_conn()
+        _erows = []
+        for _etk2 in (_ah_cache.keys() or []):
+            _last, _next = _earn_context(_ec, _etk2)
+            if _last and _last[2] is not None:
+                _sp = _last[3]
+                _vt = ("BEAT" if (_sp or 0) > 0 else "MISS" if (_sp or 0) < 0 else "INLINE")
+                _em2 = "🟢" if (_sp or 0) > 0 else ("🔴" if (_sp or 0) < 0 else "⚪")
+                _erows.append((_em2, _etk2[:5], str(_last[0])[5:],
+                               f"{_last[1]:.2f}" if _last[1] is not None else "—",
+                               f"{_last[2]:.2f}", f"{_sp:+.0f}%" if _sp is not None else "—",
+                               _vt))
+        _ec.close()
+        if _erows:
+            _events_section += ("\n" + _pipe_table(
+                ("", "Tkr", "Date", "Est", "Act", "Surp", "Verdict"), _erows,
+                right_cols={3, 4, 5}, title="📊 LAST EARNINGS (est vs actual)",
+                legend="Est=consensus EPS · Act=reported · Surp=surprise %") + "\n")
+        _events_section += "\n"
+    except Exception:
+        log.debug("earnings context block failed", exc_info=True)
+        _events_section += "\n"
 
     # 📰 NEWS — what is actually being said about each name we hold (user ask: news-based
     # analysis, not just event dates). Earnings-related headlines are sorted first because
@@ -32089,6 +32185,7 @@ def main():
         job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
         job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs ~4:30pm ET
         job_queue.run_daily(record_short_interest, time=dt_time(21, 40, 0))  # SI snapshot ~4:40pm ET
+        job_queue.run_daily(record_earnings_history, time=dt_time(21, 45, 0))  # est/actual EPS
         job_queue.run_once(riskoff_alert, when=25)                    # Risk-Off Radar readout ~on startup
         job_queue.run_daily(riskoff_alert, time=dt_time(21, 20, 0), data={"gate": True})  # post-close ~4:20 PM ET, only if caution+
         job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # ~4:35 PM ET — silently log anti-bubble baskets for tracking

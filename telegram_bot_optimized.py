@@ -20032,6 +20032,31 @@ async def signal_ticker_detail(query, ticker):
     except Exception:
         log.debug("ticker chart send failed", exc_info=True)
 
+    # Charts for the OI tables above (user 2026-07-23: "summarize in graphs, simple to
+    # grasp"). Both renderers already existed and were never called from anywhere —
+    # _oi_money_flow_chart turns the per-strike premium columns into a bar chart, and
+    # _oi_week_heatmap turns the OI-timeline grid into a heatmap. Same numbers, read at a
+    # glance instead of scanned row by row.
+    try:
+        _c2 = get_conn()
+        _lt = _c2.execute("SELECT MAX(trade_date_now) FROM options_change WHERE ticker=?",
+                          (tk,)).fetchone()
+        _lt = _lt[0] if _lt else None
+        if _lt and spot > 0:
+            for _fn, _cap in ((_oi_money_flow_chart,
+                               f"💰 {tk} — $ flow per strike (calls vs puts)"),
+                              (_oi_week_heatmap,
+                               f"🔥 {tk} — OI build/unwind heatmap by strike & day")):
+                try:
+                    _p = _fn(tk, _c2, spot, _lt)
+                    if _p:
+                        await query.message.reply_photo(_p, caption=_cap)
+                except Exception:
+                    log.debug(f"{_fn.__name__} send failed", exc_info=True)
+        _c2.close()
+    except Exception:
+        log.debug("OI chart block failed", exc_info=True)
+
 #  7) INSIDER / CONGRESS — table format
 
 

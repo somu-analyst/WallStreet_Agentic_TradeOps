@@ -6184,18 +6184,24 @@ def _oi_money_flow_chart(ticker: str, conn, spot: float, latest_date: str):
     labels  = [f"${int(s)}" for s in strikes]
     bw      = 0.38
 
-    # Separate buyers (chg>0) from closers/sellers (chg<0)
-    c_buy  = df["call_not"].clip(lower=0).values
-    c_sell = df["call_not"].clip(upper=0).values     # negative, shown as downward lighter bar
-    p_buy  = (-df["put_not"].clip(lower=0)).values   # flip: put buyers shown below x-axis
-    p_sell = (-df["put_not"].clip(upper=0)).values   # put closers shown above x-axis
+    # OPENED (chg>0) vs CLOSED (chg<0). Labelled "Buyers/Close" before, which was wrong:
+    # OI rising means contracts were OPENED, and every option has a buyer AND a seller on it.
+    # A call build 10% OTM is usually WRITING (covered calls / income), not bullish buying —
+    # which is exactly the distinction _oi_intent_algo() makes by zone (ATM build = BULLISH,
+    # >7% OTM call build = COVERED_CALL, deep-OTM put build = HEDGE not bearish). The BULL /
+    # BEAR / STRD tags along the top of this panel already carry that zone read, so the bars
+    # are now named for what they factually measure rather than implying a side.
+    c_open  = df["call_not"].clip(lower=0).values
+    c_close = df["call_not"].clip(upper=0).values    # negative, shown as downward lighter bar
+    p_open  = (-df["put_not"].clip(lower=0)).values  # flip: put opens shown below x-axis
+    p_close = (-df["put_not"].clip(upper=0)).values  # put closes shown above x-axis
 
     # Call bars
-    ax1.bar([i - bw/2 for i in x], c_buy,  bw*0.9, color="#3FB950", alpha=0.88, label="Call Buyers")
-    ax1.bar([i - bw/2 for i in x], c_sell, bw*0.9, color="#3FB950", alpha=0.30, hatch="//",  label="Call Close")
+    ax1.bar([i - bw/2 for i in x], c_open,  bw*0.9, color="#3FB950", alpha=0.88, label="Call OI opened")
+    ax1.bar([i - bw/2 for i in x], c_close, bw*0.9, color="#3FB950", alpha=0.30, hatch="//",  label="Call OI closed")
     # Put bars
-    ax1.bar([i + bw/2 for i in x], p_buy,  bw*0.9, color="#F85149", alpha=0.88, label="Put Buyers")
-    ax1.bar([i + bw/2 for i in x], p_sell, bw*0.9, color="#F85149", alpha=0.30, hatch="\\\\", label="Put Close")
+    ax1.bar([i + bw/2 for i in x], p_open,  bw*0.9, color="#F85149", alpha=0.88, label="Put OI opened")
+    ax1.bar([i + bw/2 for i in x], p_close, bw*0.9, color="#F85149", alpha=0.30, hatch="\\\\", label="Put OI closed")
 
     # Zero line
     ax1.axhline(0, color="#8B949E", linewidth=0.8, alpha=0.5)
@@ -6502,25 +6508,31 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                     s = f"{v:+.0f}%"
                     return s[:5].rjust(5)
 
-                _BLK = "▁▂▃▄▅▆▇█"
-
                 def _spark(vals):
-                    """5-bar sparkline of the OI LEVEL over the last 5 sessions, oldest→newest.
+                    """5 COLOURED day-over-day OI bars, oldest→newest (user 2026-07-23).
 
-                    Replaces the old ^/v arrow (user 2026-07-23: redundant next to +/- numbers).
-                    A rising staircase = OI building, falling = unwinding, flat = no interest —
-                    the SHAPE of the build, which a single 5d% number cannot show. Height is
-                    scaled per strike so each row uses the full range.
-                    NOTE: Telegram monospace has no per-character colour, so bars carry height
-                    only; the signed % columns beside them carry direction.
+                    🟩 OI rose that session · 🟥 OI fell · ⬜ flat (<1% move).
+                    Block characters (▁▂▃▄▅▆▇█) carry height but Telegram renders them
+                    monochrome, which read as blank; emoji squares are the only way to get
+                    real colour in a Telegram table. Height is therefore traded for colour —
+                    the signed 5d/30d % columns beside these already carry magnitude, so the
+                    bars answer the question those numbers cannot: WHICH days it built.
+                    Needs 6 samples to yield 5 day-over-day changes.
                     """
                     v = [x for x in vals if x is not None]
                     if len(v) < 2:
-                        return "     "
-                    lo, hi = min(v), max(v)
-                    if hi <= lo:
-                        return _BLK[0] * len(v)
-                    return "".join(_BLK[min(int((x - lo) / (hi - lo) * 7 + 0.5), 7)] for x in v)
+                        return ""
+                    out = []
+                    for _prev, _cur in zip(v, v[1:]):
+                        if _prev <= 0:
+                            out.append("⬜")
+                        elif (_cur - _prev) / _prev > 0.01:
+                            out.append("🟩")
+                        elif (_cur - _prev) / _prev < -0.01:
+                            out.append("🟥")
+                        else:
+                            out.append("⬜")
+                    return "".join(out[-5:])
 
                 def _sig3(c5, p5):
                     if c5 > 20 and p5 > 20:  return "HDG"
@@ -6567,7 +6579,7 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                     # 2026-07-23 — two stacked tables over identical strikes read worse
                     # and doubled the line count for no extra information).
                     # 5-session OI-level sparklines (oldest→newest) replace the ^/v arrows
-                    _last5 = list(reversed(_all_wk[:5]))      # _all_wk is newest-first
+                    _last5 = list(reversed(_all_wk[:6]))      # 6 samples -> 5 daily changes
                     _cspk = _spark([_v(d, "c_oi") for d in _last5])
                     _pspk = _spark([_v(d, "p_oi") for d in _last5])
                     _c_rows.append((_em, _stk4,
@@ -6580,8 +6592,8 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                         + _pipe_table(("ST", "Stk", "Call5d", "C5d", "C30d",
                                        "Put5d", "P5d", "P30d"), _c_rows,
                                       right_cols={3, 4, 6, 7}, title="OI Timeline (call | put)",
-                                      legend=("Call5d/Put5d = OI level last 5 sessions "
-                                              "(rising bars = building, falling = unwinding) · "
+                                      legend=("🟩 OI up that day · 🟥 down · ⬜ flat (5 sessions, oldest→newest) "
+                                              "· "
                                               "🟢 call-buy 🔴 put-sell/unwind 🟡 hedged ⚪ flat"))
                     )
     except Exception as _wk_e:

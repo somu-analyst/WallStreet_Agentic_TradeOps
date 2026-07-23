@@ -1,4 +1,4 @@
-﻿[RESUME AFTER] 2026-07-23 11:00  (limit-guard: block at 112371886 tokens >= 80000000)
+﻿[RESUME AFTER] 2026-07-23 11:00  (limit-guard: block at 117513709 tokens >= 80000000)
 # NEXT — handoff (written 2026-07-21, end of a very large session)
 
 ## START HERE (2 minutes, before anything else)

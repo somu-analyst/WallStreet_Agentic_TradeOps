@@ -12408,16 +12408,18 @@ def _closed_today_block(conn, today, spot_of):
             _pk = (f"{float(pnl or 0)/1000:+.1f}K" if abs(float(pnl or 0)) >= 1000
                    else f"{float(pnl or 0):+.0f}")
             out.append((lbl, f"{float(entry or 0):.2f}", f"{float(exitp or 0):.2f}",
-                        f"{now_px:.2f}" if now_px is not None else "—", _pk))
+                        f"{now_px:.2f}" if now_px is not None else "—"))
         except Exception:
             log.debug(f"closed row {tk} failed", exc_info=True)
     if not out:
         return "", 0.0
     _tk = f"{tot/1000:+.1f}K" if abs(tot) >= 1000 else f"{tot:+.0f}"
-    out.append(("TOTAL", "", "", "", _tk))
-    return _pipe_table(("Leg", "Buy", "Sell", "Now", "P&L"), out, right_cols={1, 2, 3, 4},
+    # 4 cols: the per-leg P&L column pushed this past the mobile wrap point (~40 chars),
+    # and buy/sell/now were the explicitly requested values. Realised total goes in the
+    # legend, where it is recoverable without costing table width.
+    return _pipe_table(("Leg", "Buy", "Sell", "Now"), out, right_cols={1, 2, 3},
                        title="📕 CLOSED TODAY",
-                       legend="Now = what it would be worth if still held (scores the exit)"), tot
+                       legend=f"Now = worth if still held (scores the exit) · realised {_tk}"), tot
 
 
 def _positions_card_parts(trades, now_s, today):

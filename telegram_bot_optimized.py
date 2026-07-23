@@ -12236,6 +12236,67 @@ def _book_risk_flags(rows, spot_of):
     return lines
 
 
+def _expiry_outcome(rows, spot_of, dte_max=3):
+    """Plain-English settlement walk-through for verticals near expiry.
+
+    Near expiry the only questions that matter are: does this get assigned, do the legs
+    offset, and is there a price band that leaves me holding stock I never wanted. A
+    per-leg P&L table answers none of them. For each vertical inside `dte_max`:
+      * both legs ITM  -> they OFFSET at settlement, net = max profit, NO share position
+      * both OTM       -> both expire worthless
+      * spot BETWEEN the strikes -> PIN RISK: one leg auto-exercises and the other does
+        not, so you wake up holding (or short) 100 shares per contract
+    OCC auto-exercises anything >= $0.01 ITM, which is why the middle band is the danger.
+    """
+    from collections import defaultdict
+    grp = defaultdict(list)
+    for r in rows:
+        otype, strike, qty = str(r[2]).upper(), r[3], int(r[12] or 0)
+        if otype.startswith("STOCK") or not strike or not qty:
+            continue
+        dte_n = int(r[8][1:]) if str(r[8]).startswith("D") and str(r[8])[1:].isdigit() else None
+        grp[(r[1], r[13], otype[:1], dte_n)].append(r)
+
+    out = []
+    for (tk, exp, ot, dte_n), legs in grp.items():
+        if dte_n is None or dte_n > dte_max:
+            continue
+        longs = [l for l in legs if int(l[12] or 0) > 0]
+        shorts = [l for l in legs if int(l[12] or 0) < 0]
+        if not (longs and shorts):
+            continue
+        S = float(spot_of(tk) or 0)
+        if S <= 0:
+            continue
+        KL, KS = float(longs[0][3]), float(shorts[0][3])
+        n = min(abs(int(longs[0][12])), abs(int(shorts[0][12])))
+        is_put = (ot == "P")
+        itm = (lambda K: S < K) if is_put else (lambda K: S > K)
+        lo, hi = min(KL, KS), max(KL, KS)
+        width = hi - lo
+        net_entry = float(longs[0][4]) - float(shorts[0][4])
+        maxp = (width - net_entry) * n * 100 if net_entry > 0 else -net_entry * n * 100
+        when = "TODAY" if dte_n == 0 else ("tomorrow" if dte_n == 1 else f"in {dte_n}d")
+        head = f"<b>{tk} {lo:.0f}/{hi:.0f}{ot} — expires {when}</b> (spot ${S:.2f})"
+        if itm(KL) and itm(KS):
+            out.append(
+                f"{head}\n   ✅ BOTH legs ITM → they OFFSET at settlement: assigned on the "
+                f"short, exercised on the long. Net <b>${maxp:,.0f}</b> (max profit), "
+                f"<b>no share position</b>.\n"
+                f"   ⚠️ PIN RISK if {tk} moves back between <b>${lo:.0f}–${hi:.0f}</b> by expiry — "
+                f"then only one leg exercises and you end up holding {100*n} shares.\n"
+                f"   → Closing the spread now locks the same ${maxp:,.0f} and removes "
+                f"assignment + pin risk entirely.")
+        elif not itm(KL) and not itm(KS):
+            out.append(f"{head}\n   Both legs OTM — expire worthless, max loss already realised.")
+        else:
+            out.append(
+                f"{head}\n   🚨 <b>IN THE PIN BAND</b> (${lo:.0f}–${hi:.0f}): only one leg "
+                f"auto-exercises (OCC exercises ≥$0.01 ITM), leaving you {100*n} shares "
+                f"long/short after expiry.\n   → Close BOTH legs before the bell to avoid it.")
+    return out
+
+
 def _positions_card_parts(trades, now_s, today):
     """Build the POSITIONS health card (table + advice + urgent + HP engine) —
     SHARED by the 10-min position_monitor push and the menu positions_view
@@ -12611,6 +12672,16 @@ def _positions_card_parts(trades, now_s, today):
         _risk = []
         log.debug("book risk flags failed", exc_info=True)
     _risk_section = ("<b>⚡ BOOK RISK</b>\n" + "\n".join(_risk) + "\n\n") if _risk else ""
+    # Settlement walk-through for anything expiring within ~3 days — assignment, whether the
+    # legs offset, and the pin band. None of that is answerable from a per-leg P&L table.
+    try:
+        _xo = _expiry_outcome(rows, lambda t: float((_ah_cache.get(t) or {}).get("spot_ext")
+                              or (_ah_cache.get(t) or {}).get("spot_reg") or 0.0))
+    except Exception:
+        _xo = []
+        log.debug("expiry outcome failed", exc_info=True)
+    if _xo:
+        _risk_section += "<b>🏁 EXPIRY / ASSIGNMENT</b>\n" + "\n".join(_xo) + "\n\n"
 
     # Events header — built from the per-ticker _ev_cache the card already populated, so no
     # new network calls on a message pushed every 10-15 min. Flags earnings/FOMC that land

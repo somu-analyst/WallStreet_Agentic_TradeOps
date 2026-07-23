@@ -12948,7 +12948,7 @@ def _positions_card_parts(trades, now_s, today):
         for _htk_pm in trades["ticker"].str.upper().unique().tolist()[:5]:
             try:
                 _sp_pm = _get_spot_with_ah(_htk_pm).get("spot_ext", 0.0)
-                _hr_pm = high_prob_signals_engine(_htk_pm, conn_hp_pm, _sp_pm)
+                _hr_pm = high_prob_signals_engine(_htk_pm, conn_hp_pm, _spy_day_ret(conn_hp_pm))
                 _ic_pm = _SIG_ICON.get(_hr_pm["signal"], "⚪")
                 _cf_pm = _hr_pm.get("confidence","")
                 _pb_pm = _hr_pm["prob"]
@@ -15385,7 +15385,7 @@ async def morning_alert(ctx: ContextTypes.DEFAULT_TYPE):
         for _htk in _hp_tks["ticker"].tolist()[:5]:
             try:
                 _sp_ma = _get_spot_with_ah(str(_htk).upper()).get("spot_ext", 0.0)
-                _hr = high_prob_signals_engine(str(_htk).upper(), conn_hp_ma, _sp_ma)
+                _hr = high_prob_signals_engine(str(_htk).upper(), conn_hp_ma, _spy_day_ret(conn_hp_ma))
                 _he = _SIG_ICON_MA.get(_hr["signal"], "⚪")
                 _cf = _hr.get("confidence", "")
                 _pb = _hr["prob"]
@@ -18855,6 +18855,21 @@ def _hp_model_put_call_wall(ticker, conn, spot):
     except Exception as e:
         log.debug(f"_hp_model_put_call_wall {ticker}: {e}")
         return {"signal": "NEUTRAL", "prob": 50, "reason": str(e)[:60]}
+
+
+def _spy_day_ret(conn):
+    """SPY % change on the last session — the `spy_ret` the HP engine expects (a PERCENT,
+    not a price). Two call sites were passing the ticker's SPOT here, which made the
+    engine's `mkt = 2 if spy_ret > 0.5` branch fire ALWAYS (a $341 spot is > 0.5), pinning
+    a maximum bullish market tilt on every positions-card render."""
+    try:
+        d = conn.execute("SELECT close FROM stock_daily WHERE ticker='SPY' "
+                         "ORDER BY trade_date DESC LIMIT 2").fetchall()
+        if len(d) >= 2 and float(d[1][0]):
+            return (float(d[0][0]) / float(d[1][0]) - 1) * 100
+    except Exception:
+        log.debug("spy_day_ret failed", exc_info=True)
+    return 0.0
 
 
 _HP_ENGINE_CACHE = {}          # (ticker, latest_trade_date, spy_ret) -> engine dict

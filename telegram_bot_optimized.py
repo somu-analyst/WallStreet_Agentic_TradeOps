@@ -12288,7 +12288,25 @@ def _positions_card_parts(trades, now_s, today):
         _risk = []
         log.debug("book risk flags failed", exc_info=True)
     _risk_section = ("<b>⚡ BOOK RISK</b>\n" + "\n".join(_risk) + "\n\n") if _risk else ""
-    colour_section = (_risk_section
+
+    # Events header — built from the per-ticker _ev_cache the card already populated, so no
+    # new network calls on a message pushed every 10-15 min. Flags earnings/FOMC that land
+    # before a leg's expiry, with the AH move for names that reported today.
+    _ev_bits = []
+    for _etk in sorted(_ev_cache):
+        _ev = _ev_cache.get(_etk) or {}
+        if not _ev.get("has_event"):
+            continue
+        _ed = _ev.get("event_days")
+        _lbl = "Earnings" if _ev.get("event_type") == "EARNINGS" else str(_ev.get("event_type") or "Event")
+        _ah = _ah_cache.get(_etk) or {}
+        _mv = (f" {_ah.get('ext_chg_pct'):+.1f}%"
+               if _ah.get("is_extended") and _ed == 0 else "")
+        _when = "today" if _ed == 0 else (f"{_ed}d" if _ed is not None else "")
+        _ev_bits.append(f"{_etk} {_lbl} {_when}{_mv}".strip())
+    _events_section = ("📅 <b>EVENTS</b>: " + " · ".join(_ev_bits) + "\n\n") if _ev_bits else ""
+
+    colour_section = (_events_section + _risk_section
                       + (f"{_spreads}\n\n" if _spreads else "")
                       + f"{table1}\n\n{advice_section}")
 

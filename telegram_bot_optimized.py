@@ -3671,7 +3671,11 @@ MKT_GROUPS = {
     "⚡ Volatility": {"VIX": "^VIX", "VXN": "^VXN"},
     "🏦 Commodities": {"Gold": "GC=F", "Oil": "CL=F"},
     "💰 Crypto/FX": {"Bitcoin": "BTC-USD", "EUR/USD": "EURUSD=X"},
-    "📉 Bonds": {"10Y Yld": "^TNX"},
+    # Full curve, not just the 10Y (user 2026-07-23): the SHAPE is the signal — 3m10y and
+    # 2s10s inversion/steepening drive the risk-on/off read, and the long end (30Y) is where
+    # inflation/term-premium shows up. NOTE: yfinance has no reliable 20Y or 2Y ticker, so
+    # 3M/5Y/10Y/30Y is the widest set we can source keylessly.
+    "📉 Bonds": {"3M": "^IRX", "5Y": "^FVX", "10Y": "^TNX", "30Y": "^TYX"},
 }
 
 async def market_overview(query):
@@ -3709,7 +3713,10 @@ async def market_overview(query):
         ("COMMODITIES", "Oil",     "CL=F",     False),
         ("CRYPTO/FX",   "BTC",     "BTC-USD",  False),
         ("CRYPTO/FX",   "EUR/USD", "EURUSD=X", False),
-        ("BONDS",       "10Y Yld", "^TNX",     True),
+        ("BONDS",       "3M",      "^IRX",     True),
+        ("BONDS",       "5Y",      "^FVX",     True),
+        ("BONDS",       "10Y",     "^TNX",     True),
+        ("BONDS",       "30Y",     "^TYX",     True),
     ]
 
     all_rows = []   # (section, name, d) — d is _fetch result or None

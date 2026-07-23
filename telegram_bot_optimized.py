@@ -25103,10 +25103,15 @@ def wrap_narrative(F, html=True):
         L.append("\n🌐 " + b("CROSS-ASSET") + "\nContagion check — " + "; ".join(parts) + ".")
 
     lev_lines = []
+    _lev_tbl = ""
     if F["lev"]:
-        worst = max(F["lev"], key=lambda x: abs(x["pct"]))
-        lev_lines.append(f"Leveraged ETFs are amplifying the move: {worst['name']} ({worst['sym']}) "
-                         f"{worst['pct']:+.1f}%. 3x funds magnify every swing — and the crowd is in them.")
+        # Levered ETFs as a TABLE, not prose (user 2026-07-23) — one row per fund reads far
+        # faster than a sentence naming only the worst, and it shows the whole complex.
+        _lr = [("🔴" if x["pct"] < 0 else "🟢", x["sym"][:5], f"{x['mult']}x",
+                f"{x['pct']:+.2f}%") for x in sorted(F["lev"], key=lambda x: x["pct"])]
+        _lev_tbl = _pipe_table(("ST", "ETF", "Lev", "Day%"), _lr, right_cols={3},
+                               title="🎰 LEVERAGED ETFs",
+                               legend="3x funds magnify every swing — record AUM means vol begets vol")
     if F["options"]:
         o = F["options"]
         flow = ("put-heavy (hedging/bearish)" if (o["put_chg"] or 0) > (o["call_chg"] or 0)
@@ -25115,8 +25120,10 @@ def wrap_narrative(F, html=True):
         ph = ", ".join(o["put_heavy"]) if o.get("put_heavy") else "—"
         lev_lines.append(f"Options flow is {flow}: net ΔOI calls {o['call_chg']:+,.0f} / puts {o['put_chg']:+,.0f}{pcr}. "
                          f"Heaviest put builds: {ph}.")
+    if _lev_tbl:
+        L.append("\n" + _lev_tbl)
     if lev_lines:
-        L.append("\n🎰 " + b("LEVERAGE & POSITIONING") + "\n" + " ".join(lev_lines))
+        L.append("\n🎰 " + b("POSITIONING") + "\n" + " ".join(lev_lines))
 
     if F["breadth"]:
         br = F["breadth"]

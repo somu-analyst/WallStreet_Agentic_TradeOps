@@ -74,3 +74,40 @@ Options-trading edge system: Telegram bot + dashboard + our own capture-forward 
 
 ## Out of scope (for now)
 - qlib port (own data-format project) · macro-event positioner (needs econ-calendar feed) · index-rebalance (corp-action feed) · gamma-scalp (tick data) · box-arb (borrow rates) · ETF-NAV (institutional data) · AlphaVantage premium backfill ($50/mo, optional).
+
+## ALERT CONSOLIDATION + polish (planned 2026-07-23, easy → hard)
+
+Goal: stop ~5 recurring pushes filling the chat. Mechanism is Telegram
+`editMessageText` — ONE status message edited in place, not re-sent.
+
+### 1. EASY — Market-structure table (~15 min)
+Levered-ETF block in the intraday writeup is prose; make it `_pipe_table`:
+`ST | ETF | AUM | Day%` (TQQQ/SOXL/UPRO). Same data, 3 lines instead of 6.
+
+### 2. EASY — Read-through / narrative as links (~15 min)
+Long narrative paragraphs (READ-THROUGH, OUTLOOK) → single clickable line via
+`<a href>`, or wrap in `<blockquote expandable>` (already used by `/plan`).
+
+### 3. MEDIUM — Timeline event-state bug (CORRECTNESS, not cosmetic)
+Timeline prints scheduled times as if the event happened: "08:30 ET — Jobless
+Claims release" shows even when no data has landed. That is a false statement.
+Fix: tag each row `upcoming / awaiting / released`, only asserting release when
+we hold the value. Widen window to **T−2 … T+2 days** (user ask) so you see what
+is coming and what just passed.
+
+### 4. HARD — Single edited STATUS message  ← the real win
+- Store `status_msg_id` in `app_settings`.
+- Recurring jobs (position_monitor, intraday_alert, heat/momentum, futures)
+  write into ONE message via `bot.edit_message_text`; send only if no id or the
+  edit 400s (message gone), then re-store the new id.
+- Sections wrapped in `<blockquote expandable>` so the combined message
+  collapses instead of running for pages.
+- **Keep as separate pushes** anything that is genuine NEWS and should
+  interrupt: assignment/pin risk firing, earnings landing, data-health break,
+  trigger alerts. Recurring status is not news.
+- Watch: combined length. Everything merged tonight had to be re-narrowed for
+  mobile width (~40 chars); build sections narrow from the start.
+
+### Notes
+- Telegram edit has a rate limit — do not edit more often than ~1/5s per chat.
+- Editing loses history; that is the trade-off and why event alerts stay separate.

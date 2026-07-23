@@ -754,13 +754,19 @@ def _get_ah_price(ticker: str) -> dict:
 
         post = 0.0; pre = 0.0
         # When the market is OPEN, fast_info.last_price IS the live price — skip the slow .info.
-        # Any other time (pre/after/closed/unknown) fetch .info so we show the latest pre/post
-        # (after-hours) price rather than the stale regular close.
-        # Only extended sessions carry a live pre/post price. When fully CLOSED, the
-        # stale postMarketPrice is just the last session's — skip the slow .info entirely
-        # (EOD close below is the correct anchor). Reuse the shared 15-min .info cache so
-        # a page with several tickers doesn't refetch the heavy .info per rerun.
-        if _market_state() in ("PRE", "AFTER"):
+        # Otherwise fetch .info for the pre/post-market print. yfinance keeps serving the last
+        # postMarketPrice well past the official 20:00 close, and an earnings move that lands at
+        # 4:05pm must stay visible at 11pm — so fetch anytime OUTSIDE 09:30-16:00 RTH on a
+        # weekday, not just the 16:00-20:00 AFTER window (fix 2026-07-22: matches the bot's
+        # _get_spot_with_ah; the dashboard reverted to the stale EOD close all evening).
+        from datetime import datetime as _dt2
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+            _nyt = _dt2.now(_ZI("America/New_York"))
+        except Exception:
+            _nyt = _dt2.now()
+        _tmin = _nyt.hour * 60 + _nyt.minute
+        if _nyt.weekday() < 5 and not (9 * 60 + 30 <= _tmin < 16 * 60):
             try:
                 _di = _cached_info(ticker)
                 post = float(_di.get("postMarketPrice") or 0)

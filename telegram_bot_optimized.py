@@ -2051,12 +2051,16 @@ def _get_spot_with_ah(ticker: str) -> dict:
                 reg = 0.0
             if reg > 0:
                 break
-        # .info is slow, so only pay for it inside an actual extended session (ET 04:00-09:30
-        # pre, 16:00-20:00 post, weekdays) -- during RTH last_price already IS the live price.
+        # .info is slow, so only pay for it OUTSIDE regular trading hours -- during RTH
+        # last_price already IS the live price. The post-market print persists on yfinance
+        # well past the official 20:00 close (verified 2026-07-22 22:52 ET: TSLA still 358.80
+        # after an earnings drop), so we keep showing that LAST post-market print all evening
+        # rather than reverting to the stale 4pm close -- an earnings move that lands at 4:05pm
+        # must stay visible at 10pm. Window: weekdays, anytime except 09:30-16:00 RTH.
         post = pre = 0.0
         _ny = _et_now()
         _tm = _ny.hour * 60 + _ny.minute
-        if _ny.weekday() < 5 and (4 * 60 <= _tm < 9 * 60 + 30 or 16 * 60 <= _tm < 20 * 60):
+        if _ny.weekday() < 5 and not (9 * 60 + 30 <= _tm < 16 * 60):
             try:
                 _inf = tkr.info or {}
                 post = float(_inf.get("postMarketPrice") or 0)

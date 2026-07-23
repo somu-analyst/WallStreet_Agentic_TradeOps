@@ -22814,6 +22814,41 @@ def morning_briefing(conn, event_keys=None):
         mom = {}
     return {"opex": rad, "events": evs, "news": news, "regime": regime, "momentum": mom}
 
+def _world_news_block(limit=6):
+    """Top world/market headlines for the morning brief — wires the previously-orphaned
+    `_lib/market_news_enhanced.get_aggregated_news` (Google/Yahoo/MarketWatch/Benzinga RSS,
+    keyless). Filters the blank rows the raw feed returns (verified 2026-07-22: the first
+    Yahoo item comes back with an empty headline), dedupes, and formats compactly. Returns
+    [] on any failure so the brief still renders without news.
+    """
+    try:
+        import sys as _sys
+        _lp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_lib")
+        if _lp not in _sys.path:
+            _sys.path.insert(0, _lp)
+        import market_news_enhanced as _mne
+        raw = _mne.get_aggregated_news(limit=limit * 3) or []
+    except Exception as e:
+        log.debug(f"world news fetch failed: {e}", exc_info=True)
+        return []
+    out, seen = [], set()
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        head = str(it.get("headline") or it.get("title") or "").strip()
+        if len(head) < 12:                     # drops the empty/junk rows
+            continue
+        key = head[:60].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        src = str(it.get("source") or "").strip()
+        out.append((head, src))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _fmt_briefing(b):
     from datetime import datetime as _dt
     news = b.get("news") or {}
@@ -22865,6 +22900,12 @@ def _fmt_briefing(b):
         if lead:
             lines.append(f"⚖️ <b>Play:</b> {lead_trade} — <i>{lead[4]}</i>")
         lines.append(f"\U0001F6E1 <b>Hedge:</b> {ev['hedge']}")
+
+    _wn = _world_news_block()
+    if _wn:
+        lines += ["", "📰 <b>WORLD & MARKETS</b>"]
+        for _h, _s in _wn:
+            lines.append(f"• {_h[:110]}" + (f" <i>({_s})</i>" if _s else ""))
 
     lines += ["",
         "<i>Tap /event NAME for the full 1st/2nd/3rd-order chain, or /opex for the expiration radar.</i>",

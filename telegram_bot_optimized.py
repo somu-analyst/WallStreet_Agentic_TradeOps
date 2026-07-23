@@ -12381,7 +12381,25 @@ def _positions_card_parts(trades, now_s, today):
         _ev_bits.append(f"{_etk} {_lbl} {_when}{_mv}".strip())
     _events_section = ("📅 <b>EVENTS</b>: " + " · ".join(_ev_bits) + "\n\n") if _ev_bits else ""
 
-    colour_section = (_events_section + _risk_section
+    # 📰 NEWS — what is actually being said about each name we hold (user ask: news-based
+    # analysis, not just event dates). Earnings-related headlines are sorted first because
+    # the day after a print they explain the move the marks are showing. Cached 30 min.
+    _news_section = ""
+    try:
+        _pn = _position_news(list(_ah_cache.keys()) or
+                             trades["ticker"].astype(str).str.upper().unique().tolist())
+        if _pn:
+            _nl = []
+            for _ntk, _hs in _pn.items():
+                _mv = _ah_cache.get(_ntk) or {}
+                _tag = (f" <i>({_mv.get('ext_chg_pct'):+.1f}% AH)</i>"
+                        if _mv.get("is_extended") else "")
+                _nl.append(f"<b>{_ntk}</b>{_tag} " + " · ".join(h[:95] for h in _hs))
+            _news_section = "📰 <b>NEWS</b>\n" + "\n".join(_nl) + "\n\n"
+    except Exception:
+        log.debug("positions news block failed", exc_info=True)
+
+    colour_section = (_events_section + _news_section + _risk_section
                       + (f"{_spreads}\n\n" if _spreads else "")
                       + f"{table1}\n\n{advice_section}")
 
@@ -23060,6 +23078,99 @@ def morning_briefing(conn, event_keys=None):
     except Exception:
         mom = {}
     return {"opex": rad, "events": evs, "news": news, "regime": regime, "momentum": mom}
+
+_POS_NEWS_CACHE = {}           # tk -> (epoch, [headline, ...]) — .news is a network call
+
+
+def _position_news(tickers, per_tk=2, max_age=1800, days=3):
+    """Recent per-ticker headlines for the positions card, earnings-first.
+
+    The card pushes every 10-15 min, so this is cached 30 min per ticker — the underlying
+    feeds update far slower than that and an uncached fetch per push would hammer them.
+
+    Sources: Finnhub company-news when the key is present (it carries a `summary`, which is
+    the closest thing we get to an earnings-call takeaway), falling back to keyless yfinance
+    per-ticker news. NOTE: neither source gives actual earnings-CALL transcripts — what you
+    get is reporting ABOUT the print, so it is labelled as headlines, not "management said".
+    """
+    import urllib.request, json as _json, datetime as _dt
+    key = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_KEY")
+    now = time.time()
+    _KW = ("earning", "results", "quarter", "guidance", "beat", "miss", "outlook",
+           "revenue", "forecast", "eps", "price target", "upgrade", "downgrade")
+    # Sources that actually move a stock. Everything else (aggregator spam, listicles,
+    # "3 stocks to watch" content) is dropped — user 2026-07-23: "strong news, not timepass".
+    _GOOD_SRC = ("reuters", "bloomberg", "wall street journal", "wsj", "cnbc", "barron",
+                 "financial times", "benzinga", "marketwatch", "associated press", "ap ",
+                 "investor's business daily", "seeking alpha", "yahoo finance", "forbes",
+                 "the information", "axios", "business insider")
+    # Company aliases so a headline is only attached to a ticker it actually names.
+    _ALIAS = {"GOOG": ("alphabet", "google"), "GOOGL": ("alphabet", "google"),
+              "TSLA": ("tesla", "musk"), "AMD": ("amd", "advanced micro"),
+              "NVDA": ("nvidia",), "AAPL": ("apple",), "MSFT": ("microsoft",),
+              "AMZN": ("amazon",), "META": ("meta", "facebook"), "NFLX": ("netflix",),
+              "AVGO": ("broadcom",), "MU": ("micron",), "INTC": ("intel",)}
+
+    def _relevant(tk_, headline):
+        """Headline must actually NAME this company. Without this, unrelated sector news
+        ('STMicro Plunges...') was being filed under TSLA."""
+        h = headline.lower()
+        if tk_.lower() in h.split() or f"({tk_.lower()})" in h or f"${tk_.lower()}" in h:
+            return True
+        return any(a in h for a in _ALIAS.get(tk_, (tk_.lower(),)))
+    out = {}
+    _used = set()                  # headlines already shown for ANOTHER ticker
+    for tk in dict.fromkeys(str(t).upper() for t in tickers if t):
+        hit = _POS_NEWS_CACHE.get(tk)
+        if hit and (now - hit[0]) < max_age:
+            _fresh = [h for h in hit[1] if h.lower()[:40] not in _used]
+            if _fresh:
+                out[tk] = _fresh
+                _used.update(h.lower()[:40] for h in _fresh)
+            continue
+        items = []
+        if key:
+            try:
+                _to = _et_now().date(); _fr = _to - _dt.timedelta(days=days)
+                u = (f"https://finnhub.io/api/v1/company-news?symbol={tk}"
+                     f"&from={_fr}&to={_to}&token={key}")
+                with urllib.request.urlopen(u, timeout=12) as r:
+                    for d in _json.loads(r.read().decode())[:40]:
+                        h = str(d.get("headline") or "").strip()
+                        src = str(d.get("source") or "").lower()
+                        if h and _relevant(tk, h) and (not src or
+                                                       any(g in src for g in _GOOD_SRC)):
+                            items.append((h, str(d.get("summary") or "").strip()))
+            except Exception:
+                log.debug(f"finnhub news {tk} failed", exc_info=True)
+        if not items:                                   # keyless fallback
+            try:
+                for it in (_yf_ticker(tk).news or [])[:20]:
+                    c = it.get("content", it) or {}
+                    h = str(c.get("title") or "").strip()
+                    if h and _relevant(tk, h):
+                        items.append((h, str(c.get("summary") or "").strip()))
+            except Exception:
+                log.debug(f"yf news {tk} failed", exc_info=True)
+        # earnings-related first — that is what moves a position the day after a print
+        items.sort(key=lambda x: 0 if any(k in x[0].lower() for k in _KW) else 1)
+        # dedupe within the ticker AND across tickers — a market-wide headline ("Nasdaq
+        # futures fall as Tesla, Alphabet earnings...") otherwise repeats on every position.
+        picked, seen = [], set()
+        for h, _s in items:
+            k = h.lower()[:40]
+            if k in seen or k in _used:
+                continue
+            seen.add(k)
+            picked.append(h)
+            if len(picked) >= per_tk:
+                break
+        _POS_NEWS_CACHE[tk] = (now, picked)
+        if picked:
+            out[tk] = picked
+            _used.update(h.lower()[:40] for h in picked)
+    return out
+
 
 def _world_news_block(limit=6):
     """Top world/market headlines for the morning brief — wires the previously-orphaned

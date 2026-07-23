@@ -11098,7 +11098,17 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
     # absorbs tick jitter so a period is never missed by a second or two.
     _rth = (9 * 60 + 30 <= hour_min < 16 * 60)      # 9:30 AM - 4:00 PM ET
     global _LAST_OFFHOURS_PUSH
-    _period = (10 if _rth else 15) * 60 - 30
+    # User-set cadence via /freq (persisted in app_settings) overrides the auto default
+    # (RTH 10 min, off-hours 15 min). 0 / "auto" = keep the auto default.
+    _uf = 0
+    try:
+        _c2 = get_conn()
+        _uf = int(float(_app_setting(_c2, "pos_alert_freq_min", "0") or 0))
+        _c2.close()
+    except Exception:
+        _uf = 0
+    _mins = _uf if _uf > 0 else (10 if _rth else 15)
+    _period = _mins * 60 - 30
     if time.time() - _LAST_OFFHOURS_PUSH < _period:
         return
     _LAST_OFFHOURS_PUSH = time.time()
@@ -11512,6 +11522,49 @@ async def recperf_cmd(update, ctx):
     finally:
         conn.close()
     await _safe_reply(update.message, msg)
+
+
+def _freq_kb(cur):
+    """Inline keyboard for /freq — position-alert cadence picker."""
+    opts = [("Auto", 0), ("5 min", 5), ("10 min", 10), ("15 min", 15),
+            ("30 min", 30), ("60 min", 60)]
+    row, rows = [], []
+    for lbl, v in opts:
+        mark = "✅ " if v == cur else ""
+        row.append(InlineKeyboardButton(f"{mark}{lbl}", callback_data=f"freq|{v}"))
+        if len(row) == 3:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+async def freq_cmd(update, ctx):
+    """/freq [MIN] — how often the position monitor pushes to Telegram.
+
+    Auto = the built-in default (10 min in RTH, 15 min after hours). A number pins one
+    interval for both sessions. The job ticks every 5 min, so 5 is the finest resolution.
+    """
+    conn = get_conn()
+    try:
+        args = list(getattr(ctx, "args", []) or [])
+        if args:
+            try:
+                v = max(0, int(args[0]))
+                _set_app_setting(conn, "pos_alert_freq_min", v)
+                _lbl = "Auto (10m RTH / 15m AH)" if v == 0 else f"every {v} min"
+                await _safe_reply(update.message, f"⏱ Position alerts: <b>{_lbl}</b>.")
+                return
+            except ValueError:
+                pass
+        cur = int(float(_app_setting(conn, "pos_alert_freq_min", "0") or 0))
+        _lbl = "Auto (10m RTH / 15m AH)" if cur == 0 else f"every {cur} min"
+        await _safe_reply(update.message,
+                          f"⏱ <b>Position-alert frequency</b>\nCurrently: <b>{_lbl}</b>\n"
+                          "<i>Pick how often the monitor pushes your positions:</i>",
+                          reply_markup=_freq_kb(cur))
+    finally:
+        conn.close()
 
 
 def _reopen_trade(conn, trade_id):
@@ -13621,6 +13674,20 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         if data == "menu_main":
             await show_main_menu(query)
+        elif data.startswith("freq|"):
+            _v = int(data.split("|", 1)[1])
+            _cf = get_conn()
+            try:
+                _set_app_setting(_cf, "pos_alert_freq_min", _v)
+            finally:
+                _cf.close()
+            _lbl = "Auto (10m RTH / 15m AH)" if _v == 0 else f"every {_v} min"
+            try:
+                await query.edit_message_text(
+                    f"⏱ <b>Position-alert frequency</b>\nSet to: <b>{_lbl}</b>",
+                    parse_mode=H, reply_markup=_freq_kb(_v))
+            except Exception:
+                log.debug("freq edit failed", exc_info=True)
         elif data == "brief_refresh":
             await briefing_view(query)
         elif data == "opex_refresh":
@@ -31649,6 +31716,7 @@ def main():
     app.add_handler(CommandHandler("debate", debate_cmd))      # multi-agent debate verdict
     app.add_handler(CommandHandler("recperf", recperf_cmd))    # recommendation track record
     app.add_handler(CommandHandler("reopen", reopen_cmd))      # undo an accidental close
+    app.add_handler(CommandHandler("freq", freq_cmd))          # position-alert cadence picker
     app.add_handler(CommandHandler("plan", plan_command))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("terminal", terminal_command))

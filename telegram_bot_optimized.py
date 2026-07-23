@@ -11741,17 +11741,19 @@ def _spread_summary(rows):
         # "make it a table"). Net/MaxP/MaxL/%Max/action all inline; the paired-leg warning is
         # identical for every spread so it is printed ONCE under the table, not per row.
         tbl.append((st, f"{tk[:4]}{int(min(KL,KS))}/{int(max(KL,KS))}{ot}",
-                    f"{abs(net_entry)*n*100:,.0f}", f"{pnl:+,.0f}", f"{pct:+.0f}%",
-                    f"{maxp:,.0f}", f"{maxl:,.0f}", act))
-        blocks.append(True)
+                    f"{pnl:+,.0f}", f"{pct:+.0f}%"))
+        # Net/max/action as ONE compact line per spread — keeping them as table columns
+        # pushed the grid to ~48 chars and it WRAPPED on mobile (user screenshot 2026-07-23);
+        # CLAUDE.md caps Telegram <pre> at ~28 chars.
+        blocks.append(f"<b>{tk[:4]}{int(min(KL,KS))}/{int(max(KL,KS))}{ot}</b> {act} · "
+                      f"net ${abs(net_entry)*n*100:,.0f} · max +${maxp:,.0f}/-${maxl:,.0f}")
     if not blocks:
         return ""
-    head = _pipe_table(("ST", "Spread", "Net", "P&L", "%Max", "MaxP", "MaxL", "Do"),
-                       tbl, right_cols={2, 3, 4, 5, 6},
-                       title="🔗 PAIRED / HEDGED POSITIONS",
-                       legend="Net=cost · %Max=of max profit · Do: TAKE PROFIT ≥50% · REVIEW ≥½ max loss")
-    return head + "\n⚠️ <i>Every spread above is PAIRED — close both legs together. Closing one " \
-                  "leg alone leaves a naked short (credit) or an unhedged long (debit).</i>"
+    head = _pipe_table(("ST", "Spread", "P&L", "%Max"), tbl, right_cols={2, 3},
+                       title="🔗 PAIRED / HEDGED POSITIONS")
+    return (head + "\n" + "\n".join(blocks)
+            + "\n⚠️ <i>All PAIRED — close both legs together; one leg alone leaves a naked "
+              "short (credit) or unhedged long (debit).</i>")
 
 
 def _atm_iv_term(conn, tk, spot):
@@ -12671,8 +12673,8 @@ def _positions_card_parts(trades, now_s, today):
         _act_short = {"SPREAD": "sprd", "SPREAD ⚠": "sprd⚠", "EXIT NOW": "EXIT",
                       "CUT LOSS": "CUT", "TAKE PROFIT": "TAKE", "ROLL/EXIT": "roll",
                       "ROLL SOON": "roll", "REVIEW": "rev", "HOLD": "hold"}.get(action, "hold")
-        _leg_ah_rows.append((_st_dot, _leg, f"{entry:.2f}", f"{eod_px:.2f}",
-                             f"{cur_px:.2f}", f"{pnl:+,.0f}", _act_short))
+        _pnl_k = (f"{pnl/1000:+.1f}K" if abs(pnl) >= 1000 else f"{pnl:+.0f}")
+        _leg_ah_rows.append((_st_dot, _leg, f"{entry:.2f}", f"{cur_px:.2f}", _pnl_k))
         _leg_tot_eodpnl += _eod_pnl
         _leg_tot_ahpnl  += pnl
         _leg_cap        += abs(entry * (qty or 0) * 100)
@@ -12713,10 +12715,13 @@ def _positions_card_parts(trades, now_s, today):
     if _leg_ah_rows:
         _rr = list(_leg_ah_rows)
         _tp = (_leg_tot_ahpnl / _leg_cap * 100) if _leg_cap > 0 else 0.0
-        _rr.append(("", "TOTAL", "", f"{_leg_tot_eodpnl:+,.0f}", "",
-                    f"{_leg_tot_ahpnl:+,.0f}", ""))
-        table1 = _pipe_table(("", "Leg", "Buy", "EOD", "AH", "P&L", "Do"), _rr,
-                             right_cols={2, 3, 4, 5},
+        _tk_pnl = (f"{_leg_tot_ahpnl/1000:+.1f}K" if abs(_leg_tot_ahpnl) >= 1000
+                   else f"{_leg_tot_ahpnl:+.0f}")
+        _rr.append(("", "TOTAL", "", "", _tk_pnl))
+        # 5 columns max — EOD and the action code moved to the legend/line below so the
+        # grid stays inside Telegram's mobile width instead of wrapping.
+        table1 = _pipe_table(("", "Leg", "Buy", "Now", "P&L"), _rr,
+                             right_cols={2, 3, 4},
                              legend=f"Buy→EOD→AH marks · P&L=live(AH) · TOTAL EOD {_leg_tot_eodpnl:+,.0f} "
                                     f"→ AH {_leg_tot_ahpnl:+,.0f} ({_tp:+.0f}% on ${_leg_cap:,.0f})")
     else:

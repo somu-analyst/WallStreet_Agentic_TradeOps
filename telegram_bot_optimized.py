@@ -2728,7 +2728,13 @@ async def news_refresh(context=None):
 # number, and a risk manager adjusts conviction. Deterministic and keyless — we adopt the
 # multi-agent PATTERN, not the LLM dependency, so it runs with no API key and no network.
 
-_AGENT_WEIGHTS = {"Flow": 1.2, "Position": 1.1, "Technical": 1.0, "Vol": 0.8, "Macro": 0.7}
+# Vol dampened 0.8 -> 0.4 alongside the sign flip in _agent_vol (2026-07-22): the buy-fear
+# edge is real across every regime 1990-2026 but modest (+0.77% vs +0.25% fwd-10d), so it is
+# flipped AND down-weighted rather than trusted at full strength. Flow/Technical NOT rebalanced:
+# a quick validation could not reproduce the t=+4.28 Technical edge (1m-return rank-IC was
+# actually -0.039 at fwd-10d — reversal, not momentum), so changing those weights would overfit
+# an unverified number. Left as-is until a proper agent-level backtest exists.
+_AGENT_WEIGHTS = {"Flow": 1.2, "Position": 1.1, "Technical": 1.0, "Vol": 0.4, "Macro": 0.7}
 
 
 def _dbt_clamp(x, lo=-100.0, hi=100.0):
@@ -2799,7 +2805,14 @@ def _agent_technical(tk, conn, spot):
 
 
 def _agent_vol(tk, conn, spot):
-    """Volatility-regime analyst — elevated vol penalises directional risk."""
+    """Volatility-regime analyst — elevated vol is a mild BULLISH tilt (buy-fear).
+
+    Sign flipped 2026-07-22. The old code scored high VIX bearish (`-...`), but across every
+    regime 1990-2026 (9,194 days) elevated VIX PRECEDED higher SPY forward returns -- rank-IC
+    positive in all six sub-periods, incl. the 2008 GFC. High fear >=25 -> +0.77% fwd-10d vs
+    +0.25% when calm. So the correct tilt is mildly BULLISH when fear is high. Edge is modest,
+    so the weight is dampened to 0.4 (see _AGENT_WEIGHTS) and the score scaled to 25 (was 40).
+    """
     _v = _vol_for(tk)
     v, idx = 0.0, ""
     if isinstance(_v, (tuple, list)):          # _vol_for returns (label, value)
@@ -2818,9 +2831,10 @@ def _agent_vol(tk, conn, spot):
     if not idx:
         vi = _get_vol_indices() or {}
         idx = "VXN" if abs(v - float(vi.get("vxn") or -999)) < 1e-6 else "VIX"
-    s = -_dbt_clamp((v - 20.0) / 15.0, -1, 1) * 40
+    s = _dbt_clamp((v - 20.0) / 15.0, -1, 1) * 25   # flipped sign, dampened scale (buy-fear)
     tone = "elevated" if v >= 25 else ("calm" if v <= 16 else "normal")
-    tail = "favours premium selling" if v >= 25 else "benign for directional risk"
+    tail = ("mild bullish tilt (buy-fear, hist. edge)" if v >= 25
+            else "low fear — no vol tailwind")
     return _dbt_clamp(s), f"{idx} {v:.1f} ({tone}) — {tail}"
 
 

@@ -5457,10 +5457,18 @@ with st.sidebar:
                          key="nav_jump",
                          help="Type to search. Every page in one list — no need to find its "
                               "section first. Set back to 'browse' to use the section picker.")
+    # Land on the Exit Planner by default (user 2026-07-22). One-time init only — set the
+    # session keys before the widgets render, so the user's later navigation still sticks.
+    if "nav_cat" not in st.session_state:
+        st.session_state["nav_cat"] = "💼 Portfolio & Risk"
+        st.session_state["nav_radio"] = "🎯 Next-Day Exit Planner"
     _cat = st.selectbox("Section", list(_NAV_GROUPS), key="nav_cat",
                         disabled=(_jump in _ALL_PAGES))
+    # radio default must be valid for the CURRENT section, else Streamlit raises
+    if st.session_state.get("nav_radio") not in _NAV_GROUPS[_cat]:
+        st.session_state["nav_radio"] = _NAV_GROUPS[_cat][0]
     _radio = st.radio("Navigate", _NAV_GROUPS[_cat], label_visibility="collapsed",
-                      disabled=(_jump in _ALL_PAGES))
+                      key="nav_radio", disabled=(_jump in _ALL_PAGES))
     page = _jump if _jump in _ALL_PAGES else _radio
     if _jump in _ALL_PAGES:
         st.caption("↑ jump active — reset it to *browse* to use the section list")

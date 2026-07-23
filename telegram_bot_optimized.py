@@ -6441,8 +6441,9 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                    "STRD": "🟡", "HEDG": "🟡", "UNWD": "⚪", "HOFF": "⚪"}.get(_pat, "⚪")
         _t3_rows.append((_pat_em, _stk_lbl, _prm_fmt(_c_prm), _prm_fmt(_p_prm)))
         # one merged row: OI change + BS price + real premium for this strike
-        _t1_rows.append(_oi_cells + (_px_fmt(_cpx).strip(), _px_fmt(_ppx).strip(),
-                                     _prm_fmt(_c_prm), _prm_fmt(_p_prm)))
+        # BS price columns dropped from the table (they ran it to ~52 chars and wrapped);
+        # real premium in/out is the column that carries information.
+        _t1_rows.append(_oi_cells + (_prm_fmt(_c_prm), _prm_fmt(_p_prm)))
 
     if compact:
         # compact mode (signal_scanner): OI-change columns only
@@ -6451,9 +6452,9 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
             legend="🟢 call-build · 🔴 put-build · 🟡 straddle/hedge · ⚪ flat/unwind")
     else:
         table_str = _pipe_table(
-            ("ST", "Stk", "CΔ", "PΔ", "C$", "P$", "C$in", "P$in"), _t1_rows,
-            right_cols={2, 3, 4, 5, 6, 7},
-            legend="CΔ/PΔ=new OI · C$/P$=BS price · C$in/P$in=real premium (+in/−out) · "
+            ("ST", "Stk", "CΔ", "PΔ", "C$in", "P$in"), _t1_rows,
+            right_cols={2, 3, 4, 5},
+            legend="CΔ/PΔ=new OI · C$in/P$in=real premium (+in/−out) · "
                    "🟢 call-build 🔴 put-build 🟡 straddle ⚪ flat")
     detail_tbl = ""
 
@@ -6582,19 +6583,22 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                     _last5 = list(reversed(_all_wk[:6]))      # 6 samples -> 5 daily changes
                     _cspk = _spark([_v(d, "c_oi") for d in _last5])
                     _pspk = _spark([_v(d, "p_oi") for d in _last5])
-                    _c_rows.append((_em, _stk4,
-                                    _cspk, _ps4(_c5p).strip(), _ps4(_c30p).strip(),
-                                    _pspk, _ps4(_p5p).strip(), _ps4(_p30p).strip()))
+                    # 4 cols: emoji are DOUBLE-width, so 5 squares = 10 display chars.
+                    # Two spark columns + four % columns ran ~59 chars and wrapped on
+                    # mobile; the 30d numbers move to the detail line under the table.
+                    _c_rows.append((_stk4, _cspk, _pspk,
+                                    f"{_ps4(_c5p).strip()}/{_ps4(_p5p).strip()}"))
+                    _p_rows.append(f"{_stk4}: calls {_ps4(_c5p).strip()} 5d / "
+                                   f"{_ps4(_c30p).strip()} 30d · puts "
+                                   f"{_ps4(_p5p).strip()} 5d / {_ps4(_p30p).strip()} 30d")
 
                 if _c_rows:
                     week_tbl = (
                         "\n\n"
-                        + _pipe_table(("ST", "Stk", "Call5d", "C5d", "C30d",
-                                       "Put5d", "P5d", "P30d"), _c_rows,
-                                      right_cols={3, 4, 6, 7}, title="OI Timeline (call | put)",
-                                      legend=("🟩 OI up that day · 🟥 down · ⬜ flat (5 sessions, oldest→newest) "
-                                              "· "
-                                              "🟢 call-buy 🔴 put-sell/unwind 🟡 hedged ⚪ flat"))
+                        + _pipe_table(("Stk", "Calls", "Puts", "5d C/P"), _c_rows,
+                                      right_cols={3}, title="OI Timeline (5 sessions)",
+                                      legend="🟩 OI up that day · 🟥 down · ⬜ flat (oldest→newest)")
+                        + "\n" + "\n".join(_p_rows)
                     )
     except Exception as _wk_e:
         pass  # week trend is optional
@@ -11893,15 +11897,11 @@ def _tx_capture(conn, tickers, quarters=None, budget=6):
     """
     _tx_ensure(conn)
     if not quarters:
+        # CURRENT quarter only — go forward, do not backfill history (user 2026-07-23).
+        # Backfilling every prior quarter would burn the ~25/day AlphaVantage quota for
+        # calls that have already been priced in. New calls get picked up as they publish.
         _n = _et_now()
-        _q = (_n.month - 1) // 3 + 1
-        quarters = [f"{_n.year}Q{_q}"]
-        for _ in range(2):                          # plus the two prior quarters
-            _q -= 1
-            _y = _n.year
-            if _q == 0:
-                _q, _y = 4, _n.year - 1
-            quarters.append(f"{_y}Q{_q}")
+        quarters = [f"{_n.year}Q{(_n.month - 1) // 3 + 1}"]
     import json as _json
     n = fetched = 0
     for tk in dict.fromkeys(str(t).upper() for t in tickers if t):
@@ -12779,10 +12779,11 @@ def _positions_card_parts(trades, now_s, today):
                 _sp = _last[3]
                 _vt = ("BEAT" if (_sp or 0) > 0 else "MISS" if (_sp or 0) < 0 else "INLINE")
                 _em2 = "🟢" if (_sp or 0) > 0 else ("🔴" if (_sp or 0) < 0 else "⚪")
+                # 5 cols: the 🟢/🔴 already encodes BEAT/MISS, so the Verdict word is
+                # redundant width. Kept inside Telegram's mobile <pre> limit.
                 _erows.append((_em2, _etk2[:5], str(_last[0])[5:],
                                f"{_last[1]:.2f}" if _last[1] is not None else "—",
-                               f"{_last[2]:.2f}", f"{_sp:+.0f}%" if _sp is not None else "—",
-                               _vt))
+                               f"{_last[2]:.2f}", f"{_sp:+.0f}%" if _sp is not None else "—"))
         _ec.close()
         if _erows:
             _events_section += ("\n" + _pipe_table(
@@ -12869,16 +12870,20 @@ def _positions_card_parts(trades, now_s, today):
                 _wl = _hr_pm.get("models", {}).get("put_call_wall", {})
                 _wls = (f"{_wl['put_wall']:.0f}/{_wl['call_wall']:.0f}"
                         if (_wl.get("call_wall") and _wl.get("prob", 0) >= 65) else "—")
-                _hp_rows.append((_ic_pm, _htk_pm[:5], f"${_sp_pm:.0f}", f"{_pb_pm:.0f}%",
-                                 f"{_bv}/{_rv}/{_sv}", _pull, _rng, _wls))
+                # 5 cols max — votes/range/walls move to the detail line below, else this
+                # grid runs ~59 chars and WRAPS on mobile (CLAUDE.md caps <pre> at ~28).
+                _hp_rows.append((_ic_pm, _htk_pm[:5], f"${_sp_pm:.0f}",
+                                 f"{_pb_pm:.0f}%", _pull))
+                _hp_details.append(f"<b>{_htk_pm}</b> votes 🟢{_bv}/🔴{_rv}/💰{_sv} · "
+                                   f"range {_rng} · walls {_wls}")
             except Exception as _e_pm:
                 log.debug(f"pos_mon hp {_htk_pm}: {_e_pm}")
         if _hp_rows:
-            _hp_tbl = _pipe_table(("ST", "Tkr", "Spot", "Prob", "Votes", "Pull", "Range", "Walls"),
-                                  _hp_rows, right_cols={2, 3, 5},
-                                  legend="Votes=🟢bull/🔴bear/💰sell-prem · Pull=POC vs spot · "
-                                         "Walls=put/call OI")
-            hp_section = "\n\n<b>🧠 HP Engine</b>\n" + _hp_tbl
+            _hp_tbl = _pipe_table(("ST", "Tkr", "Spot", "Prob", "Pull"),
+                                  _hp_rows, right_cols={2, 3, 4},
+                                  legend="Pull = POC vs spot (volume magnet)")
+            hp_section = ("\n\n<b>🧠 HP Engine</b>\n" + _hp_tbl + "\n"
+                          + "\n".join(_hp_details))
         conn_hp_pm.close()
     except Exception as _e_hp_pm:
         log.debug(f"pos_mon hp block: {_e_hp_pm}")

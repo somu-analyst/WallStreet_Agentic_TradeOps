@@ -10610,8 +10610,13 @@ async def signal_scanner(query):
     # emoji IS the signal, varying per row — + legend + per-row detail lines.
     _sig_em   = {"BULLISH": "🟢", "BEARISH": "🔴", "HEDGE": "🔵",
                  "STRADDLE": "🟡", "BULL+HEDGE": "🟡"}
-    _sig_desc = {"BULLISH": "call OI building — bullish bets",
-                 "BEARISH": "put OI directional — bearish bets",
+    # NOT "bullish bets": rising OI means contracts were OPENED, and every option has a
+    # buyer AND a writer on it. Call OI building 10% OTM is usually WRITING (covered calls /
+    # income), not a bullish bet. Same error already corrected on the money-flow chart
+    # labels. Separating buy-to-open from write-to-open needs OI x PRICE direction
+    # (OI up + price up = buying; OI up + price down = writing) — see docs/PLAN.md.
+    _sig_desc = {"BULLISH": "call OI opened (buy or write — needs price confirm)",
+                 "BEARISH": "put OI opened (buy or write — needs price confirm)",
                  "HEDGE": "deep-OTM puts — protection, not direction",
                  "STRADDLE": "both sides loading — event play",
                  "BULL+HEDGE": "calls + protective puts — hedged longs"}

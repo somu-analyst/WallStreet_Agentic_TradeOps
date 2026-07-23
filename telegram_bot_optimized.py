@@ -12784,6 +12784,17 @@ def _positions_card_parts(trades, now_s, today):
                 ("", "Tkr", "Date", "Est", "Act", "Surp", "Verdict"), _erows,
                 right_cols={3, 4, 5}, title="📊 LAST EARNINGS (est vs actual)",
                 legend="Est=consensus EPS · Act=reported · Surp=surprise %") + "\n")
+        # Call highlights for EVERY position, not just whichever ticker you drilled into
+        # (user 2026-07-23). One line per name keeps it readable on a multi-position book.
+        _hl_lines = []
+        for _htk in (_ah_cache.keys() or []):
+            _t = _tx_latest(None, _htk)
+            if _t:
+                _first = [h for h in str(_t[1]).split("\n") if h.strip()][:1]
+                if _first:
+                    _hl_lines.append(f"<b>{_htk}</b> ({_t[0]}) {_first[0][:150]}")
+        if _hl_lines:
+            _events_section += "\n🎙 <b>CALL HIGHLIGHTS</b>\n" + "\n".join(_hl_lines) + "\n"
         _events_section += "\n"
     except Exception:
         log.debug("earnings context block failed", exc_info=True)
@@ -12807,9 +12818,13 @@ def _positions_card_parts(trades, now_s, today):
     except Exception:
         log.debug("positions news block failed", exc_info=True)
 
-    colour_section = (_events_section + _news_section + _risk_section
+    # Order (user 2026-07-23): positions and risk FIRST — that is what you act on. The
+    # earnings / call-highlights / news context explains the moves but is reference, so it
+    # is appended at the END via _context_section rather than pushing the book off-screen.
+    colour_section = (_risk_section
                       + (f"{_spreads}\n\n" if _spreads else "")
                       + f"{table1}\n\n{advice_section}")
+    _context_section = ("\n\n" + _events_section + _news_section).rstrip()
 
     urgent_section = ""
     if urgent_lines:
@@ -12874,11 +12889,12 @@ def _positions_card_parts(trades, now_s, today):
         + urgent_section
         + hp_section
         + footer
+        + _context_section          # earnings / call highlights / news — reference, at the end
     )
 
     return {"full": full_msg,
             "head": f"{hdr(f'💼 POSITIONS · {now_s}')}\n\n{_ah_banner}{colour_section}",
-            "tail": urgent_section + hp_section + footer,
+            "tail": urgent_section + hp_section + footer + _context_section,
             "first_tk": str(trades["ticker"].iloc[0]).upper() if not trades.empty else "SPY"}
 
 

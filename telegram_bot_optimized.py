@@ -12842,21 +12842,35 @@ def _positions_card_parts(trades, now_s, today):
         _erows = []
         for _etk2 in (_ah_cache.keys() or []):
             _last, _next = _earn_context(_ec, _etk2)
+            # REPORTED: signed `In` (−d = already passed) + Est/Act merged into one cell.
+            # Only rendered when the actual is HELD — a scheduled time that has passed with
+            # no data never reads as released.
             if _last and _last[2] is not None:
                 _sp = _last[3]
-                _vt = ("BEAT" if (_sp or 0) > 0 else "MISS" if (_sp or 0) < 0 else "INLINE")
                 _em2 = "🟢" if (_sp or 0) > 0 else ("🔴" if (_sp or 0) < 0 else "⚪")
-                # 5 cols: the 🟢/🔴 already encodes BEAT/MISS, so the Verdict word is
-                # redundant width. Kept inside Telegram's mobile <pre> limit.
-                _erows.append((_em2, _etk2[:5], str(_last[0])[5:],
-                               f"{_last[1]:.2f}" if _last[1] is not None else "—",
-                               f"{_last[2]:.2f}", f"{_sp:+.0f}%" if _sp is not None else "—"))
+                try:
+                    _dd = (datetime.strptime(str(_last[0])[:10], "%Y-%m-%d").date() - today).days
+                except Exception:
+                    _dd = None
+                _erows.append((_etk2[:4], f"{_em2}Earn", str(_last[0])[5:],
+                               f"{_dd:+d}d" if _dd is not None else "—",
+                               (f"{_last[1]:.2f}/{_last[2]:.2f}" if _last[1] is not None
+                                else f"{_last[2]:.2f}")))
+            # UPCOMING: estimate only, positive day count
+            if _next and _next[1] is not None:
+                try:
+                    _dd2 = (datetime.strptime(str(_next[0])[:10], "%Y-%m-%d").date() - today).days
+                except Exception:
+                    _dd2 = None
+                _erows.append((_etk2[:4], "🟡Earn", str(_next[0])[5:],
+                               f"+{_dd2}d" if _dd2 is not None else "—",
+                               f"est {_next[1]:.2f}"))
         _ec.close()
         if _erows:
             _events_section += ("\n" + _pipe_table(
-                ("", "Tkr", "Date", "Est", "Act", "Surp", "Verdict"), _erows,
-                right_cols={3, 4, 5}, title="📊 LAST EARNINGS (est vs actual)",
-                legend="Est=consensus EPS · Act=reported · Surp=surprise %") + "\n")
+                ("Tkr", "Event", "Date", "In", "Est/Act"), _erows, right_cols={3, 4},
+                title="📅 EARNINGS", legend="In: −d passed / +d upcoming · "
+                "Est/Act = EPS · 🟢 beat 🔴 miss 🟡 upcoming") + "\n")
         # Call highlights for EVERY position, not just whichever ticker you drilled into
         # (user 2026-07-23). One line per name keeps it readable on a multi-position book.
         _hl_lines = []

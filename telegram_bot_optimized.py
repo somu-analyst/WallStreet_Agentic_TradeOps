@@ -11081,41 +11081,35 @@ async def market_analytics_report(query):
 _LAST_OFFHOURS_PUSH = 0.0      # epoch of the last off-hours position push (15-min throttle)
 
 
-async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE):
-    """10-min position table — ALL open positions every cycle during market hours."""
-    now_utc  = datetime.now(timezone.utc).replace(tzinfo=None)
-    if now_utc.weekday() >= 5:
-        return
-    # Gate on ET, not fixed UTC offsets. The old window was 14:30-21:00 UTC, which is
-    # 9:30-16:00 ET only while EDT is in force (it silently slides an hour under EST), and it
-    # stopped dead at the close — so no alert ever fired after hours even though the marks
-    # move most on earnings nights. Now runs through the after-hours session (to 20:00 ET),
-    # matching the 16:00-20:00 window _get_spot_with_ah uses for post-market prices.
-    _now_et = _et_now()
-    if _now_et.weekday() >= 5:                      # markets shut all weekend — nothing moves
-        return
-    hour_min = _now_et.hour * 60 + _now_et.minute
-    # Cadence is throttled HERE, not by the job interval, so one code path serves both
-    # sessions: RTH every 10 min (unchanged), off-hours every 15 min straight through to the
-    # next open (user ask 2026-07-22). The job ticks every 5 min so both periods land exactly
-    # — at the old 10-min tick a 15-min throttle actually fired every 20 min. 30s of slack
-    # absorbs tick jitter so a period is never missed by a second or two.
-    _rth = (9 * 60 + 30 <= hour_min < 16 * 60)      # 9:30 AM - 4:00 PM ET
+async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE, force=False):
+    """Position table — pushed on a cadence, or on demand.
+
+    force=True (from the manual button / adhoc trigger) BYPASSES the weekday gate and the
+    cadence throttle: a user asking for positions must ALWAYS get a fresh render, never a
+    silent return because a scheduled push happened to go out minutes ago. That throttle
+    blocking the manual button is why the card looked 'stuck' on an old message (2026-07-22).
+    """
     global _LAST_OFFHOURS_PUSH
-    # User-set cadence via /freq (persisted in app_settings) overrides the auto default
-    # (RTH 10 min, off-hours 15 min). 0 / "auto" = keep the auto default.
-    _uf = 0
-    try:
-        _c2 = get_conn()
-        _uf = int(float(_app_setting(_c2, "pos_alert_freq_min", "0") or 0))
-        _c2.close()
-    except Exception:
+    if not force:
+        _now_et = _et_now()
+        if _now_et.weekday() >= 5:                  # markets shut all weekend — nothing moves
+            return
+        hour_min = _now_et.hour * 60 + _now_et.minute
+        # Cadence throttled HERE so one code path serves both sessions: RTH every 10 min,
+        # off-hours every 15 min straight through to the next open. Job ticks every 5 min so
+        # both periods land; 30s slack absorbs tick jitter. /freq (app_settings) overrides.
+        _rth = (9 * 60 + 30 <= hour_min < 16 * 60)  # 9:30 AM - 4:00 PM ET
         _uf = 0
-    _mins = _uf if _uf > 0 else (10 if _rth else 15)
-    _period = _mins * 60 - 30
-    if time.time() - _LAST_OFFHOURS_PUSH < _period:
-        return
-    _LAST_OFFHOURS_PUSH = time.time()
+        try:
+            _c2 = get_conn()
+            _uf = int(float(_app_setting(_c2, "pos_alert_freq_min", "0") or 0))
+            _c2.close()
+        except Exception:
+            _uf = 0
+        _mins = _uf if _uf > 0 else (10 if _rth else 15)
+        if time.time() - _LAST_OFFHOURS_PUSH < _mins * 60 - 30:
+            return
+        _LAST_OFFHOURS_PUSH = time.time()
 
     _close_expired_positions()   # auto-close anything past expiry before showing
     _, chat_id = load_creds()
@@ -12849,7 +12843,7 @@ async def position_monitor_adhoc(query, ctx):
         bot      = ctx.bot
         bot_data = {}
     try:
-        await position_monitor(_MockCtx())
+        await position_monitor(_MockCtx(), force=True)   # manual = always fresh, skip throttle
     except Exception as e:
         await query.message.reply_text(f"Position monitor error: {e}", parse_mode=H)
 

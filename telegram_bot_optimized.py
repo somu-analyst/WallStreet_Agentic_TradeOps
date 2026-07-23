@@ -6441,9 +6441,11 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                    "STRD": "🟡", "HEDG": "🟡", "UNWD": "⚪", "HOFF": "⚪"}.get(_pat, "⚪")
         _t3_rows.append((_pat_em, _stk_lbl, _prm_fmt(_c_prm), _prm_fmt(_p_prm)))
         # one merged row: OI change + BS price + real premium for this strike
-        # BS price columns dropped from the table (they ran it to ~52 chars and wrapped);
-        # real premium in/out is the column that carries information.
-        _t1_rows.append(_oi_cells + (_prm_fmt(_c_prm), _prm_fmt(_p_prm)))
+        # Keep the PRICE, not the derived premium: C$in = CdOI x C$ x 100, so C$ is the
+        # primitive and the flow is recoverable from it. C$ is also what you would actually
+        # pay to trade the strike, and the money-flow CHART already shows premium flow
+        # visually -- a bar chart is the right medium for that, a table for prices.
+        _t1_rows.append(_oi_cells + (_px_fmt(_cpx).strip(), _px_fmt(_ppx).strip()))
 
     if compact:
         # compact mode (signal_scanner): OI-change columns only
@@ -6452,9 +6454,9 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
             legend="🟢 call-build · 🔴 put-build · 🟡 straddle/hedge · ⚪ flat/unwind")
     else:
         table_str = _pipe_table(
-            ("ST", "Stk", "CΔ", "PΔ", "C$in", "P$in"), _t1_rows,
+            ("ST", "Stk", "CΔ", "PΔ", "C$", "P$"), _t1_rows,
             right_cols={2, 3, 4, 5},
-            legend="CΔ/PΔ=new OI · C$in/P$in=real premium (+in/−out) · "
+            legend="CΔ/PΔ=new OI · C$/P$=option price · $ flow is in the money-flow chart · "
                    "🟢 call-build 🔴 put-build 🟡 straddle ⚪ flat")
     detail_tbl = ""
 

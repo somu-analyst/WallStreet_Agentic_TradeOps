@@ -166,3 +166,25 @@ earnings est/actual stored · transcripts (AlphaVantage, on disk, go-forward) ·
 yield curve · mobile width sweep · OI PCR column · spy_ret param bug ·
 Mag-7 study · PEAD validated · TSLA close recorded · dashboard AH fix ·
 dashboard default page · Src column · SI columns
+
+### A1 attempt 1 — FAILED, reverted (2026-07-23)
+Wired the existing crush ratio into the leg reprice for events that have already
+happened. **Overcorrected badly** — verified before shipping:
+
+    GOOG 300P, spot 318.70, market ~6.50
+      captured IV 38.6% -> 6.99   (7.5% HIGH  — the bug)
+      crushed  IV 27.0% -> 3.35   (48% LOW    — my "fix")
+
+**Why:** GOOG 300P expires Aug-28 (36 DTE). That expiry never carried the
+earnings premium — event premium lives in the FRONT expiry. `_post_event_leg`'s
+own docstring already says "ratio >= 1 means THIS expiry carries no event
+premium (GOOG Aug-28 ...)". My helper applied a front-expiry crush to a
+far-dated leg.
+
+**Correct approach next time:** crush must scale with how much of the leg's
+variance sat in the event — roughly, only the front expiry gets the full ratio;
+a 36-DTE leg gets little to none. Back-solve the market IV where a live quote
+exists (~35% here) rather than modelling the haircut. Better still: refresh IV
+from a live chain for tickers that just reported, instead of adjusting a stale one.
+
+Do NOT re-apply a flat ratio across all expiries.

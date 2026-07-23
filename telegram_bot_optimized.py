@@ -11731,16 +11731,30 @@ def _atm_iv_term(conn, tk, spot):
 _SI_CACHE = {}                 # ticker -> (fetched_ts, dict) — .info is slow, SI moves 2x/month
 
 
-def _tx_ensure(conn):
-    """Earnings-call transcripts. AlphaVantage's EARNINGS_CALL_TRANSCRIPT works on the key we
-    ALREADY hold (verified 2026-07-23: TSLA 2026Q1 = 61 segments / 38k chars / 12 speakers),
-    so no new subscription is needed. The free tier is rate-limited (~25 req/day), which is
-    exactly why these are stored: fetch a quarter once, reuse it forever."""
-    conn.execute("""CREATE TABLE IF NOT EXISTS earnings_transcripts(
-        ticker TEXT, quarter TEXT, n_segments INTEGER, n_chars INTEGER,
-        highlights TEXT, full_text TEXT, captured_at TEXT,
-        PRIMARY KEY (ticker, quarter))""")
-    conn.commit()
+TRANSCRIPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcripts")
+
+
+def _tx_ensure(conn=None):
+    """Transcripts live on DISK, not in SQLite (user 2026-07-23).
+
+    AlphaVantage's EARNINGS_CALL_TRANSCRIPT works on the key we ALREADY hold (verified:
+    TSLA 2026Q1 = 61 segments / 38k chars), and the free tier is rate-limited (~25/day),
+    so each call is fetched once and kept forever. But a 38 KB text blob per call belongs
+    in a file, not a row: it would bloat the 2.35 GB DB, slow VACUUM/backups, and is never
+    queried relationally. Layout per call:
+        transcripts/TICKER_QUARTER.txt   full text
+        transcripts/TICKER_QUARTER.json  metadata + extracted highlights (small, fast)
+    `conn` is accepted and ignored so existing call sites keep working.
+    """
+    try:
+        os.makedirs(TRANSCRIPT_DIR, exist_ok=True)
+    except Exception:
+        log.debug("transcript dir create failed", exc_info=True)
+
+
+def _tx_paths(tk, quarter):
+    base = os.path.join(TRANSCRIPT_DIR, f"{str(tk).upper()}_{quarter}")
+    return base + ".txt", base + ".json"
 
 
 _TX_GUIDE_KW = ("guidance", "outlook", "we expect", "we anticipate", "next quarter",
@@ -11824,16 +11838,16 @@ def _tx_capture(conn, tickers, quarters=None, budget=6):
             if _q == 0:
                 _q, _y = 4, _n.year - 1
             quarters.append(f"{_y}Q{_q}")
+    import json as _json
     n = fetched = 0
     for tk in dict.fromkeys(str(t).upper() for t in tickers if t):
         for q in quarters:
             if fetched >= budget:
                 log.info(f"_tx_capture: budget {budget} reached — resuming next run")
-                conn.commit()
                 return n
-            if conn.execute("SELECT 1 FROM earnings_transcripts WHERE ticker=? AND quarter=?",
-                            (tk, q)).fetchone():
-                continue
+            _txtp, _jsonp = _tx_paths(tk, q)
+            if os.path.exists(_jsonp):
+                continue                    # already on disk — never spend quota twice
             fetched += 1
             segs, _raw = _tx_fetch(tk, q)
             if not segs:
@@ -11843,23 +11857,36 @@ def _tx_capture(conn, tickers, quarters=None, budget=6):
             time.sleep(13)                  # pace under the 5-req/min free-tier ceiling
             txt = " ".join(str(s.get("content") or "") for s in segs)
             hl = _tx_highlights(segs)
-            conn.execute(
-                "INSERT OR REPLACE INTO earnings_transcripts "
-                "(ticker,quarter,n_segments,n_chars,highlights,full_text,captured_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (tk, q, len(segs), len(txt), "\n".join(hl), txt,
-                 datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            n += 1
-    conn.commit()
+            try:
+                with io.open(_txtp, "w", encoding="utf-8") as f:
+                    f.write(txt)
+                with io.open(_jsonp, "w", encoding="utf-8") as f:
+                    _json.dump({"ticker": tk, "quarter": q, "n_segments": len(segs),
+                                "n_chars": len(txt), "highlights": hl,
+                                "captured_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                               f, indent=1)
+                n += 1
+            except Exception:
+                log.warning(f"transcript write failed {tk} {q}", exc_info=True)
     return n
 
 
 def _tx_latest(conn, tk):
-    """(quarter, highlights) for the most recent stored transcript, or None."""
-    _tx_ensure(conn)
-    r = conn.execute("SELECT quarter, highlights FROM earnings_transcripts "
-                     "WHERE ticker=? ORDER BY quarter DESC LIMIT 1", (tk,)).fetchone()
-    return r if r and r[1] else None
+    """(quarter, highlights_text) for the newest transcript ON DISK, or None.
+    Reads the small .json sidecar — never the 38 KB full text."""
+    import json as _json, glob as _glob
+    _tx_ensure()
+    try:
+        files = sorted(_glob.glob(os.path.join(TRANSCRIPT_DIR, f"{str(tk).upper()}_*.json")))
+        if not files:
+            return None
+        with io.open(files[-1], encoding="utf-8") as f:      # quarters sort lexically
+            d = _json.load(f)
+        hl = d.get("highlights") or []
+        return (d.get("quarter"), "\n".join(hl)) if hl else None
+    except Exception:
+        log.debug(f"transcript read {tk} failed", exc_info=True)
+        return None
 
 
 async def record_transcripts(context=None):

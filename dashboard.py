@@ -14326,20 +14326,24 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
         _net_pnl = sum(l["pnl"] for l in _legs)
         _gross_risk = sum(abs(l["cur"] * l["m"]) for l in _legs if l["side"] == "long") \
             + sum(l["entry"] * abs(l["m"]) for l in _legs if l["side"] == "short")
-        st.markdown("#### 🧮 Portfolio Greeks (next-day exposure)")
-        _pg = st.columns(4)
-        _pg[0].metric("Net Δ per +1% move", f"${_net_ddelta:,.0f}",
-                      "bullish" if _net_ddelta >= 0 else "bearish",
-                      delta_color="normal" if _net_ddelta >= 0 else "inverse")
-        _pg[1].metric("Theta / day", f"${_net_theta:,.0f}",
-                      "you collect" if _net_theta >= 0 else "decay drag",
-                      delta_color="normal" if _net_theta >= 0 else "inverse")
-        _pg[2].metric("Vega per +1 vol pt", f"${_net_vega:,.0f}")
-        _pg[3].metric("Open P&L", f"${_net_pnl:,.0f}",
-                      delta_color="normal" if _net_pnl >= 0 else "inverse")
-        st.caption(f"Net Δ: a market +1% tomorrow ≈ **${_net_ddelta:,.0f}** P&L. "
-                   f"Time decay runs **${_net_theta:,.0f}/day**. "
-                   f"A +1 vol-point IV change ≈ **${_net_vega:,.0f}**.")
+        # Collapsible (user 2026-07-22). NOT nested in another expander — Streamlit forbids
+        # that — verified nothing above wraps this block. Headline Net Δ stays in the label so
+        # it is readable while collapsed.
+        with st.expander(f"🧮 Portfolio Greeks (next-day exposure) · Net Δ ${_net_ddelta:,.0f}/+1%",
+                         expanded=False):
+            _pg = st.columns(4)
+            _pg[0].metric("Net Δ per +1% move", f"${_net_ddelta:,.0f}",
+                          "bullish" if _net_ddelta >= 0 else "bearish",
+                          delta_color="normal" if _net_ddelta >= 0 else "inverse")
+            _pg[1].metric("Theta / day", f"${_net_theta:,.0f}",
+                          "you collect" if _net_theta >= 0 else "decay drag",
+                          delta_color="normal" if _net_theta >= 0 else "inverse")
+            _pg[2].metric("Vega per +1 vol pt", f"${_net_vega:,.0f}")
+            _pg[3].metric("Open P&L", f"${_net_pnl:,.0f}",
+                          delta_color="normal" if _net_pnl >= 0 else "inverse")
+            st.caption(f"Net Δ: a market +1% tomorrow ≈ **${_net_ddelta:,.0f}** P&L. "
+                       f"Time decay runs **${_net_theta:,.0f}/day**. "
+                       f"A +1 vol-point IV change ≈ **${_net_vega:,.0f}**.")
 
         # ── Portfolio theoretical max profit / max loss (held to expiry) ──
         _pbt = {}

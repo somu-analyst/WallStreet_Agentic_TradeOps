@@ -10622,9 +10622,10 @@ async def signal_scanner(query):
             _c   = float(r["call_oi_chg"] or 0)
             _p   = float(r["put_oi_chg"] or 0)
             _pcr = float(r["pcr"]) if r["pcr"] == r["pcr"] else 0.0
-            _rows.append((_em, str(r["ticker"])[:5], _fk(_c), _fk(_p)))
-            _details.append(f"{_em} <b>{str(r['ticker'])}</b> — calls {_fk(_c)} vs puts "
-                            f"{_fk(_p)} · PCR {_pcr:.2f} · {_sig_desc.get(r['oi_sig'], '')}")
+            # PCR becomes a COLUMN — the old detail lines restated the same C-OI/P-OI
+            # numbers already in the row and added only PCR, so 8 lines of prose carried
+            # one extra field. Table now self-contained (user 2026-07-23).
+            _rows.append((_em, str(r["ticker"])[:5], _fk(_c), _fk(_p), f"{_pcr:.2f}"))
     if _rows:
         parts.append(_pipe_table(("ST", "Tkr", "C-OI", "P-OI"), _rows,
                                  right_cols={2, 3},

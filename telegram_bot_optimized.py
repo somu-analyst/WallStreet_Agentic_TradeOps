@@ -6475,6 +6475,26 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                     s = f"{v:+.0f}%"
                     return s[:5].rjust(5)
 
+                _BLK = "▁▂▃▄▅▆▇█"
+
+                def _spark(vals):
+                    """5-bar sparkline of the OI LEVEL over the last 5 sessions, oldest→newest.
+
+                    Replaces the old ^/v arrow (user 2026-07-23: redundant next to +/- numbers).
+                    A rising staircase = OI building, falling = unwinding, flat = no interest —
+                    the SHAPE of the build, which a single 5d% number cannot show. Height is
+                    scaled per strike so each row uses the full range.
+                    NOTE: Telegram monospace has no per-character colour, so bars carry height
+                    only; the signed % columns beside them carry direction.
+                    """
+                    v = [x for x in vals if x is not None]
+                    if len(v) < 2:
+                        return "     "
+                    lo, hi = min(v), max(v)
+                    if hi <= lo:
+                        return _BLK[0] * len(v)
+                    return "".join(_BLK[min(int((x - lo) / (hi - lo) * 7 + 0.5), 7)] for x in v)
+
                 def _sig3(c5, p5):
                     if c5 > 20 and p5 > 20:  return "HDG"
                     if c5 > 15:               return "BUY"
@@ -6519,19 +6539,23 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                     # ONE row per strike: call AND put timelines side by side (merged
                     # 2026-07-23 — two stacked tables over identical strikes read worse
                     # and doubled the line count for no extra information).
+                    # 5-session OI-level sparklines (oldest→newest) replace the ^/v arrows
+                    _last5 = list(reversed(_all_wk[:5]))      # _all_wk is newest-first
+                    _cspk = _spark([_v(d, "c_oi") for d in _last5])
+                    _pspk = _spark([_v(d, "p_oi") for d in _last5])
                     _c_rows.append((_em, _stk4,
-                                    _ps4(_c5p).strip() + _tarw.get(_ct.strip(), ""),
-                                    _ps4(_c30p).strip(),
-                                    _ps4(_p5p).strip() + _tarw.get(_pt.strip(), ""),
-                                    _ps4(_p30p).strip()))
+                                    _cspk, _ps4(_c5p).strip(), _ps4(_c30p).strip(),
+                                    _pspk, _ps4(_p5p).strip(), _ps4(_p30p).strip()))
 
                 if _c_rows:
                     week_tbl = (
                         "\n\n"
-                        + _pipe_table(("ST", "Stk", "C5d", "C30d", "P5d", "P30d"), _c_rows,
-                                      right_cols={2, 3, 4, 5}, title="OI Timeline (call | put)",
-                                      legend=("🟢 call-buy · 🔴 put-sell/unwind · 🟡 hedged · "
-                                              "⚪ flat · ^built v unwound"))
+                        + _pipe_table(("ST", "Stk", "Call5d", "C5d", "C30d",
+                                       "Put5d", "P5d", "P30d"), _c_rows,
+                                      right_cols={3, 4, 6, 7}, title="OI Timeline (call | put)",
+                                      legend=("Call5d/Put5d = OI level last 5 sessions "
+                                              "(rising bars = building, falling = unwinding) · "
+                                              "🟢 call-buy 🔴 put-sell/unwind 🟡 hedged ⚪ flat"))
                     )
     except Exception as _wk_e:
         pass  # week trend is optional
@@ -19906,6 +19930,26 @@ async def signal_ticker_detail(query, ticker):
             # the headers and separators for no extra information.
             _wlbl = {_bk_tw: "wk1", _bk_nw: "wk2", _bk_lt: "later"}
 
+            def _opex_kind(d):
+                """W weekly · M monthly OPEX (3rd Friday) · Q quarterly triple-witching.
+
+                Monthly OPEX carries most of the open interest and is where pinning toward
+                max-pain actually bites; quarterly (Mar/Jun/Sep/Dec 3rd Friday) adds index
+                futures+options expiry on top. A weekly and a monthly sitting in the same
+                list look identical without this, which understates the big one.
+                """
+                try:
+                    # `date` is not imported at module level here — build via datetime
+                    _f = [x for x in range(1, 29)
+                          if datetime(d.year, d.month, x).weekday() == 4]  # Fridays
+                    third_fri = (datetime(d.year, d.month, _f[2]).date()
+                                 if len(_f) >= 3 else None)
+                    if third_fri and d == third_fri:
+                        return "Q" if d.month in (3, 6, 9, 12) else "M"
+                except Exception:
+                    pass
+                return "W" if d.weekday() == 4 else "d"
+
             def _ebias(c, p):
                 """Same call/put-build read the old separate 'By Expiry' table carried —
                 folded in here so that duplicate table could be deleted without losing it."""
@@ -19920,18 +19964,24 @@ async def signal_ticker_detail(query, ticker):
                 for er in _rows:
                     cc2 = float(er["cc"] or 0); pp2 = float(er["pp"] or 0)
                     ep2 = float(er["po"] or 0) / max(float(er["co"] or 0), 1)
+                    try:
+                        _ed2 = datetime.strptime(str(er["expiry_date"])[:10], "%Y-%m-%d").date()
+                        _kind = _opex_kind(_ed2)
+                    except Exception:
+                        _kind = ""
                     _erows.append((_ebias(cc2, pp2), _wlbl.get(_lbl, ""),
-                                   str(er["expiry_date"])[5:],
+                                   str(er["expiry_date"])[5:], _kind,
                                    _fk(cc2), _fk(pp2), f"{min(ep2, 9.9):.1f}"))
             if _erows:
                 # "PCR(OI)" not "PCR": this column is put/call OPEN INTEREST, not the ratio of
                 # the CdOI/PdOI (change) columns beside it — verified 07-21. The bare label
                 # made the table look self-contradictory.
                 parts.append("\n<b>📅 Expiry Breakdown</b>\n"
-                             + _pipe_table(("ST", "When", "Expiry", "CdOI", "PdOI", "PCR(OI)"),
-                                           _erows, right_cols={3, 4, 5},
-                                           legend="🟢 call-build · 🔴 put-build · 🟡 straddle · ⚪ flat/unwind · "
-                                                  "wk1=this week · PCR(OI)=put/call open interest"))
+                             + _pipe_table(("ST", "When", "Expiry", "Typ", "CdOI", "PdOI", "PCR(OI)"),
+                                           _erows, right_cols={4, 5, 6},
+                                           legend="Typ: M=monthly OPEX (3rd Fri) · Q=quarterly triple-witch · "
+                                                  "W=weekly · d=daily — M/Q hold the most OI and pin hardest · "
+                                                  "🟢 call-build 🔴 put-build 🟡 straddle ⚪ flat"))
     except Exception as _ex_e:
         log.warning(f"signal_ticker_detail expiry {tk}: {_ex_e}")
 

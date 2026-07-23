@@ -12364,6 +12364,62 @@ def _expiry_outcome(rows, spot_of, dte_max=3):
     return out
 
 
+def _closed_today_block(conn, today, spot_of):
+    """Positions closed TODAY: entry → exit → what it would be worth NOW.
+
+    The 'Now' column is the point: it scores the exit. If a leg you sold is worth more now
+    you left money on the table; less, and you timed it well. Closed rows vanish from the
+    open book entirely, so without this the day's realised P&L is invisible on the card.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT ticker, option_type, strike, quantity, entry_price, exit_price, pnl, expiry "
+            "FROM trades WHERE status='CLOSED' AND exit_date=? ORDER BY trade_id",
+            (today.isoformat(),)).fetchall()
+    except Exception:
+        log.debug("closed-today query failed", exc_info=True)
+        return "", 0.0
+    if not rows:
+        return "", 0.0
+    out, tot = [], 0.0
+    for tk, otype, K, qty, entry, exitp, pnl, exp in rows:
+        try:
+            typ = "stock" if str(otype).upper() == "STOCK" else str(otype).lower()
+            K = float(K or 0); q = int(qty or 0)
+            lbl = (f"{'+' if q > 0 else '-'}{str(tk)[:4]}"
+                   + (f"{int(K)}{str(otype)[:1].upper()}" if K > 0 else " sh"))
+            now_px = None
+            # A ticker closed out today has NO open legs, so it is absent from the card's
+            # AH price cache and spot_of() returns 0 — fetch it directly in that case.
+            S = float(spot_of(tk) or 0)
+            if S <= 0:
+                _d = _get_spot_with_ah(tk) or {}
+                S = float(_d.get("spot_ext") or _d.get("spot_reg") or 0)
+            if K > 0 and S > 0 and exp:
+                dte = (datetime.strptime(str(exp)[:10], "%Y-%m-%d").date() - today).days
+                q2 = _bb_quote(conn, tk, K, str(exp)[:10], typ)
+                iv = (q2 or {}).get("iv")
+                if iv and dte >= 0:
+                    g = bs_greeks(S, K, max(dte, 0) / 365.0 or 1 / 365.0, R, iv, typ)
+                    now_px = g.get("price")
+                if now_px is None:
+                    now_px = max(K - S, 0.0) if typ == "put" else max(S - K, 0.0)
+            tot += float(pnl or 0)
+            _pk = (f"{float(pnl or 0)/1000:+.1f}K" if abs(float(pnl or 0)) >= 1000
+                   else f"{float(pnl or 0):+.0f}")
+            out.append((lbl, f"{float(entry or 0):.2f}", f"{float(exitp or 0):.2f}",
+                        f"{now_px:.2f}" if now_px is not None else "—", _pk))
+        except Exception:
+            log.debug(f"closed row {tk} failed", exc_info=True)
+    if not out:
+        return "", 0.0
+    _tk = f"{tot/1000:+.1f}K" if abs(tot) >= 1000 else f"{tot:+.0f}"
+    out.append(("TOTAL", "", "", "", _tk))
+    return _pipe_table(("Leg", "Buy", "Sell", "Now", "P&L"), out, right_cols={1, 2, 3, 4},
+                       title="📕 CLOSED TODAY",
+                       legend="Now = what it would be worth if still held (scores the exit)"), tot
+
+
 def _positions_card_parts(trades, now_s, today):
     """Build the POSITIONS health card (table + advice + urgent + HP engine) —
     SHARED by the 10-min position_monitor push and the menu positions_view
@@ -12832,7 +12888,19 @@ def _positions_card_parts(trades, now_s, today):
     colour_section = (_risk_section
                       + (f"{_spreads}\n\n" if _spreads else "")
                       + f"{table1}\n\n{advice_section}")
-    _context_section = ("\n\n" + _events_section + _news_section).rstrip()
+    # Realised P&L for today — closed rows leave the open book, so without this the day's
+    # result is invisible on the card.
+    _closed_tbl, _closed_pnl = "", 0.0
+    try:
+        _cc = get_conn()
+        _closed_tbl, _closed_pnl = _closed_today_block(
+            _cc, today, lambda t: float((_ah_cache.get(t) or {}).get("spot_ext")
+                                        or (_ah_cache.get(t) or {}).get("spot_reg") or 0.0))
+        _cc.close()
+    except Exception:
+        log.debug("closed-today block failed", exc_info=True)
+    _context_section = ((("\n\n" + _closed_tbl) if _closed_tbl else "")
+                        + "\n\n" + _events_section + _news_section).rstrip()
 
     urgent_section = ""
     if urgent_lines:

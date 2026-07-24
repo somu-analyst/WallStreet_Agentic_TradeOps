@@ -1586,6 +1586,27 @@ def _dh_banner():
                 f"<div>"
                 f"{_ic} DATA {_a0['status']} — {_a0['audit_date']}{_extra}</div>",
                 unsafe_allow_html=True)
+            # 2-week dot timeline (user 2026-07-24): one dot per audited day, oldest->newest,
+            # so a run of red/yellow days is visible at a glance instead of only today's verdict.
+            try:
+                with sqlite3.connect(DB_PATH) as _c:
+                    _aud14 = pd.read_sql(
+                        "SELECT audit_date, status FROM data_audit ORDER BY audit_date DESC LIMIT 14", _c)
+                if not _aud14.empty:
+                    _aud14 = _aud14.iloc[::-1]        # oldest -> newest, left -> right
+                    _dotcolor = {"VALIDATED": "#2ecc71", "PARTIAL": "#ffb74d", "FAILED": "#ff5c6c"}
+                    _dots = "".join(
+                        f'<span title="{r.audit_date}: {r.status}" style="display:inline-block;'
+                        f'width:12px;height:12px;border-radius:50%;margin-right:4px;'
+                        f'background:{_dotcolor.get(r.status, "#666")}"></span>'
+                        for r in _aud14.itertuples())
+                    st.markdown(
+                        f'<div style="margin:4px 0 8px 0;">{_dots}'
+                        f'<span style="margin-left:8px;color:var(--muted,#8b9bb4);font-size:12px;">'
+                        f'last {len(_aud14)} audited days · hover a dot for its date/status</span></div>',
+                        unsafe_allow_html=True)
+            except Exception:
+                pass
             with st.expander("🔍 Audit details (7 checks)", expanded=False):
                 for _chk in str(_a0["summary"]).split(" · "):
                     st.markdown(_chk)

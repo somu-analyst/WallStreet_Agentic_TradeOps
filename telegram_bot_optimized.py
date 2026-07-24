@@ -5516,18 +5516,47 @@ def _oi_expiry_flow_table(ticker: str, conn, latest_date: str) -> str:
         return "FLAT"
     _bemo = {"BULL": "🟢", "BEAR": "🔴", "STRD": "🟡", "UNWD": "⚪", "FLAT": "⚪"}
     rows = []
+    _leans = []   # (net_flow, bias) per non-expired expiry, nearest-first — for the cross-expiry read below
     for _, r in edf.iterrows():
         try:
             if datetime.strptime(str(r["expiry_date"]), "%Y-%m-%d").date() < _today:
                 continue
         except Exception:
             log.debug("suppressed exception", exc_info=True)
-        b = _bias(r["c_chg"], r["p_chg"])
-        rows.append((_bemo.get(b, "⚪"), str(r["expiry_date"])[5:], _fk(r["c_chg"]), _fk(r["p_chg"])))
+        c_chg, p_chg = float(r["c_chg"] or 0), float(r["p_chg"] or 0)
+        b = _bias(c_chg, p_chg)
+        rows.append((_bemo.get(b, "⚪"), str(r["expiry_date"])[5:], _fk(c_chg), _fk(p_chg)))
+        _leans.append((c_chg - p_chg, b, c_chg, p_chg))
     if not rows:
         return ""
-    return _pipe_table(("ST", "Exp", "CΔ", "PΔ"), rows[:6], right_cols={2, 3},
-                       legend="🟢 call build · 🔴 put build · 🟡 straddle · ⚪ flat/unwind")
+    table = _pipe_table(("ST", "Exp", "CΔ", "PΔ"), rows[:6], right_cols={2, 3},
+                        legend="🟢 call build · 🔴 put build · 🟡 straddle · ⚪ flat/unwind")
+
+    # Same-week vs multi-week read (PLAN.md A6, 2026-07-24): a build in ONLY the nearest
+    # expiry is a different animal from the SAME direction building across several — the
+    # first is a single-week catalyst bet, the second is sustained conviction. A near
+    # UNWIND paired with a far-dated BUILD in the same original direction is neither — it's
+    # a position being ROLLED forward, not new interest.
+    _read = ""
+    if len(_leans) >= 2:
+        _near_net, _near_b, _near_c, _near_p = _leans[0]
+        _SIG = 300   # same magnitude floor _bias() itself uses for a real build
+        _far_same_dir = sum(
+            1 for _fn, _fb, _fc, _fp in _leans[1:]
+            if abs(_fn) > _SIG and (_fn > 0) == (_near_net > 0) and _near_b in ("BULL", "BEAR"))
+        _near_is_unwind = (_near_c < -_SIG and _near_p < -_SIG)
+        _far_build_dir = next(((_fn > 0) for _fn, _fb, _fc, _fp in _leans[1:]
+                               if abs(_fn) > _SIG and _fb in ("BULL", "BEAR")), None)
+        if _near_is_unwind and _far_build_dir is not None:
+            _read = ("🔄 <i>CALENDAR ROLL — nearest expiry unwinding while a further-dated one "
+                     "builds in the same direction: position being rolled forward, not fresh interest.</i>")
+        elif _near_b in ("BULL", "BEAR") and _far_same_dir >= 1:
+            _read = (f"📈 <i>SUSTAINED — {_far_same_dir + 1} expiries building the SAME direction: "
+                     "conviction/positioning, not a single-week bet.</i>")
+        elif _near_b in ("BULL", "BEAR"):
+            _read = ("⚡ <i>EVENT-ISOLATED — activity concentrated in the nearest expiry only: "
+                     "likely a single-week catalyst bet, not durable positioning.</i>")
+    return table + (f"\n{_read}" if _read else "")
 
 
 def _get_earnings_dte(ticker: str) -> "int | None":

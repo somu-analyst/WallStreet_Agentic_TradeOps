@@ -10309,20 +10309,21 @@ elif page == "📈 Insider / Congress / Whales":
         st.caption("Real quarterly 13F filings pulled from SEC EDGAR (free). Builds portfolio %, "
                    "quarter-over-quarter change, and a 12-quarter holding trend. First fetch per fund "
                    "takes ~10–20s; then it's stored in your DB.")
-        # KNOWN ISSUE (2026-07-24, deferred by user): a recency audit found 3 CIKs below were
-        # wrong/stale and fixed them with verified evidence (Vanguard/Soros were SWAPPED --
-        # Vanguard's line had Soros's real CIK and vice versa; Trian's CIK was dormant since
-        # 2011). 14 more funds were flagged by the same heuristic (last 13F-HR before 2024, or
-        # none found) but NOT individually re-verified -- deferred to a future session:
-        # Appaloosa (Tepper), Viking Global, Oaktree (Marks), Gotham (Greenblatt),
-        # Omega (Cooperman), Invesco Advisers, Hotchkis & Wiley, Wasatch Funds Trust,
-        # Brandes Investment Partners, Markel-Gayner (Gayner), First Pacific Advisors,
-        # Moore Capital Management, Jana Partners, Third Avenue Management, Greenlight
-        # (Einhorn) -- a DME Advisors LP lead looked promising but was inconsistent under
-        # closer check, so it was NOT swapped in unverified. The heuristic has false
-        # positives (e.g. Icahn Enterprises' CIK likely IS still current; SEC's submissions
-        # JSON just didn't surface a recent 13F-HR for it in the quick check) -- don't
-        # assume every flagged name here is actually wrong without re-checking first.
+        # KNOWN ISSUE (2026-07-24, follow-up audit): first pass fixed 3 CIKs (Vanguard/Soros
+        # SWAPPED; Trian dormant since 2011). This pass verified + fixed 4 MORE with evidence
+        # (old -> new, all confirmed via conformed-name + recent filing date): Appaloosa
+        # 0001006438->0001656456 ("Appaloosa LP", filed 2026-05-15), Viking Global
+        # 0001101785->0001103804 ("Viking Global Investors LP", 2026-05-15), Oaktree
+        # 0001403525->0000949509 ("Oaktree Capital Management LP", 2026-05-20), Gotham
+        # 0001279148->0001510387 ("Gotham Asset Management LLC", 2026-05-15; old one dormant
+        # since 2009). STILL UNVERIFIED (9 left): Omega (Cooperman) -- current CIK not found
+        # in a quick search, old one last filed 2019 -- Invesco Advisers (already confirmed
+        # fine), Hotchkis & Wiley, Wasatch Funds Trust, Brandes Investment Partners,
+        # Markel-Gayner (Gayner), First Pacific Advisors, Moore Capital Management, Jana
+        # Partners, Third Avenue Management, Greenlight (Einhorn) -- a DME Advisors LP lead
+        # looked promising but was inconsistent under closer check, not swapped in unverified.
+        # Heuristic has false positives (e.g. Icahn Enterprises' CIK is likely still current)
+        # -- don't assume every remaining flagged name is actually wrong without re-checking.
         _EDGAR_FUNDS = {
             "Berkshire Hathaway": "0001067983", "Vanguard Group": "0000102909",
             "BlackRock": "0001364742", "Citadel Advisors": "0001423053",
@@ -10339,13 +10340,13 @@ elif page == "📈 Insider / Congress / Whales":
             # maintain against their page layout). Every CIK verified directly against SEC EDGAR
             # company search before adding.
             "Icahn Enterprises": "0001257324", "Duquesne (Druckenmiller)": "0001536411",
-            "Appaloosa (Tepper)": "0001006438", "Lone Pine Capital": "0001061165",
-            "Coatue Management": "0001135730", "Viking Global": "0001101785",
+            "Appaloosa (Tepper)": "0001656456", "Lone Pine Capital": "0001061165",
+            "Coatue Management": "0001135730", "Viking Global": "0001103804",
             "Tudor Investment (PTJ)": "0000923093", "Fisher Asset Mgmt": "0000850529",
-            "Trian (Peltz)": "0001345471", "Oaktree Capital (Marks)": "0001403525",
+            "Trian (Peltz)": "0001345471", "Oaktree Capital (Marks)": "0000949509",
             "Point72 (Cohen)": "0001603466",
             "Gates Foundation Trust": "0001663801", "Paulson & Co": "0001035674",
-            "Gotham Asset Mgmt (Greenblatt)": "0001279148", "Ariel Investments (Rogers)": "0000936753",
+            "Gotham Asset Mgmt (Greenblatt)": "0001510387", "Ariel Investments (Rogers)": "0000936753",
             "Southeastern (Hawkins)": "0000807985", "Maverick Capital (Ainslie)": "0000934639",
             "Glenview Capital (Robbins)": "0001138995", "Omega Advisors (Cooperman)": "0000898202",
             "Himalaya Capital (Li Lu)": "0001709323", "Abrams Capital": "0001358706",

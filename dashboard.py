@@ -1595,15 +1595,19 @@ def _dh_banner():
                 if not _aud14.empty:
                     _aud14 = _aud14.iloc[::-1]        # oldest -> newest, left -> right
                     _dotcolor = {"VALIDATED": "#2ecc71", "PARTIAL": "#ffb74d", "FAILED": "#ff5c6c"}
-                    _dots = "".join(
-                        f'<span title="{r.audit_date}: {r.status}" style="display:inline-block;'
-                        f'width:12px;height:12px;border-radius:50%;margin-right:4px;'
-                        f'background:{_dotcolor.get(r.status, "#666")}"></span>'
-                        for r in _aud14.itertuples())
+                    _dot_spans = []
+                    for _r in _aud14.itertuples():
+                        _dc = _dotcolor.get(_r.status, "#666")
+                        _dot_spans.append(
+                            ""
+                            .format(_r.audit_date, _r.status, _dc))
+                    _dots_html = "".join(_dot_spans)
+                    _caption_html = (
+                        ""
+                        "last {} audited days " + chr(0x00b7) + " hover a dot for its date/status"
+                    ).format(len(_aud14))
                     st.markdown(
-                        f'<div style="margin:4px 0 8px 0;">{_dots}'
-                        f'<span style="margin-left:8px;color:var(--muted,#8b9bb4);font-size:12px;">'
-                        f'last {len(_aud14)} audited days · hover a dot for its date/status</span></div>',
+                        "<div>{}{}</div>".format(_dots_html, _caption_html),
                         unsafe_allow_html=True)
             except Exception:
                 pass

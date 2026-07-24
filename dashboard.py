@@ -5380,6 +5380,7 @@ _PAGE_HELP = {
     "🎯 Prop Trading Screen":    "Prop-desk style trade ideas. Scans for high-conviction setups using OI, PCR, and momentum filters — shows entry/exit levels and risk:reward.",
     "💼 Portfolio & Suggestions": "Your open and closed positions. Track unrealized P&L, Greeks, IV rank, earnings alerts, and get per-leg roll suggestions. Add/close/edit trades here.",
     "👀 Watchlist":              "Stocks you're thinking about buying but haven't yet. Add a ticker (+ optional target price / note) and it's tracked with the same components as the rest of the dashboard — live spot, day%, distance to target, next earnings/ex-div, short interest, PCR, RSI/MACD/BB technicals, and a rollup BULL/BEAR/NEUTRAL read. No entry price or P&L (nothing's bought yet) — remove a ticker once you act on it or lose interest.",
+    "📝 Paper Trading":          "Demo positions — 'what if I took this trade?' without risking real capital. Its own isolated table (never touches your real Portfolio, tax clock, or Exit Planner), so it's safe to experiment in. Same one-line add grammar as adding a real position. Mirrored in Telegram via /paper.",
     "📊 Backtest Lab":           "Test OI-based trading signals against historical data. See what win rate and P&L your strategy would have produced over the selected date range.",
     "🔮 Live Position Predictor": "Monte Carlo simulation for a single position. Models 10,000 price paths to estimate tomorrow's expected P&L, probability of profit, and VaR.",
     "📈 Insider / Congress / Whales": "Track institutional money flows — SEC insider filings, congress trades, and dark pool / block order signals for the stocks you follow.",
@@ -5435,6 +5436,7 @@ with st.sidebar:
         "💼 Portfolio & Risk": [
             "💼 Portfolio & Suggestions",
             "👀 Watchlist",
+            "📝 Paper Trading",
             "🔮 Live Position Predictor",
             "⚡ Trade Risk Calculator",
             "🎯 Next-Day Exit Planner",
@@ -10115,6 +10117,17 @@ elif page == "📈 Insider / Congress / Whales":
             "Pershing Square (Ackman)": "0001336528", "Scion (Burry)": "0001649339",
             "Third Point (Loeb)": "0001040273", "Tiger Global (Coleman)": "0001167483",
             "Greenlight (Einhorn)": "0001079114", "Baupost (Klarman)": "0001061768",
+            # Added 2026-07-24 (user: inspired by tradingkey.com/tools/star-investors —
+            # that page renders its data client-side/JS and had nothing scrapeable at fetch
+            # time, so this extends our EXISTING real-EDGAR roster with more of the same
+            # "legendary investor" names instead of a scrape) — every CIK verified directly
+            # against SEC EDGAR company search before adding.
+            "Icahn Enterprises": "0001257324", "Duquesne (Druckenmiller)": "0001536411",
+            "Appaloosa (Tepper)": "0001006438", "Lone Pine Capital": "0001061165",
+            "Coatue Management": "0001135730", "Viking Global": "0001101785",
+            "Tudor Investment (PTJ)": "0000923093", "Fisher Asset Mgmt": "0000850529",
+            "Trian (Peltz)": "0001345472", "Oaktree Capital (Marks)": "0001403525",
+            "Point72 (Cohen)": "0001603466",
         }
         _ef1, _ef2 = st.columns([2, 1])
         _fpick = _ef1.selectbox("Fund", list(_EDGAR_FUNDS) + ["(enter CIK manually)"], key="edgar_fund")
@@ -22547,3 +22560,131 @@ if page == "👀 Watchlist":
                 _wl_conn.execute("UPDATE watchlist SET status='REMOVED' WHERE id=?", (_wl_map[_wl_rm_pick],))
                 _wl_conn.commit()
                 st.success("Removed."); st.rerun()
+
+# ===================================================================
+# ──  PAGE: PAPER TRADING — demo positions, isolated from the real book
+# ===================================================================
+if page == "📝 Paper Trading":
+    _page_header("📝 Paper Trading", _PAGE_HELP["📝 Paper Trading"])
+    st.caption("Its own `paper_trades` table — separate from your real Portfolio, the tax "
+               "clock, and Exit Planner. Safe to experiment: 'what if I took this trade?' "
+               "Mirrored in Telegram via `/paper` (same table, either place shows up in both).")
+
+    def _pt_setup(conn):
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS paper_trades (trade_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ticker TEXT, option_type TEXT, strike REAL, expiry TEXT, entry_price REAL, quantity INTEGER, "
+            "entry_date TEXT, status TEXT DEFAULT 'OPEN', exit_price REAL, exit_date TEXT, notes TEXT)")
+        conn.commit()
+
+    _pt_conn = get_conn()
+    _pt_setup(_pt_conn)
+
+    def _pt_mark(row):
+        """Current mark: live stock price, or a live option-chain mid/last."""
+        tk = str(row["ticker"]).upper()
+        typ = str(row["option_type"]).upper()
+        if typ == "STOCK":
+            return _cached_price(tk) or 0.0
+        try:
+            oc = _cached_option_chain(tk, str(row["expiry"]))
+            if oc is None:
+                return float(row["entry_price"] or 0)
+            side = oc.calls if typ == "CALL" else oc.puts
+            if side is None or side.empty:
+                return float(row["entry_price"] or 0)
+            m = side[side["strike"] == float(row["strike"])]
+            if m.empty:
+                side = side.copy(); side["_d"] = (side["strike"] - float(row["strike"])).abs()
+                m = side.nsmallest(1, "_d")
+            r = m.iloc[0]
+            bid, ask, last = float(r.get("bid", 0) or 0), float(r.get("ask", 0) or 0), float(r.get("lastPrice", 0) or 0)
+            if bid > 0 and ask > 0:
+                return (bid + ask) / 2.0
+            return last or float(row["entry_price"] or 0)
+        except Exception:
+            return float(row["entry_price"] or 0)
+
+    with st.expander("➕ Add a demo position", expanded=True):
+        _pa1, _pa2, _pa3, _pa4 = st.columns(4)
+        _pa_tk = _pa1.text_input("Ticker", key="pt_add_tk", placeholder="e.g. AAPL").strip().upper()
+        _pa_typ = _pa2.selectbox("Type", ["Stock", "Call", "Put"], key="pt_add_typ")
+        _pa_qty = _pa3.number_input("Qty (− = short; shares if Stock, contracts if option)",
+                                    step=1, value=1, key="pt_add_qty")
+        _pa_px = _pa4.number_input("Entry price (0 = use live mark)", min_value=0.0, step=0.5, key="pt_add_px")
+        if _pa_typ != "Stock":
+            _pa5, _pa6 = st.columns(2)
+            _pa_strike = _pa5.number_input("Strike", min_value=0.0, step=0.5, key="pt_add_strike")
+            _pa_exp = _pa6.text_input("Expiry (YYYY-MM-DD)", key="pt_add_exp", placeholder="2026-08-21")
+        else:
+            _pa_strike, _pa_exp = 0.0, ""
+        _pa_note = st.text_input("Note (optional)", key="pt_add_note")
+        if st.button("➕ Add demo position", key="pt_add_btn"):
+            _ok = bool(_pa_tk) and int(_pa_qty) != 0
+            if _ok and _pa_typ != "Stock":
+                try:
+                    datetime.strptime(_pa_exp, "%Y-%m-%d")
+                    _ok = _pa_strike > 0
+                except Exception:
+                    _ok = False
+            if not _ok:
+                st.error("Need a ticker + non-zero qty (and strike/expiry YYYY-MM-DD for options).")
+            else:
+                _entry_px = _pa_px
+                if not _entry_px:
+                    _entry_px = (_cached_price(_pa_tk) if _pa_typ == "Stock"
+                                 else _pt_mark({"ticker": _pa_tk, "option_type": _pa_typ.upper(),
+                                               "strike": _pa_strike, "expiry": _pa_exp, "entry_price": 0}))
+                if not _entry_px:
+                    st.error("Couldn't get a live price — enter one manually.")
+                else:
+                    _pt_conn.execute(
+                        "INSERT INTO paper_trades (ticker, option_type, strike, expiry, entry_price, "
+                        "quantity, entry_date, status, notes) VALUES (?,?,?,?,?,?,?, 'OPEN', ?)",
+                        (_pa_tk, _pa_typ.upper(), _pa_strike, _pa_exp, float(_entry_px), int(_pa_qty),
+                         datetime.now().strftime("%Y-%m-%d"), _pa_note or None))
+                    _pt_conn.commit()
+                    st.success(f"Added demo {_pa_tk} {int(_pa_qty):+d} @ ${_entry_px:.2f}."); st.rerun()
+
+    _pt_df = pd.read_sql("SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY trade_id DESC", _pt_conn)
+    if _pt_df.empty:
+        st.info("No demo positions yet — add one above to see 'what if I took this trade?'")
+    else:
+        _pt_rows = []
+        for _, _pr in _pt_df.iterrows():
+            _ptk = str(_pr["ticker"]).upper()
+            _ptyp = str(_pr["option_type"]).upper()
+            _pqty = int(_pr["quantity"])
+            _pentry = float(_pr["entry_price"] or 0)
+            _pmult = 1 if _ptyp == "STOCK" else 100
+            try:
+                _pmark = _pt_mark(_pr)
+            except Exception:
+                _pmark = _pentry
+            _ppnl = (_pmark - _pentry) * _pqty * _pmult
+            _pleg = f"{_ptk} {_pqty:+d}sh" if _ptyp == "STOCK" else f"{_ptk} ${_pr['strike']:.0f}{_ptyp[0]} {_pqty:+d}x exp {_pr['expiry']}"
+            _pt_rows.append({"id": int(_pr["trade_id"]), "Leg": _pleg, "Entry": round(_pentry, 2),
+                             "Mark": round(_pmark, 2), "P&L $": round(_ppnl),
+                             "Since": _pr["entry_date"], "Note": _pr.get("notes") or ""})
+        _pt_show = pd.DataFrame(_pt_rows)
+        _net = _pt_show["P&L $"].sum()
+        st.metric("Net demo P&L", f"${_net:+,.0f}")
+        st.dataframe(_pt_show.drop(columns=["id"]), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.markdown("**Close a demo position**")
+        _pt_map = {f"{r['Leg']} (id {r['id']})": r["id"] for r in _pt_rows}
+        _pc1, _pc2 = st.columns([3, 1])
+        _pt_pick = _pc1.selectbox("Position", list(_pt_map), key="pt_close_pick")
+        _pt_exit_px = _pc2.number_input("Exit price (0 = live mark)", min_value=0.0, step=0.5, key="pt_close_px")
+        if st.button("✖️ Close demo position", key="pt_close_btn"):
+            _pid = _pt_map[_pt_pick]
+            _prow = _pt_df[_pt_df["trade_id"] == _pid].iloc[0]
+            _pexit = _pt_exit_px or _pt_mark(_prow)
+            _pmult2 = 1 if str(_prow["option_type"]).upper() == "STOCK" else 100
+            _pnl2 = (_pexit - float(_prow["entry_price"] or 0)) * int(_prow["quantity"]) * _pmult2
+            _pt_conn.execute(
+                "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=? WHERE trade_id=?",
+                (_pexit, datetime.now().strftime("%Y-%m-%d"), int(_pid)))
+            _pt_conn.commit()
+            st.success(f"Closed @ ${_pexit:.2f} — P&L ${_pnl2:+,.0f}."); st.rerun()

@@ -31153,6 +31153,125 @@ def _next_events_wl(tk):
         return "—", None
 
 
+def _pt_setup(conn):
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS paper_trades (trade_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "ticker TEXT, option_type TEXT, strike REAL, expiry TEXT, entry_price REAL, quantity INTEGER, "
+        "entry_date TEXT, status TEXT DEFAULT 'OPEN', exit_price REAL, exit_date TEXT, notes TEXT)")
+    conn.commit()
+
+
+def _pt_mark(row, conn):
+    """Current mark for one paper position: live stock price, or a live option-chain
+    mid/last (same helper /add uses for a fresh entry — _estimate_option_mark)."""
+    tk = str(row["ticker"]).upper()
+    typ = str(row["option_type"]).upper()
+    if typ == "STOCK":
+        return _last_price(tk) or 0.0
+    return _estimate_option_mark(tk, typ, float(row["strike"]), row["expiry"],
+                                 fallback=float(row["entry_price"] or 0))
+
+
+def _fmt_paper(conn):
+    """DEMO positions — a separate `paper_trades` table (never touches the real `trades`
+    book, so it can't contaminate live P&L, the tax clock, or Exit Planner). Same one-line
+    add grammar as /add; mirrored in the dashboard's Paper Trading page."""
+    _pt_setup(conn)
+    df = pd.read_sql("SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY trade_id DESC", conn)
+    if df.empty:
+        return (f"{hdr('PAPER TRADING (demo)')}\n\nNo demo positions yet. Add one:\n"
+                "<code>/paper add GOOGL 375P 2026-08-21 -1 @4.35</code>\n"
+                "<code>/paper add GOOG stock 100 @167</code>\n"
+                "<i>Same grammar as /add — see /add for the full one-liner spec.</i>")
+    rows, details = [], []
+    tot_pnl = 0.0
+    for _, r in df.iterrows():
+        tk = str(r["ticker"]).upper()
+        typ = str(r["option_type"]).upper()
+        qty = int(r["quantity"])
+        entry = float(r["entry_price"] or 0)
+        mult = 1 if typ == "STOCK" else 100
+        try:
+            mark = _pt_mark(r, conn)
+        except Exception:
+            mark = 0.0
+        pnl = (mark - entry) * qty * mult
+        tot_pnl += pnl
+        em = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
+        leg = f"{tk} {qty:+d}sh" if typ == "STOCK" else f"{tk} {_kfb(r['strike'])}{typ[0]} {qty:+d}x"
+        rows.append((em, leg, f"${entry:.2f}", f"${mark:.2f}", f"${pnl:+,.0f}"))
+        note_txt = f" — {r['note']}" if r.get("note") else ""
+        details.append(f"• #{int(r['trade_id'])} {leg} · entry {r['entry_date']}"
+                        + (f" · exp {r['expiry']}" if r.get("expiry") else "") + note_txt)
+    return _report(f"PAPER TRADING (demo) · Net ${tot_pnl:+,.0f}",
+                    ("", "Leg", "Entry", "Mark", "P&L"), rows, right_cols={2, 3, 4}, details=details,
+                    notes="/paper add ... (grammar of /add) · /paper close ID [@price]")
+
+
+async def paper_command(update, ctx):
+    """/paper [add ... | close ID [@price]] — demo/paper positions, isolated from the
+    real book (own `paper_trades` table, no tax-clock or capital effect). Same one-line
+    grammar as /add for 'add'."""
+    args = list(getattr(ctx, "args", []) or [])
+    conn = get_conn()
+    try:
+        _pt_setup(conn)
+        if args and args[0].lower() == "add" and len(args) >= 2:
+            p, err = _parse_add_args(args[1:])
+            if err:
+                msg = f"❌ {err}\n\nSame grammar as /add — see /add usage."
+            else:
+                if p["typ"] == "STOCK" and p["px"] is None:
+                    p["px"] = _last_price(p["tk"]) or None
+                px = p["px"] if p["px"] is not None else _estimate_option_mark(
+                    p["tk"], p["typ"], p["strike"], p["expiry"], fallback=1.0)
+                if not px:
+                    msg = "❌ Couldn't get a price — pass @PRICE explicitly."
+                else:
+                    conn.execute(
+                        "INSERT INTO paper_trades (ticker, option_type, strike, expiry, entry_price, "
+                        "quantity, entry_date, status) VALUES (?,?,?,?,?,?,?, 'OPEN')",
+                        (p["tk"], p["typ"], p["strike"], p["expiry"], float(px), p["qty"],
+                         p["entry_date"] or datetime.now().strftime("%Y-%m-%d")))
+                    conn.commit()
+                    new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    msg = f"✅ <b>Demo #{new_id}</b> added: {p['tk']} {p['qty']:+d} @ ${float(px):.2f}. /paper for live P&L."
+        elif args and args[0].lower() == "close" and len(args) >= 2:
+            try:
+                pid = int(args[1])
+            except ValueError:
+                msg = "❌ Usage: /paper close ID [@price]"
+            else:
+                row = conn.execute("SELECT * FROM paper_trades WHERE trade_id=? AND status='OPEN'",
+                                   (pid,)).fetchone()
+                if not row:
+                    msg = f"❌ No open demo position #{pid}."
+                else:
+                    cols = [d[0] for d in conn.execute(
+                        "SELECT * FROM paper_trades WHERE trade_id=?", (pid,)).description]
+                    rd = dict(zip(cols, row))
+                    exit_px = None
+                    if len(args) >= 3 and args[2].startswith("@"):
+                        try:
+                            exit_px = float(args[2][1:])
+                        except ValueError:
+                            exit_px = None
+                    if exit_px is None:
+                        exit_px = _pt_mark(rd, conn)
+                    mult = 1 if str(rd["option_type"]).upper() == "STOCK" else 100
+                    pnl = (exit_px - float(rd["entry_price"] or 0)) * int(rd["quantity"]) * mult
+                    conn.execute(
+                        "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=? WHERE trade_id=?",
+                        (exit_px, datetime.now().strftime("%Y-%m-%d"), pid))
+                    conn.commit()
+                    msg = f"✅ Closed demo #{pid} @ ${exit_px:.2f} — P&L ${pnl:+,.0f}."
+        else:
+            msg = _fmt_paper(conn)
+    finally:
+        conn.close()
+    await update.message.reply_text(msg, parse_mode=H)
+
+
 async def watchlist_command(update, ctx):
     """/watchlist [add TICKER [target] [class] [note...] | rm TICKER] — track stocks,
     ETFs, bonds, or commodities you plan to buy but haven't yet (class = stock/etf/
@@ -32885,6 +33004,7 @@ async def _post_init(app):
             BotCommand("journal", "Trade/event journal"),
             BotCommand("bookmarks", "Saved items"),
             BotCommand("watchlist", "Stocks/ETFs/bonds/commodities you plan to buy"),
+            BotCommand("paper", "Demo/paper positions (no real capital)"),
             BotCommand("event", "Event writeup"),
             BotCommand("logevent", "Add event"),
             BotCommand("tv", "TradingView chart"),
@@ -32963,6 +33083,7 @@ def main():
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))
     app.add_handler(CommandHandler("watchlist", watchlist_command))
+    app.add_handler(CommandHandler("paper", paper_command))
     app.add_handler(CommandHandler("gex", gex_command))
     app.add_handler(CommandHandler("macro", macro_command))
     app.add_handler(CommandHandler("momentum", momentum_command))

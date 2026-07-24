@@ -10214,10 +10214,24 @@ elif page == "📈 Insider / Congress / Whales":
         st.caption("Real quarterly 13F filings pulled from SEC EDGAR (free). Builds portfolio %, "
                    "quarter-over-quarter change, and a 12-quarter holding trend. First fetch per fund "
                    "takes ~10–20s; then it's stored in your DB.")
+        # KNOWN ISSUE (2026-07-24, deferred by user): a recency audit found 3 CIKs below were
+        # wrong/stale and fixed them with verified evidence (Vanguard/Soros were SWAPPED --
+        # Vanguard's line had Soros's real CIK and vice versa; Trian's CIK was dormant since
+        # 2011). 14 more funds were flagged by the same heuristic (last 13F-HR before 2024, or
+        # none found) but NOT individually re-verified -- deferred to a future session:
+        # Appaloosa (Tepper), Viking Global, Oaktree (Marks), Gotham (Greenblatt),
+        # Omega (Cooperman), Invesco Advisers, Hotchkis & Wiley, Wasatch Funds Trust,
+        # Brandes Investment Partners, Markel-Gayner (Gayner), First Pacific Advisors,
+        # Moore Capital Management, Jana Partners, Third Avenue Management, Greenlight
+        # (Einhorn) -- a DME Advisors LP lead looked promising but was inconsistent under
+        # closer check, so it was NOT swapped in unverified. The heuristic has false
+        # positives (e.g. Icahn Enterprises' CIK likely IS still current; SEC's submissions
+        # JSON just didn't surface a recent 13F-HR for it in the quick check) -- don't
+        # assume every flagged name here is actually wrong without re-checking first.
         _EDGAR_FUNDS = {
-            "Berkshire Hathaway": "0001067983", "Vanguard Group": "0001029160",
+            "Berkshire Hathaway": "0001067983", "Vanguard Group": "0000102909",
             "BlackRock": "0001364742", "Citadel Advisors": "0001423053",
-            "ARK Investment Management": "0001697748", "Soros Fund Management": "0001549626",
+            "ARK Investment Management": "0001697748", "Soros Fund Management": "0001029160",
             "Bridgewater Associates": "0001350694", "Renaissance Technologies": "0001037389",
             "Pershing Square (Ackman)": "0001336528", "Scion (Burry)": "0001649339",
             "Third Point (Loeb)": "0001040273", "Tiger Global (Coleman)": "0001167483",
@@ -10233,7 +10247,7 @@ elif page == "📈 Insider / Congress / Whales":
             "Appaloosa (Tepper)": "0001006438", "Lone Pine Capital": "0001061165",
             "Coatue Management": "0001135730", "Viking Global": "0001101785",
             "Tudor Investment (PTJ)": "0000923093", "Fisher Asset Mgmt": "0000850529",
-            "Trian (Peltz)": "0001345472", "Oaktree Capital (Marks)": "0001403525",
+            "Trian (Peltz)": "0001345471", "Oaktree Capital (Marks)": "0001403525",
             "Point72 (Cohen)": "0001603466",
             "Gates Foundation Trust": "0001663801", "Paulson & Co": "0001035674",
             "Gotham Asset Mgmt (Greenblatt)": "0001279148", "Ariel Investments (Rogers)": "0000936753",
@@ -10761,9 +10775,42 @@ elif page == "📈 Insider / Congress / Whales":
             "klarman":       "Margin of Safety framework. QSR $529M doubled = BK/Tim Hortons/Popeyes franchise royalties recession-resistant. WCC for AI data center electrical distribution. 22 total holdings.",
             "griffin":       "Citadel $618B = world's largest hedge fund. SPY puts + calls simultaneously = market neutral volatility capture. Pure quant 12,857 positions.",
         }
+        for _lk in _LEGENDS:
+            _LEGENDS[_lk]["src"] = "static"
 
-        st.markdown("### 🏆 Legendary Investors — Q1 2026 13F Filing Tracker")
-        st.caption("Filed 2026-05-15  |  Period: Mar 31 2026  |  Source: SEC 13F (45-day lag)  |  20 Investors")
+        # Extended 2026-07-24 (user: "increase to the investors we scraped") — the 20 above
+        # have real hand-written buy/sell/theme/insight commentary that can't be fabricated
+        # for the rest without inventing facts. Instead: auto-add every OTHER fund from the
+        # live EDGAR roster (77 total, tab6) with src="edgar" — Top Holdings/Buys/Sells for
+        # these are computed live from the edgar_13f table below (real numbers, no invented
+        # insight text). Funds already covered by a hand-written entry above are skipped.
+        _LEGENDS_CIK = {
+            "buffett": "Berkshire Hathaway", "soros": "Soros Fund Management",
+            "rentec": "Renaissance Technologies", "dalio": "Bridgewater Associates",
+            "tepper": "Appaloosa (Tepper)", "ackman": "Pershing Square (Ackman)",
+            "druckenmiller": "Duquesne (Druckenmiller)", "loeb": "Third Point (Loeb)",
+            "cohen": "Point72 (Cohen)", "burry": "Scion (Burry)",
+            "coleman": "Tiger Global (Coleman)", "tudor": "Tudor Investment (PTJ)",
+            "laffont": "Coatue Management", "wood": "ARK Investment Management",
+            "einhorn": "Greenlight (Einhorn)", "klarman": "Baupost (Klarman)",
+            "griffin": "Citadel Advisors",
+        }
+        for _lk, _cik in _LEGENDS_CIK.items():
+            if _lk in _LEGENDS:
+                _LEGENDS[_lk]["cik"] = _EDGAR_FUNDS.get(_cik)
+        _covered_funds = set(_LEGENDS_CIK.values())
+        for _fn, _fc in _EDGAR_FUNDS.items():
+            if _fn in _covered_funds:
+                continue
+            _slug = re.sub(r"[^a-z0-9]+", "_", _fn.lower()).strip("_")
+            _LEGENDS[_slug] = {"name": _fn, "firm": _fn, "aum": "—", "style": "—",
+                               "src": "edgar", "cik": _fc}
+
+        st.markdown("### 🏆 Legendary Investors — 13F Filing Tracker")
+        st.caption(f"20 with hand-written buy/sell/theme analysis (filed 2026-05-15, period "
+                   f"Mar 31 2026) + {len(_LEGENDS) - 20} more with live Top Holdings/Buys/Sells "
+                   "computed from SEC EDGAR (fetch on the 📜 13F History tab first) — "
+                   f"{len(_LEGENDS)} investors total.")
 
         _sel_key = st.selectbox(
             "Select Investor",
@@ -10772,11 +10819,43 @@ elif page == "📈 Insider / Congress / Whales":
             key="legend_sel"
         )
         d = _LEGENDS[_sel_key]
+        _filed_disp = "2026-05-15" if d.get("src") != "edgar" else "—"
+        if d.get("src") == "edgar":
+            _elc = _edgar_load(d["cik"]) if d.get("cik") else pd.DataFrame()
+            if _elc is None or _elc.empty:
+                st.warning(f"**{d['firm']}** hasn't been fetched yet — go to the 📜 13F History "
+                           f"(EDGAR) tab below, pick **{d['firm']}**, click Fetch, then come back here.")
+            else:
+                _eqs = sorted(_elc["quarter"].unique())
+                _ecur = _elc[_elc["quarter"] == _eqs[-1]]
+                _eprev = _elc[_elc["quarter"] == _eqs[-2]] if len(_eqs) > 1 else pd.DataFrame()
+                _etot = _ecur["value"].sum() or 1
+                d["aum"] = f"${_etot/1e9:.1f}B" if _etot >= 1e9 else f"${_etot/1e6:.0f}M"
+                _filed_disp = _eqs[-1]
+                _etop = (_ecur.groupby("cusip").agg(value=("value", "sum"), issuer=("issuer", "first"))
+                         .reset_index().sort_values("value", ascending=False).head(5))
+                _etop_pct = (_etop["value"] / _etot * 100).round(1)
+                _LEGENDS_TOPS[_sel_key] = list(zip(_etop["issuer"], [f"{p:.1f}%" for p in _etop_pct]))
+                if not _eprev.empty:
+                    _ecur_sh = _ecur.groupby("cusip")["shares"].sum()
+                    _eprev_sh = _eprev.groupby("cusip")["shares"].sum()
+                    _echg = _ecur_sh.subtract(_eprev_sh, fill_value=0)
+                    _enames = _ecur.groupby("cusip")["issuer"].first()
+                    _ebuys = _echg[_echg > 0].sort_values(ascending=False).head(5)
+                    _esells = _echg[_echg < 0].sort_values().head(5)
+                    _LEGENDS_BUYS[_sel_key] = [
+                        (_enames.get(_c, "?"), "Added" if _eprev_sh.get(_c, 0) > 0 else "New",
+                         "—", "—", f"{_v/1e6:+.1f}M shares") for _c, _v in _ebuys.items()]
+                    _LEGENDS_SELLS[_sel_key] = [
+                        (_enames.get(_c, "?"), f"{_v/1e6:+.1f}M shares") for _c, _v in _esells.items()]
+                st.caption("📡 Live from SEC EDGAR — Top Holdings/Buys/Sells are real numbers computed "
+                           "from the 13F filing. No editorial theme/insight commentary for this fund "
+                           "(only the original 20 have hand-written analysis).")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Firm", d["firm"])
         c2.metric("AUM", d["aum"])
         c3.metric("Style", d["style"])
-        c4.metric("Filed", "2026-05-15")
+        c4.metric("Filed" if d.get("src") != "edgar" else "Period", _filed_disp)
 
         st.markdown("---")
         lcol, rcol = st.columns(2)

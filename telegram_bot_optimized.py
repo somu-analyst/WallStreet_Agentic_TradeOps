@@ -5823,21 +5823,29 @@ def _oi_opportunity_table(ticker: str, conn, df, spot: float) -> str:
             buy_opps.append(("STRADDLE", strike, 55, "2:1", inv_strd, inv_strd * 2, inv_strd))
 
         # ── SELL / Income opportunities ────────────────────────────────
+        # $5/contract floor (5c/sh): near-expiry deep-OTM strikes BS-price to ~$0 premium,
+        # which produced "collect $0" ideas with a strike-independent max-risk (spread_width
+        # dominates when rcv~0) — not a real trade, so drop it before it reaches the table
+        # (user 2026-07-23: "everything is 0, what is this").
+        _MIN_RCV = 5.0
         if p_oi > 2000 and abs(pct) > 5 and p_chg >= -300:
             # Sell put spread: receive premium, risk = spread_width - premium
             rcv = px_p * 100
-            risk = max(spread_width * 100 - rcv, rcv * 0.5)
-            sell_opps.append(("SELL PUT", strike, int((1-delta_p)*100), "1:3", rcv, rcv, risk))
+            if rcv >= _MIN_RCV:
+                risk = max(spread_width * 100 - rcv, rcv * 0.5)
+                sell_opps.append(("SELL PUT", strike, int((1-delta_p)*100), "1:3", rcv, rcv, risk))
         if c_oi > 2000 and pct > 5:
             rcv = px_c * 100
-            risk = max(spread_width * 100 - rcv, rcv * 0.5)
-            sell_opps.append(("SELL CALL", strike, int((1-delta_c)*100), "1:3", rcv, rcv, risk))
+            if rcv >= _MIN_RCV:
+                risk = max(spread_width * 100 - rcv, rcv * 0.5)
+                sell_opps.append(("SELL CALL", strike, int((1-delta_c)*100), "1:3", rcv, rcv, risk))
         if c_chg > 300 and p_chg > 300 and abs(pct) > 2:
             # Iron condor: collect both premiums, risk = spread - collected
             rcv_ic = (px_c + px_p) * 100 * 0.5   # rough: one side only
-            risk_ic = max(spread_width * 100 - rcv_ic, rcv_ic)
-            sell_opps.append(("IRON COND", strike, max(55, int((1-delta_c)*100)), "1:2",
-                              rcv_ic, rcv_ic, risk_ic))
+            if rcv_ic >= _MIN_RCV:
+                risk_ic = max(spread_width * 100 - rcv_ic, rcv_ic)
+                sell_opps.append(("IRON COND", strike, max(55, int((1-delta_c)*100)), "1:2",
+                                  rcv_ic, rcv_ic, risk_ic))
 
     def _dedup(lst):
         seen = set(); out = []
@@ -6518,32 +6526,6 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                     s = f"{v:+.0f}%"
                     return s[:5].rjust(5)
 
-                def _spark(vals):
-                    """5 COLOURED day-over-day OI bars, oldest→newest (user 2026-07-23).
-
-                    🟩 OI rose that session · 🟥 OI fell · ⬜ flat (<1% move).
-                    Block characters (▁▂▃▄▅▆▇█) carry height but Telegram renders them
-                    monochrome, which read as blank; emoji squares are the only way to get
-                    real colour in a Telegram table. Height is therefore traded for colour —
-                    the signed 5d/30d % columns beside these already carry magnitude, so the
-                    bars answer the question those numbers cannot: WHICH days it built.
-                    Needs 6 samples to yield 5 day-over-day changes.
-                    """
-                    v = [x for x in vals if x is not None]
-                    if len(v) < 2:
-                        return ""
-                    out = []
-                    for _prev, _cur in zip(v, v[1:]):
-                        if _prev <= 0:
-                            out.append("⬜")
-                        elif (_cur - _prev) / _prev > 0.01:
-                            out.append("🟩")
-                        elif (_cur - _prev) / _prev < -0.01:
-                            out.append("🟥")
-                        else:
-                            out.append("⬜")
-                    return "".join(out[-5:])
-
                 def _sig3(c5, p5):
                     if c5 > 20 and p5 > 20:  return "HDG"
                     if c5 > 15:               return "BUY"
@@ -6566,7 +6548,6 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                 # Split: Call table and Put table separately (_pipe_table rows;
                 # trend UP/DN folds into the Stk col as ^/v to keep width ≤28)
                 _c_rows = []
-                _p_rows = []
                 _tarw = {"UP": "^", "~UP": "^", "DN": "v", "~DN": "v"}
 
                 for _sk3 in sorted(_active_sk):
@@ -6588,26 +6569,19 @@ def _oi_strike_breakdown(ticker: str, conn, spot: float, latest_date: str,
                     # ONE row per strike: call AND put timelines side by side (merged
                     # 2026-07-23 — two stacked tables over identical strikes read worse
                     # and doubled the line count for no extra information).
-                    # 5-session OI-level sparklines (oldest→newest) replace the ^/v arrows
-                    _last5 = list(reversed(_all_wk[:6]))      # 6 samples -> 5 daily changes
-                    _cspk = _spark([_v(d, "c_oi") for d in _last5])
-                    _pspk = _spark([_v(d, "p_oi") for d in _last5])
-                    # 4 cols: emoji are DOUBLE-width, so 5 squares = 10 display chars.
-                    # Two spark columns + four % columns ran ~59 chars and wrapped on
-                    # mobile; the 30d numbers move to the detail line under the table.
-                    _c_rows.append((_stk4, _cspk, _pspk,
-                                    f"{_ps4(_c5p).strip()}/{_ps4(_p5p).strip()}"))
-                    _p_rows.append(f"{_stk4}: calls {_ps4(_c5p).strip()} 5d / "
-                                   f"{_ps4(_c30p).strip()} 30d · puts "
-                                   f"{_ps4(_p5p).strip()} 5d / {_ps4(_p30p).strip()} 30d")
+                    _c_rows.append((_em, _stk4,
+                                    _ps4(_c5p).strip() + _tarw.get(_ct.strip(), ""),
+                                    _ps4(_c30p).strip(),
+                                    _ps4(_p5p).strip() + _tarw.get(_pt.strip(), ""),
+                                    _ps4(_p30p).strip()))
 
                 if _c_rows:
                     week_tbl = (
                         "\n\n"
-                        + _pipe_table(("Stk", "Calls", "Puts", "5d C/P"), _c_rows,
-                                      right_cols={3}, title="OI Timeline (5 sessions)",
-                                      legend="🟩 OI up that day · 🟥 down · ⬜ flat (oldest→newest)")
-                        + "\n" + "\n".join(_p_rows)
+                        + _pipe_table(("ST", "Stk", "C5d", "C30d", "P5d", "P30d"), _c_rows,
+                                      right_cols={2, 3, 4, 5}, title="OI Timeline (call | put)",
+                                      legend=("🟢 call-buy · 🔴 put-sell/unwind · 🟡 hedged · "
+                                              "⚪ flat · ^built v unwound"))
                     )
     except Exception as _wk_e:
         pass  # week trend is optional
@@ -31003,6 +30977,171 @@ async def bookmarks_view(query):
         conn.close()
     await query.message.reply_text(msg, parse_mode=H)
 
+
+def _wl_setup(conn):
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS watchlist (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "ticker TEXT, target_price REAL, note TEXT, added_date TEXT, status TEXT DEFAULT 'ACTIVE')")
+    conn.commit()
+
+
+def _wl_range_bar(lo, hi, val, width=10):
+    """Compact text 'chart': a width-char bar with a marker at val's position between
+    lo and hi. Telegram <pre> has no per-pixel graphics, so this is the sparkline-style
+    stand-in used elsewhere in the bot (see _spark) — a real 52w range at a glance."""
+    if not (lo and hi) or hi <= lo:
+        return ""
+    pos = min(max((val - lo) / (hi - lo), 0.0), 1.0)
+    idx = min(int(pos * (width - 1) + 0.5), width - 1)
+    return "".join("●" if i == idx else "─" for i in range(width))
+
+
+def _fmt_watchlist(conn):
+    """Stocks not yet bought, tracked with the same components as elsewhere (SI, PCR,
+    earnings, RSI, 52w range, day hi/lo, call/put GEX walls) — same `watchlist` table
+    the dashboard's Watchlist page writes to, so adding/removing a ticker in either
+    place shows up in both (user 2026-07-23)."""
+    _wl_setup(conn)
+    df = pd.read_sql("SELECT * FROM watchlist WHERE status='ACTIVE' ORDER BY id DESC", conn)
+    if df.empty:
+        return ("👀 <b>WATCHLIST</b>\n\nNothing tracked yet. Add one:\n"
+                "<code>/watchlist add TICKER [target_price] [note]</code>")
+    rows, details = [], []
+    for _, r in df.iterrows():
+        tk = str(r["ticker"]).upper()
+        try:
+            h = _daily_history(tk, years=1, conn=conn)
+            if h is None or len(h) < 2:
+                rows.append(("⚪", tk, "—", "—", "—")); continue
+            spot = float(h.iloc[-1]); prev = float(h.iloc[-2])
+            chg = (spot - prev) / prev * 100 if prev else 0.0
+            target = r.get("target_price")
+            dist = f"{(spot - target) / target * 100:+.1f}%" if target else "—"
+            rsi_note = ""
+            if len(h) >= 20:
+                try:
+                    import pandas_ta as _wpta
+                    _rsi_s = _wpta.rsi(h, length=14)
+                    rsi = float(_rsi_s.iloc[-1]) if _rsi_s is not None and not _rsi_s.empty else None
+                    if rsi is not None:
+                        rsi_note = f" · RSI {rsi:.0f}" + (" OB" if rsi > 70 else (" OS" if rsi < 30 else ""))
+                except Exception:
+                    pass
+            em = "🟢" if chg > 0 else ("🔴" if chg < 0 else "⚪")
+            rows.append((em, tk, f"${spot:,.2f}", f"{chg:+.1f}%", dist))
+            earn, _ = _next_events_wl(tk)
+            si = _si_read(_si_fetch(tk)) or {}
+            si_txt = f" · SI {si['pct_float']:.1f}%" if si.get("pct_float") else ""
+            note_txt = f" — {r['note']}" if r.get("note") else ""
+            # 52-week range (from stock_daily high/low, last ~252 sessions) + today's hi/lo
+            _52_hi = _52_lo = _dh = _dl = None
+            try:
+                _rng = pd.read_sql(
+                    "SELECT MAX(high) AS hi, MIN(low) AS lo FROM (SELECT high, low FROM stock_daily "
+                    "WHERE ticker=? ORDER BY trade_date DESC LIMIT 252)", conn, params=(tk,))
+                if not _rng.empty and _rng.iloc[0]["hi"] is not None:
+                    _52_hi = float(_rng.iloc[0]["hi"]); _52_lo = float(_rng.iloc[0]["lo"])
+                _today_row = pd.read_sql(
+                    "SELECT high, low FROM stock_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT 1",
+                    conn, params=(tk,))
+                if not _today_row.empty:
+                    _dh = float(_today_row.iloc[0]["high"] or 0) or None
+                    _dl = float(_today_row.iloc[0]["low"] or 0) or None
+            except Exception:
+                pass
+            range_line = ""
+            if _52_hi and _52_lo:
+                bar = _wl_range_bar(_52_lo, _52_hi, spot)
+                range_line = f"\n  52w ${_52_lo:,.2f} {bar} ${_52_hi:,.2f}  (now ${spot:,.2f})"
+            day_txt = f" · day ${_dl:,.2f}-${_dh:,.2f}" if (_dh and _dl) else ""
+            # Call/put GEX walls (nearest liquid expiry) — same engine as /gex
+            wall_txt = ""
+            try:
+                _g = _compute_gex(tk, conn, spot)
+                if _g.get("call_wall") or _g.get("put_wall"):
+                    _cw = f"${_g['call_wall']:.0f}" if _g.get("call_wall") else "—"
+                    _pw = f"${_g['put_wall']:.0f}" if _g.get("put_wall") else "—"
+                    wall_txt = f" · walls C{_cw}/P{_pw}"
+            except Exception:
+                pass
+            details.append(f"• {tk} ${spot:,.2f}{rsi_note}{si_txt}{day_txt}{wall_txt}"
+                            + (f" · earn {earn}" if earn and earn != '—' else "")
+                            + note_txt + range_line)
+        except Exception:
+            rows.append(("⚪", tk, "—", "—", "—"))
+    return _report("WATCHLIST", ("", "Tkr", "Spot", "Day%", "vs Target"), rows,
+                    right_cols={2, 3, 4}, details=details,
+                    notes="/watchlist add TICKER [target] [note] · /watchlist rm TICKER")
+
+
+def _wl_valid_ticker(tk, conn):
+    """True if `tk` resolves to a real, currently-quoted symbol. Checked before insert
+    (user 2026-07-23: AAOK — a typo — got added and just showed dashes everywhere)."""
+    try:
+        fi = _yf_ticker(tk).fast_info
+        px = float(fi.get("last_price") or fi.get("regular_market_price") or 0)
+        if px > 0:
+            return True
+    except Exception:
+        pass
+    try:
+        h = _daily_history(tk, years=1, conn=conn)
+        return h is not None and len(h) > 0
+    except Exception:
+        return False
+
+
+def _next_events_wl(tk):
+    """Next-earnings-only helper (ex-div isn't worth an extra .info call in this table)."""
+    try:
+        ne = _next_earnings(tk)
+        return (str(ne["date"])[:10] if ne and ne.get("date") else "—"), None
+    except Exception:
+        return "—", None
+
+
+async def watchlist_command(update, ctx):
+    """/watchlist [add TICKER [target] [note...] | rm TICKER] — track stocks you plan
+    to buy but haven't yet. Mirrors the dashboard's Watchlist page (same DB table)."""
+    args = list(getattr(ctx, "args", []) or [])
+    conn = get_conn()
+    try:
+        if args and args[0].lower() == "add" and len(args) >= 2:
+            tk = args[1].upper()
+            target = None
+            note_words = args[2:]
+            if note_words:
+                try:
+                    target = float(note_words[0]); note_words = note_words[1:]
+                except ValueError:
+                    pass
+            note = " ".join(note_words) or None
+            _wl_setup(conn)
+            dupe = pd.read_sql("SELECT id FROM watchlist WHERE ticker=? AND status='ACTIVE'",
+                                conn, params=(tk,))
+            if not dupe.empty:
+                msg = f"{tk} is already on the watchlist."
+            elif not _wl_valid_ticker(tk, conn):
+                msg = f"⚠️ {tk} doesn't look like a valid/quoted ticker — not added."
+            else:
+                conn.execute(
+                    "INSERT INTO watchlist (ticker, target_price, note, added_date, status) "
+                    "VALUES (?, ?, ?, ?, 'ACTIVE')",
+                    (tk, target, note, datetime.now().strftime("%Y-%m-%d")))
+                conn.commit()
+                msg = f"➕ Added {tk} to the watchlist" + (f" (target ${target:.2f})" if target else "") + "."
+        elif args and args[0].lower() in ("rm", "remove", "del") and len(args) >= 2:
+            tk = args[1].upper()
+            _wl_setup(conn)
+            conn.execute("UPDATE watchlist SET status='REMOVED' WHERE ticker=? AND status='ACTIVE'", (tk,))
+            conn.commit()
+            msg = f"🗑️ Removed {tk} from the watchlist."
+        else:
+            msg = _fmt_watchlist(conn)
+    finally:
+        conn.close()
+    await update.message.reply_text(msg, parse_mode=H)
+
 async def briefing_view(query):
     conn = get_conn()
     try:
@@ -32684,6 +32823,7 @@ async def _post_init(app):
             BotCommand("premium", "Rich-IV premium seller (IVR+VRP, 45DTE mechanics)"),
             BotCommand("journal", "Trade/event journal"),
             BotCommand("bookmarks", "Saved items"),
+            BotCommand("watchlist", "Stocks you're planning to buy"),
             BotCommand("event", "Event writeup"),
             BotCommand("logevent", "Add event"),
             BotCommand("tv", "TradingView chart"),
@@ -32761,6 +32901,7 @@ def main():
     app.add_handler(CommandHandler("journal", journal_command))
     app.add_handler(CommandHandler("logevent", logevent_command))
     app.add_handler(CommandHandler("bookmarks", bookmarks_command))
+    app.add_handler(CommandHandler("watchlist", watchlist_command))
     app.add_handler(CommandHandler("gex", gex_command))
     app.add_handler(CommandHandler("macro", macro_command))
     app.add_handler(CommandHandler("momentum", momentum_command))

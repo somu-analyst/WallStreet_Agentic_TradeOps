@@ -143,7 +143,7 @@ Compiled by re-reading the whole session. NOT DONE items are the real backlog.
 | A4 | **Hedge/spread exit advice for max price** | Only prose given. Needs net-debit combo limit + work-down ladder. |
 | A5 | **OI buy-vs-write classifier** | Wording fixed only. Needs OI×PRICE (up/up=buy-to-open, up/down=write). `lastPrice_*_prev` NOT stored → self-join or add to derive. |
 | A6 | **Same-week vs multi-week OI read** | Never started. `_oi_expiry_flow_table` has per-expiry ΔOI to key off. |
-| A7 | **Calendar events (FOMC/CPI) into EVENTS table** | Earnings rows landed; calendar loop blanked the section twice, reverted. `_ev_bits` tuple conversion is the hazard. |
+| A7 | ~~Calendar events (FOMC/CPI) into EVENTS table~~ | **DONE 2026-07-24** — different bug than described (no `_ev_bits` blanking found), but a real one: dashboard's News & Calendar → Economic Calendar tab was a hardcoded static 2026-05/06 event list, stale as of 07-24 (showing already-passed events as "upcoming"). Replaced with a live call to the bot's `_macro_events(days=120)` (FOMC/CPI/PCE/Jobs, correctly future-filtered). Also fixed while in there: two divergent `_FOMC_DATES` lists existed (2953 and 32358) — Dec 2026 read 12-16 in one, 12-09 in the other; verified 12-09 is correct (Fed's own Dec 8-9 2-day meeting) via web search, consolidated to one list. |
 | A8 | **Timeline event-state (T−2…T+2)** | "08:30 Jobless Claims" prints as if released with no data. Needs upcoming/awaiting/released tags. |
 | A9 | **Read-through / narrative as LINKS** | Not started. |
 | A10 | **Single consolidated alert message** | Planned only (editMessageText design in PLAN). ~5 recurring pushes still separate. |

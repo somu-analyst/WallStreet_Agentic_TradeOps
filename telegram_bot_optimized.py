@@ -2954,8 +2954,10 @@ _FOMC_DATES = [
     "2025-03-19", "2025-05-07", "2025-06-18", "2025-07-30",
     "2025-09-17", "2025-10-29", "2025-12-10",
     "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
-    "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-16",
-]
+    "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
+]  # Dec 2026 verified 2026-07-24: 2-day meeting Dec 8-9, decision announced day 2 (12-09,
+   # not 12-16 -- a second _FOMC_DATES definition further down had drifted from this one;
+   # consolidated to this single list, see _fomc_context below).
 
 def _get_event_risk(ticker: str, vix_val: float = 0.0) -> dict:
     """Return upcoming event risk for a ticker.
@@ -32355,9 +32357,10 @@ async def momentum_command(update, ctx):
         conn.close()
     await update.message.reply_text(txt, parse_mode=H, reply_markup=_kb_momentum())
 
-_FOMC_DATES = ["2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
-               "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09"]
 def _fomc_context():
+    """Uses the canonical _FOMC_DATES (defined once, near _get_event_risk) -- this used to
+    redefine its own _FOMC_DATES here, which drifted from the other list (Dec 2026 showed
+    12-16 in one, 12-09 in the other; verified 12-09 is correct). Single source now."""
     today = datetime.now().date()
     nxt = None
     for d in _FOMC_DATES:

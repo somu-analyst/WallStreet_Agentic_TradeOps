@@ -32805,16 +32805,25 @@ def _wan_get_snapshot(conn, spy_ret=0.0, max_age_sec=900):
 
 def _wan_ai_context(signals):
     """Compact text summary of live signals for the AI chat system prompt,
-    incl. which models agree so the assistant can explain *why*."""
+    incl. which models agree so the assistant can explain *why*.
+
+    r['spot'] comes straight from high_prob_signals_engine, which is memoised per
+    (ticker, latest trade_date) and reads stock_daily's close -- i.e. it is the LAST EOD
+    CLOSE, not a live quote, by design (recomputing the 24-model ensemble on every chat
+    turn would be pure waste). Labeled explicitly below so the assistant doesn't state it
+    as a current price (verified bug 2026-07-24: engine spot can be visibly stale
+    intraday, e.g. showing yesterday's close while the stock has since moved several %)."""
     if not signals:
         return "WAN-streamer: no actionable ensemble signals right now."
-    lines = ["Live WAN-streamer ensemble signals (the bot's current actionable setups):"]
+    lines = ["Live WAN-streamer ensemble signals (the bot's current actionable setups). "
+             "NOTE: 'spot' below is the last EOD close used by the signal engine, NOT a "
+             "live quote -- if asked for current price, say so and use a live source instead."]
     for r in signals:
         models = r.get("models", {}) or {}
         agree = [n for n, m in models.items() if m.get("signal") == r["signal"]]
         lines.append(
             f"- {r['ticker']}: {r['signal']} ({r['conf']} conf), prob {float(r['prob']):.0f}%, "
-            f"spot ${r['spot']}. Strategy: {str(r.get('strategy',''))[:90]}. "
+            f"EOD close ${r['spot']} (engine input, not live). Strategy: {str(r.get('strategy',''))[:90]}. "
             f"Bull votes {r.get('bull_v','?')}/{r.get('total_m','?')}, bear {r.get('bear_v','?')}. "
             f"Models agreeing: {', '.join(agree[:8]) if agree else 'n/a'}.")
     return "\n".join(lines)

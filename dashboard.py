@@ -5590,6 +5590,88 @@ def _page_header(title: str, help_text: str = ""):
             with st.popover("ℹ️ Help"):
                 st.markdown(help_text)
 
+
+def _render_closed_positions_table(closed: pd.DataFrame):
+    """Per-leg detail for CLOSED positions: Leg, Entry/Exit date+price, Days Held, P&L $/%,
+    ex-dividend-during-hold check, Exit Reason/Account/Strategy/Notes — latest closed first.
+    Shared by Portfolio & Suggestions (P&L tab) and the Exit Planner (user 2026-07-24: "where
+    is closed positions table in the next day exit planner" -> wanted here too)."""
+    if closed is None or closed.empty:
+        st.info("No closed trades yet.")
+        return
+
+    def _cp_color(val):
+        try:
+            v = float(val)
+            if v > 0: return "background-color:#c8f7c5; color:#111"
+            if v < 0: return "background-color:#f7c5c5; color:#111"
+        except Exception:
+            pass
+        return ""
+
+    @st.cache_data(ttl=86400, show_spinner=False)
+    def _cached_dividends(ticker: str):
+        """Historical ex-dividend dates (yfinance), cached 24h — dividends don't get
+        revised, so a daily cache is safe and avoids one yf call per closed row."""
+        try:
+            d = yf.Ticker(ticker).dividends
+            if d is None or d.empty:
+                return []
+            return [ts.tz_localize(None) if ts.tzinfo else ts for ts in d.index]
+        except Exception:
+            return []
+
+    def _exdiv_during_hold(ticker, entry_date, exit_date):
+        """First ex-div date inside [entry_date, exit_date], + days held before it.
+        None/None if no dividend fell inside the holding window (or no exit date yet)."""
+        if not entry_date or not exit_date:
+            return None, None
+        try:
+            _ed = pd.Timestamp(entry_date); _xd = pd.Timestamp(exit_date)
+        except Exception:
+            return None, None
+        for _dt in _cached_dividends(ticker):
+            if _ed <= _dt <= _xd:
+                return _dt.strftime("%Y-%m-%d"), (_dt - _ed).days
+        return None, None
+
+    _cl = closed.copy()
+    _cl["pnl_f"] = pd.to_numeric(_cl.get("pnl", 0), errors="coerce").fillna(0)
+    _cl["pnl_pct_f"] = pd.to_numeric(_cl.get("pnl_pct", 0), errors="coerce").fillna(0)
+    _cl["exit_dt"] = pd.to_datetime(_cl.get("exit_date", ""), errors="coerce")
+    _cl["days_held_n"] = pd.to_numeric(_cl.get("days_held", 0), errors="coerce").fillna(0)
+
+    _cl_rows = []
+    for _, _cr in _cl.sort_values("exit_dt", ascending=False, na_position="last").iterrows():
+        _ctk = str(_cr.get("ticker", "")).upper()
+        _ctyp = str(_cr.get("option_type", "") or "").upper()
+        _cqty = int(_cr.get("quantity", 0) or 0)
+        _cstk = float(_cr.get("strike", 0) or 0)
+        _cleg = (f"{_ctk} {_cqty:+d}sh" if _ctyp.startswith("S")
+                 else f"{_ctk} {_cqty:+d}x ${_cstk:.0f}{_ctyp[:1]}")
+        _cexd, _cdaysb4 = _exdiv_during_hold(_ctk, _cr.get("entry_date"), _cr.get("exit_date"))
+        _cl_rows.append({
+            "ID": int(_cr.get("trade_id", 0)), "Leg": _cleg,
+            "Entry Date": _cr.get("entry_date", ""), "Exit Date": _cr.get("exit_date", ""),
+            "Days Held": int(_cr.get("days_held_n", 0) or 0),
+            "Entry $": round(float(_cr.get("entry_price", 0) or 0), 2),
+            "Exit $": round(float(_cr.get("exit_price", 0) or 0), 2) if _cr.get("exit_price") else None,
+            "P&L $": round(float(_cr.get("pnl_f", 0) or 0), 2),
+            "P&L %": round(float(_cr.get("pnl_pct_f", 0) or 0), 1),
+            "Ex-Div (held)": _cexd or "—",
+            "Days Held Before Ex-Div": _cdaysb4 if _cdaysb4 is not None else "—",
+            "Exit Reason": _cr.get("exit_reason", "") or "",
+            "Account": _cr.get("account_type", "") or "", "Strategy": _cr.get("strategy", "") or "",
+            "Notes": _cr.get("notes", "") or "",
+        })
+    _cl_df = pd.DataFrame(_cl_rows)
+    try:
+        st.dataframe(_cl_df.drop(columns=["ID"]).style.applymap(_cp_color, subset=["P&L $", "P&L %"]),
+                     hide_index=True, use_container_width=True)
+    except Exception:
+        st.dataframe(_cl_df.drop(columns=["ID"], errors="ignore"), hide_index=True, use_container_width=True)
+
+
 # ===================================================================
 # ──  PAGE 1: MARKET OVERVIEW
 # ===================================================================
@@ -9092,62 +9174,7 @@ elif page == "💼 Portfolio & Suggestions":
             st.caption("Same leg shape as the open Per-leg detail table, plus realized P&L and "
                        "how many days the position was held before any ex-dividend date that "
                        "fell inside the holding window (dividend-capture check).")
-
-            @st.cache_data(ttl=86400, show_spinner=False)
-            def _cached_dividends(ticker: str):
-                """Historical ex-dividend dates (yfinance), cached 24h — dividends don't
-                get revised, so a daily cache is safe and avoids one yf call per closed row."""
-                try:
-                    d = yf.Ticker(ticker).dividends
-                    if d is None or d.empty:
-                        return []
-                    return [ts.tz_localize(None) if ts.tzinfo else ts for ts in d.index]
-                except Exception:
-                    return []
-
-            def _exdiv_during_hold(ticker, entry_date, exit_date):
-                """First ex-div date inside [entry_date, exit_date], + days held before it.
-                None/None if no dividend fell inside the holding window (or no exit date yet)."""
-                if not entry_date or not exit_date:
-                    return None, None
-                try:
-                    _ed = pd.Timestamp(entry_date); _xd = pd.Timestamp(exit_date)
-                except Exception:
-                    return None, None
-                for _dt in _cached_dividends(ticker):
-                    if _ed <= _dt <= _xd:
-                        return _dt.strftime("%Y-%m-%d"), (_dt - _ed).days
-                return None, None
-
-            _cl_rows = []
-            for _, _cr in closed.sort_values("exit_dt", ascending=False, na_position="last").iterrows():
-                _ctk = str(_cr.get("ticker", "")).upper()
-                _ctyp = str(_cr.get("option_type", "") or "").upper()
-                _cqty = int(_cr.get("quantity", 0) or 0)
-                _cstk = float(_cr.get("strike", 0) or 0)
-                _cleg = (f"{_ctk} {_cqty:+d}sh" if _ctyp.startswith("S")
-                         else f"{_ctk} {_cqty:+d}x ${_cstk:.0f}{_ctyp[:1]}")
-                _cexd, _cdaysb4 = _exdiv_during_hold(_ctk, _cr.get("entry_date"), _cr.get("exit_date"))
-                _cl_rows.append({
-                    "ID": int(_cr.get("trade_id", 0)), "Leg": _cleg,
-                    "Entry Date": _cr.get("entry_date", ""), "Exit Date": _cr.get("exit_date", ""),
-                    "Days Held": int(_cr.get("days_held_n", 0) or 0),
-                    "Entry $": round(float(_cr.get("entry_price", 0) or 0), 2),
-                    "Exit $": round(float(_cr.get("exit_price", 0) or 0), 2) if _cr.get("exit_price") else None,
-                    "P&L $": round(float(_cr.get("pnl_f", 0) or 0), 2),
-                    "P&L %": round(float(_cr.get("pnl_pct_f", 0) or 0), 1),
-                    "Ex-Div (held)": _cexd or "—",
-                    "Days Held Before Ex-Div": _cdaysb4 if _cdaysb4 is not None else "—",
-                    "Exit Reason": _cr.get("exit_reason", "") or "",
-                    "Account": _cr.get("account_type", "") or "", "Strategy": _cr.get("strategy", "") or "",
-                    "Notes": _cr.get("notes", "") or "",
-                })
-            _cl_df = pd.DataFrame(_cl_rows)
-            try:
-                st.dataframe(_cl_df.drop(columns=["ID"]).style.applymap(_color_pnl, subset=["P&L $", "P&L %"]),
-                             hide_index=True, use_container_width=True)
-            except Exception:
-                st.dataframe(_cl_df.drop(columns=["ID"], errors="ignore"), hide_index=True, use_container_width=True)
+            _render_closed_positions_table(closed)
 
     with tab3:
         st.markdown("#### 💡 Suggestions by Ticker")
@@ -13968,9 +13995,13 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
     try:
         _ep_conn = get_conn()
         _ep_open_trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", _ep_conn)
+        _ep_closed_trades = pd.read_sql("SELECT * FROM trades WHERE status='CLOSED'", _ep_conn)
         _ep_conn.close()
     except Exception:
-        pass
+        _ep_closed_trades = pd.DataFrame()
+
+    with st.expander(f"🧾 Closed positions ({len(_ep_closed_trades)}) — latest closed first", expanded=False):
+        _render_closed_positions_table(_ep_closed_trades)
 
     # ── Analysis Mode selector ──
     _ep_mode = st.radio(

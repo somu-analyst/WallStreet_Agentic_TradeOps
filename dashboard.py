@@ -10331,6 +10331,127 @@ elif page == "📈 Insider / Congress / Whales":
             st.caption("Note: 13F lists CUSIPs/issuer names (not tickers); % of company isn't shown here "
                        "without a CUSIP→ticker map. Values are as-reported (whole $ for 2023+ filings).")
 
+        st.markdown("---")
+        st.markdown("### 🌟 Star Investors Overview — aggregated across all tracked funds")
+        st.caption(f"Top Holdings / Most Owned / Top Buys / Top Sells across every fund in the "
+                   f"{len(_EDGAR_FUNDS)}-fund roster above (whichever have been fetched so far — "
+                   "click below to fetch any not yet pulled). By issuer name, since 13F reports "
+                   "CUSIP+name, not tickers — Sector Breakdown needs a CUSIP→ticker map, a separate "
+                   "project, and isn't built yet.")
+        _ov1, _ov2 = st.columns([3, 1])
+        with _ov2:
+            if st.button("⬇️ Fetch ALL funds (first run: several minutes)", key="edgar_fetch_all"):
+                _prog = st.progress(0.0, text="Starting…")
+                _fn_list = list(_EDGAR_FUNDS.items())
+                for _i, (_fn, _fc) in enumerate(_fn_list):
+                    _prog.progress(_i / len(_fn_list), text=f"Fetching {_fn}…")
+                    try:
+                        _edgar_build_history(_fc, _fn, n=2)
+                    except Exception:
+                        pass
+                _prog.progress(1.0, text="Done.")
+                st.success("Fetched/refreshed every fund not already up to date.")
+                st.rerun()
+
+        _all_ciks = list(_EDGAR_FUNDS.values())
+        _ov_conn = get_conn()
+        try:
+            _ov_df = pd.read_sql(
+                "SELECT * FROM edgar_13f WHERE cik IN ({})".format(",".join("?" * len(_all_ciks))),
+                _ov_conn, params=_all_ciks)
+        finally:
+            _ov_conn.close()
+
+        if _ov_df.empty:
+            st.info("No funds fetched yet — click **Fetch ALL funds** above, or fetch individual "
+                    "funds one at a time using the picker above (each is stored once fetched).")
+        else:
+            _fetched_n = _ov_df["cik"].nunique()
+            st.caption(f"{_fetched_n}/{len(_EDGAR_FUNDS)} funds fetched so far.")
+            # Each fund may have been fetched at a different time, so align per-fund latest/prior
+            # quarter rather than assuming one global quarter across all 77 funds.
+            _latest_parts, _prior_parts = [], []
+            for _cik_g, _grp in _ov_df.groupby("cik"):
+                _gqs = sorted(_grp["quarter"].unique())
+                if not _gqs:
+                    continue
+                _latest_parts.append(_grp[_grp["quarter"] == _gqs[-1]])
+                if len(_gqs) > 1:
+                    _prior_parts.append(_grp[_grp["quarter"] == _gqs[-2]])
+            _latest_all = pd.concat(_latest_parts, ignore_index=True) if _latest_parts else pd.DataFrame()
+            _prior_all = pd.concat(_prior_parts, ignore_index=True) if _prior_parts else pd.DataFrame()
+
+            # Group by CUSIP, not issuer text — the same company's name is spelled slightly
+            # differently across filings/quarters (verified: Berkshire's latest 13F says
+            # "SIRIUSXM HOLDINGS INC", a prior one says "SIRIUS XM HOLDINGS INC" — grouping by
+            # issuer name split one real position into two and manufactured a fake buy AND a
+            # fake sell of the same stock in the same quarter). CUSIP is the stable id; issuer
+            # name is only used as a display label (most frequent spelling wins).
+            def _display_names(df):
+                if df.empty:
+                    return {}
+                return (df.groupby("cusip")["issuer"].agg(lambda s: s.value_counts().idxmax())).to_dict()
+
+            _names = _display_names(pd.concat([_latest_all, _prior_all], ignore_index=True)
+                                     if not _prior_all.empty else _latest_all)
+
+            _chg = pd.DataFrame()
+            if not _prior_all.empty and not _latest_all.empty:
+                _cur_sh = _latest_all.groupby("cusip")["shares"].sum()
+                _prev_sh = _prior_all.groupby("cusip")["shares"].sum()
+                _chg = _cur_sh.subtract(_prev_sh, fill_value=0).reset_index()
+                _chg.columns = ["cusip", "Share Change"]
+                _chg["Issuer"] = _chg["cusip"].map(_names)
+
+            _ovt1, _ovt2, _ovt3, _ovt4 = st.tabs(
+                ["🏆 Top Holdings", "👥 Most Owned", "🟢 Top Buys", "🔴 Top Sells"])
+
+            def _fmt_val(v):
+                return f"${v/1e9:.2f}B" if v >= 1e9 else f"${v/1e6:.0f}M"
+
+            def _fmt_shares(v):
+                return f"{v/1e6:+.1f}M" if abs(v) >= 1e6 else f"{v:+,.0f}"
+
+            with _ovt1:
+                st.caption("Largest positions by aggregate $ value across every fetched fund.")
+                _th = (_latest_all.groupby("cusip")
+                       .agg(value=("value", "sum"), funds=("fund", "nunique"))
+                       .reset_index().sort_values("value", ascending=False).head(30))
+                _th["Issuer"] = _th["cusip"].map(_names)
+                _th["value"] = _th["value"].apply(_fmt_val)
+                st.dataframe(_th[["Issuer", "value", "funds"]].rename(
+                                 columns={"value": "Aggregate Value", "funds": "# Funds Holding"}),
+                             hide_index=True, use_container_width=True)
+
+            with _ovt2:
+                st.caption("Held by the most different funds (conviction breadth, not just size).")
+                _mo = (_latest_all.groupby("cusip")
+                       .agg(funds=("fund", "nunique"), value=("value", "sum"))
+                       .reset_index().sort_values(["funds", "value"], ascending=False).head(30))
+                _mo["Issuer"] = _mo["cusip"].map(_names)
+                _mo["value"] = _mo["value"].apply(_fmt_val)
+                st.dataframe(_mo[["Issuer", "funds", "value"]].rename(
+                                 columns={"funds": "# Funds Holding", "value": "Aggregate Value"}),
+                             hide_index=True, use_container_width=True)
+
+            with _ovt3:
+                if _chg.empty:
+                    st.info("Need at least 2 stored quarters per fund for buy/sell — bump the "
+                            "Quarters slider above and re-fetch, or wait for next quarter's filings.")
+                else:
+                    _buys = _chg.sort_values("Share Change", ascending=False).head(30).copy()
+                    _buys["Share Change"] = _buys["Share Change"].apply(_fmt_shares)
+                    st.dataframe(_buys[["Issuer", "Share Change"]], hide_index=True, use_container_width=True)
+
+            with _ovt4:
+                if _chg.empty:
+                    st.info("Need at least 2 stored quarters per fund for buy/sell — bump the "
+                            "Quarters slider above and re-fetch, or wait for next quarter's filings.")
+                else:
+                    _sells = _chg.sort_values("Share Change", ascending=True).head(30).copy()
+                    _sells["Share Change"] = _sells["Share Change"].apply(_fmt_shares)
+                    st.dataframe(_sells[["Issuer", "Share Change"]], hide_index=True, use_container_width=True)
+
     with tab1:
         insiders = q("SELECT * FROM insider_trades ORDER BY transaction_date DESC")
         if insiders.empty:

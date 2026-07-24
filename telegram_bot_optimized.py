@@ -11732,6 +11732,32 @@ def _spread_summary(rows):
             act = "REVIEW"
         else:
             act = "HOLD"
+        # Net-debit/credit COMBO limit + work-down ladder (PLAN.md A4, 2026-07-24): the old
+        # advice only said TAKE PROFIT/HOLD in prose with no actual order to place. Combo
+        # current value = long leg's price minus short leg's price (closing a debit spread
+        # means SELLING the combo, closing a credit spread means BUYING it back) — priced
+        # like a single order 1/3 into the spread from the favorable side, then two more
+        # rungs stepping toward the marketable price if unfilled, same edge-over-marketable
+        # logic as _smart_close_limit (dashboard.py A3) applied to the whole combo at once.
+        # close_value uses the SAME sign convention as net_entry (long leg price minus short
+        # leg price): positive = you'd receive money selling the combo, negative = you'd need
+        # to pay to close it. A debit spread's close_value is normally >=0 (sell for proceeds);
+        # a credit spread's is normally <=0, so the actual cash needed to buy it back is
+        # -close_value (caught in testing: using close_value directly for credit spreads gave
+        # a nonsensical near-zero/negative price after clamping).
+        close_value = float(L[5]) - float(S[5])
+        _edge = max(0.05, round(width * 0.10, 2))
+        if net_entry > 0:      # DEBIT spread: closing SELLS the combo — ask for MORE than mid first
+            _rungs = [max(close_value + _edge, 0.01), max(close_value + _edge / 2, 0.01), max(close_value, 0.01)]
+            _combo_line = (f"Close: SELL combo, work ${_rungs[0]:.2f} → ${_rungs[1]:.2f} → "
+                           f"${_rungs[2]:.2f} (marketable) · collect ${_rungs[0]*n*100:,.0f}"
+                           f"→${_rungs[2]*n*100:,.0f}")
+        else:                  # CREDIT spread: closing BUYS the combo back — offer LESS than mid first
+            _buy_cost = -close_value
+            _rungs = [max(_buy_cost - _edge, 0.01), max(_buy_cost - _edge / 2, 0.01), max(_buy_cost, 0.01)]
+            _combo_line = (f"Close: BUY combo, work ${_rungs[0]:.2f} → ${_rungs[1]:.2f} → "
+                           f"${_rungs[2]:.2f} (marketable) · pay ${_rungs[0]*n*100:,.0f}"
+                           f"→${_rungs[2]*n*100:,.0f}")
         # ONE row per spread: everything that drove the old 5-line block (user 2026-07-23 —
         # "make it a table"). Net/MaxP/MaxL/%Max/action all inline; the paired-leg warning is
         # identical for every spread so it is printed ONCE under the table, not per row.
@@ -11741,7 +11767,8 @@ def _spread_summary(rows):
         # pushed the grid to ~48 chars and it WRAPPED on mobile (user screenshot 2026-07-23);
         # CLAUDE.md caps Telegram <pre> at ~28 chars.
         blocks.append(f"<b>{tk[:4]}{int(min(KL,KS))}/{int(max(KL,KS))}{ot}</b> {act} · "
-                      f"net ${abs(net_entry)*n*100:,.0f} · max +${maxp:,.0f}/-${maxl:,.0f}")
+                      f"net ${abs(net_entry)*n*100:,.0f} · max +${maxp:,.0f}/-${maxl:,.0f}\n"
+                      f"  {_combo_line}")
     if not blocks:
         return ""
     head = _pipe_table(("ST", "Spread", "P&L", "%Max"), tbl, right_cols={2, 3},

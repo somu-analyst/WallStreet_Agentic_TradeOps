@@ -14919,6 +14919,21 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
             "Layout", ["📋 All positions (one table)", "📊 By stock"],
             horizontal=True, key="gp_layout", label_visibility="collapsed")
 
+        # Call/put GEX walls per leg (user 2026-07-24: "call wall and put wall for next
+        # expiry and the expiry of the option") — cached per (ticker, expiry) so a multi-leg
+        # position on the same ticker/expiry only computes GEX once, not once per leg.
+        _gp_wall_cache = {}
+        def _gp_walls(tk, conn, spot, expiry=None):
+            _wk = (tk, expiry)
+            if _wk not in _gp_wall_cache:
+                try:
+                    _g = _TB_ENGINE._compute_gex(tk, conn, spot, expiry=expiry) if _TB_ENGINE else {}
+                except Exception:
+                    _g = {}
+                _cw = _g.get("call_wall"); _pw = _g.get("put_wall")
+                _gp_wall_cache[_wk] = (f"${_cw:,.0f}" if _cw else "—", f"${_pw:,.0f}" if _pw else "—")
+            return _gp_wall_cache[_wk]
+
         if _gp_layout.startswith("📋"):
             # ── flat view: every leg across all tickers in one table (same detail as per-stock) ──
             _flat = []
@@ -14994,6 +15009,8 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     _fearn, _fdiv = _next_events(_ftk)
                     _fsi = _si_cells(_ftk)
                     _fsrc = _spot_src(_ftk, l)
+                    _fcw_n, _fpw_n = _gp_walls(_ftk, _gp_conn, l["spot"])          # next (nearest liquid) expiry
+                    _fcw_o, _fpw_o = _gp_walls(_ftk, _gp_conn, l["spot"], l["exp"])  # this leg's own expiry
                     _flat.append({
                         "Ticker": _ftk, "Spot": round(l["spot"], 2), "Src": _fsrc,
                         "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
@@ -15004,6 +15021,7 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                         "Est Open": _ftopen_disp, "Day L–H": f"${_folo:.2f}–${_fohi:.2f}",
                         "Stk ±1σ": f"{l['spot'] + _fsig:,.0f}/{max(l['spot'] - _fsig, 0):,.0f}",
                         "Hi/Lo": (f"${l['day_hi']:.2f}/${l['day_lo']:.2f}" if l.get("day_hi") and l.get("day_lo") else "—"),
+                        "Walls (Next Exp)": f"C{_fcw_n}/P{_fpw_n}", "Walls (Opt Exp)": f"C{_fcw_o}/P{_fpw_o}",
                         "Close @": _fclimit, "Max P": _fmt_maxp(_flb), "Max L": _fmt_maxl(_flb), "Win %": _fwin,
                         "Δ/1%": round(l["ddelta_1pct"]), "Theta": round(l["pos_theta"]),
                         "Vega": round(l["pos_vega"]),
@@ -15115,9 +15133,54 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                        f"P&L **${_ftot:,.0f}**.  **Now** = live option mid (bid/ask) when the market's "
                        "open, else the last close.  **Prev Cls** = prior session close · **Hi/Lo** = that "
                        "day's option high/low.  **Est Open** = flat-stock decay reference — backtested: NO edge over Now, trust the scenarios instead (*expired*=0DTE, "
-                       "*~\\$0.00*=deep-OTM) · **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs) · **Close @** = marketable limit "
-                       "to close · **Win %** = P(profit from entry) 🟢≥60 🟡40–60 🔴<40. "
+                       "*~\\$0.00*=deep-OTM) · **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs) · "
+                       "**Walls (Next Exp)** = call/put GEX walls for the ticker's nearest liquid expiry · "
+                       "**Walls (Opt Exp)** = same, for THIS leg's own expiry (may differ from next) · "
+                       "**Close @** = limit 1/3 into the bid/ask spread from the best price (falls back to "
+                       "a 3% buffer off Now when no live quote — tagged *(est)*) · "
+                       "**Win %** = P(profit from entry) 🟢≥60 🟡40–60 🔴<40. "
                        "Switch to *By stock* for levels, signals, scenarios & deep analysis.")
+
+            # Small per-ticker chart: price + GEX walls (user 2026-07-24: "a small chart showing
+            # price chart and walls and other required indicators"). One per ticker, not per leg —
+            # multiple legs on the same stock would just repeat an identical chart.
+            with st.expander(f"📈 Price + walls chart ({len(_by_tk)} ticker{'s' if len(_by_tk) != 1 else ''})",
+                             expanded=False):
+                _chart_cols = st.columns(min(len(_by_tk), 3) or 1)
+                for _ci, (_ctk, _ctl) in enumerate(_by_tk.items()):
+                    _chist = _cached_history(_ctk, period="90d", interval="1d")
+                    if _chist is None or _chist.empty:
+                        continue
+                    _ccw, _cpw = _gp_walls(_ctk, _gp_conn, _ctl[0]["spot"])
+                    with _chart_cols[_ci % len(_chart_cols)]:
+                        _cfig = go.Figure()
+                        _cfig.add_trace(go.Scatter(y=_chist["Close"], mode="lines",
+                                                   line=dict(width=1.5, color="#3d8bff"), showlegend=False))
+                        try:
+                            _cw_v = float(_ccw.replace("$", "").replace(",", ""))
+                            _cfig.add_hline(y=_cw_v, line_dash="dot", line_color="#e74c3c", line_width=1)
+                        except ValueError:
+                            pass
+                        try:
+                            _pw_v = float(_cpw.replace("$", "").replace(",", ""))
+                            _cfig.add_hline(y=_pw_v, line_dash="dot", line_color="#2ecc71", line_width=1)
+                        except ValueError:
+                            pass
+                        _crsi_txt = ""
+                        try:
+                            import pandas_ta as _cpta
+                            _crsi_s = _cpta.rsi(_chist["Close"], length=14)
+                            if _crsi_s is not None and not _crsi_s.empty:
+                                _crsi_txt = f" · RSI {_crsi_s.iloc[-1]:.0f}"
+                        except Exception:
+                            pass
+                        _cfig.update_layout(height=150, margin=dict(l=0, r=0, t=24, b=0),
+                                           title=dict(text=f"{_ctk}  ${_ctl[0]['spot']:,.2f}", font=dict(size=12)),
+                                           xaxis=dict(visible=False), yaxis=dict(visible=False),
+                                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                        st.plotly_chart(_cfig, use_container_width=True, config={"displayModeBar": False},
+                                        key=f"gp_wallchart_{_ctk}")
+                        st.caption(f"🔴 C-wall {_ccw} · 🟢 P-wall {_cpw}{_crsi_txt}")
             st.markdown("---")
             st.caption("📖 Full per-stock analysis (levels · signals · sentiment · scenarios · deep "
                        "analysis) for **every** position follows below.")

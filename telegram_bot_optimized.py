@@ -30978,11 +30978,35 @@ async def bookmarks_view(query):
     await query.message.reply_text(msg, parse_mode=H)
 
 
+_WL_CLASSES = ("STOCK", "ETF", "BOND", "COMMODITY")
+
+
 def _wl_setup(conn):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS watchlist (id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "ticker TEXT, target_price REAL, note TEXT, added_date TEXT, status TEXT DEFAULT 'ACTIVE')")
     conn.commit()
+    # asset_class added 2026-07-23 (user: subsection by stock/ETF/bond/commodity) — same
+    # column the dashboard's Watchlist page adds; ALTER is a no-op once it exists.
+    try:
+        conn.execute("ALTER TABLE watchlist ADD COLUMN asset_class TEXT DEFAULT 'Stock'")
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _wl_norm_class(word):
+    """Map a loose user word (etf/bond/commodity/gold/oil/stock) to the canonical class."""
+    w = (word or "").strip().upper()
+    if w in ("ETF", "ETFS"):
+        return "ETF"
+    if w in ("BOND", "BONDS"):
+        return "BOND"
+    if w in ("COMMODITY", "COMMODITIES", "GOLD", "OIL", "COMM"):
+        return "COMMODITY"
+    if w in ("STOCK", "STOCKS", "EQUITY"):
+        return "STOCK"
+    return None
 
 
 def _wl_range_bar(lo, hi, val, width=10):
@@ -30996,82 +31020,111 @@ def _wl_range_bar(lo, hi, val, width=10):
     return "".join("●" if i == idx else "─" for i in range(width))
 
 
+def _wl_one_row(tk, r, conn):
+    """Row tuple + detail line for one watchlist ticker. Split out of _fmt_watchlist so
+    it can be called per asset-class group (user 2026-07-23: Stock/ETF/Bond/Commodity
+    subsections)."""
+    try:
+        h = _daily_history(tk, years=1, conn=conn)
+        if h is None or len(h) < 2:
+            return ("⚪", tk, "—", "—", "—"), None
+        spot = float(h.iloc[-1]); prev = float(h.iloc[-2])
+        chg = (spot - prev) / prev * 100 if prev else 0.0
+        target = r.get("target_price")
+        dist = f"{(spot - target) / target * 100:+.1f}%" if target else "—"
+        rsi_note = ""
+        if len(h) >= 20:
+            try:
+                import pandas_ta as _wpta
+                _rsi_s = _wpta.rsi(h, length=14)
+                rsi = float(_rsi_s.iloc[-1]) if _rsi_s is not None and not _rsi_s.empty else None
+                if rsi is not None:
+                    rsi_note = f" · RSI {rsi:.0f}" + (" OB" if rsi > 70 else (" OS" if rsi < 30 else ""))
+            except Exception:
+                pass
+        em = "🟢" if chg > 0 else ("🔴" if chg < 0 else "⚪")
+        row = (em, tk, f"${spot:,.2f}", f"{chg:+.1f}%", dist)
+        earn, _ = _next_events_wl(tk)
+        si = _si_read(_si_fetch(tk)) or {}
+        si_txt = f" · SI {si['pct_float']:.1f}%" if si.get("pct_float") else ""
+        note_txt = f" — {r['note']}" if r.get("note") else ""
+        # 52-week range (from stock_daily high/low, last ~252 sessions) + today's hi/lo
+        # — options-universe tickers only; ETFs/bonds/commodities outside that universe
+        # just fall back to "—" (no crash, no fabricated numbers).
+        _52_hi = _52_lo = _dh = _dl = None
+        try:
+            _rng = pd.read_sql(
+                "SELECT MAX(high) AS hi, MIN(low) AS lo FROM (SELECT high, low FROM stock_daily "
+                "WHERE ticker=? ORDER BY trade_date DESC LIMIT 252)", conn, params=(tk,))
+            if not _rng.empty and _rng.iloc[0]["hi"] is not None:
+                _52_hi = float(_rng.iloc[0]["hi"]); _52_lo = float(_rng.iloc[0]["lo"])
+            _today_row = pd.read_sql(
+                "SELECT high, low FROM stock_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT 1",
+                conn, params=(tk,))
+            if not _today_row.empty:
+                _dh = float(_today_row.iloc[0]["high"] or 0) or None
+                _dl = float(_today_row.iloc[0]["low"] or 0) or None
+        except Exception:
+            pass
+        if not _52_hi:   # fallback for non-options-universe tickers (ETF/bond/commodity)
+            try:
+                _52_hi = float(h.max()); _52_lo = float(h.min())
+            except Exception:
+                pass
+        range_line = ""
+        if _52_hi and _52_lo:
+            bar = _wl_range_bar(_52_lo, _52_hi, spot)
+            range_line = f"\n  52w ${_52_lo:,.2f} {bar} ${_52_hi:,.2f}  (now ${spot:,.2f})"
+        day_txt = f" · day ${_dl:,.2f}-${_dh:,.2f}" if (_dh and _dl) else ""
+        # Call/put GEX walls (nearest liquid expiry) — same engine as /gex. Only meaningful
+        # for optionable stocks/ETFs; bonds/commodities just won't have any.
+        wall_txt = ""
+        try:
+            _g = _compute_gex(tk, conn, spot)
+            if _g.get("call_wall") or _g.get("put_wall"):
+                _cw = f"${_g['call_wall']:.0f}" if _g.get("call_wall") else "—"
+                _pw = f"${_g['put_wall']:.0f}" if _g.get("put_wall") else "—"
+                wall_txt = f" · walls C{_cw}/P{_pw}"
+        except Exception:
+            pass
+        detail = (f"• {tk} ${spot:,.2f}{rsi_note}{si_txt}{day_txt}{wall_txt}"
+                  + (f" · earn {earn}" if earn and earn != '—' else "")
+                  + note_txt + range_line)
+        return row, detail
+    except Exception:
+        return ("⚪", tk, "—", "—", "—"), None
+
+
 def _fmt_watchlist(conn):
-    """Stocks not yet bought, tracked with the same components as elsewhere (SI, PCR,
-    earnings, RSI, 52w range, day hi/lo, call/put GEX walls) — same `watchlist` table
-    the dashboard's Watchlist page writes to, so adding/removing a ticker in either
-    place shows up in both (user 2026-07-23)."""
+    """Stocks/ETFs/bonds/commodities not yet bought, grouped by asset class, tracked with
+    the same components as elsewhere (SI, PCR, earnings, RSI, 52w range, day hi/lo,
+    call/put GEX walls) — same `watchlist` table the dashboard's Watchlist page writes
+    to, so adding/removing a ticker in either place shows up in both (user 2026-07-23)."""
     _wl_setup(conn)
     df = pd.read_sql("SELECT * FROM watchlist WHERE status='ACTIVE' ORDER BY id DESC", conn)
     if df.empty:
         return ("👀 <b>WATCHLIST</b>\n\nNothing tracked yet. Add one:\n"
                 "<code>/watchlist add TICKER [target_price] [note]</code>")
-    rows, details = [], []
-    for _, r in df.iterrows():
-        tk = str(r["ticker"]).upper()
-        try:
-            h = _daily_history(tk, years=1, conn=conn)
-            if h is None or len(h) < 2:
-                rows.append(("⚪", tk, "—", "—", "—")); continue
-            spot = float(h.iloc[-1]); prev = float(h.iloc[-2])
-            chg = (spot - prev) / prev * 100 if prev else 0.0
-            target = r.get("target_price")
-            dist = f"{(spot - target) / target * 100:+.1f}%" if target else "—"
-            rsi_note = ""
-            if len(h) >= 20:
-                try:
-                    import pandas_ta as _wpta
-                    _rsi_s = _wpta.rsi(h, length=14)
-                    rsi = float(_rsi_s.iloc[-1]) if _rsi_s is not None and not _rsi_s.empty else None
-                    if rsi is not None:
-                        rsi_note = f" · RSI {rsi:.0f}" + (" OB" if rsi > 70 else (" OS" if rsi < 30 else ""))
-                except Exception:
-                    pass
-            em = "🟢" if chg > 0 else ("🔴" if chg < 0 else "⚪")
-            rows.append((em, tk, f"${spot:,.2f}", f"{chg:+.1f}%", dist))
-            earn, _ = _next_events_wl(tk)
-            si = _si_read(_si_fetch(tk)) or {}
-            si_txt = f" · SI {si['pct_float']:.1f}%" if si.get("pct_float") else ""
-            note_txt = f" — {r['note']}" if r.get("note") else ""
-            # 52-week range (from stock_daily high/low, last ~252 sessions) + today's hi/lo
-            _52_hi = _52_lo = _dh = _dl = None
-            try:
-                _rng = pd.read_sql(
-                    "SELECT MAX(high) AS hi, MIN(low) AS lo FROM (SELECT high, low FROM stock_daily "
-                    "WHERE ticker=? ORDER BY trade_date DESC LIMIT 252)", conn, params=(tk,))
-                if not _rng.empty and _rng.iloc[0]["hi"] is not None:
-                    _52_hi = float(_rng.iloc[0]["hi"]); _52_lo = float(_rng.iloc[0]["lo"])
-                _today_row = pd.read_sql(
-                    "SELECT high, low FROM stock_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT 1",
-                    conn, params=(tk,))
-                if not _today_row.empty:
-                    _dh = float(_today_row.iloc[0]["high"] or 0) or None
-                    _dl = float(_today_row.iloc[0]["low"] or 0) or None
-            except Exception:
-                pass
-            range_line = ""
-            if _52_hi and _52_lo:
-                bar = _wl_range_bar(_52_lo, _52_hi, spot)
-                range_line = f"\n  52w ${_52_lo:,.2f} {bar} ${_52_hi:,.2f}  (now ${spot:,.2f})"
-            day_txt = f" · day ${_dl:,.2f}-${_dh:,.2f}" if (_dh and _dl) else ""
-            # Call/put GEX walls (nearest liquid expiry) — same engine as /gex
-            wall_txt = ""
-            try:
-                _g = _compute_gex(tk, conn, spot)
-                if _g.get("call_wall") or _g.get("put_wall"):
-                    _cw = f"${_g['call_wall']:.0f}" if _g.get("call_wall") else "—"
-                    _pw = f"${_g['put_wall']:.0f}" if _g.get("put_wall") else "—"
-                    wall_txt = f" · walls C{_cw}/P{_pw}"
-            except Exception:
-                pass
-            details.append(f"• {tk} ${spot:,.2f}{rsi_note}{si_txt}{day_txt}{wall_txt}"
-                            + (f" · earn {earn}" if earn and earn != '—' else "")
-                            + note_txt + range_line)
-        except Exception:
-            rows.append(("⚪", tk, "—", "—", "—"))
-    return _report("WATCHLIST", ("", "Tkr", "Spot", "Day%", "vs Target"), rows,
-                    right_cols={2, 3, 4}, details=details,
-                    notes="/watchlist add TICKER [target] [note] · /watchlist rm TICKER")
+    _icon = {"STOCK": "📈", "ETF": "🧺", "BOND": "🏦", "COMMODITY": "🛢️"}
+    _plural = {"STOCK": "Stocks", "ETF": "ETFs", "BOND": "Bonds", "COMMODITY": "Commodities"}
+    parts = [hdr("WATCHLIST")]
+    for cls in _WL_CLASSES:
+        sub = df[df["asset_class"].fillna("Stock").str.upper() == cls]
+        if sub.empty:
+            continue
+        rows, details = [], []
+        for _, r in sub.iterrows():
+            tk = str(r["ticker"]).upper()
+            row, detail = _wl_one_row(tk, r, conn)
+            rows.append(row)
+            if detail:
+                details.append(detail)
+        parts.append(f"\n<b>{_icon.get(cls, '•')} {_plural.get(cls, cls.title())}</b>")
+        parts.append(_pipe_table(("", "Tkr", "Spot", "Day%", "vs Target"), rows, right_cols={2, 3, 4}))
+        if details:
+            parts.append("\n".join(details))
+    parts.append("<i>/watchlist add TICKER [target] [class] [note] · /watchlist rm TICKER</i>")
+    return "\n".join(parts)
 
 
 def _wl_valid_ticker(tk, conn):
@@ -31101,20 +31154,27 @@ def _next_events_wl(tk):
 
 
 async def watchlist_command(update, ctx):
-    """/watchlist [add TICKER [target] [note...] | rm TICKER] — track stocks you plan
-    to buy but haven't yet. Mirrors the dashboard's Watchlist page (same DB table)."""
+    """/watchlist [add TICKER [target] [class] [note...] | rm TICKER] — track stocks,
+    ETFs, bonds, or commodities you plan to buy but haven't yet (class = stock/etf/
+    bond/commodity, e.g. `/watchlist add GLD commodity gold hedge`). Mirrors the
+    dashboard's Watchlist page (same DB table, grouped by asset class in both)."""
     args = list(getattr(ctx, "args", []) or [])
     conn = get_conn()
     try:
         if args and args[0].lower() == "add" and len(args) >= 2:
             tk = args[1].upper()
             target = None
+            asset_class = "Stock"
             note_words = args[2:]
             if note_words:
                 try:
                     target = float(note_words[0]); note_words = note_words[1:]
                 except ValueError:
                     pass
+            if note_words:
+                _norm = _wl_norm_class(note_words[0])
+                if _norm:
+                    asset_class = _norm.title(); note_words = note_words[1:]
             note = " ".join(note_words) or None
             _wl_setup(conn)
             dupe = pd.read_sql("SELECT id FROM watchlist WHERE ticker=? AND status='ACTIVE'",
@@ -31125,11 +31185,12 @@ async def watchlist_command(update, ctx):
                 msg = f"⚠️ {tk} doesn't look like a valid/quoted ticker — not added."
             else:
                 conn.execute(
-                    "INSERT INTO watchlist (ticker, target_price, note, added_date, status) "
-                    "VALUES (?, ?, ?, ?, 'ACTIVE')",
-                    (tk, target, note, datetime.now().strftime("%Y-%m-%d")))
+                    "INSERT INTO watchlist (ticker, target_price, note, added_date, status, asset_class) "
+                    "VALUES (?, ?, ?, ?, 'ACTIVE', ?)",
+                    (tk, target, note, datetime.now().strftime("%Y-%m-%d"), asset_class))
                 conn.commit()
-                msg = f"➕ Added {tk} to the watchlist" + (f" (target ${target:.2f})" if target else "") + "."
+                msg = (f"➕ Added {tk} ({asset_class}) to the watchlist"
+                       + (f" (target ${target:.2f})" if target else "") + ".")
         elif args and args[0].lower() in ("rm", "remove", "del") and len(args) >= 2:
             tk = args[1].upper()
             _wl_setup(conn)
@@ -32823,7 +32884,7 @@ async def _post_init(app):
             BotCommand("premium", "Rich-IV premium seller (IVR+VRP, 45DTE mechanics)"),
             BotCommand("journal", "Trade/event journal"),
             BotCommand("bookmarks", "Saved items"),
-            BotCommand("watchlist", "Stocks you're planning to buy"),
+            BotCommand("watchlist", "Stocks/ETFs/bonds/commodities you plan to buy"),
             BotCommand("event", "Event writeup"),
             BotCommand("logevent", "Add event"),
             BotCommand("tv", "TradingView chart"),

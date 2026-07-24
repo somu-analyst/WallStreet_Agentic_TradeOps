@@ -10309,21 +10309,20 @@ elif page == "📈 Insider / Congress / Whales":
         st.caption("Real quarterly 13F filings pulled from SEC EDGAR (free). Builds portfolio %, "
                    "quarter-over-quarter change, and a 12-quarter holding trend. First fetch per fund "
                    "takes ~10–20s; then it's stored in your DB.")
-        # KNOWN ISSUE (2026-07-24, follow-up audit): first pass fixed 3 CIKs (Vanguard/Soros
-        # SWAPPED; Trian dormant since 2011). This pass verified + fixed 4 MORE with evidence
-        # (old -> new, all confirmed via conformed-name + recent filing date): Appaloosa
-        # 0001006438->0001656456 ("Appaloosa LP", filed 2026-05-15), Viking Global
-        # 0001101785->0001103804 ("Viking Global Investors LP", 2026-05-15), Oaktree
-        # 0001403525->0000949509 ("Oaktree Capital Management LP", 2026-05-20), Gotham
-        # 0001279148->0001510387 ("Gotham Asset Management LLC", 2026-05-15; old one dormant
-        # since 2009). STILL UNVERIFIED (9 left): Omega (Cooperman) -- current CIK not found
-        # in a quick search, old one last filed 2019 -- Invesco Advisers (already confirmed
-        # fine), Hotchkis & Wiley, Wasatch Funds Trust, Brandes Investment Partners,
-        # Markel-Gayner (Gayner), First Pacific Advisors, Moore Capital Management, Jana
-        # Partners, Third Avenue Management, Greenlight (Einhorn) -- a DME Advisors LP lead
-        # looked promising but was inconsistent under closer check, not swapped in unverified.
-        # Heuristic has false positives (e.g. Icahn Enterprises' CIK is likely still current)
-        # -- don't assume every remaining flagged name is actually wrong without re-checking.
+        # 13F CIK audit CLOSED OUT 2026-07-24 (3 rounds). Fixed 11 wrong/stale CIKs total, all
+        # verified via conformed-name + a real recent filing date before swapping in:
+        # Vanguard/Soros (SWAPPED with each other), Trian (dormant since 2011), Appaloosa
+        # (Tepper LP renamed/re-registered), Viking Global, Oaktree, Gotham (dormant since
+        # 2009), Hotchkis & Wiley, Wasatch (renamed key: was "Wasatch Funds Trust" — that CIK
+        # was the FUND, not the advisor; now "Wasatch Advisors" = the actual 13F filer),
+        # Brandes (upgraded to the main LP filer over a smaller "& Co." sub-entity), First
+        # Pacific Advisors, Moore Capital, Third Avenue. Markel-Gayner and Jana Partners were
+        # re-checked and found FINE (heuristic false positives / best-available filer).
+        # Genuinely unresolved (no better CIK found despite searching): Omega Advisors
+        # (Cooperman) — last 13F-HR on file 2019, no newer registered entity found — and
+        # Greenlight (Einhorn) — a DME Advisors LP lead looked promising but was inconsistent
+        # under closer check, so the original (still real, just possibly less current)
+        # Greenlight Capital Inc CIK was kept rather than swap in something unverified.
         _EDGAR_FUNDS = {
             "Berkshire Hathaway": "0001067983", "Vanguard Group": "0000102909",
             "BlackRock": "0001364742", "Citadel Advisors": "0001423053",
@@ -10365,17 +10364,17 @@ elif page == "📈 Insider / Congress / Whales":
             # company search. Every CIK below verified directly against SEC EDGAR.
             "Gardner Russo & Quinn (Russo)": "0000860643", "Brave Warrior (Greenberg)": "0001553733",
             "Parnassus Investments": "0000948669", "Barrow Hanley Mewhinney & Strauss": "0000313028",
-            "Causeway Capital (Ketterer)": "0001165797", "Hotchkis & Wiley": "0001082015",
+            "Causeway Capital (Ketterer)": "0001165797", "Hotchkis & Wiley": "0001164833",
             "Diamond Hill Capital": "0001217541", "Davis Selected Advisers": "0001036325",
-            "Wasatch Funds Trust": "0000806633", "Brandes Investment Partners": "0001542551",
+            "Wasatch Advisors": "0000814133", "Brandes Investment Partners": "0001015079",
             "Akre Capital Management": "0001112520", "Mairs & Power": "0001070134",
             "Markel-Gayner (Gayner)": "0001034180", "Manning & Napier Advisors": "0000062039",
-            "First Pacific Advisors": "0000109501", "Horizon Kinetics (Stahl)": "0001056823",
+            "First Pacific Advisors": "0001377581", "Horizon Kinetics (Stahl)": "0001056823",
             "Smead Capital Management": "0001427008", "Matthews Intl Capital Mgmt": "0001028074",
             "Tweedy Browne": "0000732905", "Donald Smith & Co": "0000814375",
-            "Moore Capital Management": "0000924178", "Weitz Investment Mgmt": "0000883965",
+            "Moore Capital Management": "0001448574", "Weitz Investment Mgmt": "0000883965",
             "Jana Partners": "0001159159", "Fairholme Capital (Berkowitz)": "0001056831",
-            "Third Avenue Management": "0001002858", "Olstein Capital Management": "0000947996",
+            "Third Avenue Management": "0001099281", "Olstein Capital Management": "0000947996",
             "Kahn Brothers": "0001039565", "Hussman Strategic Advisors": "0001179475",
             "Pennant Investors (Fournier)": "0001759176", "Baillie Gifford": "0001088875",
             "T Rowe Price Associates": "0000080255", "PRIMECAP Management": "0000763212",

@@ -13976,7 +13976,9 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                 _na_typ = _na_c1.selectbox("Type", ["call", "put"], key="gp_add_typ")
                 _na_side = _na_c2.selectbox("Side", ["long", "short"], key="gp_add_side")
                 _na_K = _na_c3.number_input("Strike", min_value=0.0, step=0.5, format="%.2f", key="gp_add_K")
-                _na_qty = _na_c4.number_input("Contracts", min_value=1, step=1, value=1, key="gp_add_qty")
+                # Allow a NEGATIVE contracts value = short, so the field itself works without
+                # forcing the user to the Side selector (user 2026-07-23: "-2 only + possible").
+                _na_qty = _na_c4.number_input("Contracts (− = short)", step=1, value=1, key="gp_add_qty")
                 _na_c5, _na_c6, _na_c7 = st.columns(3)
                 _na_exp = _na_c5.text_input("Expiry (YYYY-MM-DD)", key="gp_add_exp", placeholder="2026-07-18")
                 _na_px = _na_c6.number_input("Entry premium", min_value=0.0, step=0.05, key="gp_add_px")
@@ -13986,13 +13988,14 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     _ok = False
                     try:
                         datetime.strptime(_na_exp, "%Y-%m-%d")
-                        _ok = bool(_na_tk and _na_K > 0 and _na_px > 0)
+                        _ok = bool(_na_tk and _na_K > 0 and _na_px > 0 and int(_na_qty) != 0)
                     except Exception:
                         _ok = False
                     if not _ok:
                         st.error("Need ticker, strike>0, premium>0 and expiry as YYYY-MM-DD.")
                     else:
-                        _sq = _na_qty if _na_side == "long" else -_na_qty
+                        # Short if EITHER the Side selector says short OR contracts is negative
+                        _sq = -abs(int(_na_qty)) if (_na_side == "short" or _na_qty < 0) else abs(int(_na_qty))
                         try:
                             _gp_conn.execute(
                                 "INSERT INTO trades (ticker, option_type, strike, expiry, entry_price, "
@@ -14043,7 +14046,9 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                                              index=0 if _cur_qty >= 0 else 1, key=f"ed_side_{_tid}")
                     _e4, _e5, _e6 = st.columns(3)
                     _ed_K = _e4.number_input("Strike", min_value=0.0, step=0.5, format="%.2f", value=_sv("strike"), key=f"ed_K_{_tid}")
-                    _ed_qty = _e5.number_input("Contracts", min_value=1, step=1, value=max(abs(_cur_qty), 1), key=f"ed_qty_{_tid}")
+                    # Show the REAL signed quantity (a short reads -2, not 2) and let the field
+                    # go negative directly — no floor at 1.
+                    _ed_qty = _e5.number_input("Contracts (− = short)", step=1, value=int(_cur_qty), key=f"ed_qty_{_tid}")
                     _ed_px = _e6.number_input("Entry premium", min_value=0.0, step=0.05, value=_sv("entry_price"), key=f"ed_px_{_tid}")
                     _e7, _e8, _e9 = st.columns(3)
                     _ed_exp = _e7.text_input("Expiry (YYYY-MM-DD)", value=str(_row["expiry"]), key=f"ed_exp_{_tid}")
@@ -14061,7 +14066,8 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                             _ok = False; st.error("Expiry must be YYYY-MM-DD.")
                         if _ok:
                             try:
-                                _sq = _ed_qty if _ed_side == "long" else -_ed_qty
+                                # negative Contracts OR Side=short → short; magnitude from the field
+                                _sq = -abs(int(_ed_qty)) if (_ed_side == "short" or _ed_qty < 0) else abs(int(_ed_qty))
                                 _gp_conn.execute(
                                     "UPDATE trades SET ticker=?, option_type=?, strike=?, quantity=?, expiry=?, "
                                     "entry_price=?, entry_date=?, entry_iv=?, stop_loss_price=?, take_profit_price=?, "

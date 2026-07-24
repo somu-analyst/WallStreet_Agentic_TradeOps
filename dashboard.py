@@ -5379,6 +5379,7 @@ _PAGE_HELP = {
     "🔥 OI Analytics & Prediction": "AI-style OI signal engine. Runs 5-factor composite scoring (OI bias, PCR, volume, flow pattern, GEX) to generate BULLISH/BEARISH/NEUTRAL signals with next-day backtest.",
     "🎯 Prop Trading Screen":    "Prop-desk style trade ideas. Scans for high-conviction setups using OI, PCR, and momentum filters — shows entry/exit levels and risk:reward.",
     "💼 Portfolio & Suggestions": "Your open and closed positions. Track unrealized P&L, Greeks, IV rank, earnings alerts, and get per-leg roll suggestions. Add/close/edit trades here.",
+    "👀 Watchlist":              "Stocks you're thinking about buying but haven't yet. Add a ticker (+ optional target price / note) and it's tracked with the same components as the rest of the dashboard — live spot, day%, distance to target, next earnings/ex-div, short interest, PCR, RSI/MACD/BB technicals, and a rollup BULL/BEAR/NEUTRAL read. No entry price or P&L (nothing's bought yet) — remove a ticker once you act on it or lose interest.",
     "📊 Backtest Lab":           "Test OI-based trading signals against historical data. See what win rate and P&L your strategy would have produced over the selected date range.",
     "🔮 Live Position Predictor": "Monte Carlo simulation for a single position. Models 10,000 price paths to estimate tomorrow's expected P&L, probability of profit, and VaR.",
     "📈 Insider / Congress / Whales": "Track institutional money flows — SEC insider filings, congress trades, and dark pool / block order signals for the stocks you follow.",
@@ -5433,6 +5434,7 @@ with st.sidebar:
         ],
         "💼 Portfolio & Risk": [
             "💼 Portfolio & Suggestions",
+            "👀 Watchlist",
             "🔮 Live Position Predictor",
             "⚡ Trade Risk Calculator",
             "🎯 Next-Day Exit Planner",
@@ -22319,3 +22321,194 @@ if page == "🌍 Global Opportunities":
                     st.error(f"Couldn't read that feed: {_e}")
             st.caption("Tip: most newsletters/blogs have an RSS link (often /feed or /rss). "
                        "Paste it above to fold it into your sentiment feed.")
+
+# ===================================================================
+# ──  PAGE: WATCHLIST — stocks not yet bought, tracked with the same components
+# ===================================================================
+if page == "👀 Watchlist":
+    _page_header("👀 Watchlist", _PAGE_HELP["👀 Watchlist"])
+
+    def _wl_setup(conn):
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS watchlist (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ticker TEXT, target_price REAL, note TEXT, added_date TEXT, status TEXT DEFAULT 'ACTIVE')")
+        conn.commit()
+
+    _wl_conn = get_conn()
+    _wl_setup(_wl_conn)
+
+    def _wl_valid_ticker(tk):
+        """True if `tk` resolves to a real, currently-quoted symbol (user 2026-07-23:
+        a typo'd ticker got added and just showed dashes everywhere)."""
+        try:
+            fi = yf.Ticker(tk).fast_info
+            px = float(fi.get("last_price") or fi.get("regular_market_price") or 0)
+            if px > 0:
+                return True
+        except Exception:
+            pass
+        return _db_spot(tk) > 0
+
+    with st.expander("➕ Add a ticker", expanded=True):
+        _wa1, _wa2, _wa3 = st.columns([1, 1, 2])
+        _wa_tk = _wa1.text_input("Ticker", key="wl_add_tk", placeholder="e.g. AAPL").strip().upper()
+        _wa_target = _wa2.number_input("Target buy price (optional)", min_value=0.0, step=0.5, key="wl_add_target")
+        _wa_note = _wa3.text_input("Note (optional)", key="wl_add_note", placeholder="why you're watching it")
+        if st.button("➕ Add to watchlist", key="wl_add_btn"):
+            if _wa_tk:
+                _dupe = pd.read_sql("SELECT id FROM watchlist WHERE ticker=? AND status='ACTIVE'",
+                                     _wl_conn, params=(_wa_tk,))
+                if not _dupe.empty:
+                    st.warning(f"{_wa_tk} is already on the watchlist.")
+                elif not _wl_valid_ticker(_wa_tk):
+                    st.error(f"⚠️ {_wa_tk} doesn't look like a valid/quoted ticker — not added.")
+                else:
+                    _wl_conn.execute(
+                        "INSERT INTO watchlist (ticker, target_price, note, added_date, status) "
+                        "VALUES (?, ?, ?, ?, 'ACTIVE')",
+                        (_wa_tk, (_wa_target or None), (_wa_note or None), datetime.now().strftime("%Y-%m-%d")))
+                    _wl_conn.commit()
+                    st.success(f"Added {_wa_tk}."); st.rerun()
+            else:
+                st.error("Need a ticker.")
+
+    _wl_df = pd.read_sql("SELECT * FROM watchlist WHERE status='ACTIVE' ORDER BY id DESC", _wl_conn)
+    if _wl_df.empty:
+        st.info("Nothing on your watchlist yet — add a ticker above to start tracking it.")
+    else:
+        st.caption(f"Tracking **{len(_wl_df)}** ticker(s). Live spot, distance to target, earnings/ex-div, "
+                   "short interest, PCR, and RSI/MACD/BB technicals — refreshed with the sidebar's Live/AH toggle.")
+        try:
+            import pandas_ta as _wl_pta
+        except Exception:
+            _wl_pta = None
+
+        _wl_rows = []
+        for _, _wr in _wl_df.iterrows():
+            _wtk = str(_wr["ticker"]).upper()
+            try:
+                _weod = _db_spot(_wtk)
+                _wspot = _cached_price(_wtk) if st.session_state.get("use_ah", True) else _weod
+                _wspot = _wspot or _weod
+                if not _wspot:
+                    _wl_rows.append({"Ticker": _wtk, "Spot": None, "Note": "no price data"})
+                    continue
+                _wsrc = "EOD"
+                if _weod and abs(_wspot - _weod) > 1e-9:
+                    try:
+                        _wsrc = (_get_ah_price(_wtk) or {}).get("label") or "Live"
+                    except Exception:
+                        _wsrc = "Live"
+                _whist = _cached_history(_wtk, period="90d", interval="1d")
+                _wchg = None
+                if _whist is not None and len(_whist) >= 2:
+                    _wprev = float(_whist["Close"].iloc[-2])
+                    _wchg = (_wspot - _wprev) / _wprev * 100 if _wprev else None
+                _wtarget = _wr.get("target_price")
+                _wdist = (((_wspot - _wtarget) / _wtarget * 100) if _wtarget else None)
+                _wearn, _wdiv = _next_events(_wtk)
+                _wsi = _si_cells(_wtk)
+                _wpcr = None
+                try:
+                    _wpcr_row = pd.read_sql(
+                        "SELECT pcr_oi FROM stock_daily WHERE ticker=? AND pcr_oi IS NOT NULL "
+                        "ORDER BY trade_date DESC LIMIT 1", _wl_conn, params=(_wtk,))
+                    if not _wpcr_row.empty:
+                        _wpcr = float(_wpcr_row.iloc[0]["pcr_oi"])
+                except Exception:
+                    pass
+                _wsig, _wrsi = "—", None
+                if _wl_pta is not None and _whist is not None and len(_whist) >= 26:
+                    _wclose = _whist["Close"]
+                    _wrsi_s = _wl_pta.rsi(_wclose, length=14)
+                    _wrsi = float(_wrsi_s.iloc[-1]) if _wrsi_s is not None and not _wrsi_s.empty else None
+                    _wmacd_df = _wl_pta.macd(_wclose, fast=12, slow=26, signal=9)
+                    _wmacd_up = True
+                    if _wmacd_df is not None and not _wmacd_df.empty:
+                        _wmc = _wmacd_df.columns.tolist()
+                        _wmacd_col = next((c for c in _wmc if c.startswith("MACD_")), _wmc[0])
+                        _wsigs_col = next((c for c in _wmc if c.startswith("MACDs_")), _wmc[2])
+                        _wmacd_up = float(_wmacd_df[_wmacd_col].iloc[-1]) > float(_wmacd_df[_wsigs_col].iloc[-1])
+                    _wema_s = _wl_pta.ema(_wclose, length=20)
+                    _wabove_ema = (_wspot > float(_wema_s.iloc[-1])) if _wema_s is not None and not _wema_s.empty else True
+                    _wpts = sum([(_wrsi or 50) < 70, (_wrsi or 50) > 50, _wmacd_up, _wabove_ema])
+                    _wsig = ("🟢 BULL" if _wpts >= 3 else ("🔴 BEAR" if _wpts <= 1 else "🟡 NEUT"))
+                # 52-week hi/lo + today's hi/lo, straight from stock_daily (same source as
+                # everywhere else in the dashboard — no extra yfinance round trip).
+                _w52hi = _w52lo = _wdh = _wdl = None
+                try:
+                    _wrng = pd.read_sql(
+                        "SELECT MAX(high) AS hi, MIN(low) AS lo FROM (SELECT high, low FROM stock_daily "
+                        "WHERE ticker=? ORDER BY trade_date DESC LIMIT 252)", _wl_conn, params=(_wtk,))
+                    if not _wrng.empty and _wrng.iloc[0]["hi"] is not None:
+                        _w52hi = float(_wrng.iloc[0]["hi"]); _w52lo = float(_wrng.iloc[0]["lo"])
+                    _wtoday = pd.read_sql(
+                        "SELECT high, low FROM stock_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT 1",
+                        _wl_conn, params=(_wtk,))
+                    if not _wtoday.empty:
+                        _wdh = float(_wtoday.iloc[0]["high"] or 0) or None
+                        _wdl = float(_wtoday.iloc[0]["low"] or 0) or None
+                except Exception:
+                    pass
+                # Call/put GEX walls, nearest liquid expiry — same engine as GEX Profile page
+                _wcw = _wpw = None
+                if _TB_ENGINE is not None:
+                    try:
+                        _wg = _TB_ENGINE._compute_gex(_wtk, _wl_conn, _wspot)
+                        _wcw = _wg.get("call_wall"); _wpw = _wg.get("put_wall")
+                    except Exception:
+                        pass
+                _wl_rows.append({
+                    "id": int(_wr["id"]), "Ticker": _wtk, "Spot": round(_wspot, 2), "Src": _wsrc,
+                    "Day%": (round(_wchg, 2) if _wchg is not None else None),
+                    "Day L-H": (f"${_wdl:,.2f}-${_wdh:,.2f}" if (_wdh and _wdl) else "—"),
+                    "52w L-H": (f"${_w52lo:,.2f}-${_w52hi:,.2f}" if (_w52hi and _w52lo) else "—"),
+                    "Call Wall": (f"${_wcw:,.0f}" if _wcw else "—"),
+                    "Put Wall": (f"${_wpw:,.0f}" if _wpw else "—"),
+                    "Target": (round(_wtarget, 2) if _wtarget else None),
+                    "Dist to Target": (f"{_wdist:+.1f}%" if _wdist is not None else "—"),
+                    "Earnings": _wearn, "Ex-Div": _wdiv,
+                    "SI %": _wsi[0], "DTC": _wsi[1], "Shorts": _wsi[2],
+                    "PCR(OI)": (round(_wpcr, 2) if _wpcr is not None else None),
+                    "RSI(14)": (round(_wrsi, 1) if _wrsi is not None else None),
+                    "Signal": _wsig,
+                    "Note": _wr.get("note") or "",
+                    "Added": _wr.get("added_date"),
+                    "_52hi": _w52hi, "_52lo": _w52lo, "_hist": _whist,
+                })
+            except Exception as _e:
+                _wl_rows.append({"id": int(_wr["id"]), "Ticker": _wtk, "Spot": None, "Note": f"error: {_e}"})
+
+        _wl_show = pd.DataFrame(_wl_rows)
+        st.dataframe(_wl_show.drop(columns=["id", "_52hi", "_52lo", "_hist"], errors="ignore"),
+                     use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.markdown("**52-week range** — current price vs the year's high/low")
+        _wl_chart_cols = st.columns(min(len(_wl_rows), 4) or 1)
+        for _wi, _wrow in enumerate(_wl_rows):
+            if not (_wrow.get("_52hi") and _wrow.get("_52lo") and _wrow.get("_hist") is not None):
+                continue
+            with _wl_chart_cols[_wi % len(_wl_chart_cols)]:
+                _wfig = go.Figure()
+                _wfig.add_trace(go.Scatter(y=_wrow["_hist"]["Close"], mode="lines",
+                                           line=dict(width=1.5), showlegend=False))
+                _wfig.add_hline(y=_wrow["_52hi"], line_dash="dot", line_color="#e74c3c", line_width=1)
+                _wfig.add_hline(y=_wrow["_52lo"], line_dash="dot", line_color="#2ecc71", line_width=1)
+                _wfig.update_layout(height=140, margin=dict(l=0, r=0, t=24, b=0),
+                                    title=dict(text=f"{_wrow['Ticker']}  ${_wrow['Spot']:,.2f}", font=dict(size=12)),
+                                    xaxis=dict(visible=False), yaxis=dict(visible=False),
+                                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(_wfig, use_container_width=True, config={"displayModeBar": False},
+                                key=f"wl_chart_{_wrow['Ticker']}_{_wrow.get('id', _wi)}")
+                st.caption(f"52w ${_wrow['_52lo']:,.0f}–${_wrow['_52hi']:,.0f}")
+
+        st.markdown("---")
+        st.markdown("**Remove a ticker** (bought it, or lost interest)")
+        _wl_map = {f"{r['Ticker']} (id {r['id']})": r["id"] for r in _wl_rows if "id" in r}
+        if _wl_map:
+            _wl_rm_pick = st.selectbox("Ticker", list(_wl_map), key="wl_rm_pick")
+            if st.button("🗑️ Remove", key="wl_rm_btn"):
+                _wl_conn.execute("UPDATE watchlist SET status='REMOVED' WHERE id=?", (_wl_map[_wl_rm_pick],))
+                _wl_conn.commit()
+                st.success("Removed."); st.rerun()

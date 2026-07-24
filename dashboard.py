@@ -15604,9 +15604,9 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                         _topen_disp = "~$0.00"
                     else:
                         _topen_disp = f"${_topen:.2f}"
-                    _buf = max(0.05, round(l["cur"] * 0.03, 2))     # ~3% / min 5c marketable buffer
-                    _climit = (f"SELL ≤ ${max(l['cur'] - _buf, 0.01):.2f}" if l["side"] == "long"
-                               else f"BUY ≥ ${l['cur'] + _buf:.2f}")
+                    _px, _fromq = _smart_close_limit(l["side"], l["cur"], l.get("bid"), l.get("ask"))
+                    _climit = (f"SELL ≤ ${_px:.2f}" if l["side"] == "long" else f"BUY ≥ ${_px:.2f}") \
+                              + ("" if _fromq else " (est)")
                     _lb = _combo_bounds([l], l["spot"])
                     _pa = _pos_analytics([l], l["spot"])
                     _win = (f"{'🟢' if _pa['pop'] >= 60 else '🟡' if _pa['pop'] >= 40 else '🔴'} "

@@ -10117,17 +10117,29 @@ elif page == "📈 Insider / Congress / Whales":
             "Pershing Square (Ackman)": "0001336528", "Scion (Burry)": "0001649339",
             "Third Point (Loeb)": "0001040273", "Tiger Global (Coleman)": "0001167483",
             "Greenlight (Einhorn)": "0001079114", "Baupost (Klarman)": "0001061768",
-            # Added 2026-07-24 (user: inspired by tradingkey.com/tools/star-investors —
-            # that page renders its data client-side/JS and had nothing scrapeable at fetch
-            # time, so this extends our EXISTING real-EDGAR roster with more of the same
-            # "legendary investor" names instead of a scrape) — every CIK verified directly
-            # against SEC EDGAR company search before adding.
+            # Added 2026-07-24 (user: inspired by tradingkey.com/tools/star-investors' 88-name
+            # roster — that page turned out to be plain SSR HTML, not JS-gated, so its full
+            # investor list + one-line holdings were readable via `requests`; rather than build
+            # a SEPARATE scraped table, cross-referenced every name against SEC EDGAR and folded
+            # matches into THIS roster instead — one 13F engine, real filings, no scrape to
+            # maintain against their page layout). Every CIK verified directly against SEC EDGAR
+            # company search before adding.
             "Icahn Enterprises": "0001257324", "Duquesne (Druckenmiller)": "0001536411",
             "Appaloosa (Tepper)": "0001006438", "Lone Pine Capital": "0001061165",
             "Coatue Management": "0001135730", "Viking Global": "0001101785",
             "Tudor Investment (PTJ)": "0000923093", "Fisher Asset Mgmt": "0000850529",
             "Trian (Peltz)": "0001345472", "Oaktree Capital (Marks)": "0001403525",
             "Point72 (Cohen)": "0001603466",
+            "Gates Foundation Trust": "0001663801", "Paulson & Co": "0001035674",
+            "Gotham Asset Mgmt (Greenblatt)": "0001279148", "Ariel Investments (Rogers)": "0000936753",
+            "Southeastern (Hawkins)": "0000807985", "Maverick Capital (Ainslie)": "0000934639",
+            "Glenview Capital (Robbins)": "0001138995", "Omega Advisors (Cooperman)": "0000898202",
+            "Himalaya Capital (Li Lu)": "0001709323", "Abrams Capital": "0001358706",
+            "Pzena Investment Mgmt": "0001027796", "Yacktman Asset Mgmt": "0000905567",
+            "Royce & Associates": "0000906304", "Sands Capital Management": "0001020066",
+            "Harris Associates (Herro)": "0000813917", "First Eagle Investment": "0001325447",
+            "Generation IM (Al Gore)": "0001375534", "Invesco Advisers": "0000020430",
+            "Dodge & Cox": "0000200217", "Baron Funds (BAMCO)": "0001017918",
         }
         _ef1, _ef2 = st.columns([2, 1])
         _fpick = _ef1.selectbox("Fund", list(_EDGAR_FUNDS) + ["(enter CIK manually)"], key="edgar_fund")

@@ -25103,9 +25103,24 @@ def wrap_facts(conn, universe_cap=120):
 
 
 def wrap_narrative(F, html=True):
-    """Render the fact pack into a punchy 'what just happened' write-up."""
+    """Render the fact pack into a punchy 'what just happened' write-up.
+
+    Each section's PROSE body renders inside <blockquote expandable> (user 2026-07-24: long
+    narrative paragraphs should collapse behind their header instead of always being fully
+    expanded — same pattern /plan already uses per-position). Only the bold section header
+    stays visible by default; tap to expand. Tables (levered-ETF) stay outside the blockquote —
+    Telegram's <pre> grid inside a blockquote renders oddly on some clients."""
     b = (lambda s: f"<b>{s}</b>") if html else (lambda s: s)
     esc = (lambda s: str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")) if html else (lambda s: s)
+
+    def _sec(emoji, title, body):
+        """One collapsible section: bold header (always visible) + expandable body."""
+        if not body:
+            return ""
+        if not html:
+            return f"\n{emoji} {title}\n{body}"
+        return f"\n{emoji} <b>{title}</b>\n<blockquote expandable>{body}</blockquote>"
+
     L = []
     lead = F["lead"]; shape = F["shape"]
     seed = int(F["ts"].strftime("%Y%m%d"))
@@ -25121,7 +25136,7 @@ def wrap_narrative(F, html=True):
                 f"intraday peak{dollar}. It opened {op:+.1f}% and is now {d:+.1f}% — a violent round trip on the day.",
                 f"A textbook volatility shock: the {lead['name']} ran to {op:+.1f}% at the open, then dumped "
                 f"{shape['dd_pct']:.1f}% in {shape['dd_mins']} minutes{dollar}, settling {d:+.1f}% on the day."]
-            L.append("⚡ " + b("WHAT JUST HAPPENED") + "\n" + _wrap_pick(seed, hooks))
+            L.append(_sec("⚡", "WHAT JUST HAPPENED", _wrap_pick(seed, hooks)))
         elif lead.get("dollars"):
             verb = "erased" if d < 0 else "added"
             hooks = [
@@ -25129,19 +25144,19 @@ def wrap_narrative(F, html=True):
                 f"moving {d:+.1f}% ({lead['pts']:+,.0f} pts).",
                 f"An estimated {_wrap_money(abs(lead['dollars']))} {('vanished from' if d<0 else 'flowed into')} the "
                 f"{lead['name']} today as it moved {d:+.1f}% ({lead['pts']:+,.0f} pts)."]
-            L.append("⚡ " + b("WHAT JUST HAPPENED") + "\n" + _wrap_pick(seed, hooks))
+            L.append(_sec("⚡", "WHAT JUST HAPPENED", _wrap_pick(seed, hooks)))
         else:
             risk = "sell-off" if d < 0 else "rally"
-            L.append("⚡ " + b("WHAT JUST HAPPENED") + "\n"
-                     f"The {lead['name']} is {('down' if d<0 else 'up')} {abs(d):.1f}% "
-                     f"({lead['pts']:+,.0f} pts) in a session {risk}.")
+            L.append(_sec("⚡", "WHAT JUST HAPPENED",
+                          f"The {lead['name']} is {('down' if d<0 else 'up')} {abs(d):.1f}% "
+                          f"({lead['pts']:+,.0f} pts) in a session {risk}."))
 
     if shape and lead:
         op = (shape["open"] / lead["prev"] - 1) * 100
-        L.append("\n🕘 " + b("THE TIMELINE") + "\n"
-                 f"The {lead['name']} opened {op:+.1f}% vs the prior close, peaked near {shape['peak']:,.0f} at "
-                 f"{_wrap_fmt_t(shape['t_peak'])}, then slid to {shape['trough']:,.0f} by {_wrap_fmt_t(shape['t_trough'])} "
-                 f"({shape['dd_pct']:+.1f}%). It now trades at {shape['cur']:,.0f}.")
+        L.append(_sec("🕘", "THE TIMELINE",
+                      f"The {lead['name']} opened {op:+.1f}% vs the prior close, peaked near {shape['peak']:,.0f} at "
+                      f"{_wrap_fmt_t(shape['t_peak'])}, then slid to {shape['trough']:,.0f} by {_wrap_fmt_t(shape['t_trough'])} "
+                      f"({shape['dd_pct']:+.1f}%). It now trades at {shape['cur']:,.0f}."))
 
     if F["catalyst"]:
         big = next((m for m in (F["movers_dn"] + F["movers_up"]) if m["t"] == F["catalyst"]["ticker"]), None)
@@ -25150,14 +25165,14 @@ def wrap_narrative(F, html=True):
                     f"“{esc(F['catalyst']['title'])}”.")
         else:
             line = f"A key catalyst: {F['catalyst']['ticker']} — “{esc(F['catalyst']['title'])}”."
-        L.append("\n📰 " + b("THE CATALYST") + "\n" + line)
+        L.append(_sec("📰", "THE CATALYST", line))
 
     if F["vix"]:
         v = F["vix"]
         tone = "spiking — fear is back" if v["pct"] > 8 else "rising" if v["pct"] > 0 else "easing"
-        L.append("\n🌪 " + b("VOLATILITY") + "\n"
-                 f"The VIX is at {v['last']:.1f} ({v['pct']:+.1f}%), {tone}. "
-                 + ("Above 20 signals real stress." if v["last"] >= 20 else "Still contained below 20."))
+        L.append(_sec("🌪", "VOLATILITY",
+                      f"The VIX is at {v['last']:.1f} ({v['pct']:+.1f}%), {tone}. "
+                      + ("Above 20 signals real stress." if v["last"] >= 20 else "Still contained below 20.")))
 
     if F.get("macro"):
         m = F["macro"]
@@ -25165,11 +25180,11 @@ def wrap_narrative(F, html=True):
         if bits:
             hot = m.get("CPI", {}).get("yoy", 0)
             vs = "well above" if hot >= 3 else "above" if hot > 2.3 else "near"
-            L.append("\n📅 " + b("MACRO BACKDROP") + "\n"
-                     f"Inflation backdrop: {', '.join(bits)} — {vs} the Fed's 2% target.")
+            L.append(_sec("📅", "MACRO BACKDROP",
+                          f"Inflation backdrop: {', '.join(bits)} — {vs} the Fed's 2% target."))
 
     if F.get("regime"):
-        L.append("\n🧭 " + b("MACRO REGIME") + "\n" + F["regime"] + ".")
+        L.append(_sec("🧭", "MACRO REGIME", F["regime"] + "."))
 
     if F["cross"]:
         parts = []
@@ -25178,7 +25193,7 @@ def wrap_narrative(F, html=True):
                 parts.append(f"the 10Y yield {('rose' if c['pct']>0 else 'fell')} to {c['last']:.2f}%")
             else:
                 parts.append(f"{c['name']} {c['pct']:+.1f}%")
-        L.append("\n🌐 " + b("CROSS-ASSET") + "\nContagion check — " + "; ".join(parts) + ".")
+        L.append(_sec("🌐", "CROSS-ASSET", "Contagion check — " + "; ".join(parts) + "."))
 
     lev_lines = []
     _lev_tbl = ""

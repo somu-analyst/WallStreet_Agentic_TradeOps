@@ -13605,54 +13605,32 @@ elif page == "📰 News & Calendar":
 
     with tab2:
         st.markdown("### 📅 Key Economic Events")
-        st.caption("Approximate scheduled dates — always verify on the official Fed/BLS website before trading.")
-        # Upcoming 2026 events (rolling schedule — update quarterly)
-        events = [
-            {"Event": "FOMC Meeting",       "Date": "2026-06-17", "Impact": "HIGH",
-             "Description": "Federal Reserve interest rate decision. Markets move 1–3% on surprises."},
-            {"Event": "CPI Report",         "Date": "2026-05-13", "Impact": "HIGH",
-             "Description": "Consumer Price Index — inflation gauge. High CPI = Fed may hike rates."},
-            {"Event": "PPI Report",         "Date": "2026-05-14", "Impact": "MEDIUM",
-             "Description": "Producer Price Index — factory-level inflation. Leads CPI by ~1 month."},
-            {"Event": "Retail Sales",       "Date": "2026-05-15", "Impact": "MEDIUM",
-             "Description": "Consumer spending. Strong = economy healthy. Weak = slowdown risk."},
-            {"Event": "Jobs Report (NFP)",  "Date": "2026-06-05", "Impact": "HIGH",
-             "Description": "Non-Farm Payrolls. Biggest monthly jobs number — moves markets strongly."},
-            {"Event": "PCE (Core)",         "Date": "2026-05-29", "Impact": "HIGH",
-             "Description": "Fed's preferred inflation gauge. Directly influences rate decisions."},
-            {"Event": "GDP Q1 2026",        "Date": "2026-05-28", "Impact": "HIGH",
-             "Description": "First quarter 2026 GDP estimate. Negative = recession territory."},
-            {"Event": "FOMC Meeting",       "Date": "2026-07-29", "Impact": "HIGH",
-             "Description": "Next Fed rate decision after June."},
-            {"Event": "CPI Report",         "Date": "2026-06-11", "Impact": "HIGH",
-             "Description": "May 2026 inflation data."},
-            {"Event": "Jobs Report (NFP)",  "Date": "2026-07-02", "Impact": "HIGH",
-             "Description": "June 2026 jobs data."},
-        ]
-        ev_df = pd.DataFrame(events)
-        ev_df["Days Until"] = (pd.to_datetime(ev_df["Date"]) - datetime.now()).dt.days
-        # Sort: upcoming first, then past
-        ev_df = ev_df.sort_values("Days Until")
-
-        upcoming = ev_df[ev_df["Days Until"] >= 0]
-        past     = ev_df[ev_df["Days Until"] < 0]
-
-        if not upcoming.empty:
-            st.markdown("**⏳ Upcoming**")
-            for _, ev in upcoming.iterrows():
-                impact_badge = "🔴" if ev["Impact"] == "HIGH" else "🟡" if ev["Impact"] == "MEDIUM" else "🟢"
-                days = int(ev["Days Until"])
-                urgency = "⚡ TODAY" if days == 0 else f"⚡ {days}d away" if days <= 3 else f"📌 {days}d"
-                st.markdown(f"{impact_badge} **{ev['Event']}** — {ev['Date']} &nbsp; `{urgency}`")
-                st.caption(ev["Description"])
-
-        if not past.empty:
-            with st.expander("📁 Past events (last 90 days)", expanded=False):
-                for _, ev in past[past["Days Until"] >= -90].sort_values("Days Until", ascending=False).iterrows():
-                    days = int(ev["Days Until"])
-                    impact_badge = "🔴" if ev["Impact"] == "HIGH" else "🟡"
-                    st.markdown(f"{impact_badge} ~~{ev['Event']}~~ — {ev['Date']} ({abs(days)}d ago)")
-                    st.caption(ev["Description"])
+        st.caption("Live-computed from the bot's FOMC/CPI/PCE/Jobs schedule (not a hardcoded "
+                   "list — the old version showed 2026-05/06 dates as 'upcoming' long after "
+                   "they'd passed, fixed 2026-07-24). Always verify on the official Fed/BLS "
+                   "site before trading.")
+        _EV_DESC = {
+            "FOMC decision": ("HIGH", "Federal Reserve interest rate decision. Markets move 1-3% on surprises."),
+            "CPI · inflation": ("HIGH", "Consumer Price Index — inflation gauge. High CPI = Fed may hike rates."),
+            "PCE · Fed gauge": ("HIGH", "Fed's preferred inflation gauge. Directly influences rate decisions."),
+            "Jobs · NFP": ("HIGH", "Non-Farm Payrolls. Biggest monthly jobs number — moves markets strongly."),
+        }
+        try:
+            _macro_evs = _TB_ENGINE._macro_events(days=120) if _TB_ENGINE is not None else []
+        except Exception:
+            _macro_evs = []
+        if not _macro_evs:
+            st.info("No macro events resolved — check telegram_bot_optimized import.")
+        else:
+            st.markdown("**⏳ Upcoming (next 120 days)**")
+            for _n, _ds, _lbl in _macro_evs:
+                _impact, _desc = _EV_DESC.get(_lbl, ("MEDIUM", ""))
+                _badge = "🔴" if _impact == "HIGH" else "🟡"
+                _urgency = "⚡ TODAY" if _n == 0 else (f"⚡ {_n}d away" if _n <= 3 else f"📌 {_n}d")
+                _dt_disp = datetime.strptime(_ds, "%Y-%m-%d").strftime("%a %b %d, %Y")
+                st.markdown(f"{_badge} **{_lbl}** — {_dt_disp} &nbsp; `{_urgency}`")
+                if _desc:
+                    st.caption(_desc)
 
 
 # ===================================================================

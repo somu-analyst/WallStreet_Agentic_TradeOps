@@ -55,6 +55,20 @@ Options-trading edge system: Telegram bot + dashboard + our own capture-forward 
 - [ ] (gated: ~1 mo of OpenBB bid/ask captures) Dispersion (#14) + a skew *backtest* on the OpenBB `skew_snapshot` panel (does high 25Δ skew / put-flow predict fwd downside? need ~15-20 dates)
 - [x] Catalyst Radar — `/catalysts [TICKERS]` + `catalyst_alert` (8:20 AM ET, ≤3d): earnings (per-ticker yfinance) + macro (FOMC in-code · CPI/PCE hardcoded 2026 · Jobs/NFP computed first-Friday) on the open book. The one intraday-ish nudge so EOD signals aren't blindsided by scheduled events. `_macro_events/_upcoming_catalysts/_fmt_catalysts`.
 
+## QUEUED (deferred by user 2026-07-24, not forgotten)
+- [ ] **13F CIK re-audit — 14 funds.** While expanding the Legendary Investors tab (dashboard.py
+  `_EDGAR_FUNDS`), found 3 CIKs were wrong/stale and fixed them with verified evidence (Vanguard
+  ↔ Soros were SWAPPED; Trian's CIK was dormant since 2011). A quick heuristic (no 13F-HR filed
+  since 2024) flagged 14 more as *possibly* wrong, but none individually re-verified: Appaloosa
+  (Tepper), Viking Global, Oaktree (Marks), Gotham (Greenblatt), Omega (Cooperman), Invesco
+  Advisers, Hotchkis & Wiley, Wasatch Funds Trust, Brandes Investment Partners, Markel-Gayner
+  (Gayner), First Pacific Advisors, Moore Capital Management, Jana Partners, Third Avenue
+  Management, Greenlight (Einhorn — a DME Advisors LP lead looked promising but was inconsistent
+  under closer check). Heuristic has false positives (e.g. Icahn Enterprises is likely fine) —
+  each needs the same treatment as the 3 fixed: browse-edgar company search → pick highest
+  `<last-date>` → confirm `conformed-name` → confirm holdings size/character is sane before
+  swapping in. Also documented as a code comment right above `_EDGAR_FUNDS` in dashboard.py.
+
 ## PENDING USER DECISIONS (carried 2026-07-21 → open)
 - [ ] **Vol analyst sign flip** (`_agent_vol`). Evidence 2026-07-22: rank-IC of VIX level vs SPY fwd-10d is POSITIVE in **every regime 1990–2026** (n=9,194) — 1990s +0.092, dotcom +0.271, 2003-07 +0.106, **GFC +0.026**, 2009-19 +0.208, 2020-26 +0.159. Full-sample elevated(≥25) **+0.77%** vs calm(≤16) **+0.25%**. The "buy-fear breaks in 2008" objection FAILED the test: in the GFC crash elevated-VIX entries lost (−2.01%, worst −25.88%) but calm-side entries lost MORE OFTEN (−1.63%, 69% neg vs 56%). Current code scores elevated VIX bearish = backwards. **Recommendation: flip AND dampen** (edge is real but modest). Awaiting user.
 - [ ] **`/debate` weight rebalance.** Flow = highest weight (1.2) w/ zero edge (t=−0.07); Technical t=+4.28 at weight 1.0. Rebalancing on one backtest risks overfitting. Awaiting user.

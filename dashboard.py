@@ -665,18 +665,42 @@ def _ohlc_for_range(ticker: str, rng: str) -> pd.DataFrame:
     return h
 
 @st.cache_data(ttl=120, show_spinner=False)
-def _fetch_option_mid(ticker: str, expiry_str: str, strike: float, opt_type: str
-                      ) -> tuple:
-    """Fetch real option mid-price and IV from yfinance options chain.
-    Returns (mid_price, implied_vol) — both None when unavailable (market closed
-    or expiry not listed)."""
-    # Fast path: when the market is fully CLOSED there is no live bid/ask, so this
-    # would fetch the whole option chain over the network only to return (None, ...).
-    # Skip the round-trip — the caller already falls back to the EOD DB premium, and
-    # it ignores the IV when the mid is None, so the result is identical but instant.
+def _smart_close_limit(side, cur, bid=None, ask=None, buf=None):
+    """Limit price to CLOSE a position, biased toward keeping edge instead of conceding
+    it away (PLAN.md A3, 2026-07-24). The old behavior always priced ~3% through the
+    current mid/last — a real trader posts near the ask (selling) or bid (buying) first
+    and only concedes if unfilled, not the other way around.
+
+    With a real bid/ask: start 1/3 of the spread in from the best price (ask when
+    selling, bid when buying), never worse than the mid — i.e. the order asks for MORE
+    than a marketable limit would, while still inside the spread so it's plausible to fill.
+    Without a live bid/ask (market closed, no quote): fall back to the old buffer-off-cur
+    heuristic, which is the best available anchor at that point.
+    Returns (price: float, from_quote: bool)."""
+    closing_sell = (side == "long")   # long position closes by selling; short closes by buying
+    if bid and ask and ask > bid > 0:
+        spread = ask - bid
+        mid = (bid + ask) / 2
+        if closing_sell:
+            px = max(ask - spread / 3, mid)
+        else:
+            px = min(bid + spread / 3, mid)
+        return round(px, 2), True
+    _buf = buf if buf is not None else max(0.05, round(float(cur or 0) * 0.03, 2))
+    px = (max(cur - _buf, 0.01) if closing_sell else cur + _buf)
+    return round(px, 2), False
+
+
+def _fetch_option_quote(ticker: str, expiry_str: str, strike: float, opt_type: str
+                        ) -> tuple:
+    """Fetch real option bid/ask/mid/IV from yfinance options chain.
+    Returns (mid, iv, bid, ask) — mid/iv/bid/ask all None when unavailable (market
+    closed or expiry not listed). Superset of _fetch_option_mid (which wraps this for
+    older callers that only want mid+iv); added 2026-07-24 (PLAN.md A3) so callers can
+    build a real bid/ask-anchored closing limit instead of a flat % concession off mid."""
     try:
         if _market_state() == "CLOSED":
-            return None, None
+            return None, None, None, None
     except Exception:
         pass
     try:
@@ -688,7 +712,7 @@ def _fetch_option_mid(ticker: str, expiry_str: str, strike: float, opt_type: str
             if abs(float(near["strike"].iloc[0]) - strike) <= 2.5:
                 row = near
         if row.empty:
-            return None, None
+            return None, None, None, None
         r = row.iloc[0]
         bid  = float(r.get("bid", 0) or 0)
         ask  = float(r.get("ask", 0) or 0)
@@ -699,9 +723,20 @@ def _fetch_option_mid(ticker: str, expiry_str: str, strike: float, opt_type: str
             mid = (bid + ask) / 2
         else:
             mid = None   # market closed → caller uses HV-based BS
-        return mid, (iv if iv > 0.02 else None)
+            bid = ask = None
+        return mid, (iv if iv > 0.02 else None), bid, ask
     except Exception:
-        return None, None
+        return None, None, None, None
+
+
+def _fetch_option_mid(ticker: str, expiry_str: str, strike: float, opt_type: str
+                      ) -> tuple:
+    """Fetch real option mid-price and IV from yfinance options chain.
+    Returns (mid_price, implied_vol) — both None when unavailable (market closed
+    or expiry not listed). Thin wrapper over _fetch_option_quote for callers that
+    don't need bid/ask."""
+    mid, iv, _bid, _ask = _fetch_option_quote(ticker, expiry_str, strike, opt_type)
+    return mid, iv
 
 def _exp_to_date(d):
     """Any stored expiry/date string -> datetime.date. ISO YYYY-MM-DD first (all DB date
@@ -14632,9 +14667,9 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
             # Live market mid + IV (yfinance bid/ask). When the market is open this is the REAL option
             # quote — use it for "Now" AND re-anchor IV to it so the Greeks, Est Open and Day L–H range
             # stay consistent with the live price instead of drifting off a stale EOD premium.
-            _live_mid = _live_iv = None
+            _live_mid = _live_iv = _live_bid = _live_ask = None
             if _gp_use_ah and _T > 0 and _exp_mdy:
-                _live_mid, _live_iv = _fetch_option_mid(_tk, _exp_mdy, _K, _typ)
+                _live_mid, _live_iv, _live_bid, _live_ask = _fetch_option_quote(_tk, _exp_mdy, _K, _typ)
             # Only refine IV from the live quote when there's a REAL market mid (bid & ask both live).
             # After hours _fetch_option_mid returns mid=None yet yfinance still reports a stale/low
             # impliedVolatility — trusting it would wrongly reprice OTM legs to ~$0. Keep the stable
@@ -14660,6 +14695,7 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                 "exp": _exp, "exp_mdy": _exp_mdy, "dte": _dte, "spot": _spot, "eod_spot": _eod_spot,
                 "iv": _iv, "entry": _entry, "cur": _cur, "g": _g, "m": _m, "be": _be,
                 "prev_close": _prev_cls, "day_hi": _day_hi, "day_lo": _day_lo,
+                "bid": _live_bid, "ask": _live_ask,
                 "pnl": (_cur - _entry) * _m,
                 "pos_delta": _g["delta"] * _m, "pos_theta": _g["theta"] * _m,
                 "pos_vega": _g["vega"] * _m, "pos_gamma": _g["gamma"] * _m,
@@ -14948,9 +14984,9 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
                     _ftopen = bs_greeks(l["spot"], l["K"], max(l["dte"] - 1, 0) / 365.0, _R, l["iv"], l["typ"])["price"]
                     _ftopen_disp = ("expired" if l["dte"] < 0 else "exp today" if l["dte"] == 0 else
                                     "~$0.00" if _ftopen < 0.005 else f"${_ftopen:.2f}")
-                    _fbuf = max(0.05, round(l["cur"] * 0.03, 2))
-                    _fclimit = (f"SELL ≤ ${max(l['cur'] - _fbuf, 0.01):.2f}" if l["side"] == "long"
-                                else f"BUY ≥ ${l['cur'] + _fbuf:.2f}")
+                    _fpx, _ffromq = _smart_close_limit(l["side"], l["cur"], l.get("bid"), l.get("ask"))
+                    _fclimit = (f"SELL ≤ ${_fpx:.2f}" if l["side"] == "long" else f"BUY ≥ ${_fpx:.2f}") \
+                               + ("" if _ffromq else " (est)")
                     _flb = _combo_bounds([l], l["spot"])
                     _fpa = _pos_analytics([l], l["spot"])
                     _fwin = (f"{'🟢' if _fpa['pop'] >= 60 else '🟡' if _fpa['pop'] >= 40 else '🔴'} "

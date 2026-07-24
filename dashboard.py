@@ -10218,6 +10218,30 @@ elif page == "📈 Insider / Congress / Whales":
             "Harris Associates (Herro)": "0000813917", "First Eagle Investment": "0001325447",
             "Generation IM (Al Gore)": "0001375534", "Invesco Advisers": "0000020430",
             "Dodge & Cox": "0000200217", "Baron Funds (BAMCO)": "0001017918",
+            # Second batch 2026-07-24 (user: "we have many right in the page right" — the
+            # first pass stopped at 40 when TradingKey's roster has 88; this covers nearly
+            # all the rest that are genuine US SEC 13F filers. Skipped: Scotia Canadian
+            # Dividend Fund, EdgePoint Canadian Portfolio, CI Select Canadian Equity Fund
+            # (Canadian, don't file US 13F), Azvalor Blue Chips, Cobas Asset Mgmt (Spanish),
+            # Chou Associates (Toronto) — none are SEC filers. Harbor Capital Appreciation
+            # Fund and Keeley-Teton Advisors had no findable 13F filer entity under EDGAR
+            # company search. Every CIK below verified directly against SEC EDGAR.
+            "Gardner Russo & Quinn (Russo)": "0000860643", "Brave Warrior (Greenberg)": "0001553733",
+            "Parnassus Investments": "0000948669", "Barrow Hanley Mewhinney & Strauss": "0000313028",
+            "Causeway Capital (Ketterer)": "0001165797", "Hotchkis & Wiley": "0001082015",
+            "Diamond Hill Capital": "0001217541", "Davis Selected Advisers": "0001036325",
+            "Wasatch Funds Trust": "0000806633", "Brandes Investment Partners": "0001542551",
+            "Akre Capital Management": "0001112520", "Mairs & Power": "0001070134",
+            "Markel-Gayner (Gayner)": "0001034180", "Manning & Napier Advisors": "0000062039",
+            "First Pacific Advisors": "0000109501", "Horizon Kinetics (Stahl)": "0001056823",
+            "Smead Capital Management": "0001427008", "Matthews Intl Capital Mgmt": "0001028074",
+            "Tweedy Browne": "0000732905", "Donald Smith & Co": "0000814375",
+            "Moore Capital Management": "0000924178", "Weitz Investment Mgmt": "0000883965",
+            "Jana Partners": "0001159159", "Fairholme Capital (Berkowitz)": "0001056831",
+            "Third Avenue Management": "0001002858", "Olstein Capital Management": "0000947996",
+            "Kahn Brothers": "0001039565", "Hussman Strategic Advisors": "0001179475",
+            "Pennant Investors (Fournier)": "0001759176", "Baillie Gifford": "0001088875",
+            "T Rowe Price Associates": "0000080255", "PRIMECAP Management": "0000763212",
         }
         _ef1, _ef2 = st.columns([2, 1])
         _fpick = _ef1.selectbox("Fund", list(_EDGAR_FUNDS) + ["(enter CIK manually)"], key="edgar_fund")

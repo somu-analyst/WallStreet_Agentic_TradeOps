@@ -738,6 +738,66 @@ def _fetch_option_mid(ticker: str, expiry_str: str, strike: float, opt_type: str
     mid, iv, _bid, _ask = _fetch_option_quote(ticker, expiry_str, strike, opt_type)
     return mid, iv
 
+
+def _cusip_batch_to_ticker(cusips):
+    """CUSIP -> US ticker via OpenFIGI's free mapping API (no key needed). Batches up to
+    20 per request with a short pause between batches to stay under the unauthenticated
+    rate limit. Returns {cusip: ticker or None}."""
+    import requests as _rq
+    import time as _time
+    out = {}
+    for i in range(0, len(cusips), 20):
+        chunk = cusips[i:i + 20]
+        try:
+            resp = _rq.post(
+                "https://api.openfigi.com/v3/mapping",
+                json=[{"idType": "ID_CUSIP", "idValue": c, "exchCode": "US"} for c in chunk],
+                headers={"Content-Type": "application/json"}, timeout=20)
+            results = resp.json()
+            for c, r in zip(chunk, results):
+                data = r.get("data") or []
+                out[c] = data[0].get("ticker") if data else None
+        except Exception:
+            for c in chunk:
+                out.setdefault(c, None)
+        _time.sleep(1)   # unauthenticated OpenFIGI limit is modest — stay well under it
+    return out
+
+
+def _cusip_sector_map(cusips):
+    """CUSIP -> GICS-style sector string (or 'Unmapped'), for the Star Investors Sector
+    Breakdown (PLAN.md, user 2026-07-24: 'sector breakdown, how money flowing to which
+    sectors' was asked but never built — CUSIP->ticker was the missing step, resolved via
+    OpenFIGI; ticker->sector reuses the existing fundamentals cache). Persists the CUSIP->
+    ticker half PERMANENTLY (that mapping never changes) so repeat runs cost nothing."""
+    with get_conn() as _c:
+        _c.execute("CREATE TABLE IF NOT EXISTS cusip_ticker_map "
+                   "(cusip TEXT PRIMARY KEY, ticker TEXT, asof TEXT)")
+        _have = dict(pd.read_sql("SELECT cusip, ticker FROM cusip_ticker_map "
+                                 "WHERE cusip IN ({})".format(",".join("?" * len(cusips))),
+                                 _c, params=cusips).values.tolist()) if cusips else {}
+    _missing = [c for c in cusips if c not in _have]
+    if _missing:
+        _resolved = _cusip_batch_to_ticker(_missing)
+        with get_conn() as _c:
+            _c.executemany(
+                "INSERT OR REPLACE INTO cusip_ticker_map VALUES (?,?,?)",
+                [(c, t, datetime.now().strftime("%Y-%m-%d")) for c, t in _resolved.items()])
+            _c.commit()
+        _have.update(_resolved)
+    out = {}
+    for cusip, ticker in _have.items():
+        if not ticker:
+            out[cusip] = "Unmapped"
+            continue
+        try:
+            sec = (_cached_info(ticker) or {}).get("sector")
+            out[cusip] = sec or "Unmapped"
+        except Exception:
+            out[cusip] = "Unmapped"
+    return out
+
+
 def _exp_to_date(d):
     """Any stored expiry/date string -> datetime.date. ISO YYYY-MM-DD first (all DB date
     cols are ISO since the 07-2026 census), legacy MM-DD-YYYY fallback. None if unparseable.
@@ -10452,8 +10512,8 @@ elif page == "📈 Insider / Congress / Whales":
                 _chg.columns = ["cusip", "Share Change"]
                 _chg["Issuer"] = _chg["cusip"].map(_names)
 
-            _ovt1, _ovt2, _ovt3, _ovt4 = st.tabs(
-                ["🏆 Top Holdings", "👥 Most Owned", "🟢 Top Buys", "🔴 Top Sells"])
+            _ovt1, _ovt2, _ovt3, _ovt4, _ovt5 = st.tabs(
+                ["🏆 Top Holdings", "👥 Most Owned", "🟢 Top Buys", "🔴 Top Sells", "🧭 Sector Breakdown"])
 
             def _fmt_val(v):
                 return f"${v/1e9:.2f}B" if v >= 1e9 else f"${v/1e6:.0f}M"
@@ -10500,6 +10560,40 @@ elif page == "📈 Insider / Congress / Whales":
                     _sells = _chg.sort_values("Share Change", ascending=True).head(30).copy()
                     _sells["Share Change"] = _sells["Share Change"].apply(_fmt_shares)
                     st.dataframe(_sells[["Issuer", "Share Change"]], hide_index=True, use_container_width=True)
+
+            with _ovt5:
+                st.caption("Aggregate $ value by sector across the top holdings (by value) of every "
+                           "fetched fund — mirrors TradingKey's Sector Breakdown panel. 13F filings "
+                           "report CUSIP+name, not tickers, so resolving sector needs an extra step: "
+                           "CUSIP→ticker via OpenFIGI (free, no key), then ticker→sector via cached "
+                           "fundamentals. Capped to the top 150 holdings by value — that's where "
+                           "nearly all the $ sits; the long tail would cost hundreds of lookups for "
+                           "a rounding error of extra coverage.")
+                _sb_top = (_latest_all.groupby("cusip").agg(value=("value", "sum"))
+                           .reset_index().sort_values("value", ascending=False).head(150))
+                if _sb_top.empty:
+                    st.info("No holdings to classify yet — fetch some funds above first.")
+                else:
+                    _sb_map = _cusip_sector_map(_sb_top["cusip"].tolist())
+                    _sb_top["sector"] = _sb_top["cusip"].map(lambda c: _sb_map.get(c, "Unmapped"))
+                    _sb_agg = (_sb_top.groupby("sector")["value"].sum()
+                               .reset_index().sort_values("value", ascending=False))
+                    _sb_tot = _sb_agg["value"].sum() or 1
+                    _sb_agg["% Portfolio"] = (_sb_agg["value"] / _sb_tot * 100).round(1)
+                    _sb_agg["Mkt Value"] = _sb_agg["value"].apply(_fmt_val)
+                    st.dataframe(_sb_agg[["sector", "Mkt Value", "% Portfolio"]].rename(
+                                     columns={"sector": "Sector"}),
+                                 hide_index=True, use_container_width=True)
+                    _sb_fig = px.bar(_sb_agg[_sb_agg["sector"] != "Unmapped"], x="value", y="sector",
+                                     orientation="h", labels={"value": "Aggregate Value ($)", "sector": ""})
+                    _sb_fig.update_layout(template="plotly_dark", height=max(220, len(_sb_agg) * 28),
+                                         margin=dict(t=10, b=10))
+                    st.plotly_chart(_sb_fig, use_container_width=True)
+                    _sb_unmapped = _sb_agg.loc[_sb_agg["sector"] == "Unmapped", "% Portfolio"]
+                    if not _sb_unmapped.empty and _sb_unmapped.iloc[0] > 0:
+                        st.caption(f"⚠️ {_sb_unmapped.iloc[0]:.0f}% unmapped (CUSIP had no US-listed "
+                                   "ticker match — foreign ordinary shares, private placements, or "
+                                   "bonds/preferred, which OpenFIGI/yfinance don't resolve cleanly).")
 
     with tab1:
         insiders = q("SELECT * FROM insider_trades ORDER BY transaction_date DESC")

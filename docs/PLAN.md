@@ -80,9 +80,9 @@ Options-trading edge system: Telegram bot + dashboard + our own capture-forward 
 Goal: stop ~5 recurring pushes filling the chat. Mechanism is Telegram
 `editMessageText` — ONE status message edited in place, not re-sent.
 
-### 1. EASY — Market-structure table (~15 min)
-Levered-ETF block in the intraday writeup is prose; make it `_pipe_table`:
-`ST | ETF | AUM | Day%` (TQQQ/SOXL/UPRO). Same data, 3 lines instead of 6.
+### 1. [x] EASY — Market-structure table — DONE (commit 4f63e60)
+Levered-ETF block in the Wrap writeup is now `_pipe_table` (`ST | ETF | Lev | Day%`),
+sorted worst→best, replacing the old "worst fund named in a sentence" prose.
 
 ### 2. EASY — Read-through / narrative as links (~15 min)
 Long narrative paragraphs (READ-THROUGH, OUTLOOK) → single clickable line via
@@ -150,7 +150,7 @@ Compiled by re-reading the whole session. NOT DONE items are the real backlog.
 | A11 | **Dashboard: Summary + Per-leg detail at TOP** (no scrolling) | Not started. |
 | A12 | **Dashboard: market overview collapsible dropdown at top** | Not started. |
 | A13 | **Portfolio Greeks as dropdown** | Not started. |
-| A14 | **Wire PEAD into a command** | Signal VALIDATED (t=+3.62, OOS-survives, 57%) but no command uses it. |
+| A14 | ~~Wire PEAD into a command~~ | **DONE** — `/pead` registered (`pead_command`, telegram_bot_optimized.py:27577), stale audit line. |
 | A15 | **Dashboard Portfolio page render-check** | ~12 commits touched it; NEVER once opened. |
 | A16 | `_lib` orphan triage (B: position lifecycle, C: forex/crypto) | Only the news orphans were wired. |
 | A17 | `/debate` weight rebalance | HELD — my validation contradicted the premise (Technical IC −0.039, not +4.28). Needs a proper agent-level backtest. |

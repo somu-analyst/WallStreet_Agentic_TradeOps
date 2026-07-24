@@ -10110,7 +10110,7 @@ elif page == "📈 Insider / Congress / Whales":
         _EDGAR_FUNDS = {
             "Berkshire Hathaway": "0001067983", "Vanguard Group": "0001029160",
             "BlackRock": "0001364742", "Citadel Advisors": "0001423053",
-            "ARK Investment Management": "0001649339", "Soros Fund Management": "0001549626",
+            "ARK Investment Management": "0001697748", "Soros Fund Management": "0001549626",
             "Bridgewater Associates": "0001350694", "Renaissance Technologies": "0001037389",
             "Pershing Square (Ackman)": "0001336528", "Scion (Burry)": "0001649339",
             "Third Point (Loeb)": "0001040273", "Tiger Global (Coleman)": "0001167483",
@@ -22283,6 +22283,18 @@ if page == "🌍 Global Opportunities":
                         e = "🟢" if it["tone"] > 0 else ("🔴" if it["tone"] < 0 else "⚪")
                         st.markdown(f"- {e} [{it['title']}]({it['link']}) · _{it['when']}_")
 
+            st.markdown("#### 📰 TradingKey")
+            st.caption("[tradingkey.com](https://www.tradingkey.com/) has no public RSS feed, so this "
+                       "pulls its coverage via Google News search instead (same mechanism as the feeds "
+                       "above). It also runs a live 13F-style tracker at "
+                       "[/tools/star-investors](https://www.tradingkey.com/tools/star-investors) — "
+                       "the same names (Buffett, Dalio, Simons, Wood, Soros, Ackman) are already tracked "
+                       "here from source SEC EDGAR 13F filings, not a scrape: see "
+                       "🏆 Legendary Investors (13F) → 📜 13F History tab.")
+            for it in _theme_news("site:tradingkey.com", n=6):
+                e = "🟢" if it["tone"] > 0 else ("🔴" if it["tone"] < 0 else "⚪")
+                st.markdown(f"- {e} [{it['title']}]({it['link']}) · _{it['when']}_")
+
             st.markdown("#### 🏛 Institutional research & white papers")
             st.caption("Big-4 / bank / institution reports surfaced via news (most don't offer clean RSS). "
                        "Each pulls the latest coverage of that publisher's reports & outlooks.")
@@ -22328,11 +22340,20 @@ if page == "🌍 Global Opportunities":
 if page == "👀 Watchlist":
     _page_header("👀 Watchlist", _PAGE_HELP["👀 Watchlist"])
 
+    _WL_CLASSES = ["Stock", "ETF", "Bond", "Commodity"]
+
     def _wl_setup(conn):
         conn.execute(
             "CREATE TABLE IF NOT EXISTS watchlist (id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "ticker TEXT, target_price REAL, note TEXT, added_date TEXT, status TEXT DEFAULT 'ACTIVE')")
         conn.commit()
+        # asset_class added 2026-07-23 (user: subsection by Stock/ETF/Bond/Commodity) —
+        # ALTER is a no-op once the column exists, so this stays safe to re-run every load.
+        try:
+            conn.execute("ALTER TABLE watchlist ADD COLUMN asset_class TEXT DEFAULT 'Stock'")
+            conn.commit()
+        except Exception:
+            pass
 
     _wl_conn = get_conn()
     _wl_setup(_wl_conn)
@@ -22350,10 +22371,13 @@ if page == "👀 Watchlist":
         return _db_spot(tk) > 0
 
     with st.expander("➕ Add a ticker", expanded=True):
-        _wa1, _wa2, _wa3 = st.columns([1, 1, 2])
-        _wa_tk = _wa1.text_input("Ticker", key="wl_add_tk", placeholder="e.g. AAPL").strip().upper()
-        _wa_target = _wa2.number_input("Target buy price (optional)", min_value=0.0, step=0.5, key="wl_add_target")
-        _wa_note = _wa3.text_input("Note (optional)", key="wl_add_note", placeholder="why you're watching it")
+        _wa1, _wa2, _wa3, _wa4 = st.columns([1, 1, 1, 2])
+        _wa_tk = _wa1.text_input("Ticker", key="wl_add_tk", placeholder="e.g. AAPL, GLD, TLT").strip().upper()
+        _wa_class = _wa2.selectbox("Asset class", _WL_CLASSES, key="wl_add_class",
+                                   help="Groups the watchlist below into subsections. "
+                                        "Commodities: GLD/GC=F gold, USO/CL=F oil. Bonds: TLT/IEF/SHY.")
+        _wa_target = _wa3.number_input("Target buy price (optional)", min_value=0.0, step=0.5, key="wl_add_target")
+        _wa_note = _wa4.text_input("Note (optional)", key="wl_add_note", placeholder="why you're watching it")
         if st.button("➕ Add to watchlist", key="wl_add_btn"):
             if _wa_tk:
                 _dupe = pd.read_sql("SELECT id FROM watchlist WHERE ticker=? AND status='ACTIVE'",
@@ -22364,11 +22388,12 @@ if page == "👀 Watchlist":
                     st.error(f"⚠️ {_wa_tk} doesn't look like a valid/quoted ticker — not added.")
                 else:
                     _wl_conn.execute(
-                        "INSERT INTO watchlist (ticker, target_price, note, added_date, status) "
-                        "VALUES (?, ?, ?, ?, 'ACTIVE')",
-                        (_wa_tk, (_wa_target or None), (_wa_note or None), datetime.now().strftime("%Y-%m-%d")))
+                        "INSERT INTO watchlist (ticker, target_price, note, added_date, status, asset_class) "
+                        "VALUES (?, ?, ?, ?, 'ACTIVE', ?)",
+                        (_wa_tk, (_wa_target or None), (_wa_note or None),
+                         datetime.now().strftime("%Y-%m-%d"), _wa_class))
                     _wl_conn.commit()
-                    st.success(f"Added {_wa_tk}."); st.rerun()
+                    st.success(f"Added {_wa_tk} ({_wa_class})."); st.rerun()
             else:
                 st.error("Need a ticker.")
 
@@ -22391,7 +22416,8 @@ if page == "👀 Watchlist":
                 _wspot = _cached_price(_wtk) if st.session_state.get("use_ah", True) else _weod
                 _wspot = _wspot or _weod
                 if not _wspot:
-                    _wl_rows.append({"Ticker": _wtk, "Spot": None, "Note": "no price data"})
+                    _wl_rows.append({"id": int(_wr["id"]), "Class": _wr.get("asset_class") or "Stock",
+                                      "Ticker": _wtk, "Spot": None, "Note": "no price data"})
                     continue
                 _wsrc = "EOD"
                 if _weod and abs(_wspot - _weod) > 1e-9:
@@ -22459,7 +22485,8 @@ if page == "👀 Watchlist":
                     except Exception:
                         pass
                 _wl_rows.append({
-                    "id": int(_wr["id"]), "Ticker": _wtk, "Spot": round(_wspot, 2), "Src": _wsrc,
+                    "id": int(_wr["id"]), "Class": _wr.get("asset_class") or "Stock",
+                    "Ticker": _wtk, "Spot": round(_wspot, 2), "Src": _wsrc,
                     "Day%": (round(_wchg, 2) if _wchg is not None else None),
                     "Day L-H": (f"${_wdl:,.2f}-${_wdh:,.2f}" if (_wdh and _wdl) else "—"),
                     "52w L-H": (f"${_w52lo:,.2f}-${_w52hi:,.2f}" if (_w52hi and _w52lo) else "—"),
@@ -22477,35 +22504,43 @@ if page == "👀 Watchlist":
                     "_52hi": _w52hi, "_52lo": _w52lo, "_hist": _whist,
                 })
             except Exception as _e:
-                _wl_rows.append({"id": int(_wr["id"]), "Ticker": _wtk, "Spot": None, "Note": f"error: {_e}"})
+                _wl_rows.append({"id": int(_wr["id"]), "Class": _wr.get("asset_class") or "Stock",
+                                  "Ticker": _wtk, "Spot": None, "Note": f"error: {_e}"})
 
-        _wl_show = pd.DataFrame(_wl_rows)
-        st.dataframe(_wl_show.drop(columns=["id", "_52hi", "_52lo", "_hist"], errors="ignore"),
-                     use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-        st.markdown("**52-week range** — current price vs the year's high/low")
-        _wl_chart_cols = st.columns(min(len(_wl_rows), 4) or 1)
-        for _wi, _wrow in enumerate(_wl_rows):
-            if not (_wrow.get("_52hi") and _wrow.get("_52lo") and _wrow.get("_hist") is not None):
+        _WL_ICON = {"Stock": "📈", "ETF": "🧺", "Bond": "🏦", "Commodity": "🛢️"}
+        _WL_PLURAL = {"Stock": "Stocks", "ETF": "ETFs", "Bond": "Bonds", "Commodity": "Commodities"}
+        for _wcls in _WL_CLASSES:
+            _cls_rows = [r for r in _wl_rows if r.get("Class", "Stock") == _wcls]
+            if not _cls_rows:
                 continue
-            with _wl_chart_cols[_wi % len(_wl_chart_cols)]:
-                _wfig = go.Figure()
-                _wfig.add_trace(go.Scatter(y=_wrow["_hist"]["Close"], mode="lines",
-                                           line=dict(width=1.5), showlegend=False))
-                _wfig.add_hline(y=_wrow["_52hi"], line_dash="dot", line_color="#e74c3c", line_width=1)
-                _wfig.add_hline(y=_wrow["_52lo"], line_dash="dot", line_color="#2ecc71", line_width=1)
-                _wfig.update_layout(height=140, margin=dict(l=0, r=0, t=24, b=0),
-                                    title=dict(text=f"{_wrow['Ticker']}  ${_wrow['Spot']:,.2f}", font=dict(size=12)),
-                                    xaxis=dict(visible=False), yaxis=dict(visible=False),
-                                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-                st.plotly_chart(_wfig, use_container_width=True, config={"displayModeBar": False},
-                                key=f"wl_chart_{_wrow['Ticker']}_{_wrow.get('id', _wi)}")
-                st.caption(f"52w ${_wrow['_52lo']:,.0f}–${_wrow['_52hi']:,.0f}")
+            st.markdown(f"### {_WL_ICON.get(_wcls, '•')} {_WL_PLURAL.get(_wcls, _wcls)} ({len(_cls_rows)})")
+            _cls_show = pd.DataFrame(_cls_rows)
+            st.dataframe(_cls_show.drop(columns=["id", "Class", "_52hi", "_52lo", "_hist"], errors="ignore"),
+                         use_container_width=True, hide_index=True)
 
-        st.markdown("---")
+            _cls_chart_rows = [r for r in _cls_rows
+                               if r.get("_52hi") and r.get("_52lo") and r.get("_hist") is not None]
+            if _cls_chart_rows:
+                _wl_chart_cols = st.columns(min(len(_cls_chart_rows), 4) or 1)
+                for _wi, _wrow in enumerate(_cls_chart_rows):
+                    with _wl_chart_cols[_wi % len(_wl_chart_cols)]:
+                        _wfig = go.Figure()
+                        _wfig.add_trace(go.Scatter(y=_wrow["_hist"]["Close"], mode="lines",
+                                                   line=dict(width=1.5), showlegend=False))
+                        _wfig.add_hline(y=_wrow["_52hi"], line_dash="dot", line_color="#e74c3c", line_width=1)
+                        _wfig.add_hline(y=_wrow["_52lo"], line_dash="dot", line_color="#2ecc71", line_width=1)
+                        _wfig.update_layout(height=140, margin=dict(l=0, r=0, t=24, b=0),
+                                            title=dict(text=f"{_wrow['Ticker']}  ${_wrow['Spot']:,.2f}", font=dict(size=12)),
+                                            xaxis=dict(visible=False), yaxis=dict(visible=False),
+                                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                        st.plotly_chart(_wfig, use_container_width=True, config={"displayModeBar": False},
+                                        key=f"wl_chart_{_wrow['Ticker']}_{_wrow.get('id', _wi)}")
+                        st.caption(f"52w ${_wrow['_52lo']:,.0f}–${_wrow['_52hi']:,.0f}")
+            st.markdown("---")
+
         st.markdown("**Remove a ticker** (bought it, or lost interest)")
-        _wl_map = {f"{r['Ticker']} (id {r['id']})": r["id"] for r in _wl_rows if "id" in r}
+        _wl_map = {f"{r['Ticker']} · {r.get('Class','Stock')} (id {r['id']})": r["id"]
+                   for r in _wl_rows if "id" in r}
         if _wl_map:
             _wl_rm_pick = st.selectbox("Ticker", list(_wl_map), key="wl_rm_pick")
             if st.button("🗑️ Remove", key="wl_rm_btn"):

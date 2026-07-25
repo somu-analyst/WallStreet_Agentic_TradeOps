@@ -14915,43 +14915,42 @@ elif page == "🎯 Next-Day Exit Planner":
                 st.caption("Capital-at-risk split: "
                            + " · ".join(f"{k} {v/_tot*100:.0f}%" for k, v in sorted(_gross.items(), key=lambda x: -x[1])))
 
-        # ── Next-day market-shock P&L grid ──
-        st.markdown("#### 📉 Tomorrow's scenarios — portfolio P&L vs a market move")
-        _shocks = [-0.03, -0.02, -0.01, -0.005, 0.0, 0.005, 0.01, 0.02, 0.03]
-        _scn_rows = []
-        for s in _shocks:
-            tot = 0.0
-            for l in _legs:
-                ns = l["spot"] * (1 + s)
-                t1 = max(l["dte"] - 1, 0) / 365.0
-                if l["typ"] == "stock" or not l.get("K"):
-                    tot += (ns - l["cur"]) * l["m"]           # shares: linear, no BS (K=0)
-                    continue
-                iv_s = max(l["iv"] * (1 - 2.0 * s), 0.05)     # vol rises when market drops
-                np_ = bs_greeks(ns, l["K"], t1, _R, iv_s, l["typ"]).get("price", l["cur"]) if t1 > 0 else \
-                    (max(ns - l["K"], 0) if l["typ"] == "call" else max(l["K"] - ns, 0))
-                tot += (np_ - l["cur"]) * l["m"]
-            _scn_rows.append({"Market move": f"{s*100:+.1f}%", "Portfolio P&L $": round(tot),
-                              "_s": s, "_pnl": tot})
-        _scn = pd.DataFrame(_scn_rows)
-        _sc1, _sc2 = st.columns([2, 3])
-        with _sc1:
-            _disp = _scn[["Market move", "Portfolio P&L $"]].copy()
-            st.dataframe(_disp, hide_index=True, use_container_width=True,
-                         column_config={"Portfolio P&L $": st.column_config.NumberColumn(format="$%d")})
-        with _sc2:
-            _sfig = go.Figure(go.Bar(
-                x=_scn["Market move"], y=_scn["_pnl"],
-                marker_color=["#ff5c6c" if v < 0 else "#00e676" for v in _scn["_pnl"]]))
-            _sfig.update_layout(template="plotly_dark", height=300,
-                                title="Next-day P&L by market move (1 day of decay + vol shift)",
-                                xaxis_title="Market move", yaxis_title="P&L $",
-                                margin=dict(t=42, b=10))
-            st.plotly_chart(_sfig, use_container_width=True)
-        _down = next(r["_pnl"] for r in _scn_rows if abs(r["_s"] + 0.02) < 1e-9)
-        _up = next(r["_pnl"] for r in _scn_rows if abs(r["_s"] - 0.02) < 1e-9)
-        st.caption(f"A **−2%** gap tomorrow ≈ **${_down:,.0f}**; a **+2%** gap ≈ **${_up:,.0f}**. "
-                   "Includes one day of theta and a simple vol bump on down moves.")
+        with st.expander("📉 Tomorrow's scenarios — portfolio P&L vs a market move", expanded=False):
+            _shocks = [-0.03, -0.02, -0.01, -0.005, 0.0, 0.005, 0.01, 0.02, 0.03]
+            _scn_rows = []
+            for s in _shocks:
+                tot = 0.0
+                for l in _legs:
+                    ns = l["spot"] * (1 + s)
+                    t1 = max(l["dte"] - 1, 0) / 365.0
+                    if l["typ"] == "stock" or not l.get("K"):
+                        tot += (ns - l["cur"]) * l["m"]           # shares: linear, no BS (K=0)
+                        continue
+                    iv_s = max(l["iv"] * (1 - 2.0 * s), 0.05)     # vol rises when market drops
+                    np_ = bs_greeks(ns, l["K"], t1, _R, iv_s, l["typ"]).get("price", l["cur"]) if t1 > 0 else \
+                        (max(ns - l["K"], 0) if l["typ"] == "call" else max(l["K"] - ns, 0))
+                    tot += (np_ - l["cur"]) * l["m"]
+                _scn_rows.append({"Market move": f"{s*100:+.1f}%", "Portfolio P&L $": round(tot),
+                                  "_s": s, "_pnl": tot})
+            _scn = pd.DataFrame(_scn_rows)
+            _sc1, _sc2 = st.columns([2, 3])
+            with _sc1:
+                _disp = _scn[["Market move", "Portfolio P&L $"]].copy()
+                st.dataframe(_disp, hide_index=True, use_container_width=True,
+                             column_config={"Portfolio P&L $": st.column_config.NumberColumn(format="$%d")})
+            with _sc2:
+                _sfig = go.Figure(go.Bar(
+                    x=_scn["Market move"], y=_scn["_pnl"],
+                    marker_color=["#ff5c6c" if v < 0 else "#00e676" for v in _scn["_pnl"]]))
+                _sfig.update_layout(template="plotly_dark", height=300,
+                                    title="Next-day P&L by market move (1 day of decay + vol shift)",
+                                    xaxis_title="Market move", yaxis_title="P&L $",
+                                    margin=dict(t=42, b=10))
+                st.plotly_chart(_sfig, use_container_width=True)
+            _down = next(r["_pnl"] for r in _scn_rows if abs(r["_s"] + 0.02) < 1e-9)
+            _up = next(r["_pnl"] for r in _scn_rows if abs(r["_s"] - 0.02) < 1e-9)
+            st.caption(f"A **−2%** gap tomorrow ≈ **${_down:,.0f}**; a **+2%** gap ≈ **${_up:,.0f}**. "
+                       "Includes one day of theta and a simple vol bump on down moves.")
 
         # ── Monte Carlo simulation (portfolio P&L distribution) ──
         st.markdown("#### 🎲 Monte Carlo — portfolio P&L distribution")

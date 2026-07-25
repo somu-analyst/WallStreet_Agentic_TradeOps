@@ -1728,6 +1728,52 @@ def _dh_banner():
         pass  # banner must never break the app
 
 
+# ── PWA install support (user 2026-07-24: "add to home screen" icon on Android) ──
+# Streamlit renders st.markdown/components.html content inside a sandboxed iframe, so a
+# plain <link rel="manifest"> tag placed there has no effect — the manifest/icons/theme-color
+# must live in the PARENT document's <head> for Chrome's install banner to see them. This
+# reaches out via window.parent, once, and is a no-op on repeat reruns (checks for a marker
+# id first). Static files are served from ./static/ via [server] enableStaticServing=true
+# in .streamlit/config.toml (Streamlit 1.54+).
+st.components.v1.html(
+    """
+    <script>
+    (function() {
+        var d = window.parent.document;
+        if (d.getElementById('pwa-manifest-injected')) return;
+        var marker = d.createElement('meta');
+        marker.id = 'pwa-manifest-injected';
+        d.head.appendChild(marker);
+        var manifest = d.createElement('link');
+        manifest.rel = 'manifest';
+        manifest.href = '/app/static/manifest.json';
+        d.head.appendChild(manifest);
+        var appleIcon = d.createElement('link');
+        appleIcon.rel = 'apple-touch-icon';
+        appleIcon.href = '/app/static/apple-touch-icon.png';
+        d.head.appendChild(appleIcon);
+        var themeColor = d.createElement('meta');
+        themeColor.name = 'theme-color';
+        themeColor.content = '#0b1120';
+        d.head.appendChild(themeColor);
+        var mobileApp = d.createElement('meta');
+        mobileApp.name = 'mobile-web-app-capable';
+        mobileApp.content = 'yes';
+        d.head.appendChild(mobileApp);
+        var appleCapable = d.createElement('meta');
+        appleCapable.name = 'apple-mobile-web-app-capable';
+        appleCapable.content = 'yes';
+        d.head.appendChild(appleCapable);
+        var appleTitle = d.createElement('meta');
+        appleTitle.name = 'apple-mobile-web-app-title';
+        appleTitle.content = 'RUDRARJUN';
+        d.head.appendChild(appleTitle);
+    })();
+    </script>
+    """,
+    height=0, width=0,
+)
+
 _dh_banner()
 
 # ---------------------------------------------------------------------------

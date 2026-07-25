@@ -1,9 +1,16 @@
+# base was hardcoded "dark" with dark colors always -- Streamlit's NATIVE widgets
+# (dataframe grid, dropdown/selectbox chrome) read THIS config-level theme directly,
+# not page CSS, so the app's own Light/Dark toggle (_CSS_LIGHT/_CSS_DARK in dashboard.py)
+# could only ever patch CSS-reachable elements -- native tables/dropdowns stayed dark
+# even in "Light" mode (user 2026-07-24: "tables showing as black background white
+# letters" in light mode). Light is the actual default (_load_saved_theme() default),
+# so the base now matches it; dark mode's CSS layer already overrides these to match.
 [theme]
-base = "dark"
-primaryColor = "#3d8bff"
-backgroundColor = "#0b1120"
-secondaryBackgroundColor = "#141c2e"
-textColor = "#e6edf3"
+base = "light"
+primaryColor = "#4f46e5"
+backgroundColor = "#f4f5f8"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1a2332"
 font = "sans serif"
 
 [client]

@@ -8450,8 +8450,11 @@ def _parse_add_args(args):
                 continue
             except ValueError:
                 return None, f"bad price '{s}'"
-        if re.fullmatch(r"[+-]?\d+", s) and qty is None:
-            qty = int(s)
+        if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", s) and qty is None:
+            # Fractional qty allowed (fractional-share investing is real, user 2026-07-24)
+            # -- kept as float here regardless of type; callers that need whole contracts
+            # (options) cast with int() themselves, same as before.
+            qty = float(s) if "." in s else int(s)
             continue
         if tk is None and re.fullmatch(r"[A-Za-z][A-Za-z.\-]{0,7}", s):
             tk = s.upper()
@@ -31258,22 +31261,62 @@ def _fmt_paper(conn):
                 "<i>Same grammar as /add — see /add for the full one-liner spec.</i>")
     rows, details = [], []
     tot_pnl = 0.0
-    for _, r in df.iterrows():
+
+    def _earn_txt(tk):
+        try:
+            ne = _next_earnings(tk)
+            if ne and ne.get("days") is not None and 0 <= ne["days"] <= 14:
+                return f" · earn {ne['days']}d"
+        except Exception:
+            pass
+        return ""
+
+    # Consolidate stock lots of the SAME ticker into one weighted-avg position, same fix
+    # as the dashboard (user 2026-07-24: "GOOGL +1sh / GOOGL +100sh shows as two different"
+    # -- real platforms show one position per symbol). Options stay one row per contract.
+    _stock_df = df[df["option_type"].astype(str).str.upper() == "STOCK"]
+    _opt_df = df[df["option_type"].astype(str).str.upper() != "STOCK"]
+    for tk, grp in _stock_df.groupby(_stock_df["ticker"].str.upper()):
+        qty = float(grp["quantity"].sum())
+        if qty == 0:
+            continue
+        entry = float((grp["entry_price"] * grp["quantity"]).sum() / qty)
+        try:
+            mark = _last_price(tk) or entry
+        except Exception:
+            mark = entry
+        pnl = (mark - entry) * qty
+        tot_pnl += pnl
+        pnl_pct = pnl / (abs(entry * qty) or 1.0) * 100
+        em = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
+        lots_txt = f" ({len(grp)} lots)" if len(grp) > 1 else ""
+        leg = f"{tk} {qty:+g}sh{lots_txt}"
+        rows.append((em, leg, f"${entry:.2f}", f"${mark:.2f}", f"${pnl:+,.0f}"))
+        earliest = grp["entry_date"].min()
+        try:
+            days_held = (datetime.now().date() - datetime.strptime(str(earliest), "%Y-%m-%d").date()).days
+        except Exception:
+            days_held = None
+        ids_txt = "/".join(str(int(x)) for x in grp["trade_id"])
+        note_txt = "; ".join(n for n in grp["notes"].dropna().unique() if n)
+        note_txt = f" — {note_txt}" if note_txt else ""
+        details.append(f"• #{ids_txt} {leg} · entry {earliest}"
+                        + (f" ({days_held}d held)" if days_held is not None else "")
+                        + f" · {pnl_pct:+.0f}%" + _earn_txt(tk) + note_txt)
+    for _, r in _opt_df.iterrows():
         tk = str(r["ticker"]).upper()
         typ = str(r["option_type"]).upper()
         qty = int(r["quantity"])
         entry = float(r["entry_price"] or 0)
-        mult = 1 if typ == "STOCK" else 100
         try:
             mark = _pt_mark(r, conn)
         except Exception:
             mark = 0.0
-        pnl = (mark - entry) * qty * mult
+        pnl = (mark - entry) * qty * 100
         tot_pnl += pnl
-        cost = abs(entry * qty * mult) or 1.0
-        pnl_pct = pnl / cost * 100
+        pnl_pct = pnl / (abs(entry * qty * 100) or 1.0) * 100
         em = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
-        leg = f"{tk} {qty:+d}sh" if typ == "STOCK" else f"{tk} {_kfb(r['strike'])}{typ[0]} {qty:+d}x"
+        leg = f"{tk} {_kfb(r['strike'])}{typ[0]} {qty:+d}x"
         rows.append((em, leg, f"${entry:.2f}", f"${mark:.2f}", f"${pnl:+,.0f}"))
         note_txt = f" — {r['note']}" if r.get("note") else ""
         try:
@@ -31287,16 +31330,9 @@ def _fmt_paper(conn):
                 dte_txt = f" · exp {r['expiry']} ({dte}d)"
             except Exception:
                 dte_txt = f" · exp {r['expiry']}"
-        earn_txt = ""
-        try:
-            ne = _next_earnings(tk)
-            if ne and ne.get("days") is not None and 0 <= ne["days"] <= 14:
-                earn_txt = f" · earn {ne['days']}d"
-        except Exception:
-            pass
         details.append(f"• #{int(r['trade_id'])} {leg} · entry {r['entry_date']}"
                         + (f" ({days_held}d held)" if days_held is not None else "")
-                        + f" · {pnl_pct:+.0f}%" + dte_txt + earn_txt + note_txt)
+                        + f" · {pnl_pct:+.0f}%" + dte_txt + _earn_txt(tk) + note_txt)
     return _report(f"PAPER TRADING (demo) · Net ${tot_pnl:+,.0f}",
                     ("", "Leg", "Entry", "Mark", "P&L"), rows, right_cols={2, 3, 4}, details=details,
                     notes="/paper add ... (grammar of /add) · /paper close ID [@price]")
@@ -31352,8 +31388,10 @@ async def paper_command(update, ctx):
                             exit_px = None
                     if exit_px is None:
                         exit_px = _pt_mark(rd, conn)
-                    mult = 1 if str(rd["option_type"]).upper() == "STOCK" else 100
-                    pnl = (exit_px - float(rd["entry_price"] or 0)) * int(rd["quantity"]) * mult
+                    is_stock = str(rd["option_type"]).upper() == "STOCK"
+                    mult = 1 if is_stock else 100
+                    qty_close = float(rd["quantity"]) if is_stock else int(rd["quantity"])
+                    pnl = (exit_px - float(rd["entry_price"] or 0)) * qty_close * mult
                     conn.execute(
                         "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=? WHERE trade_id=?",
                         (exit_px, datetime.now().strftime("%Y-%m-%d"), pid))

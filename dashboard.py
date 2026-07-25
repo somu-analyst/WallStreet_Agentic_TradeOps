@@ -1918,7 +1918,7 @@ h1 a,h2 a,h3 a,h4 a{ display:none!important; }
 button[data-baseweb="tab"]{ font-size:.85rem!important; font-weight:600; color:var(--muted)!important; padding:6px 16px; }
 button[data-baseweb="tab"][aria-selected="true"]{ color:var(--accent)!important; background:rgba(79,70,229,.08); border-radius:10px 10px 0 0; }
 [data-baseweb="tab-highlight"]{ background:linear-gradient(90deg,var(--accent),#7c3aed)!important; height:3px!important; }
-.stDataFrame,[data-testid="stDataFrame"]{ border-radius:12px; overflow:hidden; border:1px solid var(--border); }
+.stDataFrame,[data-testid="stDataFrame"]{ border-radius:12px; overflow:hidden; border:1px solid #000!important; }
 .stButton>button{ background:linear-gradient(135deg,#4f46e5,#7c3aed); color:#fff!important; border:none; border-radius:10px; font-weight:700; transition:all .15s; box-shadow:0 3px 10px rgba(79,70,229,.25); }
 .stButton>button:hover{ filter:brightness(1.06); transform:translateY(-1px); box-shadow:0 6px 18px rgba(124,58,237,.35); }
 [data-testid="stSelectbox"] label,[data-testid="stMultiSelect"] label,
@@ -1948,7 +1948,7 @@ input::placeholder, textarea::placeholder{ color:#94a3b8!important; }
 code, kbd{ background:#eef0f6!important; color:#4f46e5!important; }
 pre{ background:#f1f3f8!important; }
 [data-testid="stTable"] td, [data-testid="stTable"] th,
-table td, table th{ color:var(--text)!important; border-color:var(--border)!important; }
+table td, table th{ color:var(--text)!important; border-color:#000!important; }
 [data-baseweb="tab-panel"]{ background:transparent; }
 .section-header{ font-size:1.05rem; font-weight:700; color:var(--accent); border-bottom:2px solid var(--accent); padding-bottom:6px; margin:20px 0 12px; }
 .card{ background:#fff; border:1px solid var(--border); border-radius:14px; padding:16px; margin-bottom:12px; box-shadow:0 1px 3px rgba(16,24,40,.05); }
@@ -23230,6 +23230,45 @@ if page == "📝 Paper Trading":
         _pt_rows = []
         _pt_stock = _pt_df[_pt_df["option_type"].astype(str).str.upper() == "STOCK"]
         _pt_opts = _pt_df[_pt_df["option_type"].astype(str).str.upper() != "STOCK"]
+        def _pt_52w(ticker):
+            """52-week hi/lo from stock_daily (user 2026-07-24: missing entirely from
+            Paper Trading, same fix already in Watchlist) -- (lo, hi) or (None, None)."""
+            try:
+                _rng = pd.read_sql(
+                    "SELECT MAX(high) AS hi, MIN(low) AS lo FROM (SELECT high, low FROM stock_daily "
+                    "WHERE ticker=? ORDER BY trade_date DESC LIMIT 252)", _pt_conn, params=(ticker,))
+                if not _rng.empty and _rng.iloc[0]["hi"] is not None:
+                    return float(_rng.iloc[0]["lo"]), float(_rng.iloc[0]["hi"])
+            except Exception:
+                pass
+            return None, None
+
+        def _xirr(cashflows):
+            """Annualized IRR for irregularly-dated cash flows (user 2026-07-24: XIRR per
+            stock position). cashflows = [(date, amount), ...], amount<0 = money out (buy),
+            amount>0 = money in (current value, as if sold today). Bisection on NPV=0 --
+            no scipy/numpy_financial dependency needed for a single well-behaved sign change
+            (one or more negative cash flows followed by one final positive one)."""
+            if len(cashflows) < 2:
+                return None
+            t0 = min(d for d, _ in cashflows)
+            def npv(rate):
+                return sum(amt / (1 + rate) ** ((d - t0).days / 365.0) for d, amt in cashflows)
+            lo, hi = -0.9999, 10.0   # -99.99%/yr .. +1000%/yr covers any realistic case
+            f_lo, f_hi = npv(lo), npv(hi)
+            if f_lo * f_hi > 0:
+                return None   # no sign change in range -- can't solve (shouldn't happen for buy+current-value)
+            for _ in range(100):
+                mid = (lo + hi) / 2
+                f_mid = npv(mid)
+                if abs(f_mid) < 1e-6:
+                    return mid
+                if f_lo * f_mid < 0:
+                    hi = mid
+                else:
+                    lo, f_lo = mid, f_mid
+            return (lo + hi) / 2
+
         for _ptk, _grp in _pt_stock.groupby(_pt_stock["ticker"].str.upper()):
             _pqty = float(_grp["quantity"].sum())   # fractional shares allowed
             if _pqty == 0:
@@ -23248,10 +23287,21 @@ if page == "📝 Paper Trading":
                 _pdays_held = None
             _pearn, _pdiv = _next_events(_ptk)
             _pnotes = "; ".join(n for n in _grp["notes"].dropna().unique() if n) or ""
-            _pt_rows.append({"id": tuple(int(x) for x in _grp["trade_id"]), "Leg": f"{_ptk} {_pqty:+g}sh"
-                             + (f" ({len(_grp)} lots)" if len(_grp) > 1 else ""),
+            _p52lo, _p52hi = _pt_52w(_ptk)
+            _pcfs = [(datetime.strptime(str(_r["entry_date"]), "%Y-%m-%d"),
+                      -float(_r["entry_price"]) * float(_r["quantity"])) for _, _r in _grp.iterrows()]
+            _pcfs.append((datetime.now(), _pmark * _pqty))
+            try:
+                _pxirr = _xirr(_pcfs)
+            except Exception:
+                _pxirr = None
+            _pt_rows.append({"id": tuple(int(x) for x in _grp["trade_id"]),
+                             "Ticker": _ptk, "Type": "Stock",
+                             "Qty": _pqty, "Lots": len(_grp),
                              "Entry": round(_pentry, 2), "Mark": round(_pmark, 2),
+                             "52w L-H": (f"${_p52lo:,.2f}-${_p52hi:,.2f}" if _p52hi else "—"),
                              "P&L $": round(_ppnl), "P&L %": round(_ppnl_pct, 1),
+                             "XIRR %": (round(_pxirr * 100, 1) if _pxirr is not None else None),
                              "Entry Date": _pearliest, "Days Held": _pdays_held,
                              "DTE": None, "Earnings": _pearn, "Ex-Div": _pdiv, "Note": _pnotes})
         for _, _pr in _pt_opts.iterrows():
@@ -23265,7 +23315,6 @@ if page == "📝 Paper Trading":
                 _pmark = _pentry
             _ppnl = (_pmark - _pentry) * _pqty * 100
             _ppnl_pct = _ppnl / (abs(_pentry * _pqty * 100) or 1.0) * 100
-            _pleg = f"{_ptk} ${_pr['strike']:.0f}{_ptyp[0]} {_pqty:+d}x exp {_pr['expiry']}"
             try:
                 _pdays_held = (datetime.now().date() - datetime.strptime(str(_pr["entry_date"]), "%Y-%m-%d").date()).days
             except Exception:
@@ -23275,19 +23324,37 @@ if page == "📝 Paper Trading":
             except Exception:
                 _pdte = None
             _pearn, _pdiv = _next_events(_ptk)
-            _pt_rows.append({"id": (int(_pr["trade_id"]),), "Leg": _pleg, "Entry": round(_pentry, 2),
-                             "Mark": round(_pmark, 2), "P&L $": round(_ppnl), "P&L %": round(_ppnl_pct, 1),
+            _p52lo, _p52hi = _pt_52w(_ptk)
+            try:
+                _pspot = _cached_price(_ptk) or 0.0
+            except Exception:
+                _pspot = 0.0
+            _pt_rows.append({"id": (int(_pr["trade_id"]),),
+                             "Ticker": _ptk, "Type": f"${_pr['strike']:.0f}{_ptyp[0]} exp {_pr['expiry']}",
+                             "Qty": _pqty, "Lots": 1,
+                             "Entry": round(_pentry, 2), "Mark": round(_pmark, 2),
+                             "Spot": (round(_pspot, 2) if _pspot else None),
+                             "52w L-H": (f"${_p52lo:,.2f}-${_p52hi:,.2f}" if _p52hi else "—"),
+                             "P&L $": round(_ppnl), "P&L %": round(_ppnl_pct, 1),
                              "Entry Date": _pr["entry_date"], "Days Held": _pdays_held,
                              "DTE": _pdte, "Earnings": _pearn, "Ex-Div": _pdiv,
                              "Note": _pr.get("notes") or ""})
         _pt_show = pd.DataFrame(_pt_rows)
         _net = _pt_show["P&L $"].sum()
         st.metric("Net demo P&L", f"${_net:+,.0f}")
+        # TOTAL row (user 2026-07-24) -- sums the dollar columns, blanks anything that
+        # isn't meaningfully summable (per-ticker rates/dates/ranges).
+        _pt_total = {c: "" for c in _pt_show.columns}
+        _pt_total["Ticker"] = "TOTAL"
+        for _c in ("P&L $",):
+            if _c in _pt_show.columns:
+                _pt_total[_c] = round(_pt_show[_c].sum())
+        _pt_show = pd.concat([_pt_show, pd.DataFrame([_pt_total])], ignore_index=True)
         st.dataframe(_pt_show.drop(columns=["id"]), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.markdown("**Close a demo position** (closing a multi-lot stock position closes ALL its lots)")
-        _pt_map = {f"{r['Leg']} (id {r['id']})": r["id"] for r in _pt_rows}
+        _pt_map = {f"{r['Ticker']} {r['Type']} {r['Qty']:+g} (id {r['id']})": r["id"] for r in _pt_rows}
         _pc1, _pc2 = st.columns([3, 1])
         _pt_pick = _pc1.selectbox("Position", list(_pt_map), key="pt_close_pick")
         _pt_exit_px = _pc2.number_input("Exit price (0 = live mark)", min_value=0.0, step=0.5, key="pt_close_px")

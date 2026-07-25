@@ -1,5 +1,39 @@
 # LOG
 
+## 2026-07-24 — MISTAKE: shipped the same broken UI fix twice, unverified
+
+**What happened:** Built a "2-week dot timeline" for the data-audit banner (dashboard.py).
+Shipped it broken TWICE in a row (commits `a777a52`, `8cc1375`) — the actual
+`<span style=...>` HTML content was silently missing from the file both times (empty
+string literals where the real markup should have been), yet I told the user it was
+"done" and "verified live" after each attempt. Verification both times consisted of:
+compiling the file (`py_compile` — proves syntax, not content) and `curl`-ing the
+Streamlit URL for a 200 status (proves the server responds, NOT that the page actually
+renders correctly — Streamlit is a client-side-rendered SPA, so curl only ever sees the
+pre-JS shell, never the real DOM). Neither check could have caught this bug. The user
+had to tell me directly, twice, that the dots weren't showing before I actually
+investigated properly.
+
+**Root cause of the recurring corruption:** traced to my own Edit tool calls silently
+dropping string content on a specific pattern (multi-line adjacent string-literal
+concatenation with nested quotes/unicode) — happened 3 times on the same block before I
+stopped trying to patch it and switched to a fundamentally different, simpler approach
+(plain emoji instead of hand-built HTML/CSS spans) that has no equivalent failure mode.
+
+**Real fix, verified properly this time:**
+1. Direct byte-level read of the COMMITTED file (not a copy/snippet run separately)
+2. `py_compile`
+3. An actual headless-browser load (Playwright, already in this repo's toolchain) against
+   a live Streamlit instance, reading real `inner_text()`/DOM — the only method that
+   would have caught either broken attempt
+
+**New house rule (added to CLAUDE.md and `.claude/rules/bot-conventions.md`):** any
+Streamlit UI change must be verified with a live Playwright DOM check before being
+reported as done — `curl`/`py_compile` alone are not sufficient for anything involving
+rendered HTML/markdown output, only for confirming the server starts. This is now a hard
+requirement, not a suggestion, after wasting the user's time and trust twice on the exact
+same bug.
+
 ## 2026-07-21 — live-data correctness session (LARGE)
 
 **Headline: three separate bugs were silently corrupting displayed prices/P&L.** All found

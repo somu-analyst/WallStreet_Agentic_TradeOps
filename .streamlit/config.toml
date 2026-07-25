@@ -12,6 +12,13 @@ backgroundColor = "#f4f5f8"
 secondaryBackgroundColor = "#ffffff"
 textColor = "#1a2332"
 font = "sans serif"
+# The native dataframe grid (st.dataframe) is canvas-rendered (glide-data-grid) and reads
+# these theme keys DIRECTLY -- page CSS (dashboard.py's .stDataFrame border rule) cannot
+# reach its internal row/column gridlines, only the outer HTML wrapper. This is the actual
+# fix for "table rows and columns black" (user 2026-07-24) applying to every st.dataframe
+# table in the app, not just plain HTML/markdown tables.
+borderColor = "#000000"
+dataframeBorderColor = "#000000"
 
 [client]
 showErrorDetails = true

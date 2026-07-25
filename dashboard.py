@@ -23145,11 +23145,35 @@ if page == "📝 Paper Trading":
     _pt_setup(_pt_conn)
 
     def _pt_mark(row):
-        """Current mark: live stock price, or a live option-chain mid/last."""
+        """Current mark: live stock price, or a live option-chain mid/last.
+
+        Expired options (user 2026-07-24: "options in paper trading is not bringing mark
+        price") get a real settlement value -- intrinsic value from the stock's close on
+        the expiry date -- instead of silently falling back to entry_price (which was
+        masking a real settled P&L as $0, since yfinance has no live chain for a date
+        that's already passed)."""
         tk = str(row["ticker"]).upper()
         typ = str(row["option_type"]).upper()
         if typ == "STOCK":
             return _cached_price(tk) or 0.0
+        _expired = False
+        try:
+            _expired = datetime.strptime(str(row["expiry"]), "%Y-%m-%d").date() < datetime.now().date()
+        except Exception:
+            pass
+        if _expired:
+            try:
+                _settle = pd.read_sql(
+                    "SELECT close FROM stock_daily WHERE ticker=? AND trade_date<=? "
+                    "ORDER BY trade_date DESC LIMIT 1", _pt_conn, params=(tk, str(row["expiry"])))
+                if not _settle.empty:
+                    _settle_px = float(_settle.iloc[0]["close"])
+                    _strike = float(row["strike"])
+                    return (max(_settle_px - _strike, 0.0) if typ == "CALL"
+                            else max(_strike - _settle_px, 0.0))
+            except Exception:
+                pass
+            return float(row["entry_price"] or 0)
         try:
             oc = _cached_option_chain(tk, str(row["expiry"]))
             if oc is None:
@@ -23298,7 +23322,7 @@ if page == "📝 Paper Trading":
             _pt_rows.append({"id": tuple(int(x) for x in _grp["trade_id"]),
                              "Ticker": _ptk, "Type": "Stock",
                              "Qty": _pqty, "Lots": len(_grp),
-                             "Entry": round(_pentry, 2), "Mark": round(_pmark, 2),
+                             "Entry": round(_pentry, 2), "Current Price": round(_pmark, 2),
                              "52w L-H": (f"${_p52lo:,.2f}-${_p52hi:,.2f}" if _p52hi else "—"),
                              "P&L $": round(_ppnl), "P&L %": round(_ppnl_pct, 1),
                              "XIRR %": (round(_pxirr * 100, 1) if _pxirr is not None else None),
@@ -23332,7 +23356,7 @@ if page == "📝 Paper Trading":
             _pt_rows.append({"id": (int(_pr["trade_id"]),),
                              "Ticker": _ptk, "Type": f"${_pr['strike']:.0f}{_ptyp[0]} exp {_pr['expiry']}",
                              "Qty": _pqty, "Lots": 1,
-                             "Entry": round(_pentry, 2), "Mark": round(_pmark, 2),
+                             "Entry": round(_pentry, 2), "Current Price": round(_pmark, 2),
                              "Spot": (round(_pspot, 2) if _pspot else None),
                              "52w L-H": (f"${_p52lo:,.2f}-${_p52hi:,.2f}" if _p52hi else "—"),
                              "P&L $": round(_ppnl), "P&L %": round(_ppnl_pct, 1),
@@ -23350,7 +23374,12 @@ if page == "📝 Paper Trading":
             if _c in _pt_show.columns:
                 _pt_total[_c] = round(_pt_show[_c].sum())
         _pt_show = pd.concat([_pt_show, pd.DataFrame([_pt_total])], ignore_index=True)
-        st.dataframe(_pt_show.drop(columns=["id"]), use_container_width=True, hide_index=True)
+        try:
+            st.dataframe(_pt_show.drop(columns=["id"]).style.set_properties(
+                             subset=["Current Price"], **{"font-weight": "bold"}),
+                         use_container_width=True, hide_index=True)
+        except Exception:
+            st.dataframe(_pt_show.drop(columns=["id"]), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.markdown("**Close a demo position** (closing a multi-lot stock position closes ALL its lots)")

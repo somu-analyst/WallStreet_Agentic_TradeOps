@@ -1675,18 +1675,12 @@ def _dh_banner():
             _a0 = _aud.iloc[0]
             _cls = {"VALIDATED": "dh-ok", "PARTIAL": "dh-part", "FAILED": "dh-fail"}.get(_a0["status"], "dh-part")
             _ic = {"VALIDATED": "✅", "PARTIAL": "🟡", "FAILED": "🔴"}.get(_a0["status"], "🟡")
-            # SHORT + BIG (user 2026-07-17); full checks live in the expander below
             _n_fail = str(_a0["summary"]).count("❌")
             _extra = f" · {_n_fail} check{'s' if _n_fail > 1 else ''} failed" if _n_fail else ""
-            st.markdown(
-                f"<div>"
-                f"{_ic} DATA {_a0['status']} — {_a0['audit_date']}{_extra}</div>",
-                unsafe_allow_html=True)
-            # 2-week dot timeline (user 2026-07-24): one dot per audited day, oldest->newest.
-            # Plain emoji, no HTML/CSS string concatenation -- Streamlit's markdown pipeline
-            # kept silently mangling hand-built  HTML here (three separate
-            # times), so this uses colored-circle EMOJI instead: it is just text, cannot be
-            # stripped/corrupted the way raw HTML was, and needs no unsafe_allow_html at all.
+            # ONE compact caption line: status + trailing dot timeline (user 2026-07-24: the
+            # earlier 3-4 line version — status/dots/date-list/expander — ate too much vertical
+            # space). st.caption renders small by default; dots are plain emoji (see note below).
+            _dates_str = ""
             try:
                 with sqlite3.connect(DB_PATH) as _c:
                     _aud14 = pd.read_sql(
@@ -1694,13 +1688,16 @@ def _dh_banner():
                 if not _aud14.empty:
                     _aud14 = _aud14.iloc[::-1]        # oldest -> newest, left -> right
                     _dotemoji = {"VALIDATED": "🟢", "PARTIAL": "🟡", "FAILED": "🔴"}
-                    _dots = " ".join(_dotemoji.get(_r.status, "⚪") for _r in _aud14.itertuples())
-                    _dates_list = ", ".join(f"{_r.audit_date}={_r.status}" for _r in _aud14.itertuples())
-                    st.markdown(_dots)
-                    st.caption(f"last {len(_aud14)} audited days, oldest to newest: {_dates_list}")
+                    _dots = "".join(_dotemoji.get(_r.status, "⚪") for _r in _aud14.itertuples())
+                    _dates_str = ", ".join(f"{_r.audit_date}={_r.status}" for _r in _aud14.itertuples())
+                else:
+                    _dots = ""
             except Exception:
-                pass
+                _dots = ""
+            st.caption(f"{_ic} DATA {_a0['status']} — {_a0['audit_date']}{_extra}  {_dots}")
             with st.expander("🔍 Audit details (7 checks)", expanded=False):
+                if _dates_str:
+                    st.caption(f"Last {len(_aud14)} audited days: {_dates_str}")
                 for _chk in str(_a0["summary"]).split(" · "):
                     st.markdown(_chk)
         if _open.empty:
@@ -14347,16 +14344,17 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
     except Exception:
         _ep_closed_trades = pd.DataFrame()
 
-    with st.expander(f"🧾 Closed positions ({len(_ep_closed_trades)}) — latest closed first", expanded=False):
-        _render_closed_positions_table(_ep_closed_trades)
-
-    # ── Analysis Mode selector ──
+    # ── Analysis Mode selector — ABOVE Closed Positions (user 2026-07-24): today's live
+    # per-leg analysis is the reason you're on this page; closed history is reference,
+    # not the first thing to see ──
     _ep_mode = st.radio(
         "Analysis Mode",
         ["🌅 Next-Day Game Plan", "📋 Individual Position",
          "🏢 All positions — by Ticker", "🌐 All Open Positions"],
         horizontal=True, key="ep_analysis_mode",
     )
+    with st.expander(f"🧾 Closed positions ({len(_ep_closed_trades)}) — latest closed first", expanded=False):
+        _render_closed_positions_table(_ep_closed_trades)
 
     # ══════════════════════════════════════════════════════════════════
     #  NEXT-DAY GAME PLAN — whole-portfolio scenario analysis + action plan
@@ -23218,10 +23216,25 @@ if page == "📝 Paper Trading":
             except Exception:
                 _pmark = _pentry
             _ppnl = (_pmark - _pentry) * _pqty * _pmult
+            _pcost = abs(_pentry * _pqty * _pmult) or 1.0
+            _ppnl_pct = _ppnl / _pcost * 100
             _pleg = f"{_ptk} {_pqty:+d}sh" if _ptyp == "STOCK" else f"{_ptk} ${_pr['strike']:.0f}{_ptyp[0]} {_pqty:+d}x exp {_pr['expiry']}"
+            try:
+                _pdays_held = (datetime.now().date() - datetime.strptime(str(_pr["entry_date"]), "%Y-%m-%d").date()).days
+            except Exception:
+                _pdays_held = None
+            _pdte = None
+            if _ptyp != "STOCK":
+                try:
+                    _pdte = (datetime.strptime(str(_pr["expiry"]), "%Y-%m-%d").date() - datetime.now().date()).days
+                except Exception:
+                    _pdte = None
+            _pearn, _pdiv = _next_events(_ptk)
             _pt_rows.append({"id": int(_pr["trade_id"]), "Leg": _pleg, "Entry": round(_pentry, 2),
-                             "Mark": round(_pmark, 2), "P&L $": round(_ppnl),
-                             "Since": _pr["entry_date"], "Note": _pr.get("notes") or ""})
+                             "Mark": round(_pmark, 2), "P&L $": round(_ppnl), "P&L %": round(_ppnl_pct, 1),
+                             "Entry Date": _pr["entry_date"], "Days Held": _pdays_held,
+                             "DTE": _pdte, "Earnings": _pearn, "Ex-Div": _pdiv,
+                             "Note": _pr.get("notes") or ""})
         _pt_show = pd.DataFrame(_pt_rows)
         _net = _pt_show["P&L $"].sum()
         st.metric("Net demo P&L", f"${_net:+,.0f}")

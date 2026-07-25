@@ -14841,78 +14841,79 @@ elif page == "🎯 Next-Day Exit Planner":
                        f"Time decay runs **${_net_theta:,.0f}/day**. "
                        f"A +1 vol-point IV change ≈ **${_net_vega:,.0f}**.")
 
-        # ── Portfolio theoretical max profit / max loss (held to expiry) ──
-        _pbt = {}
-        for l in _legs:
-            _pbt.setdefault(l["ticker"], []).append(l)
-        _pmaxp = _pmaxl = 0.0; _p_up_unl = _p_dn_unl = False
-        for _ptk, _ptl in _pbt.items():
-            _bb = _combo_bounds(_ptl, _ptl[0]["spot"])
-            if _bb:
-                _pmaxp += _bb["max_profit"]; _pmaxl += _bb["max_loss"]
-                _p_up_unl = _p_up_unl or _bb["up_profit_unlimited"]
-                _p_dn_unl = _p_dn_unl or _bb["up_loss_unlimited"]
-        _mm = st.columns(2)
-        _mm[0].metric("Portfolio max profit (to expiry)", "Unlimited" if _p_up_unl else f"${_pmaxp:,.0f}")
-        _mm[1].metric("Portfolio max loss (to expiry)", "Unlimited" if _p_dn_unl else f"${_pmaxl:,.0f}",
-                      delta_color="inverse")
-        st.caption("Theoretical bound if every position is held to expiration (summed across tickers, "
-                   "each underlying at its own best/worst). *Unlimited* = a naked long call (uncapped "
-                   "upside) or short call (uncapped loss).")
+        with st.expander("📊 Portfolio max profit/loss, SPY-beta exposure, VaR", expanded=False):
+            # ── Portfolio theoretical max profit / max loss (held to expiry) ──
+            _pbt = {}
+            for l in _legs:
+                _pbt.setdefault(l["ticker"], []).append(l)
+            _pmaxp = _pmaxl = 0.0; _p_up_unl = _p_dn_unl = False
+            for _ptk, _ptl in _pbt.items():
+                _bb = _combo_bounds(_ptl, _ptl[0]["spot"])
+                if _bb:
+                    _pmaxp += _bb["max_profit"]; _pmaxl += _bb["max_loss"]
+                    _p_up_unl = _p_up_unl or _bb["up_profit_unlimited"]
+                    _p_dn_unl = _p_dn_unl or _bb["up_loss_unlimited"]
+            _mm = st.columns(2)
+            _mm[0].metric("Portfolio max profit (to expiry)", "Unlimited" if _p_up_unl else f"${_pmaxp:,.0f}")
+            _mm[1].metric("Portfolio max loss (to expiry)", "Unlimited" if _p_dn_unl else f"${_pmaxl:,.0f}",
+                          delta_color="inverse")
+            st.caption("Theoretical bound if every position is held to expiration (summed across tickers, "
+                       "each underlying at its own best/worst). *Unlimited* = a naked long call (uncapped "
+                       "upside) or short call (uncapped loss).")
 
-        # ── Beta-weighted (SPY-equivalent) exposure + concentration / correlation + portfolio EV ──
-        _betas = {t: (_beta_to_spy(t) or 1.0) for t in _pbt}
-        _spy_delta = sum(l["ddelta_1pct"] * _betas.get(l["ticker"], 1.0) for l in _legs)
-        _gross_by_t = {}
-        for l in _legs:
-            _g = abs(l["cur"] * l["m"]) if l["side"] == "long" else l["entry"] * abs(l["m"])
-            _gross_by_t[l["ticker"]] = _gross_by_t.get(l["ticker"], 0.0) + _g
-        _gt = sum(_gross_by_t.values()) or 1.0
-        _topt = max(_gross_by_t, key=_gross_by_t.get)
-        _port_ev = sum((_pos_analytics(_ptl, _ptl[0]["spot"]) or {"ev": 0})["ev"] for _ptl in _pbt.values())
-        _bw = st.columns(3)
-        _bw[0].metric("SPY-equiv Δ / +1% SPY", f"${_spy_delta:,.0f}",
-                      "net long market" if _spy_delta >= 0 else "net short market",
-                      delta_color="normal" if _spy_delta >= 0 else "inverse")
-        _bw[1].metric("Top concentration", f"{_topt} {_gross_by_t[_topt]/_gt*100:.0f}%")
-        _bw[2].metric("Portfolio EV (to expiry)", f"${_port_ev:,.0f}",
-                      delta_color="normal" if _port_ev >= 0 else "inverse")
-        _cm = _corr_matrix(list(_pbt))
-        _corr_note = (f" Positions move together (avg correlation **{_cm['avg']:.2f}**) — "
-                      "diversification is thin." if _cm and _cm["avg"] > 0.5 else
-                      (f" Avg position correlation **{_cm['avg']:.2f}**." if _cm else ""))
-        st.caption(f"Beta-weighted Δ: your whole book ≈ **${_spy_delta:,.0f}** P&L per **+1% in SPY**. "
-                   f"Largest name **{_topt}** = {_gross_by_t[_topt]/_gt*100:.0f}% of gross risk.{_corr_note}")
-        if _gross_by_t[_topt] / _gt > 0.6:
-            st.warning(f"🔶 Concentrated: **{_gross_by_t[_topt]/_gt*100:.0f}%** of risk is in **{_topt}**. "
-                       "One gap there drives the whole book — consider trimming or hedging.")
+            # ── Beta-weighted (SPY-equivalent) exposure + concentration / correlation + portfolio EV ──
+            _betas = {t: (_beta_to_spy(t) or 1.0) for t in _pbt}
+            _spy_delta = sum(l["ddelta_1pct"] * _betas.get(l["ticker"], 1.0) for l in _legs)
+            _gross_by_t = {}
+            for l in _legs:
+                _g = abs(l["cur"] * l["m"]) if l["side"] == "long" else l["entry"] * abs(l["m"])
+                _gross_by_t[l["ticker"]] = _gross_by_t.get(l["ticker"], 0.0) + _g
+            _gt = sum(_gross_by_t.values()) or 1.0
+            _topt = max(_gross_by_t, key=_gross_by_t.get)
+            _port_ev = sum((_pos_analytics(_ptl, _ptl[0]["spot"]) or {"ev": 0})["ev"] for _ptl in _pbt.values())
+            _bw = st.columns(3)
+            _bw[0].metric("SPY-equiv Δ / +1% SPY", f"${_spy_delta:,.0f}",
+                          "net long market" if _spy_delta >= 0 else "net short market",
+                          delta_color="normal" if _spy_delta >= 0 else "inverse")
+            _bw[1].metric("Top concentration", f"{_topt} {_gross_by_t[_topt]/_gt*100:.0f}%")
+            _bw[2].metric("Portfolio EV (to expiry)", f"${_port_ev:,.0f}",
+                          delta_color="normal" if _port_ev >= 0 else "inverse")
+            _cm = _corr_matrix(list(_pbt))
+            _corr_note = (f" Positions move together (avg correlation **{_cm['avg']:.2f}**) — "
+                          "diversification is thin." if _cm and _cm["avg"] > 0.5 else
+                          (f" Avg position correlation **{_cm['avg']:.2f}**." if _cm else ""))
+            st.caption(f"Beta-weighted Δ: your whole book ≈ **${_spy_delta:,.0f}** P&L per **+1% in SPY**. "
+                       f"Largest name **{_topt}** = {_gross_by_t[_topt]/_gt*100:.0f}% of gross risk.{_corr_note}")
+            if _gross_by_t[_topt] / _gt > 0.6:
+                st.warning(f"🔶 Concentrated: **{_gross_by_t[_topt]/_gt*100:.0f}%** of risk is in **{_topt}**. "
+                           "One gap there drives the whole book — consider trimming or hedging.")
 
-        # ── Portfolio risk: 1-day historical VaR + concentration ──
-        st.markdown("#### 🛡️ Portfolio risk")
-        _var = _portfolio_var(_legs)
-        _vc = st.columns(3)
-        if _var:
-            _vc[0].metric("1-day 95% VaR", f"${_var['var']:,.0f}", "worst realistic day", delta_color="inverse")
-            _vc[1].metric("Expected shortfall", f"${_var['cvar']:,.0f}", "avg of the bad tail", delta_color="inverse")
-            _vc[2].metric("Worst sim day", f"${_var['worst']:,.0f}", f"of {_var['n']} days", delta_color="inverse")
-            st.caption(f"Replays the last ~{_var['n']} daily moves of your underlyings through the book "
-                       "(BS reprice + 1 day decay). 95% VaR = on a bad-but-normal day you lose about this much; "
-                       "expected shortfall = average loss on the worst 5% of days.")
-        else:
-            st.caption("VaR needs more price history for these names.")
-        _gross = {}
-        for l in _legs:
-            gr = abs(l["cur"] * l["m"]) if l["side"] == "long" else l["entry"] * abs(l["m"])
-            _gross[l["ticker"]] = _gross.get(l["ticker"], 0.0) + gr
-        _tot = sum(_gross.values()) or 1.0
-        _top = max(_gross, key=_gross.get)
-        _toppct = _gross[_top] / _tot * 100
-        if _toppct >= 50:
-            st.warning(f"⚠️ **Concentration:** {_top} is **{_toppct:.0f}%** of your capital-at-risk. "
-                       "A single-name shock hits hard — consider diversifying or hedging it.")
-        else:
-            st.caption("Capital-at-risk split: "
-                       + " · ".join(f"{k} {v/_tot*100:.0f}%" for k, v in sorted(_gross.items(), key=lambda x: -x[1])))
+            # ── Portfolio risk: 1-day historical VaR + concentration ──
+            st.markdown("#### 🛡️ Portfolio risk")
+            _var = _portfolio_var(_legs)
+            _vc = st.columns(3)
+            if _var:
+                _vc[0].metric("1-day 95% VaR", f"${_var['var']:,.0f}", "worst realistic day", delta_color="inverse")
+                _vc[1].metric("Expected shortfall", f"${_var['cvar']:,.0f}", "avg of the bad tail", delta_color="inverse")
+                _vc[2].metric("Worst sim day", f"${_var['worst']:,.0f}", f"of {_var['n']} days", delta_color="inverse")
+                st.caption(f"Replays the last ~{_var['n']} daily moves of your underlyings through the book "
+                           "(BS reprice + 1 day decay). 95% VaR = on a bad-but-normal day you lose about this much; "
+                           "expected shortfall = average loss on the worst 5% of days.")
+            else:
+                st.caption("VaR needs more price history for these names.")
+            _gross = {}
+            for l in _legs:
+                gr = abs(l["cur"] * l["m"]) if l["side"] == "long" else l["entry"] * abs(l["m"])
+                _gross[l["ticker"]] = _gross.get(l["ticker"], 0.0) + gr
+            _tot = sum(_gross.values()) or 1.0
+            _top = max(_gross, key=_gross.get)
+            _toppct = _gross[_top] / _tot * 100
+            if _toppct >= 50:
+                st.warning(f"⚠️ **Concentration:** {_top} is **{_toppct:.0f}%** of your capital-at-risk. "
+                           "A single-name shock hits hard — consider diversifying or hedging it.")
+            else:
+                st.caption("Capital-at-risk split: "
+                           + " · ".join(f"{k} {v/_tot*100:.0f}%" for k, v in sorted(_gross.items(), key=lambda x: -x[1])))
 
         # ── Next-day market-shock P&L grid ──
         st.markdown("#### 📉 Tomorrow's scenarios — portfolio P&L vs a market move")

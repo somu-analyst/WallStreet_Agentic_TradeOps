@@ -31270,12 +31270,33 @@ def _fmt_paper(conn):
             mark = 0.0
         pnl = (mark - entry) * qty * mult
         tot_pnl += pnl
+        cost = abs(entry * qty * mult) or 1.0
+        pnl_pct = pnl / cost * 100
         em = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
         leg = f"{tk} {qty:+d}sh" if typ == "STOCK" else f"{tk} {_kfb(r['strike'])}{typ[0]} {qty:+d}x"
         rows.append((em, leg, f"${entry:.2f}", f"${mark:.2f}", f"${pnl:+,.0f}"))
         note_txt = f" — {r['note']}" if r.get("note") else ""
+        try:
+            days_held = (datetime.now().date() - datetime.strptime(str(r["entry_date"]), "%Y-%m-%d").date()).days
+        except Exception:
+            days_held = None
+        dte_txt = ""
+        if r.get("expiry"):
+            try:
+                dte = (datetime.strptime(str(r["expiry"]), "%Y-%m-%d").date() - datetime.now().date()).days
+                dte_txt = f" · exp {r['expiry']} ({dte}d)"
+            except Exception:
+                dte_txt = f" · exp {r['expiry']}"
+        earn_txt = ""
+        try:
+            ne = _next_earnings(tk)
+            if ne and ne.get("days") is not None and 0 <= ne["days"] <= 14:
+                earn_txt = f" · earn {ne['days']}d"
+        except Exception:
+            pass
         details.append(f"• #{int(r['trade_id'])} {leg} · entry {r['entry_date']}"
-                        + (f" · exp {r['expiry']}" if r.get("expiry") else "") + note_txt)
+                        + (f" ({days_held}d held)" if days_held is not None else "")
+                        + f" · {pnl_pct:+.0f}%" + dte_txt + earn_txt + note_txt)
     return _report(f"PAPER TRADING (demo) · Net ${tot_pnl:+,.0f}",
                     ("", "Leg", "Entry", "Mark", "P&L"), rows, right_cols={2, 3, 4}, details=details,
                     notes="/paper add ... (grammar of /add) · /paper close ID [@price]")

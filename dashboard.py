@@ -1765,7 +1765,7 @@ st.components.v1.html(
     height=0, width=0,
 )
 
-_dh_banner()
+# _dh_banner() call moved into the sidebar (below the theme toggle) — user 2026-07-24
 
 # ---------------------------------------------------------------------------
 # DARK THEME CSS  (Bloomberg-style)
@@ -5561,6 +5561,7 @@ with st.sidebar:
     st.radio("Theme", ["🌙 Dark", "☀️ Light"], key="ui_theme", horizontal=True,
              label_visibility="collapsed", on_change=_save_theme,
              help="Switch between dark fintech and light minimal. Your choice is remembered next time.")
+    _dh_banner()
     st.markdown("---")
 
     _NAV_GROUPS = {
@@ -14304,36 +14305,6 @@ elif page == "🎯 Next-Day Exit Planner":
             st.markdown(_PAGE_HELP.get(page, ""))
     st.markdown("*Pre-market intelligence: predict tomorrow's option value, set optimal sell orders, and protect your capital*")
 
-    with st.expander("📘 How to Use This Page — Exit Planner Guide", expanded=False):
-        st.markdown("""
-**Purpose:** This page gives you a pre-market daily brief on every open option position.
-It fetches live market mid-prices (bid+ask)/2 and compares them to what you paid, telling you
-whether to hold, take profit, or cut losses before tomorrow's open.
-
-**What each mode does:**
-| Mode | Best for |
-|---|---|
-| 📋 Individual Position | Deep dive on one specific trade — scenarios, Greeks, Monte Carlo |
-| 🏢 All positions — by Ticker | Full picture on a stock you're watching — payoff chart, OI, news |
-| 🌐 All Open Positions | Morning scan across everything — spot any positions needing action |
-
-**Decision framework (corporate standard):**
-- 🟢 **TAKE PROFIT** (>50% gain): Close at least half. Options decay — realized gains beat paper gains.
-- 🔴 **CUT LOSS** (>30% loss): Exit or roll. The 2:1 rule — if you wouldn't enter this trade today, exit it.
-- ⚠️ **NEAR EXPIRY** (<5 DTE in loss): Theta decay is exponential in the last 5 days. Close or roll immediately.
-- 🟡 **CLOSE SOON** (<5 DTE in profit): Lock in gains — don't let time decay erode a winner.
-- ⚪ **HOLD**: No urgent action. Set a mental stop (typically 25–30% below your entry on any remaining gain).
-
-**Reading the P&L column:**
-- `$7.29→$1.66` = option premium dropped from $7.29 to $1.66 (↓77%) — this is the *option price*, not stock price
-- Each contract controls 100 shares, so a $1 move = $100 P&L per contract
-- For **SELL** positions: you collected premium upfront; profit = entry premium − current mid
-
-**Risk management at a glance:**
-The TOTAL row shows your net unrealized P&L across all positions.
-Positive = portfolio is net profitable. Negative = review which legs to cut first (start with highest loss %).
-        """)
-
     # ── Load from Portfolio ──
     _ep_open_trades = pd.DataFrame()
     try:
@@ -14344,17 +14315,16 @@ Positive = portfolio is net profitable. Negative = review which legs to cut firs
     except Exception:
         _ep_closed_trades = pd.DataFrame()
 
-    # ── Analysis Mode selector — ABOVE Closed Positions (user 2026-07-24): today's live
-    # per-leg analysis is the reason you're on this page; closed history is reference,
-    # not the first thing to see ──
+    # ── Analysis Mode selector — Closed Positions now renders AFTER all mode content, at
+    # the bottom of the page (user 2026-07-24: it was rendering BETWEEN the selector and
+    # the actual analysis tables/content — moving just the selector widget wasn't enough,
+    # the real fix is moving the expander past the entire mode-dispatch block below) ──
     _ep_mode = st.radio(
         "Analysis Mode",
         ["🌅 Next-Day Game Plan", "📋 Individual Position",
          "🏢 All positions — by Ticker", "🌐 All Open Positions"],
         horizontal=True, key="ep_analysis_mode",
     )
-    with st.expander(f"🧾 Closed positions ({len(_ep_closed_trades)}) — latest closed first", expanded=False):
-        _render_closed_positions_table(_ep_closed_trades)
 
     # ══════════════════════════════════════════════════════════════════
     #  NEXT-DAY GAME PLAN — whole-portfolio scenario analysis + action plan
@@ -17422,6 +17392,46 @@ ${_mc_expected_val:.2f}
         margin=dict(t=50, b=30),
     )
     st.plotly_chart(_fig_ep)
+
+    # Closed Positions — deliberately LAST on the page (user 2026-07-24): today's live
+    # analysis (whichever Analysis Mode is selected above) is why you're here; closed
+    # history is reference material, not the first thing to see.
+    with st.expander(f"🧾 Closed positions ({len(_ep_closed_trades)}) — latest closed first", expanded=False):
+        _render_closed_positions_table(_ep_closed_trades)
+
+    # How-to-Use guide -- pure static reference text, no computed dependencies, so it
+    # moves here safely (user 2026-07-24: wanted the live analysis/tables higher up,
+    # not buried under a help guide). The real reorder of Manage-positions/macro/Monte
+    # Carlo vs the tables needs a computation-order refactor -- not done here, see PLAN.md.
+    with st.expander("📘 How to Use This Page — Exit Planner Guide", expanded=False):
+        st.markdown("""
+**Purpose:** This page gives you a pre-market daily brief on every open option position.
+It fetches live market mid-prices (bid+ask)/2 and compares them to what you paid, telling you
+whether to hold, take profit, or cut losses before tomorrow's open.
+
+**What each mode does:**
+| Mode | Best for |
+|---|---|
+| 📋 Individual Position | Deep dive on one specific trade — scenarios, Greeks, Monte Carlo |
+| 🏢 All positions — by Ticker | Full picture on a stock you're watching — payoff chart, OI, news |
+| 🌐 All Open Positions | Morning scan across everything — spot any positions needing action |
+
+**Decision framework (corporate standard):**
+- 🟢 **TAKE PROFIT** (>50% gain): Close at least half. Options decay — realized gains beat paper gains.
+- 🔴 **CUT LOSS** (>30% loss): Exit or roll. The 2:1 rule — if you wouldn't enter this trade today, exit it.
+- ⚠️ **NEAR EXPIRY** (<5 DTE in loss): Theta decay is exponential in the last 5 days. Close or roll immediately.
+- 🟡 **CLOSE SOON** (<5 DTE in profit): Lock in gains — don't let time decay erode a winner.
+- ⚪ **HOLD**: No urgent action. Set a mental stop (typically 25–30% below your entry on any remaining gain).
+
+**Reading the P&L column:**
+- `$7.29→$1.66` = option premium dropped from $7.29 to $1.66 (↓77%) — this is the *option price*, not stock price
+- Each contract controls 100 shares, so a $1 move = $100 P&L per contract
+- For **SELL** positions: you collected premium upfront; profit = entry premium − current mid
+
+**Risk management at a glance:**
+The TOTAL row shows your net unrealized P&L across all positions.
+Positive = portfolio is net profitable. Negative = review which legs to cut first (start with highest loss %).
+        """)
 
 
 # ===================================================================
@@ -23163,8 +23173,12 @@ if page == "📝 Paper Trading":
         _pa1, _pa2, _pa3, _pa4 = st.columns(4)
         _pa_tk = _pa1.text_input("Ticker", key="pt_add_tk", placeholder="e.g. AAPL").strip().upper()
         _pa_typ = _pa2.selectbox("Type", ["Stock", "Call", "Put"], key="pt_add_typ")
+        # Stock qty allows fractions (fractional-share investing is real, user 2026-07-24);
+        # option qty is always whole contracts, so the step differs by type.
         _pa_qty = _pa3.number_input("Qty (− = short; shares if Stock, contracts if option)",
-                                    step=1, value=1, key="pt_add_qty")
+                                    step=(0.001 if _pa_typ == "Stock" else 1.0),
+                                    value=1.0, format=("%.4f" if _pa_typ == "Stock" else "%.0f"),
+                                    key="pt_add_qty")
         _pa_px = _pa4.number_input("Entry price (0 = use live mark)", min_value=0.0, step=0.5, key="pt_add_px")
         if _pa_typ != "Stock":
             _pa5, _pa6 = st.columns(2)
@@ -23172,9 +23186,11 @@ if page == "📝 Paper Trading":
             _pa_exp = _pa6.text_input("Expiry (YYYY-MM-DD)", key="pt_add_exp", placeholder="2026-08-21")
         else:
             _pa_strike, _pa_exp = 0.0, ""
-        _pa_note = st.text_input("Note (optional)", key="pt_add_note")
+        _pa_c1, _pa_c2 = st.columns(2)
+        _pa_entry_date = _pa_c1.date_input("Entry date", value=datetime.now().date(), key="pt_add_date")
+        _pa_note = _pa_c2.text_input("Note (optional)", key="pt_add_note")
         if st.button("➕ Add demo position", key="pt_add_btn"):
-            _ok = bool(_pa_tk) and int(_pa_qty) != 0
+            _ok = bool(_pa_tk) and float(_pa_qty) != 0
             if _ok and _pa_typ != "Stock":
                 try:
                     datetime.strptime(_pa_exp, "%Y-%m-%d")
@@ -23195,42 +23211,71 @@ if page == "📝 Paper Trading":
                     _pt_conn.execute(
                         "INSERT INTO paper_trades (ticker, option_type, strike, expiry, entry_price, "
                         "quantity, entry_date, status, notes) VALUES (?,?,?,?,?,?,?, 'OPEN', ?)",
-                        (_pa_tk, _pa_typ.upper(), _pa_strike, _pa_exp, float(_entry_px), int(_pa_qty),
-                         datetime.now().strftime("%Y-%m-%d"), _pa_note or None))
+                        (_pa_tk, _pa_typ.upper(), _pa_strike, _pa_exp, float(_entry_px),
+                         float(_pa_qty) if _pa_typ == "Stock" else int(_pa_qty),
+                         _pa_entry_date.strftime("%Y-%m-%d"), _pa_note or None))
                     _pt_conn.commit()
-                    st.success(f"Added demo {_pa_tk} {int(_pa_qty):+d} @ ${_entry_px:.2f}."); st.rerun()
+                    st.success(f"Added demo {_pa_tk} {_pa_qty:+g} @ ${_entry_px:.2f}."); st.rerun()
 
     _pt_df = pd.read_sql("SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY trade_id DESC", _pt_conn)
     if _pt_df.empty:
         st.info("No demo positions yet — add one above to see 'what if I took this trade?'")
     else:
+        # Consolidate multiple STOCK buys of the SAME ticker into ONE position with a
+        # weighted-average cost basis (user 2026-07-24: "GOOGL +1sh / GOOGL +100sh shows
+        # as two different [rows] ... like a proper stock platform Robinhood/Fidelity" --
+        # those show one consolidated position per symbol, not a row per lot). Options
+        # stay one row per contract: a 340C and a 345C are genuinely different instruments,
+        # not fungible the way shares of the same stock are.
         _pt_rows = []
-        for _, _pr in _pt_df.iterrows():
+        _pt_stock = _pt_df[_pt_df["option_type"].astype(str).str.upper() == "STOCK"]
+        _pt_opts = _pt_df[_pt_df["option_type"].astype(str).str.upper() != "STOCK"]
+        for _ptk, _grp in _pt_stock.groupby(_pt_stock["ticker"].str.upper()):
+            _pqty = float(_grp["quantity"].sum())   # fractional shares allowed
+            if _pqty == 0:
+                continue
+            _pentry = float((_grp["entry_price"] * _grp["quantity"]).sum() / _pqty)   # weighted avg cost
+            try:
+                _pmark = _cached_price(_ptk) or _pentry
+            except Exception:
+                _pmark = _pentry
+            _ppnl = (_pmark - _pentry) * _pqty
+            _ppnl_pct = _ppnl / (abs(_pentry * _pqty) or 1.0) * 100
+            _pearliest = _grp["entry_date"].min()
+            try:
+                _pdays_held = (datetime.now().date() - datetime.strptime(str(_pearliest), "%Y-%m-%d").date()).days
+            except Exception:
+                _pdays_held = None
+            _pearn, _pdiv = _next_events(_ptk)
+            _pnotes = "; ".join(n for n in _grp["notes"].dropna().unique() if n) or ""
+            _pt_rows.append({"id": tuple(int(x) for x in _grp["trade_id"]), "Leg": f"{_ptk} {_pqty:+g}sh"
+                             + (f" ({len(_grp)} lots)" if len(_grp) > 1 else ""),
+                             "Entry": round(_pentry, 2), "Mark": round(_pmark, 2),
+                             "P&L $": round(_ppnl), "P&L %": round(_ppnl_pct, 1),
+                             "Entry Date": _pearliest, "Days Held": _pdays_held,
+                             "DTE": None, "Earnings": _pearn, "Ex-Div": _pdiv, "Note": _pnotes})
+        for _, _pr in _pt_opts.iterrows():
             _ptk = str(_pr["ticker"]).upper()
             _ptyp = str(_pr["option_type"]).upper()
             _pqty = int(_pr["quantity"])
             _pentry = float(_pr["entry_price"] or 0)
-            _pmult = 1 if _ptyp == "STOCK" else 100
             try:
                 _pmark = _pt_mark(_pr)
             except Exception:
                 _pmark = _pentry
-            _ppnl = (_pmark - _pentry) * _pqty * _pmult
-            _pcost = abs(_pentry * _pqty * _pmult) or 1.0
-            _ppnl_pct = _ppnl / _pcost * 100
-            _pleg = f"{_ptk} {_pqty:+d}sh" if _ptyp == "STOCK" else f"{_ptk} ${_pr['strike']:.0f}{_ptyp[0]} {_pqty:+d}x exp {_pr['expiry']}"
+            _ppnl = (_pmark - _pentry) * _pqty * 100
+            _ppnl_pct = _ppnl / (abs(_pentry * _pqty * 100) or 1.0) * 100
+            _pleg = f"{_ptk} ${_pr['strike']:.0f}{_ptyp[0]} {_pqty:+d}x exp {_pr['expiry']}"
             try:
                 _pdays_held = (datetime.now().date() - datetime.strptime(str(_pr["entry_date"]), "%Y-%m-%d").date()).days
             except Exception:
                 _pdays_held = None
-            _pdte = None
-            if _ptyp != "STOCK":
-                try:
-                    _pdte = (datetime.strptime(str(_pr["expiry"]), "%Y-%m-%d").date() - datetime.now().date()).days
-                except Exception:
-                    _pdte = None
+            try:
+                _pdte = (datetime.strptime(str(_pr["expiry"]), "%Y-%m-%d").date() - datetime.now().date()).days
+            except Exception:
+                _pdte = None
             _pearn, _pdiv = _next_events(_ptk)
-            _pt_rows.append({"id": int(_pr["trade_id"]), "Leg": _pleg, "Entry": round(_pentry, 2),
+            _pt_rows.append({"id": (int(_pr["trade_id"]),), "Leg": _pleg, "Entry": round(_pentry, 2),
                              "Mark": round(_pmark, 2), "P&L $": round(_ppnl), "P&L %": round(_ppnl_pct, 1),
                              "Entry Date": _pr["entry_date"], "Days Held": _pdays_held,
                              "DTE": _pdte, "Earnings": _pearn, "Ex-Div": _pdiv,
@@ -23241,19 +23286,23 @@ if page == "📝 Paper Trading":
         st.dataframe(_pt_show.drop(columns=["id"]), use_container_width=True, hide_index=True)
 
         st.markdown("---")
-        st.markdown("**Close a demo position**")
+        st.markdown("**Close a demo position** (closing a multi-lot stock position closes ALL its lots)")
         _pt_map = {f"{r['Leg']} (id {r['id']})": r["id"] for r in _pt_rows}
         _pc1, _pc2 = st.columns([3, 1])
         _pt_pick = _pc1.selectbox("Position", list(_pt_map), key="pt_close_pick")
         _pt_exit_px = _pc2.number_input("Exit price (0 = live mark)", min_value=0.0, step=0.5, key="pt_close_px")
         if st.button("✖️ Close demo position", key="pt_close_btn"):
-            _pid = _pt_map[_pt_pick]
-            _prow = _pt_df[_pt_df["trade_id"] == _pid].iloc[0]
-            _pexit = _pt_exit_px or _pt_mark(_prow)
-            _pmult2 = 1 if str(_prow["option_type"]).upper() == "STOCK" else 100
-            _pnl2 = (_pexit - float(_prow["entry_price"] or 0)) * int(_prow["quantity"]) * _pmult2
-            _pt_conn.execute(
-                "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=? WHERE trade_id=?",
-                (_pexit, datetime.now().strftime("%Y-%m-%d"), int(_pid)))
+            _pids = _pt_map[_pt_pick]
+            _pnl_total = 0.0
+            for _pid in _pids:
+                _prow = _pt_df[_pt_df["trade_id"] == _pid].iloc[0]
+                _pexit = _pt_exit_px or _pt_mark(_prow)
+                _pqty2 = float(_prow["quantity"]) if str(_prow["option_type"]).upper() == "STOCK" else int(_prow["quantity"])
+                _pmult2 = 1 if str(_prow["option_type"]).upper() == "STOCK" else 100
+                _pnl_total += (_pexit - float(_prow["entry_price"] or 0)) * _pqty2 * _pmult2
+                _pt_conn.execute(
+                    "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=? WHERE trade_id=?",
+                    (_pexit, datetime.now().strftime("%Y-%m-%d"), int(_pid)))
             _pt_conn.commit()
-            st.success(f"Closed @ ${_pexit:.2f} — P&L ${_pnl2:+,.0f}."); st.rerun()
+            _lots_txt = f" across {len(_pids)} lots" if len(_pids) > 1 else ""
+            st.success(f"Closed{_lots_txt} — P&L ${_pnl_total:+,.0f}."); st.rerun()

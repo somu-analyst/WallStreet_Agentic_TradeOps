@@ -1995,23 +1995,6 @@ st.session_state.setdefault("ui_theme", _load_saved_theme())
 st.markdown(_CSS_DARK if "Dark" in st.session_state["ui_theme"] else _CSS_LIGHT,
             unsafe_allow_html=True)
 
-# Compact vertical spacing (user 2026-07-24: "eating away space, I have to scroll down every
-# time" — Streamlit's default per-element margin/padding stacks up fast on pages with many
-# short markdown/caption/radio/expander lines in a row, like the Exit Planner header). Theme-
-# independent, so it applies in both Dark and Light. Tightens the GAPS between elements, not
-# the elements themselves — nothing gets smaller or harder to read, just less dead air.
-st.markdown("""
-<style>
-div[data-testid="stVerticalBlock"] > div[data-testid="stElementContainer"]{ margin-bottom:0.25rem !important; }
-div[data-testid="stMarkdownContainer"] p{ margin-bottom:0.3rem !important; }
-div[data-testid="stExpander"]{ margin-bottom:0.35rem !important; }
-div[data-testid="stExpander"] summary{ padding-top:0.4rem !important; padding-bottom:0.4rem !important; }
-div[data-testid="stCaptionContainer"]{ margin-bottom:0.2rem !important; }
-div[data-testid="stRadio"]{ margin-bottom:0.2rem !important; }
-.block-container{ padding-top:1.2rem !important; }
-</style>
-""", unsafe_allow_html=True)
-
 # ===================================================================
 # ──  GREEKS  (Black-Scholes)
 # ===================================================================

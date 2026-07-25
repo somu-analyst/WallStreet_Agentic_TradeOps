@@ -78,6 +78,36 @@ Options-trading edge system: Telegram bot + dashboard + our own capture-forward 
   - **BLOCKER for validation — pretraining leakage.** Kronos was pretrained on historical market data through an unpublished cutoff. Backtesting it on `stock_history` 2016–2026 is CONTAMINATED and will manufacture a fake edge. Any test must be strictly out-of-sample vs that cutoff (or forward-tested live). This is the single biggest trap.
   - Note repo's own caveat: its backtest demo is "not a production-ready quantitative trading system"; no accuracy benchmarks published. Qlib is needed only for their fine-tune demo — **inference does not require Qlib** (which stays out of scope).
 
+## Adjacent-framework ideas (user 2026-07-24 — RESEARCHED, not built)
+Deep-dived 3 repos the user asked about as a possible "AI hedge fund desk" architecture:
+`koala73/worldmonitor` (74.1k★, real intel dashboard), `TauricResearch/TradingAgents` (94.5k★,
+paid-LLM multi-agent debate framework), `NousResearch/hermes-agent` (real, self-improving
+personal agent runtime). Wholesale adoption of any of the three rejected — TradingAgents needs
+paid LLM calls per decision (conflicts with this project's free/deterministic design); worldmonitor
+and hermes-agent are much bigger standalone products than a bolt-on. Four smaller, genuinely
+scoped pieces worth doing instead, none requiring new paid dependencies:
+- [ ] **Bull-vs-Bear adversarial round in `/debate`** — TradingAgents' Researcher-team step
+  (explicit bull/bear debate before the Trader/Risk verdict) that our existing 5-agent `/debate`
+  skips today (agents vote → straight to weighted verdict, no adversarial round in between).
+  Also add the structured output schema from the user's template: Action / Entry range /
+  Stop-loss / Take-profit / one-sentence thesis (currently `/debate` doesn't give concrete
+  entry/stop/target numbers).
+- [ ] **Optional LLM prose-polish layer** — `ANTHROPIC_API_KEY` is already set and verified live.
+  Feed `/debate`/AI Hedge Fund's existing DETERMINISTIC output through Claude to rewrite as
+  natural prose; the verdict/numbers themselves stay 100% deterministic and free — LLM only
+  touches the write-up, with graceful fallback to today's plain format if no key/budget.
+- [ ] **Local-LLM narrative synthesis (Ollama, free)** — worldmonitor's core pattern: synthesize
+  the day's headlines into an actual brief via a locally-run model, not just a headline list +
+  `_headline_tone` score. Needs Ollama installed locally; zero API cost either way.
+- [ ] **Country/supply-chain instability flag** — lightweight version of worldmonitor's Country
+  Instability Index: flag `/catalysts` when a ticker's known supply-chain country (e.g. Taiwan
+  for TSM-exposed chip names) has an active geopolitical event, instead of the full dashboard.
+- [ ] **Persistent user-preference memory** — hermes-agent's standout feature (builds a model of
+  "who you are" across sessions). Extend the existing `app_settings` table (already used for tax
+  settings) to remember most-checked tickers / risk tolerance / which scanners actually get acted
+  on, and quietly use it to personalize Watchlist ordering or Action Board ranking instead of
+  every session starting from a blank slate.
+
 ## Constraints / decisions locked in
 - CLAUDE.md rules win: edit `telegram_bot_optimized.py`/`dashboard.py` directly (no patch scripts), single-engine (dashboard imports the bot), dates now ISO YYYY-MM-DD everywhere (substr sort trick retired 07-14-2026), secrets never committed/printed, `US_data.db` never written by NYSE_OpenBB.py.
 - "Tested" = validated vs DB history (hit-rate vs baseline), not "it runs".

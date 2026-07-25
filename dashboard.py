@@ -1596,7 +1596,8 @@ def load_market_history(symbol, limit=500):
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="RUDRARJUN Analytics",
-    page_icon="📊",
+    page_icon="static/icon-192.png",   # was a plain emoji favicon — replaced with the real
+                                       # app icon (user 2026-07-24: "its old one" in Chrome)
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -1681,29 +1682,22 @@ def _dh_banner():
                 f"<div>"
                 f"{_ic} DATA {_a0['status']} — {_a0['audit_date']}{_extra}</div>",
                 unsafe_allow_html=True)
-            # 2-week dot timeline (user 2026-07-24): one dot per audited day, oldest->newest,
-            # so a run of red/yellow days is visible at a glance instead of only today's verdict.
+            # 2-week dot timeline (user 2026-07-24): one dot per audited day, oldest->newest.
+            # Plain emoji, no HTML/CSS string concatenation -- Streamlit's markdown pipeline
+            # kept silently mangling hand-built  HTML here (three separate
+            # times), so this uses colored-circle EMOJI instead: it is just text, cannot be
+            # stripped/corrupted the way raw HTML was, and needs no unsafe_allow_html at all.
             try:
                 with sqlite3.connect(DB_PATH) as _c:
                     _aud14 = pd.read_sql(
                         "SELECT audit_date, status FROM data_audit ORDER BY audit_date DESC LIMIT 14", _c)
                 if not _aud14.empty:
                     _aud14 = _aud14.iloc[::-1]        # oldest -> newest, left -> right
-                    _dotcolor = {"VALIDATED": "#2ecc71", "PARTIAL": "#ffb74d", "FAILED": "#ff5c6c"}
-                    _dot_spans = []
-                    for _r in _aud14.itertuples():
-                        _dc = _dotcolor.get(_r.status, "#666")
-                        _dot_spans.append(
-                            ""
-                            .format(_r.audit_date, _r.status, _dc))
-                    _dots_html = "".join(_dot_spans)
-                    _caption_html = (
-                        ""
-                        "last {} audited days " + chr(0x00b7) + " hover a dot for its date/status"
-                    ).format(len(_aud14))
-                    st.markdown(
-                        "<div>{}{}</div>".format(_dots_html, _caption_html),
-                        unsafe_allow_html=True)
+                    _dotemoji = {"VALIDATED": "🟢", "PARTIAL": "🟡", "FAILED": "🔴"}
+                    _dots = " ".join(_dotemoji.get(_r.status, "⚪") for _r in _aud14.itertuples())
+                    _dates_list = ", ".join(f"{_r.audit_date}={_r.status}" for _r in _aud14.itertuples())
+                    st.markdown(_dots)
+                    st.caption(f"last {len(_aud14)} audited days, oldest to newest: {_dates_list}")
             except Exception:
                 pass
             with st.expander("🔍 Audit details (7 checks)", expanded=False):

@@ -67,13 +67,20 @@ def _spot_src(ticker, leg):
 
 
 def _si_cells(ticker):
-    """(SI %, DTC, Shorts) display cells — '—' when the ticker has no short-interest feed."""
+    """(SI %, DTC, Shorts) display cells — '—' when the ticker has no short-interest feed.
+
+    DTC is always a STRING (never a bare float/None) — mixing float DTC values for some
+    tickers with None/'' for others in the same dataframe column crashed Streamlit's Arrow
+    conversion outright (pyarrow.lib.ArrowInvalid: "Could not convert '' with type str: tried
+    to convert to double"), which silently halted the WHOLE page mid-render with no visible
+    error banner -- everything after that table (including Closed Positions) never rendered.
+    Verified via server log, not just browser inspection -- that's what actually caught this."""
     r = _si_for(ticker)
     if not r:
-        return "—", None, "—"
+        return "—", "—", "—"
     arrow = {"BUILDING": "🔺", "COVERING": "🔻", "STABLE": "▪"}.get(r["state"], "")
     chg = f" {r['chg'] * 100:+.0f}%" if r.get("chg") is not None else ""
-    return (f"{r['pct_float']:.1f}%", round(r["dtc"], 1),
+    return (f"{r['pct_float']:.1f}%", f"{r['dtc']:.1f}",
             f"{arrow} {r['state'].title()}{chg}")
 
 
@@ -5792,7 +5799,7 @@ def _render_closed_positions_table(closed: pd.DataFrame):
             "P&L $": round(float(_cr.get("pnl_f", 0) or 0), 2),
             "P&L %": round(float(_cr.get("pnl_pct_f", 0) or 0), 1),
             "Ex-Div (held)": _cexd or "—",
-            "Days Held Before Ex-Div": _cdaysb4 if _cdaysb4 is not None else "—",
+            "Days Held Before Ex-Div": str(_cdaysb4) if _cdaysb4 is not None else "—",
             "Exit Reason": _cr.get("exit_reason", "") or "",
             "Account": _cr.get("account_type", "") or "", "Strategy": _cr.get("strategy", "") or "",
             "Notes": _cr.get("notes", "") or "",
@@ -15839,7 +15846,13 @@ elif page == "🎯 Next-Day Exit Planner":
 
         try: _gp_conn.close()
         except Exception: pass
-        st.stop()
+        # st.stop() removed (user 2026-07-24: "i don't see closed positions section anymore") --
+        # it sat at the SAME indent as `if _gp_layout.startswith("📋"):` above, i.e. it ran
+        # UNCONDITIONALLY after that block regardless of which layout was selected, halting the
+        # entire script for every Game Plan user before reaching Closed Positions / How-to-Use
+        # further down the page. No comment explained it; looks like leftover from before this
+        # was merged into the multi-mode page. Confirmed via server log (not just browser
+        # inspection): no crash was occurring, execution was being deliberately stopped here.
 
     # ──────────────────────────────────────────────────────────────
     # BATCH HELPER: fetch current option mid-price from yfinance

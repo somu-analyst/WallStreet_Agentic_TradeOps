@@ -23321,7 +23321,7 @@ if page == "📝 Paper Trading":
                 _pxirr = None
             _pt_rows.append({"id": tuple(int(x) for x in _grp["trade_id"]),
                              "Ticker": _ptk, "Type": "Stock",
-                             "Qty": _pqty, "Lots": len(_grp),
+                             "Qty": _pqty, "Lots": len(_grp), "Status": "🟢 Live",
                              "Entry": round(_pentry, 2), "Current Price": round(_pmark, 2),
                              "52w L-H": (f"${_p52lo:,.2f}-${_p52hi:,.2f}" if _p52hi else "—"),
                              "P&L $": round(_ppnl), "P&L %": round(_ppnl_pct, 1),
@@ -23353,9 +23353,13 @@ if page == "📝 Paper Trading":
                 _pspot = _cached_price(_ptk) or 0.0
             except Exception:
                 _pspot = 0.0
+            # Status flag (user 2026-07-24: "$0.00 current price" on an expired option read
+            # as a fetch failure -- it's actually a real, correct settled value (intrinsic at
+            # expiry). Label it explicitly so $0 isn't mistaken for a bug.
+            _pstatus = "⚫ EXPIRED (settled)" if (_pdte is not None and _pdte < 0) else "🟢 Live"
             _pt_rows.append({"id": (int(_pr["trade_id"]),),
                              "Ticker": _ptk, "Type": f"${_pr['strike']:.0f}{_ptyp[0]} exp {_pr['expiry']}",
-                             "Qty": _pqty, "Lots": 1,
+                             "Qty": _pqty, "Lots": 1, "Status": _pstatus,
                              "Entry": round(_pentry, 2), "Current Price": round(_pmark, 2),
                              "Spot": (round(_pspot, 2) if _pspot else None),
                              "52w L-H": (f"${_p52lo:,.2f}-${_p52hi:,.2f}" if _p52hi else "—"),

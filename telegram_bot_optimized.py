@@ -261,6 +261,11 @@ import time
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 
+try:                                  # AV SSL-interception fix (2026-07-24) -- must run
+    from _ssl_fix import ensure_ssl_trust  # BEFORE yfinance's first network call
+    ensure_ssl_trust()
+except Exception:
+    pass
 import numpy as np
 import pandas as pd
 import yfinance as yf

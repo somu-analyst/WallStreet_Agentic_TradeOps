@@ -7,6 +7,11 @@ portfolio management, and risk prediction.
 All data: Yahoo Finance + SQLite (US_data.db).  Zero IBKR dependency.
 """
 
+try:                                  # AV SSL-interception fix (2026-07-24) -- must run
+    from _ssl_fix import ensure_ssl_trust  # BEFORE yfinance's first network call
+    ensure_ssl_trust()
+except Exception:
+    pass
 import streamlit as st
 import pandas as pd
 import numpy as np

@@ -159,61 +159,6 @@ async def group_stock_detail(query, ticker):
 import importlib.util
 import sys
 import io
-# Helper to import get_open_positions from _lib/options_tracker.py
-def _import_get_open_positions():
-    lib_path = os.path.join(NYSE_DIR, '_lib', 'options_tracker.py')
-    spec = importlib.util.spec_from_file_location('options_tracker', lib_path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules['options_tracker'] = mod
-    spec.loader.exec_module(mod)
-    return mod.get_open_positions
-
-# Stock-level PnL summary with quick actions and insights
-async def stock_pnl_summary(query):
-    get_open_positions = _import_get_open_positions()
-    df = get_open_positions()
-    if df.empty:
-        await query.message.reply_text(
-            f"<b>Stock Option PnL</b>\n\nNo open option positions.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[BACK_BTN]])
-        )
-        return
-
-    # Aggregate by ticker
-    summary = df.groupby('ticker').agg(
-        total_pnl=pd.NamedAgg(column='unrealized_pnl', aggfunc='sum'),
-        num_pos=pd.NamedAgg(column='trade_id', aggfunc='count'),
-        net_qty=pd.NamedAgg(column='quantity', aggfunc='sum')
-    ).reset_index()
-
-    parts = [hdr('📊 Stock Option PnL')]
-    btn_rows = []
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    for _, row in summary.iterrows():
-        tkr = row['ticker']
-        pnl = row['total_pnl']
-        npos = row['num_pos']
-        net_qty = row['net_qty']
-        emoji = '🟢' if pnl >= 0 else '🔴'
-        action = 'Net Buyer' if net_qty > 0 else ('Net Seller' if net_qty < 0 else 'Hedged')
-        insight = f"{action} | {npos} pos | PnL: ${pnl:,.0f}"
-        parts.append(f"{emoji} <b>{tkr}</b> — {insight}")
-        # Quick actions: Buy, Hedge, Sell, Close All
-        btn_rows.append([
-            InlineKeyboardButton(f"Buy {tkr}", callback_data=f"stockact_buy_{tkr}"),
-            InlineKeyboardButton(f"Hedge {tkr}", callback_data=f"stockact_hedge_{tkr}"),
-            InlineKeyboardButton(f"Sell {tkr}", callback_data=f"stockact_sell_{tkr}"),
-            InlineKeyboardButton(f"Close All", callback_data=f"stockact_close_{tkr}")
-        ])
-
-    btn_rows.append([InlineKeyboardButton("⬅️ Back", callback_data="menu_positions")])
-    parts.append(f"\n<i>Updated {now}</i>")
-    await _safe_reply(query.message, "\n".join(parts), reply_markup=InlineKeyboardMarkup(btn_rows))
-
-# Add handler to menu or as a command (example: /stock_pnl)
-async def stock_pnl_command(update, ctx):
-    await stock_pnl_summary(update)
 """
 Options Intelligence Telegram Bot
 All navigation is button-based — no typing needed.

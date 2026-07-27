@@ -2848,27 +2848,104 @@ def compute_debate(tk, conn=None):
             conn.close()
 
 
+def _debate_move_band(tk, conn, days=5):
+    """1-sigma expected move over `days` sessions, from realized (historical) volatility on
+    stock_daily closes. Used to size the Bull/Bear price targets and the Risk Manager's
+    stop/take-profit off something real, not an arbitrary fixed percent."""
+    try:
+        h = pd.read_sql(
+            "SELECT close FROM stock_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT 60",
+            conn, params=(tk,))
+        if len(h) < 10:
+            return 0.05   # fallback: 5% band when there's not enough history
+        closes = h["close"].astype(float).iloc[::-1].reset_index(drop=True)
+        rets = closes.pct_change().dropna()
+        hv = float(rets.std() * (252 ** 0.5))
+        hv = max(0.10, min(hv, 2.0))
+        return hv * ((days / 252.0) ** 0.5)
+    except Exception:
+        return 0.05
+
+
+def _debate_bull_bear_case(d, conn):
+    """Adversarial Bull-vs-Bear round (TradingAgents-style Researcher team, adopted 2026-07-24
+    per PLAN.md 'Adjacent-framework ideas' — our 5 agents already vote, but never explicitly
+    argued a case against each other with a concrete target before the verdict). Built entirely
+    from the SAME deterministic agent evidence already computed above — no LLM, no new data."""
+    tk, spot = d["tk"], d["spot"]
+    band = _debate_move_band(tk, conn)
+    bull_target = spot * (1 + band)
+    bear_target = spot * (1 - band)
+    bull_agents = [a for a in d["agents"] if a["score"] > 0]
+    bear_agents = [a for a in d["agents"] if a["score"] < 0]
+    bull_ev = "; ".join(a["evidence"] for a in bull_agents) if bull_agents else "no agent currently leans bullish"
+    bear_ev = "; ".join(a["evidence"] for a in bear_agents) if bear_agents else "no agent currently leans bearish"
+    bull_txt = (f"🟢 <b>BULL CASE</b> (target ${bull_target:,.2f}, +{band*100:.1f}%): {bull_ev}.")
+    bear_txt = (f"🔴 <b>BEAR CASE</b> (target ${bear_target:,.2f}, -{band*100:.1f}%): {bear_ev}.")
+    return bull_txt, bear_txt, bull_target, bear_target, band
+
+
+def _debate_verdict_schema(d, bull_target, bear_target, band):
+    """Structured Action/Entry/Stop/Take-profit output (from the user's proposed template,
+    2026-07-24) laid over our existing deterministic verdict — no new decision logic, just a
+    concrete, tradeable shape for the SAME net/conviction the agents already produced."""
+    spot = d["spot"]
+    if d["net"] >= 15 and d["conviction"] != "LOW":
+        action = "BUY"
+        entry_lo, entry_hi = spot * 0.997, spot * 1.003
+        stop = spot * (1 - band * 0.6)
+        target = bull_target
+    elif d["net"] <= -15 and d["conviction"] != "LOW":
+        action = "SELL"
+        entry_lo, entry_hi = spot * 0.997, spot * 1.003
+        stop = spot * (1 + band * 0.6)
+        target = bear_target
+    else:
+        action = "HOLD"
+        entry_lo, entry_hi = spot, spot
+        stop = target = spot
+    winner = "bulls" if d["net"] > 0 else ("bears" if d["net"] < 0 else "neither side")
+    thesis = (f"{winner.capitalize()} prevailed on weighted net {d['net']:+.0f} "
+              f"({d['conviction']} conviction)" if action != "HOLD" else
+              f"No side cleared the ±15 conviction threshold (net {d['net']:+.0f}) — standing aside")
+    lines = [f"<b>🏦 Risk Manager verdict</b>",
+             f"Action: <b>{action}</b>"]
+    if action != "HOLD":
+        lines.append(f"Entry range: ${entry_lo:,.2f} – ${entry_hi:,.2f}")
+        lines.append(f"Stop-loss: ${stop:,.2f}")
+        lines.append(f"Take-profit: ${target:,.2f}")
+    lines.append(f"Thesis: {thesis}.")
+    return "\n".join(lines)
+
+
 def _debate_report(tk):
-    d = compute_debate(tk)
-    rows = [[a["emoji"], a["name"], a["label"], f"{a['score']:+.0f}"] for a in d["agents"]]
-    details = [f"<b>{a['name']}</b> {a['emoji']} {a['score']:+.0f} — {a['evidence']}"
-               for a in d["agents"]]
-    details.append(f"<b>Bull case</b>: {', '.join(d['bulls']) or 'none'}")
-    details.append(f"<b>Bear case</b>: {', '.join(d['bears']) or 'none'}")
-    details.append(f"<b>Trader</b>: weighted net <b>{d['net']:+.0f}</b> → "
-                   f"{d['emoji']} <b>{d['verdict']}</b> · conviction <b>{d['conviction']}</b>")
-    if d["risks"]:
-        details.append("<b>Risk mgr</b>: " + " · ".join(d["risks"]))
+    conn = get_conn()
+    try:
+        d = compute_debate(tk, conn)
+        rows = [[a["emoji"], a["name"], a["label"], f"{a['score']:+.0f}"] for a in d["agents"]]
+        details = [f"<b>{a['name']}</b> {a['emoji']} {a['score']:+.0f} — {a['evidence']}"
+                   for a in d["agents"]]
+        bull_txt, bear_txt, bull_target, bear_target, band = _debate_bull_bear_case(d, conn)
+        details.append(bull_txt)
+        details.append(bear_txt)
+        details.append(f"<b>Trader</b>: weighted net <b>{d['net']:+.0f}</b> → "
+                       f"{d['emoji']} <b>{d['verdict']}</b> · conviction <b>{d['conviction']}</b>")
+        if d["risks"]:
+            details.append("<b>Risk mgr flags</b>: " + " · ".join(d["risks"]))
+        details.append(_debate_verdict_schema(d, bull_target, bear_target, band))
+    finally:
+        conn.close()
     return _report(
         f"⚖️ AGENT DEBATE — {d['tk']}  ${d['spot']:,.2f} ({'LIVE' if d['is_live'] else 'EOD'})",
         ["", "Agent", "Stance", "Score"], rows, right_cols=[3],
         legend="🟢 bull · 🔴 bear · 🟡 neutral",
         notes=("5 role-specialised analysts over our own engine (flow/GEX/momentum/vol/macro), "
-               "weighted into one verdict. Deterministic, no LLM. ⚠️ <b>Partly backtested "
-               "2026-07-21:</b> the Flow analyst (heaviest, 1.2) has NO proven directional edge "
-               "(rank-IC ≈ 0, t=-0.07 over 143 days) — so treat the verdict as a structured "
-               "summary of positioning, NOT a validated forecast. Position/Technical/Vol legs are "
-               "still unvalidated. Educational, not advice."),
+               "now with an explicit Bull-vs-Bear round (targets sized off realized 5d vol) and "
+               "a structured Action/Entry/Stop/Target verdict — still deterministic, no LLM. "
+               "⚠️ <b>Partly backtested 2026-07-21:</b> the Flow analyst (heaviest, 1.2) has NO "
+               "proven directional edge (rank-IC ≈ 0, t=-0.07 over 143 days) — so treat the "
+               "verdict as a structured summary of positioning, NOT a validated forecast. "
+               "Position/Technical/Vol legs are still unvalidated. Educational, not advice."),
         details=details)
 
 

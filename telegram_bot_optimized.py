@@ -12068,11 +12068,20 @@ def _tx_capture(conn, tickers, quarters=None, budget=6):
     """
     _tx_ensure(conn)
     if not quarters:
-        # CURRENT quarter only — go forward, do not backfill history (user 2026-07-23).
-        # Backfilling every prior quarter would burn the ~25/day AlphaVantage quota for
-        # calls that have already been priced in. New calls get picked up as they publish.
+        # MOST RECENTLY REPORTED quarter only — go forward, do not backfill history
+        # (user 2026-07-23). Backfilling every prior quarter would burn the ~25/day
+        # AlphaVantage quota for calls that have already been priced in.
+        #
+        # BUG FOUND 2026-07-24 (user: "earning call is not latest"): this used to compute
+        # the CALENDAR quarter still in progress (e.g. "2026Q3" in July 2026) instead of the
+        # quarter that just FINISHED and reported (Q2, reported ~July). A quarter's earnings
+        # call doesn't happen until weeks after that quarter ends, so the in-progress quarter
+        # never has a transcript to fetch -- this was silently failing every single day,
+        # forever, never catching up to the real latest transcript. Fixed: target the PRIOR
+        # completed quarter, with year wraparound for Q1 (previous quarter = prior year Q4).
         _n = _et_now()
-        quarters = [f"{_n.year}Q{(_n.month - 1) // 3 + 1}"]
+        _prev_q = (_n.month - 1) // 3
+        quarters = [f"{_n.year - 1}Q4"] if _prev_q == 0 else [f"{_n.year}Q{_prev_q}"]
     import json as _json
     n = fetched = 0
     for tk in dict.fromkeys(str(t).upper() for t in tickers if t):

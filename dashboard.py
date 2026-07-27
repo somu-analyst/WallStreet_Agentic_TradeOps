@@ -22311,8 +22311,8 @@ if page == "📡 Macro/Event Hub":
             _ct_days = st.slider("Days ahead", 3, 21, 7, key="hub_cat_days")
             try:
                 _ct_tks = _tbmod._ratings_default_tickers()
-                _ct_m, _ct_e = _tbmod._upcoming_catalysts(_ct_tks, _ct_days)
-                _ct_fmt = _tbmod._fmt_catalysts(_ct_m, _ct_e, _ct_days)
+                _ct_m, _ct_e, _ct_g = _tbmod._upcoming_catalysts(_ct_tks, _ct_days)
+                _ct_fmt = _tbmod._fmt_catalysts(_ct_m, _ct_e, _ct_days, geo=_ct_g)
                 if _ct_fmt:
                     _render_tg(_ct_fmt)
                 else:

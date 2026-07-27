@@ -1,5 +1,48 @@
 # LOG
 
+## 2026-07-24 (late) — 4 real bugs found from one user report, all fixed + verified
+
+User reported 4 things in one message: missing OI charts, "trimmed" daily alerts, stale
+earnings-call transcripts, and no hyperlinks in news. Investigated each with real evidence
+instead of guessing — all 4 turned out to be genuine bugs, not perception:
+
+1. **OI charts (GOOGL showed only 1 of 2)** — both chart functions verified working in
+   isolation with real data. Root cause: `signal_ticker_detail` sends 3 photos back-to-back
+   with zero delay (ticker chart, then money-flow chart, then heatmap) — classic Telegram
+   flood-control trigger, silently swallowed by a `log.debug`-only exception handler. Added
+   a 0.6s gap between sends + upgraded to visible `log.warning`.
+2. **Daily alerts "trimmed"** — real root cause, two bugs stacking: (a) `_tg_balance()`
+   (runs on EVERY message send) matched `<blockquote>` via exact literal string, so my
+   earlier `<blockquote expandable>` collapsible-sections feature (added same session) had
+   every real closing tag treated as an "orphan" and DELETED, corrupting the HTML on every
+   send; (b) `wrap_command`/`wrap_view`/`wrap_alert` split the photo caption at a blind
+   `txt[:1024]` character position with zero tag-awareness, which could cut straight through
+   a tag. Either bug alone triggers Telegram's "can't parse entities" error, which falls
+   through to the bot's own last-resort fallback: escape all `<`/`>` and resend as plain
+   text — exactly the literal `&lt;b&gt;` output the user showed. Fixed `_tg_balance`'s
+   blockquote matching to be attribute-aware (regex instead of exact string), and added
+   `_wrap_safe_split()` (finds a clean line-boundary near the limit, tag-balances the head)
+   at all 3 call sites.
+3. **Earnings call not latest** — `_tx_capture()`'s "current quarter" formula computed the
+   calendar quarter STILL IN PROGRESS (e.g. "2026Q3" in July 2026) instead of the one that
+   just reported ("2026Q2") — a quarter's earnings call happens weeks AFTER that quarter
+   ends, so the formula was permanently querying data that can't exist for months, every
+   day, forever. Confirmed on disk: GOOG only had a 2026Q1 transcript despite Q2 having
+   already reported. Fixed the quarter math (with year-wraparound for Q1). Live-tested the
+   corrected quarter against the real AlphaVantage API: valid response, empty transcript
+   (provider hasn't published Q2 yet — a data-availability lag, not a code bug; the fix
+   itself is confirmed correct and will pick it up once published).
+4. **No hyperlinks in news** — article URLs were present in the underlying data the whole
+   time (Finnhub's API returns `url`, yfinance's news items have `canonicalUrl.url`,
+   `_lib/market_news_enhanced`'s own docstring says "with links") but were being discarded
+   at 3 separate consumption points: `_position_news()` (daily position alert + OI
+   ticker-detail news sections) and `_world_news_block()` (world-news line + the
+   geopolitical/supply-chain flag feature added earlier this session). All 4 render points
+   now emit real `<a href="...">` links, verified against live data end to end.
+
+Commits: b191f43 (OI chart delay), d4c9e51 (blockquote/split bug — the big one),
+9129bb2 (news hyperlinks), be21f08 (transcript quarter fix).
+
 ## 2026-07-24 — MISTAKE: shipped the same broken UI fix twice, unverified
 
 **What happened:** Built a "2-week dot timeline" for the data-audit banner (dashboard.py).

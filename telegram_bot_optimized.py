@@ -28178,6 +28178,52 @@ def _catalyst_watchlist(conn, extra=None):
     return out
 
 
+_SUPPLY_CHAIN_COUNTRY = {
+    # Lightweight version of worldmonitor's Country Instability Index (PLAN.md "Adjacent-
+    # framework ideas", 2026-07-24) -- flag when a ticker's known supply-chain concentration
+    # country shows up in recent headlines alongside a conflict/tension keyword. Starter set:
+    # the most concrete, well-known single-country concentration risks. Add more as needed --
+    # this is a small illustrative map, not an exhaustive one.
+    "TSM": "Taiwan", "NVDA": "Taiwan", "AMD": "Taiwan", "AVGO": "Taiwan", "QCOM": "Taiwan",
+    "ASML": "Netherlands", "ASX": "Taiwan", "UMC": "Taiwan",
+    "AAPL": "China", "TSLA": "China", "NKE": "Vietnam",
+}
+_GEOPOLITICAL_KEYWORDS = (
+    "invasion", "invade", "war", "conflict", "military", "blockade", "sanction",
+    "tension", "escalat", "missile", "strike", "attack", "troops", "border clash",
+)
+
+
+def _country_instability_flags(tickers, headline_limit=40):
+    """For each unique supply-chain country among `tickers`, scan recent world headlines
+    (existing keyless RSS aggregation, no new dependency) for that country's name next to a
+    geopolitical keyword. Returns [(ticker, country, headline)] -- empty list on any failure
+    or when nothing matches, never blocks the caller."""
+    countries = {}
+    for tk in tickers:
+        c = _SUPPLY_CHAIN_COUNTRY.get(str(tk).upper())
+        if c:
+            countries.setdefault(c, []).append(str(tk).upper())
+    if not countries:
+        return []
+    try:
+        news = _world_news_block(limit=headline_limit)
+    except Exception:
+        return []
+    flags = []
+    seen_countries = set()
+    for headline, _src in news:
+        hl = headline.lower()
+        for country, tks in countries.items():
+            if country in seen_countries:
+                continue
+            if country.lower() in hl and any(kw in hl for kw in _GEOPOLITICAL_KEYWORDS):
+                for tk in tks:
+                    flags.append((tk, country, headline))
+                seen_countries.add(country)
+    return flags
+
+
 def _upcoming_catalysts(tickers, days=7):
     macro = _macro_events(days)
     earn = []
@@ -28190,11 +28236,16 @@ def _upcoming_catalysts(tickers, days=7):
         except Exception:
             continue
     earn.sort()
-    return macro, earn
+    try:
+        geo = _country_instability_flags(tickers)
+    except Exception:
+        geo = []
+    return macro, earn, geo
 
 
-def _fmt_catalysts(macro, earn, days=7):
-    if not macro and not earn:
+def _fmt_catalysts(macro, earn, days=7, geo=None):
+    geo = geo or []
+    if not macro and not earn and not geo:
         return None
     parts = [f"⚡ <b>Catalyst Radar — next {days}d</b>",
              "<i>IV inflates into these; expect gaps — size down / don't fade blindly · not advice</i>"]
@@ -28206,12 +28257,16 @@ def _fmt_catalysts(macro, earn, days=7):
         lines = [f"📊 <b>{tk}</b> earnings — {('today' if n==0 else str(n)+'d')}"
                  f"{(' · '+str(dt)) if dt else ''}" for n, tk, dt in earn]
         parts.append("<b>🏢 EARNINGS (your book)</b>\n" + "\n".join(lines))
+    if geo:
+        lines = [f"🌐 <b>{tk}</b> — {country} supply-chain risk: “{hl[:90]}”"
+                 for tk, country, hl in geo]
+        parts.append("<b>⚠️ GEOPOLITICAL / SUPPLY-CHAIN</b>\n" + "\n".join(lines))
     return "\n\n".join(parts)
 
 
 async def _send_catalysts(msg, tickers, days=7):
-    macro, earn = _upcoming_catalysts(tickers, days)
-    body = _fmt_catalysts(macro, earn, days)
+    macro, earn, geo = _upcoming_catalysts(tickers, days)
+    body = _fmt_catalysts(macro, earn, days, geo=geo)
     if not body:
         await msg.reply_text(f"No major catalysts (earnings/Fed/CPI) in the next {days} days.", parse_mode=H)
         return
@@ -28252,8 +28307,8 @@ async def catalyst_alert(ctx: ContextTypes.DEFAULT_TYPE):
         tickers = _catalyst_watchlist(conn)
     finally:
         conn.close()
-    macro, earn = _upcoming_catalysts(tickers, days=3)      # only fire on imminent (≤3d) events
-    body = _fmt_catalysts(macro, earn, days=3)
+    macro, earn, geo = _upcoming_catalysts(tickers, days=3)  # only fire on imminent (≤3d) events
+    body = _fmt_catalysts(macro, earn, days=3, geo=geo)
     if not body:
         return
     try:

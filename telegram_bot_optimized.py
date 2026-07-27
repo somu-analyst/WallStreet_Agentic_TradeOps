@@ -2715,11 +2715,25 @@ async def news_refresh(context=None):
 
 # Vol dampened 0.8 -> 0.4 alongside the sign flip in _agent_vol (2026-07-22): the buy-fear
 # edge is real across every regime 1990-2026 but modest (+0.77% vs +0.25% fwd-10d), so it is
-# flipped AND down-weighted rather than trusted at full strength. Flow/Technical NOT rebalanced:
-# a quick validation could not reproduce the t=+4.28 Technical edge (1m-return rank-IC was
-# actually -0.039 at fwd-10d — reversal, not momentum), so changing those weights would overfit
-# an unverified number. Left as-is until a proper agent-level backtest exists.
-_AGENT_WEIGHTS = {"Flow": 1.2, "Position": 1.1, "Technical": 1.0, "Vol": 0.4, "Macro": 0.7}
+# flipped AND down-weighted rather than trusted at full strength.
+#
+# Agent-level backtest 2026-07-27 (150 liquid tickers, ~150 trading days, fwd-5d, point-in-time
+# replication of each agent's exact scoring formula — standalone script, not live code):
+#   Technical: rank-IC +0.047, t=+7.05 (N=22,350) — real, statistically significant, and
+#     correctly signed (BULL avg fwd +0.79% vs BEAR +0.08% vs overall +0.57%). The earlier
+#     "-0.039 reversal" figure (see prior comment, now superseded) does NOT replicate either —
+#     that was an unverified guess, not a real backtest. Weight raised 1.0 -> 1.3.
+#   Macro (tested against SPY's own fwd return, since it's a market-wide broadcast, not a
+#     cross-sectional pick): rank-IC -0.0008, t=-0.01 (N=135) — no edge, same zero-edge
+#     verdict as Flow. Dampened 0.7 -> 0.3, matching Vol's treatment.
+#   Flow: zero edge already documented in compute_capflow's own backtest note (2026-07-21,
+#     rank-IC ~0, t=+0.28 @5d) — NOT re-derived here. Its weight (1.2, still the highest of
+#     all 5 agents despite zero edge) is a known open issue, intentionally left untouched this
+#     pass to avoid conflating two separate findings in one change.
+#   Position (GEX-based): NOT tested — replicating _compute_gex point-in-time historically is
+#     invasive and risks corrupting the live gamma-wall logic; deferred rather than guessed at.
+#     Weight left unchanged.
+_AGENT_WEIGHTS = {"Flow": 1.2, "Position": 1.1, "Technical": 1.3, "Vol": 0.4, "Macro": 0.3}
 
 
 def _dbt_clamp(x, lo=-100.0, hi=100.0):

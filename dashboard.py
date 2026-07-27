@@ -22987,11 +22987,20 @@ if page == "👀 Watchlist":
             else:
                 st.error("Need a ticker.")
 
-    _wl_df = pd.read_sql("SELECT * FROM watchlist WHERE status='ACTIVE' ORDER BY id DESC", _wl_conn)
+    # Ordered by ticker_interest (PLAN.md "Adjacent-framework ideas", 2026-07-24 -- hermes-
+    # agent-style preference memory: /debate logs a +1 each time you actively evaluate a
+    # ticker, so the ones you actually check most surface first here instead of plain
+    # insertion order). Table may not exist yet if /debate has never run -- created here too.
+    _wl_conn.execute("CREATE TABLE IF NOT EXISTS ticker_interest "
+                     "(ticker TEXT PRIMARY KEY, views INTEGER DEFAULT 0, last_viewed TEXT)")
+    _wl_df = pd.read_sql(
+        "SELECT w.* FROM watchlist w LEFT JOIN ticker_interest ti ON ti.ticker = w.ticker "
+        "WHERE w.status='ACTIVE' ORDER BY COALESCE(ti.views, 0) DESC, w.id DESC", _wl_conn)
     if _wl_df.empty:
         st.info("Nothing on your watchlist yet — add a ticker above to start tracking it.")
     else:
-        st.caption(f"Tracking **{len(_wl_df)}** ticker(s). Live spot, distance to target, earnings/ex-div, "
+        st.caption(f"Tracking **{len(_wl_df)}** ticker(s), ordered by how often you check each one "
+                   "via /debate (most-checked first). Live spot, distance to target, earnings/ex-div, "
                    "short interest, PCR, and RSI/MACD/BB technicals — refreshed with the sidebar's Live/AH toggle.")
         try:
             import pandas_ta as _wl_pta

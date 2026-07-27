@@ -14337,6 +14337,14 @@ elif page == "🎯 Next-Day Exit Planner":
     #  NEXT-DAY GAME PLAN — whole-portfolio scenario analysis + action plan
     # ══════════════════════════════════════════════════════════════════
     if _ep_mode == "🌅 Next-Day Game Plan":
+        # Reserve the OUTPUT SLOT for the Layout/tables section here, at the top -- filled in
+        # far below, after _legs/_by_tk/_checklist finish computing (user 2026-07-24: wants
+        # tables above Manage-positions/macro/Monte Carlo). Deliberately NOT moving any code:
+        # a prior attempt cut-pasted the tables block up and crashed with NameError('_by_tk')
+        # because that computation lives in the content between here and there. st.empty()
+        # sidesteps the whole dependency question -- execution order is UNCHANGED, only the
+        # DOM position of this section's eventual output is reserved early.
+        _gp_tables_slot = st.empty()
         st.caption("Whole-portfolio view: what tomorrow's open could do to your positions, the key "
                    "levels to watch, and a ranked action checklist. Built from your DB (latest close + "
                    "stored option prices) with Black-Scholes.")
@@ -15024,997 +15032,998 @@ elif page == "🎯 Next-Day Exit Planner":
         # heavy tables below stay put. This is the part that replaces the old freeze-on-refresh.
         _gp_live_strip()
 
-        _gp_layout = st.radio(
-            "Layout", ["📋 All positions (one table)", "📊 By stock"],
-            horizontal=True, key="gp_layout", label_visibility="collapsed")
+        with _gp_tables_slot.container():
+            _gp_layout = st.radio(
+                "Layout", ["📋 All positions (one table)", "📊 By stock"],
+                horizontal=True, key="gp_layout", label_visibility="collapsed")
 
-        # Call/put GEX walls per leg (user 2026-07-24: "call wall and put wall for next
-        # expiry and the expiry of the option") — cached per (ticker, expiry) so a multi-leg
-        # position on the same ticker/expiry only computes GEX once, not once per leg.
-        _gp_wall_cache = {}
-        def _gp_walls(tk, conn, spot, expiry=None):
-            _wk = (tk, expiry)
-            if _wk not in _gp_wall_cache:
-                try:
-                    _g = _TB_ENGINE._compute_gex(tk, conn, spot, expiry=expiry) if _TB_ENGINE else {}
-                except Exception:
-                    _g = {}
-                _cw = _g.get("call_wall"); _pw = _g.get("put_wall")
-                _gp_wall_cache[_wk] = (f"${_cw:,.0f}" if _cw else "—", f"${_pw:,.0f}" if _pw else "—")
-            return _gp_wall_cache[_wk]
+            # Call/put GEX walls per leg (user 2026-07-24: "call wall and put wall for next
+            # expiry and the expiry of the option") — cached per (ticker, expiry) so a multi-leg
+            # position on the same ticker/expiry only computes GEX once, not once per leg.
+            _gp_wall_cache = {}
+            def _gp_walls(tk, conn, spot, expiry=None):
+                _wk = (tk, expiry)
+                if _wk not in _gp_wall_cache:
+                    try:
+                        _g = _TB_ENGINE._compute_gex(tk, conn, spot, expiry=expiry) if _TB_ENGINE else {}
+                    except Exception:
+                        _g = {}
+                    _cw = _g.get("call_wall"); _pw = _g.get("put_wall")
+                    _gp_wall_cache[_wk] = (f"${_cw:,.0f}" if _cw else "—", f"${_pw:,.0f}" if _pw else "—")
+                return _gp_wall_cache[_wk]
 
-        if _gp_layout.startswith("📋"):
-            # ── flat view: every leg across all tickers in one table (same detail as per-stock) ──
-            _flat = []
-            for _ftk, _ftl in _by_tk.items():
-                for l in _ftl:
-                    if l["typ"] == "stock":            # shares: linear economics, no Greeks/DTE
+            if _gp_layout.startswith("📋"):
+                # ── flat view: every leg across all tickers in one table (same detail as per-stock) ──
+                _flat = []
+                for _ftk, _ftl in _by_tk.items():
+                    for l in _ftl:
+                        if l["typ"] == "stock":            # shares: linear economics, no Greeks/DTE
+                            _fpp = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
+                            _fac = []
+                            if _fpp >= 50: _fac.append("up ≥50% — take profit")
+                            elif _fpp <= -50: _fac.append("down ≥50% — cut/hedge")
+                            _faction = "; ".join(_fac) if _fac else "hold & monitor"
+                            _fsig = l["cur"] * l["iv"] * (1 / 252.0) ** 0.5
+                            _fbuf = max(0.02, round(l["cur"] * 0.003, 2))
+                            _fclimit = (f"SELL ≤ ${max(l['cur'] - _fbuf, 0.01):.2f}" if l["side"] == "long"
+                                        else f"BUY ≥ ${l['cur'] + _fbuf:.2f}")
+                            _flb = _combo_bounds([l], l["spot"]); _fpa = _pos_analytics([l], l["spot"])
+                            _fwin = (f"{'🟢' if _fpa['pop'] >= 60 else '🟡' if _fpa['pop'] >= 40 else '🔴'} "
+                                     f"{_fpa['pop']:.0f}%") if _fpa else "—"
+                            _fearn, _fdiv = _next_events(_ftk)
+                            _fsi = _si_cells(_ftk)
+                            _fsrc = _spot_src(_ftk, l)
+                            _flat.append({
+                                "Ticker": _ftk, "Spot": round(l["spot"], 2), "Src": _fsrc,
+                                "Leg": f"{l['side']} {abs(l['qty']):g} sh",
+                                "Exp": "—", "DTE": None, "Earnings": _fearn, "Ex-Div": _fdiv, "Money": "—",
+                            "SI %": _fsi[0], "DTC": _fsi[1], "Shorts": _fsi[2],
+                                "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
+                                "Prev Cls": None,
+                                "Est Open": f"${l['spot']:.2f}",
+                                "Day L–H": f"${max(l['cur'] - _fsig, 0.01):.2f}–${l['cur'] + _fsig:.2f}",
+                                "Stk ±1σ": f"{l['cur'] + _fsig:,.0f}/{max(l['cur'] - _fsig, 0):,.0f}",
+                                "Hi\\Lo": "—",
+                                "Close @": _fclimit, "Max P": _fmt_maxp(_flb), "Max L": _fmt_maxl(_flb),
+                                "Win %": _fwin,
+                                "Δ/1%": round(l["ddelta_1pct"]), "Theta": round(l["pos_theta"]),
+                                "Vega": round(l["pos_vega"]),
+                                "P&L %": round(_fpp), "P&L $": round(l["pnl"]), "Action": _faction,
+                            })
+                            continue
+                        _fm = "ITM" if ((l["spot"] > l["K"]) if l["typ"] == "call" else (l["spot"] < l["K"])) else "OTM"
                         _fpp = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
+                        # action (with roll suggestion), matching the per-stock leg table
                         _fac = []
+                        if l["dte"] <= 7: _fac.append(f"{l['dte']}DTE — decide now")
+                        elif l["dte"] <= 21: _fac.append(f"{l['dte']}DTE — plan exit/roll")
+                        if l["side"] == "short" and _fm == "ITM": _fac.append("ITM short — assignment risk")
                         if _fpp >= 50: _fac.append("up ≥50% — take profit")
-                        elif _fpp <= -50: _fac.append("down ≥50% — cut/hedge")
+                        elif _fpp <= -50: _fac.append("down ≥50% — cut/roll")
                         _faction = "; ".join(_fac) if _fac else "hold & monitor"
-                        _fsig = l["cur"] * l["iv"] * (1 / 252.0) ** 0.5
-                        _fbuf = max(0.02, round(l["cur"] * 0.003, 2))
-                        _fclimit = (f"SELL ≤ ${max(l['cur'] - _fbuf, 0.01):.2f}" if l["side"] == "long"
-                                    else f"BUY ≥ ${l['cur'] + _fbuf:.2f}")
-                        _flb = _combo_bounds([l], l["spot"]); _fpa = _pos_analytics([l], l["spot"])
+                        if _fac and (l["dte"] <= 21 or (l["side"] == "short" and _fm == "ITM")):
+                            _frs = _roll_suggestion(_gp_conn, l)
+                            if _frs: _faction += f" · {_frs}"
+                        # next-session economics (est open, 1σ day range, fill-limit to close)
+                        _fTn = max(l["dte"], 0) / 365.0
+                        _fsig = l["spot"] * l["iv"] * (1 / 252.0) ** 0.5
+                        _fbase = bs_greeks(l["spot"], l["K"], _fTn, _R, l["iv"], l["typ"])["price"]
+                        _fvu = bs_greeks(l["spot"] + _fsig, l["K"], _fTn, _R, l["iv"], l["typ"])["price"]
+                        _fvd = bs_greeks(max(l["spot"] - _fsig, 0.01), l["K"], _fTn, _R, l["iv"], l["typ"])["price"]
+                        # anchor the modeled ±1σ swing to the real current price ("Now") so the range
+                        # always brackets it, instead of floating around a pure-model base.
+                        _folo = max(l["cur"] + min(_fvu, _fvd) - _fbase, 0.01)
+                        _fohi = max(l["cur"] + max(_fvu, _fvd) - _fbase, _folo)
+                        _ftopen = bs_greeks(l["spot"], l["K"], max(l["dte"] - 1, 0) / 365.0, _R, l["iv"], l["typ"])["price"]
+                        _ftopen_disp = ("expired" if l["dte"] < 0 else "exp today" if l["dte"] == 0 else
+                                        "~$0.00" if _ftopen < 0.005 else f"${_ftopen:.2f}")
+                        _fpx, _ffromq = _smart_close_limit(l["side"], l["cur"], l.get("bid"), l.get("ask"))
+                        _fclimit = (f"SELL ≤ ${_fpx:.2f}" if l["side"] == "long" else f"BUY ≥ ${_fpx:.2f}") \
+                                   + ("" if _ffromq else " (est)")
+                        _flb = _combo_bounds([l], l["spot"])
+                        _fpa = _pos_analytics([l], l["spot"])
                         _fwin = (f"{'🟢' if _fpa['pop'] >= 60 else '🟡' if _fpa['pop'] >= 40 else '🔴'} "
                                  f"{_fpa['pop']:.0f}%") if _fpa else "—"
                         _fearn, _fdiv = _next_events(_ftk)
                         _fsi = _si_cells(_ftk)
                         _fsrc = _spot_src(_ftk, l)
+                        _fcw_n, _fpw_n = _gp_walls(_ftk, _gp_conn, l["spot"])          # next (nearest liquid) expiry
+                        _fcw_o, _fpw_o = _gp_walls(_ftk, _gp_conn, l["spot"], l["exp"])  # this leg's own expiry
                         _flat.append({
                             "Ticker": _ftk, "Spot": round(l["spot"], 2), "Src": _fsrc,
-                            "Leg": f"{l['side']} {abs(l['qty']):g} sh",
-                            "Exp": "—", "DTE": None, "Earnings": _fearn, "Ex-Div": _fdiv, "Money": "—",
-                        "SI %": _fsi[0], "DTC": _fsi[1], "Shorts": _fsi[2],
+                            "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
+                            "Exp": l["exp"][:10], "DTE": l["dte"], "Earnings": _fearn, "Ex-Div": _fdiv, "Money": _fm,
+                            "SI %": _fsi[0], "DTC": _fsi[1], "Shorts": _fsi[2],
                             "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
-                            "Prev Cls": None,
-                            "Est Open": f"${l['spot']:.2f}",
-                            "Day L–H": f"${max(l['cur'] - _fsig, 0.01):.2f}–${l['cur'] + _fsig:.2f}",
-                            "Stk ±1σ": f"{l['cur'] + _fsig:,.0f}/{max(l['cur'] - _fsig, 0):,.0f}",
-                            "Hi\\Lo": "—",
-                            "Close @": _fclimit, "Max P": _fmt_maxp(_flb), "Max L": _fmt_maxl(_flb),
-                            "Win %": _fwin,
+                            "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
+                            "Est Open": _ftopen_disp, "Day L–H": f"${_folo:.2f}–${_fohi:.2f}",
+                            "Stk ±1σ": f"{l['spot'] + _fsig:,.0f}/{max(l['spot'] - _fsig, 0):,.0f}",
+                            "Hi/Lo": (f"${l['day_hi']:.2f}/${l['day_lo']:.2f}" if l.get("day_hi") and l.get("day_lo") else "—"),
+                            "Walls (Next Exp)": f"C{_fcw_n}/P{_fpw_n}", "Walls (Opt Exp)": f"C{_fcw_o}/P{_fpw_o}",
+                            "Close @": _fclimit, "Max P": _fmt_maxp(_flb), "Max L": _fmt_maxl(_flb), "Win %": _fwin,
                             "Δ/1%": round(l["ddelta_1pct"]), "Theta": round(l["pos_theta"]),
                             "Vega": round(l["pos_vega"]),
                             "P&L %": round(_fpp), "P&L $": round(l["pnl"]), "Action": _faction,
                         })
-                        continue
-                    _fm = "ITM" if ((l["spot"] > l["K"]) if l["typ"] == "call" else (l["spot"] < l["K"])) else "OTM"
-                    _fpp = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
-                    # action (with roll suggestion), matching the per-stock leg table
-                    _fac = []
-                    if l["dte"] <= 7: _fac.append(f"{l['dte']}DTE — decide now")
-                    elif l["dte"] <= 21: _fac.append(f"{l['dte']}DTE — plan exit/roll")
-                    if l["side"] == "short" and _fm == "ITM": _fac.append("ITM short — assignment risk")
-                    if _fpp >= 50: _fac.append("up ≥50% — take profit")
-                    elif _fpp <= -50: _fac.append("down ≥50% — cut/roll")
-                    _faction = "; ".join(_fac) if _fac else "hold & monitor"
-                    if _fac and (l["dte"] <= 21 or (l["side"] == "short" and _fm == "ITM")):
-                        _frs = _roll_suggestion(_gp_conn, l)
-                        if _frs: _faction += f" · {_frs}"
-                    # next-session economics (est open, 1σ day range, fill-limit to close)
-                    _fTn = max(l["dte"], 0) / 365.0
-                    _fsig = l["spot"] * l["iv"] * (1 / 252.0) ** 0.5
-                    _fbase = bs_greeks(l["spot"], l["K"], _fTn, _R, l["iv"], l["typ"])["price"]
-                    _fvu = bs_greeks(l["spot"] + _fsig, l["K"], _fTn, _R, l["iv"], l["typ"])["price"]
-                    _fvd = bs_greeks(max(l["spot"] - _fsig, 0.01), l["K"], _fTn, _R, l["iv"], l["typ"])["price"]
-                    # anchor the modeled ±1σ swing to the real current price ("Now") so the range
-                    # always brackets it, instead of floating around a pure-model base.
-                    _folo = max(l["cur"] + min(_fvu, _fvd) - _fbase, 0.01)
-                    _fohi = max(l["cur"] + max(_fvu, _fvd) - _fbase, _folo)
-                    _ftopen = bs_greeks(l["spot"], l["K"], max(l["dte"] - 1, 0) / 365.0, _R, l["iv"], l["typ"])["price"]
-                    _ftopen_disp = ("expired" if l["dte"] < 0 else "exp today" if l["dte"] == 0 else
-                                    "~$0.00" if _ftopen < 0.005 else f"${_ftopen:.2f}")
-                    _fpx, _ffromq = _smart_close_limit(l["side"], l["cur"], l.get("bid"), l.get("ask"))
-                    _fclimit = (f"SELL ≤ ${_fpx:.2f}" if l["side"] == "long" else f"BUY ≥ ${_fpx:.2f}") \
-                               + ("" if _ffromq else " (est)")
-                    _flb = _combo_bounds([l], l["spot"])
-                    _fpa = _pos_analytics([l], l["spot"])
-                    _fwin = (f"{'🟢' if _fpa['pop'] >= 60 else '🟡' if _fpa['pop'] >= 40 else '🔴'} "
-                             f"{_fpa['pop']:.0f}%") if _fpa else "—"
-                    _fearn, _fdiv = _next_events(_ftk)
-                    _fsi = _si_cells(_ftk)
-                    _fsrc = _spot_src(_ftk, l)
-                    _fcw_n, _fpw_n = _gp_walls(_ftk, _gp_conn, l["spot"])          # next (nearest liquid) expiry
-                    _fcw_o, _fpw_o = _gp_walls(_ftk, _gp_conn, l["spot"], l["exp"])  # this leg's own expiry
-                    _flat.append({
-                        "Ticker": _ftk, "Spot": round(l["spot"], 2), "Src": _fsrc,
-                        "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
-                        "Exp": l["exp"][:10], "DTE": l["dte"], "Earnings": _fearn, "Ex-Div": _fdiv, "Money": _fm,
-                        "SI %": _fsi[0], "DTC": _fsi[1], "Shorts": _fsi[2],
-                        "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
-                        "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
-                        "Est Open": _ftopen_disp, "Day L–H": f"${_folo:.2f}–${_fohi:.2f}",
-                        "Stk ±1σ": f"{l['spot'] + _fsig:,.0f}/{max(l['spot'] - _fsig, 0):,.0f}",
-                        "Hi/Lo": (f"${l['day_hi']:.2f}/${l['day_lo']:.2f}" if l.get("day_hi") and l.get("day_lo") else "—"),
-                        "Walls (Next Exp)": f"C{_fcw_n}/P{_fpw_n}", "Walls (Opt Exp)": f"C{_fcw_o}/P{_fpw_o}",
-                        "Close @": _fclimit, "Max P": _fmt_maxp(_flb), "Max L": _fmt_maxl(_flb), "Win %": _fwin,
-                        "Δ/1%": round(l["ddelta_1pct"]), "Theta": round(l["pos_theta"]),
-                        "Vega": round(l["pos_vega"]),
-                        "P&L %": round(_fpp), "P&L $": round(l["pnl"]), "Action": _faction,
-                    })
-            # ── ticker + portfolio summary (max P/L, P&L, POP, EV) ──
-            _sumrows = []
-            _spmaxp = _spmaxl = _spev = _sppnl = 0.0; _spup = _spdn = False
-            for _stk, _stl in _by_tk.items():
-                _sb2 = _combo_bounds(_stl, _stl[0]["spot"])
-                _sa2 = _pos_analytics(_stl, _stl[0]["spot"])
-                _spnl2 = sum(x["pnl"] for x in _stl); _sppnl += _spnl2
-                if _sb2:
-                    _spmaxp += _sb2["max_profit"]; _spmaxl += _sb2["max_loss"]
-                    _spup = _spup or _sb2["up_profit_unlimited"]; _spdn = _spdn or _sb2["up_loss_unlimited"]
-                if _sa2:
-                    _spev += _sa2["ev"]
+                # ── ticker + portfolio summary (max P/L, P&L, POP, EV) ──
+                _sumrows = []
+                _spmaxp = _spmaxl = _spev = _sppnl = 0.0; _spup = _spdn = False
+                for _stk, _stl in _by_tk.items():
+                    _sb2 = _combo_bounds(_stl, _stl[0]["spot"])
+                    _sa2 = _pos_analytics(_stl, _stl[0]["spot"])
+                    _spnl2 = sum(x["pnl"] for x in _stl); _sppnl += _spnl2
+                    if _sb2:
+                        _spmaxp += _sb2["max_profit"]; _spmaxl += _sb2["max_loss"]
+                        _spup = _spup or _sb2["up_profit_unlimited"]; _spdn = _spdn or _sb2["up_loss_unlimited"]
+                    if _sa2:
+                        _spev += _sa2["ev"]
+                    _sumrows.append({
+                        "Ticker": _stk, "Legs": len(_stl), "Open P&L": round(_spnl2),
+                        "Max P": _fmt_maxp(_sb2), "Max L": _fmt_maxl(_sb2),
+                        "POP": f"{_sa2['pop']:.0f}%" if _sa2 else "—",
+                        "EV": round(_sa2["ev"]) if _sa2 else None,
+                        "Breakeven": ", ".join(f"${b:.0f}" for b in _sa2["breakevens"]) if (_sa2 and _sa2["breakevens"]) else "—"})
                 _sumrows.append({
-                    "Ticker": _stk, "Legs": len(_stl), "Open P&L": round(_spnl2),
-                    "Max P": _fmt_maxp(_sb2), "Max L": _fmt_maxl(_sb2),
-                    "POP": f"{_sa2['pop']:.0f}%" if _sa2 else "—",
-                    "EV": round(_sa2["ev"]) if _sa2 else None,
-                    "Breakeven": ", ".join(f"${b:.0f}" for b in _sa2["breakevens"]) if (_sa2 and _sa2["breakevens"]) else "—"})
-            _sumrows.append({
-                "Ticker": "▣ PORTFOLIO", "Legs": sum(len(t) for t in _by_tk.values()),
-                "Open P&L": round(_sppnl), "Max P": "Unlimited" if _spup else f"${_spmaxp:,.0f}",
-                "Max L": "Unlimited" if _spdn else f"${_spmaxl:,.0f}", "POP": "—",
-                "EV": round(_spev), "Breakeven": "—"})
-            st.markdown("**📊 Summary — ticker & portfolio level** (max profit/loss to expiry, POP, EV)")
-            st.dataframe(pd.DataFrame(_sumrows), hide_index=True, use_container_width=True,
-                         column_config={"Open P&L": st.column_config.NumberColumn(format="$%d"),
-                                        "EV": st.column_config.NumberColumn(format="$%d")})
+                    "Ticker": "▣ PORTFOLIO", "Legs": sum(len(t) for t in _by_tk.values()),
+                    "Open P&L": round(_sppnl), "Max P": "Unlimited" if _spup else f"${_spmaxp:,.0f}",
+                    "Max L": "Unlimited" if _spdn else f"${_spmaxl:,.0f}", "POP": "—",
+                    "EV": round(_spev), "Breakeven": "—"})
+                st.markdown("**📊 Summary — ticker & portfolio level** (max profit/loss to expiry, POP, EV)")
+                st.dataframe(pd.DataFrame(_sumrows), hide_index=True, use_container_width=True,
+                             column_config={"Open P&L": st.column_config.NumberColumn(format="$%d"),
+                                            "EV": st.column_config.NumberColumn(format="$%d")})
 
-            st.markdown("**🧾 Per-leg detail**")
-            _fdf = pd.DataFrame(_flat)
-            # Column order (user 2026-07-22): move the Ex-Div..Shorts block to sit AFTER
-            # Est Open, so the price columns (Entry/Now/Prev Cls/Est Open) stay adjacent and
-            # the context columns follow. Done once on the frame instead of editing both
-            # _flat.append literals — those two branches have already drifted apart once.
-            try:
-                _c = list(_fdf.columns)
-                _a, _b, _anchor = _c.index("Ex-Div"), _c.index("Shorts"), _c.index("Est Open")
-                if _a <= _b and _anchor > _b:
-                    _blk = _c[_a:_b + 1]
-                    _rest = _c[:_a] + _c[_b + 1:]
-                    _at = _rest.index("Est Open") + 1
-                    _fdf = _fdf[_rest[:_at] + _blk + _rest[_at:]]
-            except (ValueError, KeyError):
-                pass                               # column missing — leave order untouched
-            _fdf = _fdf.sort_values(["Ticker", "DTE"])
-            # TOTAL row (user 2026-07-22): every aggregatable number populated, not blanks.
-            # Entry/Now/Prev Cls are SIGNED net dollar values (a short leg's entry is a
-            # CREDIT, qty<0), so Now - Entry == P&L $ exactly. Unsigned sums would look
-            # tidier and silently contradict the P&L column. Multiplier respected: STOCK 1x,
-            # options 100x. DTE and Win % are capital-weighted, not naive means, so a 2-lot
-            # $10k leg does not count the same as a 1-lot $200 leg.
-            _fnet_e = _fnet_n = _fnet_p = _fcost = _fdtew = _fwinw = _fwcap = 0.0
-            for _lgs in _by_tk.values():
-                for _l in _lgs:
-                    _mult = 1 if str(_l.get("typ", "")).lower() == "stock" else 100
-                    _q = float(_l.get("qty") or 0)
-                    _e = float(_l.get("entry") or 0)
-                    _c = float(_l.get("cur") or 0)
-                    _cap = abs(_e * _q * _mult)
-                    _fnet_e += _e * _q * _mult
-                    _fnet_n += _c * _q * _mult
-                    _fnet_p += (float(_l["prev_close"]) if _l.get("prev_close") else _c) * _q * _mult
-                    _fcost += _cap
-                    if _l.get("dte") is not None:
-                        _fdtew += float(_l["dte"]) * _cap
-            for _r in _flat:                       # Win % is a display string like "🟢 68%"
-                _m = re.search(r"(\d+(?:\.\d+)?)\s*%", str(_r.get("Win %", "")))
-                if _m:
-                    _fwinw += float(_m.group(1)); _fwcap += 1
-            _ftot = _fnet_n - _fnet_e              # identical to sum of per-leg P&L $
-            _trow = {c: "" for c in _fdf.columns}
-            _trow.update({
-                "Ticker": "TOTAL",
-                "Leg": f"{len(_flat)} legs · {len(_by_tk)} tickers",
-                "Spot": None,                      # prices of different stocks do not add up
-                "Exp": "—",
-                "DTE": round(_fdtew / _fcost) if _fcost > 0 else None,
-                "Entry": round(_fnet_e, 2), "Now": round(_fnet_n, 2),
-                "Prev Cls": round(_fnet_p, 2),
-                "Max P": "Unlimited" if _spup else f"${_spmaxp:,.0f}",
-                "Max L": "Unlimited" if _spdn else f"${_spmaxl:,.0f}",
-                "Win %": f"{_fwinw / _fwcap:.0f}%" if _fwcap else "—",
-                # Greeks are additive across legs (unlike Spot), so the portfolio total is
-                # the honest sum — this is the same net exposure as the Greeks strip above.
-                "Δ/1%": round(sum(l["ddelta_1pct"] for gg in _by_tk.values() for l in gg)),
-                "Theta": round(sum(l["pos_theta"] for gg in _by_tk.values() for l in gg)),
-                "Vega": round(sum(l["pos_vega"] for gg in _by_tk.values() for l in gg)),
-                "P&L $": round(_ftot),
-                "P&L %": round(_ftot / _fcost * 100) if _fcost > 0 else None,
-                "Action": f"capital ${_fcost:,.0f}",
-            })
-            _fdf = pd.concat([_fdf, pd.DataFrame([_trow])], ignore_index=True)
-            # Full column set (user 2026-07-18: keep ALL columns); height sized to every
-            # row so there's no inner vertical scroll — the page scrolls naturally instead.
-            st.dataframe(_fdf, hide_index=True, use_container_width=True,
-                         height=(len(_fdf) + 1) * 35 + 3,
-                         column_config={
-                             "Spot": st.column_config.NumberColumn(format="$%.2f"),
-                             "Entry": st.column_config.NumberColumn(format="$%.2f"),
-                             "Now": st.column_config.NumberColumn(format="$%.2f"),
-                             "P&L %": st.column_config.NumberColumn(format="%d%%"),
-                             "P&L $": st.column_config.NumberColumn(format="$%d")})
-            st.caption(f"All **{len(_flat)}** legs across **{len(_by_tk)}** tickers · total open "
-                       f"P&L **${_ftot:,.0f}**.  **Now** = live option mid (bid/ask) when the market's "
-                       "open, else the last close.  **Prev Cls** = prior session close · **Hi/Lo** = that "
-                       "day's option high/low.  **Est Open** = flat-stock decay reference — backtested: NO edge over Now, trust the scenarios instead (*expired*=0DTE, "
-                       "*~\\$0.00*=deep-OTM) · **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs) · "
-                       "**Walls (Next Exp)** = call/put GEX walls for the ticker's nearest liquid expiry · "
-                       "**Walls (Opt Exp)** = same, for THIS leg's own expiry (may differ from next) · "
-                       "**Close @** = limit 1/3 into the bid/ask spread from the best price (falls back to "
-                       "a 3% buffer off Now when no live quote — tagged *(est)*) · "
-                       "**Win %** = P(profit from entry) 🟢≥60 🟡40–60 🔴<40. "
-                       "Switch to *By stock* for levels, signals, scenarios & deep analysis.")
+                st.markdown("**🧾 Per-leg detail**")
+                _fdf = pd.DataFrame(_flat)
+                # Column order (user 2026-07-22): move the Ex-Div..Shorts block to sit AFTER
+                # Est Open, so the price columns (Entry/Now/Prev Cls/Est Open) stay adjacent and
+                # the context columns follow. Done once on the frame instead of editing both
+                # _flat.append literals — those two branches have already drifted apart once.
+                try:
+                    _c = list(_fdf.columns)
+                    _a, _b, _anchor = _c.index("Ex-Div"), _c.index("Shorts"), _c.index("Est Open")
+                    if _a <= _b and _anchor > _b:
+                        _blk = _c[_a:_b + 1]
+                        _rest = _c[:_a] + _c[_b + 1:]
+                        _at = _rest.index("Est Open") + 1
+                        _fdf = _fdf[_rest[:_at] + _blk + _rest[_at:]]
+                except (ValueError, KeyError):
+                    pass                               # column missing — leave order untouched
+                _fdf = _fdf.sort_values(["Ticker", "DTE"])
+                # TOTAL row (user 2026-07-22): every aggregatable number populated, not blanks.
+                # Entry/Now/Prev Cls are SIGNED net dollar values (a short leg's entry is a
+                # CREDIT, qty<0), so Now - Entry == P&L $ exactly. Unsigned sums would look
+                # tidier and silently contradict the P&L column. Multiplier respected: STOCK 1x,
+                # options 100x. DTE and Win % are capital-weighted, not naive means, so a 2-lot
+                # $10k leg does not count the same as a 1-lot $200 leg.
+                _fnet_e = _fnet_n = _fnet_p = _fcost = _fdtew = _fwinw = _fwcap = 0.0
+                for _lgs in _by_tk.values():
+                    for _l in _lgs:
+                        _mult = 1 if str(_l.get("typ", "")).lower() == "stock" else 100
+                        _q = float(_l.get("qty") or 0)
+                        _e = float(_l.get("entry") or 0)
+                        _c = float(_l.get("cur") or 0)
+                        _cap = abs(_e * _q * _mult)
+                        _fnet_e += _e * _q * _mult
+                        _fnet_n += _c * _q * _mult
+                        _fnet_p += (float(_l["prev_close"]) if _l.get("prev_close") else _c) * _q * _mult
+                        _fcost += _cap
+                        if _l.get("dte") is not None:
+                            _fdtew += float(_l["dte"]) * _cap
+                for _r in _flat:                       # Win % is a display string like "🟢 68%"
+                    _m = re.search(r"(\d+(?:\.\d+)?)\s*%", str(_r.get("Win %", "")))
+                    if _m:
+                        _fwinw += float(_m.group(1)); _fwcap += 1
+                _ftot = _fnet_n - _fnet_e              # identical to sum of per-leg P&L $
+                _trow = {c: "" for c in _fdf.columns}
+                _trow.update({
+                    "Ticker": "TOTAL",
+                    "Leg": f"{len(_flat)} legs · {len(_by_tk)} tickers",
+                    "Spot": None,                      # prices of different stocks do not add up
+                    "Exp": "—",
+                    "DTE": round(_fdtew / _fcost) if _fcost > 0 else None,
+                    "Entry": round(_fnet_e, 2), "Now": round(_fnet_n, 2),
+                    "Prev Cls": round(_fnet_p, 2),
+                    "Max P": "Unlimited" if _spup else f"${_spmaxp:,.0f}",
+                    "Max L": "Unlimited" if _spdn else f"${_spmaxl:,.0f}",
+                    "Win %": f"{_fwinw / _fwcap:.0f}%" if _fwcap else "—",
+                    # Greeks are additive across legs (unlike Spot), so the portfolio total is
+                    # the honest sum — this is the same net exposure as the Greeks strip above.
+                    "Δ/1%": round(sum(l["ddelta_1pct"] for gg in _by_tk.values() for l in gg)),
+                    "Theta": round(sum(l["pos_theta"] for gg in _by_tk.values() for l in gg)),
+                    "Vega": round(sum(l["pos_vega"] for gg in _by_tk.values() for l in gg)),
+                    "P&L $": round(_ftot),
+                    "P&L %": round(_ftot / _fcost * 100) if _fcost > 0 else None,
+                    "Action": f"capital ${_fcost:,.0f}",
+                })
+                _fdf = pd.concat([_fdf, pd.DataFrame([_trow])], ignore_index=True)
+                # Full column set (user 2026-07-18: keep ALL columns); height sized to every
+                # row so there's no inner vertical scroll — the page scrolls naturally instead.
+                st.dataframe(_fdf, hide_index=True, use_container_width=True,
+                             height=(len(_fdf) + 1) * 35 + 3,
+                             column_config={
+                                 "Spot": st.column_config.NumberColumn(format="$%.2f"),
+                                 "Entry": st.column_config.NumberColumn(format="$%.2f"),
+                                 "Now": st.column_config.NumberColumn(format="$%.2f"),
+                                 "P&L %": st.column_config.NumberColumn(format="%d%%"),
+                                 "P&L $": st.column_config.NumberColumn(format="$%d")})
+                st.caption(f"All **{len(_flat)}** legs across **{len(_by_tk)}** tickers · total open "
+                           f"P&L **${_ftot:,.0f}**.  **Now** = live option mid (bid/ask) when the market's "
+                           "open, else the last close.  **Prev Cls** = prior session close · **Hi/Lo** = that "
+                           "day's option high/low.  **Est Open** = flat-stock decay reference — backtested: NO edge over Now, trust the scenarios instead (*expired*=0DTE, "
+                           "*~\\$0.00*=deep-OTM) · **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs) · "
+                           "**Walls (Next Exp)** = call/put GEX walls for the ticker's nearest liquid expiry · "
+                           "**Walls (Opt Exp)** = same, for THIS leg's own expiry (may differ from next) · "
+                           "**Close @** = limit 1/3 into the bid/ask spread from the best price (falls back to "
+                           "a 3% buffer off Now when no live quote — tagged *(est)*) · "
+                           "**Win %** = P(profit from entry) 🟢≥60 🟡40–60 🔴<40. "
+                           "Switch to *By stock* for levels, signals, scenarios & deep analysis.")
 
-            # Small per-ticker chart: price + GEX walls (user 2026-07-24: "a small chart showing
-            # price chart and walls and other required indicators"). One per ticker, not per leg —
-            # multiple legs on the same stock would just repeat an identical chart.
-            with st.expander(f"📈 Price + walls chart ({len(_by_tk)} ticker{'s' if len(_by_tk) != 1 else ''})",
-                             expanded=False):
-                _chart_cols = st.columns(min(len(_by_tk), 3) or 1)
-                for _ci, (_ctk, _ctl) in enumerate(_by_tk.items()):
-                    _chist = _cached_history(_ctk, period="90d", interval="1d")
-                    if _chist is None or _chist.empty:
-                        continue
-                    _ccw, _cpw = _gp_walls(_ctk, _gp_conn, _ctl[0]["spot"])
-                    with _chart_cols[_ci % len(_chart_cols)]:
-                        _cfig = go.Figure()
-                        _cfig.add_trace(go.Scatter(y=_chist["Close"], mode="lines",
-                                                   line=dict(width=1.5, color="#3d8bff"), showlegend=False))
+                # Small per-ticker chart: price + GEX walls (user 2026-07-24: "a small chart showing
+                # price chart and walls and other required indicators"). One per ticker, not per leg —
+                # multiple legs on the same stock would just repeat an identical chart.
+                with st.expander(f"📈 Price + walls chart ({len(_by_tk)} ticker{'s' if len(_by_tk) != 1 else ''})",
+                                 expanded=False):
+                    _chart_cols = st.columns(min(len(_by_tk), 3) or 1)
+                    for _ci, (_ctk, _ctl) in enumerate(_by_tk.items()):
+                        _chist = _cached_history(_ctk, period="90d", interval="1d")
+                        if _chist is None or _chist.empty:
+                            continue
+                        _ccw, _cpw = _gp_walls(_ctk, _gp_conn, _ctl[0]["spot"])
+                        with _chart_cols[_ci % len(_chart_cols)]:
+                            _cfig = go.Figure()
+                            _cfig.add_trace(go.Scatter(y=_chist["Close"], mode="lines",
+                                                       line=dict(width=1.5, color="#3d8bff"), showlegend=False))
+                            try:
+                                _cw_v = float(_ccw.replace("$", "").replace(",", ""))
+                                _cfig.add_hline(y=_cw_v, line_dash="dot", line_color="#e74c3c", line_width=1)
+                            except ValueError:
+                                pass
+                            try:
+                                _pw_v = float(_cpw.replace("$", "").replace(",", ""))
+                                _cfig.add_hline(y=_pw_v, line_dash="dot", line_color="#2ecc71", line_width=1)
+                            except ValueError:
+                                pass
+                            _crsi_txt = ""
+                            try:
+                                import pandas_ta as _cpta
+                                _crsi_s = _cpta.rsi(_chist["Close"], length=14)
+                                if _crsi_s is not None and not _crsi_s.empty:
+                                    _crsi_txt = f" · RSI {_crsi_s.iloc[-1]:.0f}"
+                            except Exception:
+                                pass
+                            _cfig.update_layout(height=150, margin=dict(l=0, r=0, t=24, b=0),
+                                               title=dict(text=f"{_ctk}  ${_ctl[0]['spot']:,.2f}", font=dict(size=12)),
+                                               xaxis=dict(visible=False), yaxis=dict(visible=False),
+                                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                            st.plotly_chart(_cfig, use_container_width=True, config={"displayModeBar": False},
+                                            key=f"gp_wallchart_{_ctk}")
+                            st.caption(f"🔴 C-wall {_ccw} · 🟢 P-wall {_cpw}{_crsi_txt}")
+                st.markdown("---")
+                st.caption("📖 Full per-stock analysis (levels · signals · sentiment · scenarios · deep "
+                           "analysis) for **every** position follows below.")
+            else:
+                st.caption("Each stock is a card — flip its toggle to load that stock's full ticker-level "
+                           "analysis and legs. **Opened stocks stay open through live refresh** (the page "
+                           "only re-renders when prices actually move).")
+            for _tk, _tl in _by_tk.items():
+                _spot = _tl[0]["spot"]
+                _ivs = sorted(x["iv"] for x in _tl); _ivm = _ivs[len(_ivs) // 2]
+                _em = _spot * _ivm * (1 / 252.0) ** 0.5
+                _tk_dd = sum(x["ddelta_1pct"] for x in _tl)
+                _tk_th = sum(x["pos_theta"] for x in _tl)
+                _tk_pnl = sum(x["pnl"] for x in _tl)
+                _nw = _ticker_news(_tk)
+                _te = {"BULLISH": "🟢", "BEARISH": "🔴", "MIXED": "🟡", "NEUTRAL": "⚪"}[_nw["label"]]
+                # previous close + day change
+                try:
+                    _hc = _cached_history(_tk, "5d")["Close"].dropna()
+                    _prev_close = float(_hc.iloc[-2]) if len(_hc) >= 2 else float(_hc.iloc[-1])
+                except Exception:
+                    _prev_close = _tl[0].get("eod_spot", _spot)
+                _chg = (_spot / _prev_close - 1) * 100 if _prev_close else 0.0
+                _daylbl = "🟢 up day" if _chg > 0.2 else "🔴 down day" if _chg < -0.2 else "⚪ flat"
+                _pnllbl = "🟢 winning" if _tk_pnl > 0 else "🔴 losing" if _tk_pnl < 0 else "⚪ flat"
+                # container (NOT expander) so live-refresh never collapses an opened stock; the keyed
+                # toggle below remembers open/closed state across reruns.
+                with st.container(border=True):
+                    st.markdown(
+                        f"{_te} **{_tk}** · \\${_spot:.2f} {_src_tag} ({_chg:+.1f}% vs prev \\${_prev_close:.2f}) · "
+                        f"{len(_tl)} legs · P&L \\${_tk_pnl:,.0f} {_pnllbl} · news {_nw['label']}")
+                    _mc = st.columns(4)
+                    _mc[0].metric(f"Spot · {_src_tag}", f"${_spot:.2f}", f"{_chg:+.2f}% vs prev close",
+                                  delta_color="normal" if _chg >= 0 else "inverse")
+                    _mc[1].metric("1-day exp. move", f"±${_em:.2f}", f"±{_em/_spot*100:.1f}%")
+                    _mc[2].metric("Δ per +1%", f"${_tk_dd:,.0f}", _daylbl)
+                    _mc[3].metric("Theta / day", f"${_tk_th:,.0f}")
+                    _pb = _combo_bounds(_tl, _spot)
+                    if _pb:
+                        st.caption(f"💰 **{_tk} position** (to expiry): max profit **{_fmt_maxp(_pb)}** · "
+                                   f"max loss **{_fmt_maxl(_pb)}** · open P&L ${_tk_pnl:,.0f}".replace("$", "\\$"))
+                    _dma = _dma_status(_tk, _spot)
+                    if _dma:
+                        _gc = "Golden Cross (50>200)" if _dma["golden"] else "Death Cross (50<200)"
+                        st.caption(f"{_dma['em']} **Trend:** {_dma['lbl']} · "
+                                   f"50DMA \\${_dma['dma50']:.2f} · 200DMA \\${_dma['dma200']:.2f} · {_gc}")
+
+                    # ── lazy gate: in 'By stock' mode load heavy detail on demand; in 'All positions'
+                    #    mode every section auto-renders for every stock ──
+                    if _gp_layout.startswith("📊"):
+                        if not st.toggle("🔬 Full analysis", value=True, key=f"gp_open_{_tk}"):
+                            st.caption("Collapsed — flip on for this stock's full plan. Metrics above are live.")
+                            continue
+                    # Stock-only positions have no option chain — skip wall calc to avoid
+                    # stale/wrong expiry lookups (e.g. GOOG stock leg has exp_mdy=None
+                    # which can pull historical chain rows giving phantom $200 put wall).
+                    _opt_legs = [l for l in _tl if l["typ"] != "stock" and l.get("K", 0) > 0]
+                    _near = min(_opt_legs, key=lambda x: x["dte"]) if _opt_legs else None
+                    if _near is not None:
                         try:
-                            _cw_v = float(_ccw.replace("$", "").replace(",", ""))
-                            _cfig.add_hline(y=_cw_v, line_dash="dot", line_color="#e74c3c", line_width=1)
-                        except ValueError:
-                            pass
+                            _chain = pd.read_sql(
+                                "SELECT strike, openInt_Call_now, openInt_Put_now, R1, S1 FROM options_change "
+                                "WHERE UPPER(ticker)=? AND expiry_date=? AND trade_date_now=("
+                                "SELECT trade_date_now FROM options_change WHERE UPPER(ticker)=? AND expiry_date=? "
+                                "ORDER BY trade_date_now "
+                                "DESC LIMIT 1)",
+                                _gp_conn, params=(_tk, _near["exp_mdy"], _tk, _near["exp_mdy"]))
+                        except Exception:
+                            _chain = pd.DataFrame()
+                        _w = compute_walls(_chain, _spot) if not _chain.empty else {}
+                    else:
+                        _chain = pd.DataFrame()
+                        _w = {}
+                    _r1 = _s1 = None
+                    if not _chain.empty:
                         try:
-                            _pw_v = float(_cpw.replace("$", "").replace(",", ""))
-                            _cfig.add_hline(y=_pw_v, line_dash="dot", line_color="#2ecc71", line_width=1)
-                        except ValueError:
-                            pass
-                        _crsi_txt = ""
-                        try:
-                            import pandas_ta as _cpta
-                            _crsi_s = _cpta.rsi(_chist["Close"], length=14)
-                            if _crsi_s is not None and not _crsi_s.empty:
-                                _crsi_txt = f" · RSI {_crsi_s.iloc[-1]:.0f}"
+                            _r1 = float(_chain["R1"].dropna().iloc[0]); _s1 = float(_chain["S1"].dropna().iloc[0])
                         except Exception:
                             pass
-                        _cfig.update_layout(height=150, margin=dict(l=0, r=0, t=24, b=0),
-                                           title=dict(text=f"{_ctk}  ${_ctl[0]['spot']:,.2f}", font=dict(size=12)),
-                                           xaxis=dict(visible=False), yaxis=dict(visible=False),
-                                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-                        st.plotly_chart(_cfig, use_container_width=True, config={"displayModeBar": False},
-                                        key=f"gp_wallchart_{_ctk}")
-                        st.caption(f"🔴 C-wall {_ccw} · 🟢 P-wall {_cpw}{_crsi_txt}")
-            st.markdown("---")
-            st.caption("📖 Full per-stock analysis (levels · signals · sentiment · scenarios · deep "
-                       "analysis) for **every** position follows below.")
-        else:
-            st.caption("Each stock is a card — flip its toggle to load that stock's full ticker-level "
-                       "analysis and legs. **Opened stocks stay open through live refresh** (the page "
-                       "only re-renders when prices actually move).")
-        for _tk, _tl in _by_tk.items():
-            _spot = _tl[0]["spot"]
-            _ivs = sorted(x["iv"] for x in _tl); _ivm = _ivs[len(_ivs) // 2]
-            _em = _spot * _ivm * (1 / 252.0) ** 0.5
-            _tk_dd = sum(x["ddelta_1pct"] for x in _tl)
-            _tk_th = sum(x["pos_theta"] for x in _tl)
-            _tk_pnl = sum(x["pnl"] for x in _tl)
-            _nw = _ticker_news(_tk)
-            _te = {"BULLISH": "🟢", "BEARISH": "🔴", "MIXED": "🟡", "NEUTRAL": "⚪"}[_nw["label"]]
-            # previous close + day change
-            try:
-                _hc = _cached_history(_tk, "5d")["Close"].dropna()
-                _prev_close = float(_hc.iloc[-2]) if len(_hc) >= 2 else float(_hc.iloc[-1])
-            except Exception:
-                _prev_close = _tl[0].get("eod_spot", _spot)
-            _chg = (_spot / _prev_close - 1) * 100 if _prev_close else 0.0
-            _daylbl = "🟢 up day" if _chg > 0.2 else "🔴 down day" if _chg < -0.2 else "⚪ flat"
-            _pnllbl = "🟢 winning" if _tk_pnl > 0 else "🔴 losing" if _tk_pnl < 0 else "⚪ flat"
-            # container (NOT expander) so live-refresh never collapses an opened stock; the keyed
-            # toggle below remembers open/closed state across reruns.
-            with st.container(border=True):
-                st.markdown(
-                    f"{_te} **{_tk}** · \\${_spot:.2f} {_src_tag} ({_chg:+.1f}% vs prev \\${_prev_close:.2f}) · "
-                    f"{len(_tl)} legs · P&L \\${_tk_pnl:,.0f} {_pnllbl} · news {_nw['label']}")
-                _mc = st.columns(4)
-                _mc[0].metric(f"Spot · {_src_tag}", f"${_spot:.2f}", f"{_chg:+.2f}% vs prev close",
-                              delta_color="normal" if _chg >= 0 else "inverse")
-                _mc[1].metric("1-day exp. move", f"±${_em:.2f}", f"±{_em/_spot*100:.1f}%")
-                _mc[2].metric("Δ per +1%", f"${_tk_dd:,.0f}", _daylbl)
-                _mc[3].metric("Theta / day", f"${_tk_th:,.0f}")
-                _pb = _combo_bounds(_tl, _spot)
-                if _pb:
-                    st.caption(f"💰 **{_tk} position** (to expiry): max profit **{_fmt_maxp(_pb)}** · "
-                               f"max loss **{_fmt_maxl(_pb)}** · open P&L ${_tk_pnl:,.0f}".replace("$", "\\$"))
-                _dma = _dma_status(_tk, _spot)
-                if _dma:
-                    _gc = "Golden Cross (50>200)" if _dma["golden"] else "Death Cross (50<200)"
-                    st.caption(f"{_dma['em']} **Trend:** {_dma['lbl']} · "
-                               f"50DMA \\${_dma['dma50']:.2f} · 200DMA \\${_dma['dma200']:.2f} · {_gc}")
+                    _stt = _stocktwits_sentiment(_tk)
+                    _lv = []
+                    if _w.get("put_wall"): _lv.append(f"🟩 put wall ${_kf(_w['put_wall'])}")
+                    if _w.get("call_wall"): _lv.append(f"🟥 call wall ${_kf(_w['call_wall'])}")
+                    if _s1: _lv.append(f"S1 ${_kf(_s1)}")
+                    if _r1: _lv.append(f"R1 ${_kf(_r1)}")
+                    if _lv:
+                        st.markdown("**Key levels:** " + " · ".join(_lv))
+                    # dual-class siblings trade separate option chains — keep them distinct, never merge
+                    _sib = {"GOOG": "GOOGL", "GOOGL": "GOOG", "FOX": "FOXA", "FOXA": "FOX",
+                            "NWS": "NWSA", "NWSA": "NWS", "UA": "UAA", "UAA": "UA",
+                            "BRK.A": "BRK.B", "BRK.B": "BRK.A", "BRK-A": "BRK-B", "BRK-B": "BRK-A",
+                            "LBRDA": "LBRDK", "LBRDK": "LBRDA"}.get(_tk.upper())
+                    if _sib:
+                        st.caption(f"ℹ️ **{_tk}** and **{_sib}** are separate share classes with **separate "
+                                   f"option chains** — these walls/levels come from {_tk}'s own chain, not "
+                                   f"{_sib}'s, so they can differ.")
+                    # scenarios computed here so the chart + scenarios sit side by side
+                    _sm = []
+                    for s in (-0.03, -0.02, -0.01, 0.0, 0.01, 0.02, 0.03):
+                        tot = 0.0
+                        for l in _tl:
+                            ns = l["spot"] * (1 + s); t1 = max(l["dte"] - 1, 0) / 365.0
+                            if l["typ"] == "stock" or not l.get("K"):
+                                tot += (ns - l["cur"]) * l["m"]    # shares: linear, no BS (K=0)
+                                continue
+                            ivs = max(l["iv"] * (1 - 2.0 * s), 0.05)
+                            npx = bs_greeks(ns, l["K"], t1, _R, ivs, l["typ"]).get("price", l["cur"]) if t1 > 0 \
+                                else (max(ns - l["K"], 0) if l["typ"] == "call" else max(l["K"] - ns, 0))
+                            tot += (npx - l["cur"]) * l["m"]
+                        _sm.append({f"If {_tk} moves": f"{s*100:+.0f}%", "P&L $": round(tot)})
+                    _kc1, _kc2 = st.columns([3, 2])
+                    with _kc1:
+                        try:
+                            st.plotly_chart(_gp_levels_fig(_tk, _spot, _w, _r1, _s1, _em), use_container_width=True)
+                        except Exception:
+                            pass
+                    with _kc2:
+                        st.markdown("**📉 Tomorrow's scenarios**")
+                        st.dataframe(pd.DataFrame(_sm), hide_index=True, use_container_width=True,
+                                     column_config={"P&L $": st.column_config.NumberColumn(format="$%d")})
 
-                # ── lazy gate: in 'By stock' mode load heavy detail on demand; in 'All positions'
-                #    mode every section auto-renders for every stock ──
-                if _gp_layout.startswith("📊"):
-                    if not st.toggle("🔬 Full analysis", value=True, key=f"gp_open_{_tk}"):
-                        st.caption("Collapsed — flip on for this stock's full plan. Metrics above are live.")
-                        continue
-                # Stock-only positions have no option chain — skip wall calc to avoid
-                # stale/wrong expiry lookups (e.g. GOOG stock leg has exp_mdy=None
-                # which can pull historical chain rows giving phantom $200 put wall).
-                _opt_legs = [l for l in _tl if l["typ"] != "stock" and l.get("K", 0) > 0]
-                _near = min(_opt_legs, key=lambda x: x["dte"]) if _opt_legs else None
-                if _near is not None:
-                    try:
-                        _chain = pd.read_sql(
-                            "SELECT strike, openInt_Call_now, openInt_Put_now, R1, S1 FROM options_change "
-                            "WHERE UPPER(ticker)=? AND expiry_date=? AND trade_date_now=("
-                            "SELECT trade_date_now FROM options_change WHERE UPPER(ticker)=? AND expiry_date=? "
-                            "ORDER BY trade_date_now "
-                            "DESC LIMIT 1)",
-                            _gp_conn, params=(_tk, _near["exp_mdy"], _tk, _near["exp_mdy"]))
-                    except Exception:
-                        _chain = pd.DataFrame()
-                    _w = compute_walls(_chain, _spot) if not _chain.empty else {}
-                else:
-                    _chain = pd.DataFrame()
-                    _w = {}
-                _r1 = _s1 = None
-                if not _chain.empty:
-                    try:
-                        _r1 = float(_chain["R1"].dropna().iloc[0]); _s1 = float(_chain["S1"].dropna().iloc[0])
-                    except Exception:
-                        pass
-                _stt = _stocktwits_sentiment(_tk)
-                _lv = []
-                if _w.get("put_wall"): _lv.append(f"🟩 put wall ${_kf(_w['put_wall'])}")
-                if _w.get("call_wall"): _lv.append(f"🟥 call wall ${_kf(_w['call_wall'])}")
-                if _s1: _lv.append(f"S1 ${_kf(_s1)}")
-                if _r1: _lv.append(f"R1 ${_kf(_r1)}")
-                if _lv:
-                    st.markdown("**Key levels:** " + " · ".join(_lv))
-                # dual-class siblings trade separate option chains — keep them distinct, never merge
-                _sib = {"GOOG": "GOOGL", "GOOGL": "GOOG", "FOX": "FOXA", "FOXA": "FOX",
-                        "NWS": "NWSA", "NWSA": "NWS", "UA": "UAA", "UAA": "UA",
-                        "BRK.A": "BRK.B", "BRK.B": "BRK.A", "BRK-A": "BRK-B", "BRK-B": "BRK-A",
-                        "LBRDA": "LBRDK", "LBRDK": "LBRDA"}.get(_tk.upper())
-                if _sib:
-                    st.caption(f"ℹ️ **{_tk}** and **{_sib}** are separate share classes with **separate "
-                               f"option chains** — these walls/levels come from {_tk}'s own chain, not "
-                               f"{_sib}'s, so they can differ.")
-                # scenarios computed here so the chart + scenarios sit side by side
-                _sm = []
-                for s in (-0.03, -0.02, -0.01, 0.0, 0.01, 0.02, 0.03):
-                    tot = 0.0
-                    for l in _tl:
-                        ns = l["spot"] * (1 + s); t1 = max(l["dte"] - 1, 0) / 365.0
-                        if l["typ"] == "stock" or not l.get("K"):
-                            tot += (ns - l["cur"]) * l["m"]    # shares: linear, no BS (K=0)
-                            continue
-                        ivs = max(l["iv"] * (1 - 2.0 * s), 0.05)
-                        npx = bs_greeks(ns, l["K"], t1, _R, ivs, l["typ"]).get("price", l["cur"]) if t1 > 0 \
-                            else (max(ns - l["K"], 0) if l["typ"] == "call" else max(l["K"] - ns, 0))
-                        tot += (npx - l["cur"]) * l["m"]
-                    _sm.append({f"If {_tk} moves": f"{s*100:+.0f}%", "P&L $": round(tot)})
-                _kc1, _kc2 = st.columns([3, 2])
-                with _kc1:
-                    try:
-                        st.plotly_chart(_gp_levels_fig(_tk, _spot, _w, _r1, _s1, _em), use_container_width=True)
-                    except Exception:
-                        pass
-                with _kc2:
-                    st.markdown("**📉 Tomorrow's scenarios**")
-                    st.dataframe(pd.DataFrame(_sm), hide_index=True, use_container_width=True,
-                                 column_config={"P&L $": st.column_config.NumberColumn(format="$%d")})
+                    # ── Breakeven · POP · EV + interactive payoff diagram ──
+                    _pa = _pos_analytics(_tl, _spot)
+                    if _pa:
+                        _be_s = ", ".join(f"${b:.0f}" for b in _pa["breakevens"]) or "—"
+                        _evc = "🟢" if _pa["ev"] > 0 else "🔴"
+                        st.markdown((f"📈 **POP {_pa['pop']:.0f}%** · {_evc} **EV ${_pa['ev']:,.0f}** · "
+                                     f"breakeven {_be_s} · max profit {_fmt_maxp(_pb)} · max loss {_fmt_maxl(_pb)} "
+                                     f"(by {_pa['horizon_dte']}DTE)").replace("$", "\\$"))
+                        try:
+                            st.plotly_chart(_pos_payoff_fig(_tk, _pa), use_container_width=True)
+                        except Exception:
+                            pass
 
-                # ── Breakeven · POP · EV + interactive payoff diagram ──
-                _pa = _pos_analytics(_tl, _spot)
-                if _pa:
-                    _be_s = ", ".join(f"${b:.0f}" for b in _pa["breakevens"]) or "—"
-                    _evc = "🟢" if _pa["ev"] > 0 else "🔴"
-                    st.markdown((f"📈 **POP {_pa['pop']:.0f}%** · {_evc} **EV ${_pa['ev']:,.0f}** · "
-                                 f"breakeven {_be_s} · max profit {_fmt_maxp(_pb)} · max loss {_fmt_maxl(_pb)} "
-                                 f"(by {_pa['horizon_dte']}DTE)").replace("$", "\\$"))
-                    try:
-                        st.plotly_chart(_pos_payoff_fig(_tk, _pa), use_container_width=True)
-                    except Exception:
-                        pass
+                    # ── Profit-booking advice (capped max reached / long up big or near expiry) ──
+                    _bnotes, _ = _gp_booking_notes(_tl, _spot)
+                    for _bn in _bnotes:
+                        st.success(_bn.replace("$", "\\$"))
 
-                # ── Profit-booking advice (capped max reached / long up big or near expiry) ──
-                _bnotes, _ = _gp_booking_notes(_tl, _spot)
-                for _bn in _bnotes:
-                    st.success(_bn.replace("$", "\\$"))
-
-                # ── Ready-to-place order ideas (cost-reduction sells · max value · close) ──
-                _tix = _gp_order_tickets(_tl, _spot, _w)
-                if _tix:
-                    with st.expander("🧾 Ready-to-place order ideas — sell to cut cost · max value · close",
-                                     expanded=False):
-                        for _t in _tix:
-                            st.markdown(_t)
-                        st.caption("Premiums are Black-Scholes estimates at current IV — confirm live bid/ask "
-                                   "before sending. Selling the wall caps upside but cuts cost; price often "
-                                   "gravitates to the call/put wall (GEX magnet).")
-
-                # ── 🎯 Which signal to trust (inline accuracy → priority) ──
-                _sa_gp = _signal_accuracy_backtest(_tk, 5)
-                _tr_rows = []
-                if _sa_gp and _sa_gp.get("signals"):
-                    for s in _sa_gp["signals"]:
-                        if s["hit"] is not None:
-                            _tr_rows.append({"Signal": s["name"], "Hit-rate": s["hit"],
-                                             "Edge/call": s["edge"], "Fires": s["n"]})
-                _sa24_gp = _signal_accuracy_24model(_tk)
-                if _sa24_gp:
-                    _tr_rows.append({"Signal": "24-model ensemble", "Hit-rate": _sa24_gp["overall_hit"],
-                                     "Edge/call": None, "Fires": _sa24_gp["n_total"]})
-                _slog_gp = _sentiment_log_view(_tk, 0.005)
-                if _slog_gp and _slog_gp.get("overall_hit") is not None:
-                    _tr_rows.append({"Signal": "Sentiment (crowd/news)", "Hit-rate": _slog_gp["overall_hit"],
-                                     "Edge/call": None, "Fires": _slog_gp["n_resolved"]})
-                _trdf = (pd.DataFrame(_tr_rows).sort_values(
-                    "Edge/call", ascending=False, na_position="last").reset_index(drop=True)
-                    if _tr_rows else None)
-
-                # ── compact one-line sentiment / IV / earnings strip ──
-                _sb = []
-                if _stt:
-                    _ste = {"BULLISH": "🟢", "BEARISH": "🔴", "MIXED": "🟡"}.get(_stt["label"], "⚪")
-                    _sb.append(f"💬 {_ste}{_stt['label']} ({_stt['bull']}/{_stt['bear']})")
-                    _log_sentiment(_tk, "stocktwits", _stt["label"])
-                _fh = _finnhub_sentiment(_tk)
-                if _fh:
-                    _fhe = {"BULLISH": "🟢", "BEARISH": "🔴", "MIXED": "🟡"}.get(_fh["label"], "⚪")
-                    _sb.append(f"🛰 {_fhe}{_fh['label']} ({_fh['bull_pct']:.0f}%)"
-                               + (f" buzz {_fh['buzz']:.1f}×" if _fh.get("buzz") else ""))
-                    _log_sentiment(_tk, "finnhub", _fh["label"], _fh.get("bull_pct"))
-                _log_sentiment(_tk, "news_tone", _nw["label"])
-                _ivr = _iv_rank(_tk)
-                if _ivr:
-                    _ivh = "🟢cheap" if _ivr["rank"] < 30 else "🔴rich" if _ivr["rank"] > 70 else "🟡mid"
-                    _sb.append(f"🌡️IVR {_ivr['rank']:.0f} {_ivh}")
-                _earn = _next_earnings(_tk)
-                if _earn:
-                    _sb.append(f"📅ER {_earn['date']} ({_earn['days']}d)")
-                if _sb:
-                    st.markdown("  ·  ".join(_sb))
-                if _earn:
-                    _spanning = [l for l in _tl if _earn["days"] <= l["dte"]]
-                    if _spanning:
-                        _legtxt = ", ".join(f"${_kf(l['K'])}{l['typ'][0].upper()}" for l in _spanning)
-                        st.warning(f"📅 {_tk} earnings {_earn['date']} ({_earn['days']}d) lands **before "
-                                   f"expiry** for: {_legtxt} — binary gap + IV-crush risk on "
-                                   f"{'these legs' if len(_spanning) > 1 else 'this leg'}.")
-                    elif _earn["days"] <= 14:
-                        st.warning(f"📅 {_tk} earnings in {_earn['days']}d — binary gap risk; size down / "
-                                   "close before the print.")
-
-                # ── Signals + Plain-English read + Hold/Close debate (collapsed to save space) ──
-                with st.expander("📋 Read · ⚖️ Hold-vs-Close · 🎯 Which signal to trust", expanded=False):
-                    if _trdf is not None:
-                        st.markdown("**🎯 Which signal to trust here** — track record on this ticker "
-                                    "(5-day forward); prioritize the top row")
-                        st.dataframe(_trdf, hide_index=True, use_container_width=True,
-                                     column_config={
-                                         "Hit-rate": st.column_config.NumberColumn(format="%.1f%%"),
-                                         "Edge/call": st.column_config.NumberColumn(format="%+.2f%%"),
-                                         "Fires": st.column_config.NumberColumn(format="%d")})
-                        st.caption(f"➡️ **Prioritize _{_trdf.iloc[0]['Signal']}_** for {_tk} — best historical "
-                                   "edge here. Full breakdown on the 🎯 Signal Accuracy page.")
-                        st.markdown("---")
-                    st.info(_gp_writeup(_tk, _spot, _em, _w, _r1, _s1, _tk_dd, _tk_th, _nw, _tl, _stt).replace("$", "\\$"))
-                    _holds, _closes, _verdict = _gp_debate(_tk, _tl, _spot, _em, _tk_dd, _tk_th, _w, _nw, _stt, _ivr, _earn)
-                    _dbc1, _dbc2 = st.columns(2)
-                    with _dbc1:
-                        st.markdown("✅ **HOLD**")
-                        for _h in (_holds or ["— no strong hold case."]):
-                            st.markdown(("- " + _h).replace("$", "\\$"))
-                    with _dbc2:
-                        st.markdown("⚠️ **CLOSE / adjust**")
-                        for _cl in (_closes or ["— no urgent close case."]):
-                            st.markdown(("- " + _cl).replace("$", "\\$"))
-                    st.markdown("**Assessment:** " + _verdict.replace("$", "\\$"))
-
-                # ── Execution & timing (close at open vs wait; time-of-day windows) ──
-                _eh, _eb = _gp_exec_timing(_tk, _tl, _spot, _chg)
-                with st.expander("⏱ Execution & timing — close at open or wait?", expanded=False):
-                    st.markdown(_eh.replace("$", "\\$"))
-                    for _x in _eb:
-                        st.markdown(("- " + _x).replace("$", "\\$"))
-                    st.caption("These are well-documented intraday liquidity patterns (open/close auctions, power "
-                               "hour, lunch lull) — i.e. *when* big players (market makers, index funds, MOC desks) "
-                               "are most active. Real-time HFT order flow (Jane Street etc.) isn't public; this is "
-                               "timing/liquidity edge, not their order book. All times ET.")
-
-                # ── Deep analysis (indicators / order flow / 24-model) — default-ON but isolated
-                #    in an st.fragment so the heavy 24-model compute reruns on its own and never
-                #    freezes the rest of the card (prices, payoff, metrics paint first). ──
-                @st.fragment
-                def _gp_deep_frag(_tk=_tk, _spot=_spot, _w=_w):
-                    if not st.checkbox(f"🔬 Deep analysis — indicators, order flow & 24-model ({_tk})",
-                                       value=True, key=f"gp_deep_{_tk}"):
-                        st.caption("Deep analysis off — flip on for indicators, order flow & the 24-model engine.")
-                        return
-                    _inds = _gp_indicators(_tk)
-                    if _inds:
-                        st.markdown("**📊 Indicators — what each says & whether to weight it**")
-                        st.dataframe(pd.DataFrame([
-                            {"Indicator": i["name"], "Value": i["val"], "Signal": i["sig"],
-                             "What it means": i["why"], "How to use it": i["use"]} for i in _inds]),
-                            hide_index=True, use_container_width=True)
-                        _b = sum(i["sig"] == "BULL" for i in _inds); _br = sum(i["sig"] == "BEAR" for i in _inds)
-                        st.caption(f"Tally: **{_b} bullish vs {_br} bearish** → "
-                                   + ("net bullish lean." if _b > _br else
-                                      "net bearish lean." if _br > _b else "mixed / neutral."))
-                    # ── Chart-pattern & gamma-regime checklist ──
-                    _pats = _gp_patterns(_tk, _spot, _w.get("put_wall"), _w.get("call_wall"))
-                    if _pats:
-                        st.markdown("**🔺 Patterns & regime — EMA sequence · golden/death cross · "
-                                    "bull/bear flag · gamma regime**")
-                        _pe = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "⚪"}
-                        st.dataframe(pd.DataFrame([
-                            {"Pattern": f"{_pe.get(p['sig'],'⚪')} {p['name']}", "Reading": p["val"],
-                             "What it means": p["why"], "How to use it": p["use"]} for p in _pats]),
-                            hide_index=True, use_container_width=True)
-                        _pb = sum(p["sig"] == "BULL" for p in _pats)
-                        _pbr = sum(p["sig"] == "BEAR" for p in _pats)
-                        st.caption(f"Pattern tally: **{_pb} bullish vs {_pbr} bearish** → "
-                                   + ("net bullish technical lean." if _pb > _pbr else
-                                      "net bearish technical lean." if _pbr > _pb else "mixed / no clear lean."))
-                    # ── Options order flow: headline + full OI analytics dropdown ──
-                    _of = _gp_orderflow(_tk)
-                    if _of:
-                        _ofe = {"BULLISH": "🟢", "BEARISH": "🔴", "MIXED": "🟡"}[_of["flow"]]
-                        st.markdown(
-                            (f"**💧 Options order flow:** {_ofe} **{_of['flow']}** — net OI build "
-                             f"{_of['net']:+,.0f} (calls {_of['coi']:+,.0f} / puts {_of['poi']:+,.0f}), "
-                             f"vol PCR {_of['pcrv']:.2f}. " + (
-                                 "Call buildup + calls outvoting puts = bullish positioning." if _of["flow"] == "BULLISH"
-                                 else "Put buildup / puts outvoting calls = bearish or hedging." if _of["flow"] == "BEARISH"
-                                 else "Two-sided — no clear lean.")).replace("$", "\\$"))
-                        with st.expander("💧 Full OI analytics — buying / selling / hedging, across strikes & expiries",
+                    # ── Ready-to-place order ideas (cost-reduction sells · max value · close) ──
+                    _tix = _gp_order_tickets(_tl, _spot, _w)
+                    if _tix:
+                        with st.expander("🧾 Ready-to-place order ideas — sell to cut cost · max value · close",
                                          expanded=False):
-                            _oa = _gp_oi_analytics(_tk, _spot)
-                            if not _oa:
-                                st.caption("No chain snapshot available for this ticker.")
-                            else:
-                                st.markdown(f"**Hedge-aware verdict:** {_oa['intent_sig']} — "
-                                            f"{_oa['intent_desc']}"
-                                            + (f"  ·  *{_oa['hedge_pct']:.0f}% of put flow looks like hedging.*"
-                                               if _oa["hedge_pct"] > 20 else ""))
-                                if _of["cv"]:
-                                    _voi = (_of["cv"] + _of["pv"]) / (abs(_of["coi"]) + abs(_of["poi"]) + 1)
-                                    st.caption(f"Volume vs ΔOI ≈ {_voi:.1f}× — "
-                                               + ("high turnover → fresh positions opening aggressively (likely institutional)."
-                                                  if _voi > 1.5 else
-                                                  "low turnover → mostly existing positions, little new conviction."))
-                                st.markdown("**1) What is the flow doing — buying, selling or hedging?**")
-                                if _oa["buckets"]:
-                                    st.dataframe(pd.DataFrame(_oa["buckets"]), hide_index=True,
-                                                 use_container_width=True,
-                                                 column_config={"% of activity": st.column_config.NumberColumn(
-                                                     format="%.1f%%")})
-                                st.caption("Classified by the hedge-aware intent algo (strike-zone heuristics). "
-                                           "Opening flow can't be tagged buy/sell with certainty without the trade "
-                                           "aggressor — treat as a well-grounded proxy, not tape.")
-                                st.markdown(f"**2) Across strikes** — biggest ΔOI in the front expiry "
-                                            f"(*{_oa['front']}*):")
-                                if _oa["strikes"]:
-                                    st.dataframe(pd.DataFrame(_oa["strikes"]), hide_index=True,
-                                                 use_container_width=True,
-                                                 column_config={
-                                                     "Call ΔOI": st.column_config.NumberColumn(format="%+d"),
-                                                     "Put ΔOI": st.column_config.NumberColumn(format="%+d")})
-                                st.markdown("**3) Across expiries (calendar)** — where new OI is going:")
-                                if _oa["calendar"]:
-                                    st.dataframe(pd.DataFrame(_oa["calendar"]), hide_index=True,
-                                                 use_container_width=True,
-                                                 column_config={
-                                                     "Call ΔOI": st.column_config.NumberColumn(format="%+d"),
-                                                     "Put ΔOI": st.column_config.NumberColumn(format="%+d"),
-                                                     "Net": st.column_config.NumberColumn(format="%+d")})
-                                st.caption("📅 " + _oa["cal_tilt"])
+                            for _t in _tix:
+                                st.markdown(_t)
+                            st.caption("Premiums are Black-Scholes estimates at current IV — confirm live bid/ask "
+                                       "before sending. Selling the wall caps upside but cuts cost; price often "
+                                       "gravitates to the call/put wall (GEX magnet).")
 
-                    # ── 24-model engine: headline + per-model breakdown dropdown ──
-                    try:
-                        _eng = _cached_hp_engine(_tk)
-                        if isinstance(_eng, dict) and _eng.get("signal"):
-                            _ee2 = {"BULL": "🟢", "BEAR": "🔴", "SELL_PREMIUM": "🟠", "NEUTRAL": "⚪"}.get(_eng["signal"], "⚪")
-                            st.markdown(f"**🤖 24-Model engine:** {_ee2} **{_eng['signal']}** · "
-                                        f"{_eng.get('prob',0):.0f}% · {_eng.get('conf','')} conf "
-                                        f"({_eng.get('bull_v','?')}🟢 / {_eng.get('bear_v','?')}🔴 of {_eng.get('total_m',24)})")
-                            if _eng.get("strategy"):
-                                st.caption(("Engine play: " + str(_eng["strategy"])).replace("$", "\\$"))
-                            with st.expander("🤖 24-model breakdown — every model's vote, weight & reason",
+                    # ── 🎯 Which signal to trust (inline accuracy → priority) ──
+                    _sa_gp = _signal_accuracy_backtest(_tk, 5)
+                    _tr_rows = []
+                    if _sa_gp and _sa_gp.get("signals"):
+                        for s in _sa_gp["signals"]:
+                            if s["hit"] is not None:
+                                _tr_rows.append({"Signal": s["name"], "Hit-rate": s["hit"],
+                                                 "Edge/call": s["edge"], "Fires": s["n"]})
+                    _sa24_gp = _signal_accuracy_24model(_tk)
+                    if _sa24_gp:
+                        _tr_rows.append({"Signal": "24-model ensemble", "Hit-rate": _sa24_gp["overall_hit"],
+                                         "Edge/call": None, "Fires": _sa24_gp["n_total"]})
+                    _slog_gp = _sentiment_log_view(_tk, 0.005)
+                    if _slog_gp and _slog_gp.get("overall_hit") is not None:
+                        _tr_rows.append({"Signal": "Sentiment (crowd/news)", "Hit-rate": _slog_gp["overall_hit"],
+                                         "Edge/call": None, "Fires": _slog_gp["n_resolved"]})
+                    _trdf = (pd.DataFrame(_tr_rows).sort_values(
+                        "Edge/call", ascending=False, na_position="last").reset_index(drop=True)
+                        if _tr_rows else None)
+
+                    # ── compact one-line sentiment / IV / earnings strip ──
+                    _sb = []
+                    if _stt:
+                        _ste = {"BULLISH": "🟢", "BEARISH": "🔴", "MIXED": "🟡"}.get(_stt["label"], "⚪")
+                        _sb.append(f"💬 {_ste}{_stt['label']} ({_stt['bull']}/{_stt['bear']})")
+                        _log_sentiment(_tk, "stocktwits", _stt["label"])
+                    _fh = _finnhub_sentiment(_tk)
+                    if _fh:
+                        _fhe = {"BULLISH": "🟢", "BEARISH": "🔴", "MIXED": "🟡"}.get(_fh["label"], "⚪")
+                        _sb.append(f"🛰 {_fhe}{_fh['label']} ({_fh['bull_pct']:.0f}%)"
+                                   + (f" buzz {_fh['buzz']:.1f}×" if _fh.get("buzz") else ""))
+                        _log_sentiment(_tk, "finnhub", _fh["label"], _fh.get("bull_pct"))
+                    _log_sentiment(_tk, "news_tone", _nw["label"])
+                    _ivr = _iv_rank(_tk)
+                    if _ivr:
+                        _ivh = "🟢cheap" if _ivr["rank"] < 30 else "🔴rich" if _ivr["rank"] > 70 else "🟡mid"
+                        _sb.append(f"🌡️IVR {_ivr['rank']:.0f} {_ivh}")
+                    _earn = _next_earnings(_tk)
+                    if _earn:
+                        _sb.append(f"📅ER {_earn['date']} ({_earn['days']}d)")
+                    if _sb:
+                        st.markdown("  ·  ".join(_sb))
+                    if _earn:
+                        _spanning = [l for l in _tl if _earn["days"] <= l["dte"]]
+                        if _spanning:
+                            _legtxt = ", ".join(f"${_kf(l['K'])}{l['typ'][0].upper()}" for l in _spanning)
+                            st.warning(f"📅 {_tk} earnings {_earn['date']} ({_earn['days']}d) lands **before "
+                                       f"expiry** for: {_legtxt} — binary gap + IV-crush risk on "
+                                       f"{'these legs' if len(_spanning) > 1 else 'this leg'}.")
+                        elif _earn["days"] <= 14:
+                            st.warning(f"📅 {_tk} earnings in {_earn['days']}d — binary gap risk; size down / "
+                                       "close before the print.")
+
+                    # ── Signals + Plain-English read + Hold/Close debate (collapsed to save space) ──
+                    with st.expander("📋 Read · ⚖️ Hold-vs-Close · 🎯 Which signal to trust", expanded=False):
+                        if _trdf is not None:
+                            st.markdown("**🎯 Which signal to trust here** — track record on this ticker "
+                                        "(5-day forward); prioritize the top row")
+                            st.dataframe(_trdf, hide_index=True, use_container_width=True,
+                                         column_config={
+                                             "Hit-rate": st.column_config.NumberColumn(format="%.1f%%"),
+                                             "Edge/call": st.column_config.NumberColumn(format="%+.2f%%"),
+                                             "Fires": st.column_config.NumberColumn(format="%d")})
+                            st.caption(f"➡️ **Prioritize _{_trdf.iloc[0]['Signal']}_** for {_tk} — best historical "
+                                       "edge here. Full breakdown on the 🎯 Signal Accuracy page.")
+                            st.markdown("---")
+                        st.info(_gp_writeup(_tk, _spot, _em, _w, _r1, _s1, _tk_dd, _tk_th, _nw, _tl, _stt).replace("$", "\\$"))
+                        _holds, _closes, _verdict = _gp_debate(_tk, _tl, _spot, _em, _tk_dd, _tk_th, _w, _nw, _stt, _ivr, _earn)
+                        _dbc1, _dbc2 = st.columns(2)
+                        with _dbc1:
+                            st.markdown("✅ **HOLD**")
+                            for _h in (_holds or ["— no strong hold case."]):
+                                st.markdown(("- " + _h).replace("$", "\\$"))
+                        with _dbc2:
+                            st.markdown("⚠️ **CLOSE / adjust**")
+                            for _cl in (_closes or ["— no urgent close case."]):
+                                st.markdown(("- " + _cl).replace("$", "\\$"))
+                        st.markdown("**Assessment:** " + _verdict.replace("$", "\\$"))
+
+                    # ── Execution & timing (close at open vs wait; time-of-day windows) ──
+                    _eh, _eb = _gp_exec_timing(_tk, _tl, _spot, _chg)
+                    with st.expander("⏱ Execution & timing — close at open or wait?", expanded=False):
+                        st.markdown(_eh.replace("$", "\\$"))
+                        for _x in _eb:
+                            st.markdown(("- " + _x).replace("$", "\\$"))
+                        st.caption("These are well-documented intraday liquidity patterns (open/close auctions, power "
+                                   "hour, lunch lull) — i.e. *when* big players (market makers, index funds, MOC desks) "
+                                   "are most active. Real-time HFT order flow (Jane Street etc.) isn't public; this is "
+                                   "timing/liquidity edge, not their order book. All times ET.")
+
+                    # ── Deep analysis (indicators / order flow / 24-model) — default-ON but isolated
+                    #    in an st.fragment so the heavy 24-model compute reruns on its own and never
+                    #    freezes the rest of the card (prices, payoff, metrics paint first). ──
+                    @st.fragment
+                    def _gp_deep_frag(_tk=_tk, _spot=_spot, _w=_w):
+                        if not st.checkbox(f"🔬 Deep analysis — indicators, order flow & 24-model ({_tk})",
+                                           value=True, key=f"gp_deep_{_tk}"):
+                            st.caption("Deep analysis off — flip on for indicators, order flow & the 24-model engine.")
+                            return
+                        _inds = _gp_indicators(_tk)
+                        if _inds:
+                            st.markdown("**📊 Indicators — what each says & whether to weight it**")
+                            st.dataframe(pd.DataFrame([
+                                {"Indicator": i["name"], "Value": i["val"], "Signal": i["sig"],
+                                 "What it means": i["why"], "How to use it": i["use"]} for i in _inds]),
+                                hide_index=True, use_container_width=True)
+                            _b = sum(i["sig"] == "BULL" for i in _inds); _br = sum(i["sig"] == "BEAR" for i in _inds)
+                            st.caption(f"Tally: **{_b} bullish vs {_br} bearish** → "
+                                       + ("net bullish lean." if _b > _br else
+                                          "net bearish lean." if _br > _b else "mixed / neutral."))
+                        # ── Chart-pattern & gamma-regime checklist ──
+                        _pats = _gp_patterns(_tk, _spot, _w.get("put_wall"), _w.get("call_wall"))
+                        if _pats:
+                            st.markdown("**🔺 Patterns & regime — EMA sequence · golden/death cross · "
+                                        "bull/bear flag · gamma regime**")
+                            _pe = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "⚪"}
+                            st.dataframe(pd.DataFrame([
+                                {"Pattern": f"{_pe.get(p['sig'],'⚪')} {p['name']}", "Reading": p["val"],
+                                 "What it means": p["why"], "How to use it": p["use"]} for p in _pats]),
+                                hide_index=True, use_container_width=True)
+                            _pb = sum(p["sig"] == "BULL" for p in _pats)
+                            _pbr = sum(p["sig"] == "BEAR" for p in _pats)
+                            st.caption(f"Pattern tally: **{_pb} bullish vs {_pbr} bearish** → "
+                                       + ("net bullish technical lean." if _pb > _pbr else
+                                          "net bearish technical lean." if _pbr > _pb else "mixed / no clear lean."))
+                        # ── Options order flow: headline + full OI analytics dropdown ──
+                        _of = _gp_orderflow(_tk)
+                        if _of:
+                            _ofe = {"BULLISH": "🟢", "BEARISH": "🔴", "MIXED": "🟡"}[_of["flow"]]
+                            st.markdown(
+                                (f"**💧 Options order flow:** {_ofe} **{_of['flow']}** — net OI build "
+                                 f"{_of['net']:+,.0f} (calls {_of['coi']:+,.0f} / puts {_of['poi']:+,.0f}), "
+                                 f"vol PCR {_of['pcrv']:.2f}. " + (
+                                     "Call buildup + calls outvoting puts = bullish positioning." if _of["flow"] == "BULLISH"
+                                     else "Put buildup / puts outvoting calls = bearish or hedging." if _of["flow"] == "BEARISH"
+                                     else "Two-sided — no clear lean.")).replace("$", "\\$"))
+                            with st.expander("💧 Full OI analytics — buying / selling / hedging, across strikes & expiries",
                                              expanded=False):
-                                st.caption(f"Votes: {_eng.get('bull_v',0)} bull · {_eng.get('bear_v',0)} bear · "
-                                           f"{_eng.get('neut_v',0)} neutral · {_eng.get('sell_v',0)} sell-premium "
-                                           f"→ ensemble **{_eng['signal']} {_eng.get('prob',0):.0f}%** "
-                                           f"({_eng.get('conf','')} confidence). Probabilities are weighted by each "
-                                           "model's recent hit-rate (adaptive weights).")
-                                _vb = _eng.get("vrvp_box") or {}
-                                if _vb.get("poc"):
-                                    st.markdown(("**Volume profile (VRVP):** value area "
-                                                 f"\\${_vb.get('val','?')}–\\${_vb.get('vah','?')}, "
-                                                 f"POC \\${_vb.get('poc','?')}"
-                                                 + (f", box \\${_vb.get('lo')}–\\${_vb.get('hi')}" if _vb.get('lo') else "")
-                                                 + " — high-volume nodes act as magnets/support-resistance."))
-                                _mods = _eng.get("models") or {}
-                                _wts = _eng.get("weights") or {}
-                                if isinstance(_mods, dict) and _mods:
-                                    _mrows = []
-                                    _eord = {"BULL": 0, "BEAR": 1, "SELL_PREMIUM": 2, "NEUTRAL": 3}
-                                    for _mn, _md in _mods.items():
-                                        if not isinstance(_md, dict):
-                                            continue
-                                        _msig = _md.get("signal", "NEUTRAL")
-                                        _me = {"BULL": "🟢", "BEAR": "🔴", "SELL_PREMIUM": "🟠",
-                                               "NEUTRAL": "⚪"}.get(_msig, "⚪")
-                                        _mrows.append({
-                                            "Model": _mn, "Vote": f"{_me} {_msig}",
-                                            "Prob": round(float(_md.get("prob", 50)), 0),
-                                            "Weight": round(float(_wts.get(_mn, 1.0)), 2),
-                                            "Why": str(_md.get("reason", ""))[:90],
-                                            "_o": _eord.get(_msig, 3)})
-                                    _mrows.sort(key=lambda r: (r["_o"], -r["Prob"]))
-                                    for _r in _mrows:
-                                        _r.pop("_o", None)
-                                    st.dataframe(pd.DataFrame(_mrows), hide_index=True,
-                                                 use_container_width=True,
-                                                 column_config={
-                                                     "Prob": st.column_config.NumberColumn(format="%d%%"),
-                                                     "Weight": st.column_config.NumberColumn(
-                                                         format="%.2f×",
-                                                         help="Adaptive weight from the model's recent accuracy")})
-                                    st.caption("Weight >1.0 = the model has been more accurate recently and counts "
-                                               "for more; <1.0 = recently unreliable, down-weighted. See the "
-                                               "🎯 Signal Accuracy page for each model's forward-tracked hit-rate.")
-                    except Exception as _ee:
-                        st.caption(f"(24-model engine unavailable: {_ee})")
-                _gp_deep_frag()
+                                _oa = _gp_oi_analytics(_tk, _spot)
+                                if not _oa:
+                                    st.caption("No chain snapshot available for this ticker.")
+                                else:
+                                    st.markdown(f"**Hedge-aware verdict:** {_oa['intent_sig']} — "
+                                                f"{_oa['intent_desc']}"
+                                                + (f"  ·  *{_oa['hedge_pct']:.0f}% of put flow looks like hedging.*"
+                                                   if _oa["hedge_pct"] > 20 else ""))
+                                    if _of["cv"]:
+                                        _voi = (_of["cv"] + _of["pv"]) / (abs(_of["coi"]) + abs(_of["poi"]) + 1)
+                                        st.caption(f"Volume vs ΔOI ≈ {_voi:.1f}× — "
+                                                   + ("high turnover → fresh positions opening aggressively (likely institutional)."
+                                                      if _voi > 1.5 else
+                                                      "low turnover → mostly existing positions, little new conviction."))
+                                    st.markdown("**1) What is the flow doing — buying, selling or hedging?**")
+                                    if _oa["buckets"]:
+                                        st.dataframe(pd.DataFrame(_oa["buckets"]), hide_index=True,
+                                                     use_container_width=True,
+                                                     column_config={"% of activity": st.column_config.NumberColumn(
+                                                         format="%.1f%%")})
+                                    st.caption("Classified by the hedge-aware intent algo (strike-zone heuristics). "
+                                               "Opening flow can't be tagged buy/sell with certainty without the trade "
+                                               "aggressor — treat as a well-grounded proxy, not tape.")
+                                    st.markdown(f"**2) Across strikes** — biggest ΔOI in the front expiry "
+                                                f"(*{_oa['front']}*):")
+                                    if _oa["strikes"]:
+                                        st.dataframe(pd.DataFrame(_oa["strikes"]), hide_index=True,
+                                                     use_container_width=True,
+                                                     column_config={
+                                                         "Call ΔOI": st.column_config.NumberColumn(format="%+d"),
+                                                         "Put ΔOI": st.column_config.NumberColumn(format="%+d")})
+                                    st.markdown("**3) Across expiries (calendar)** — where new OI is going:")
+                                    if _oa["calendar"]:
+                                        st.dataframe(pd.DataFrame(_oa["calendar"]), hide_index=True,
+                                                     use_container_width=True,
+                                                     column_config={
+                                                         "Call ΔOI": st.column_config.NumberColumn(format="%+d"),
+                                                         "Put ΔOI": st.column_config.NumberColumn(format="%+d"),
+                                                         "Net": st.column_config.NumberColumn(format="%+d")})
+                                    st.caption("📅 " + _oa["cal_tilt"])
 
-                with st.expander(f"📰 Latest headlines & tone ({len(_nw['items'])})", expanded=False):
-                    if _nw["items"]:
-                        for it in _nw["items"]:
-                            e = "🟢" if it["tone"] > 0 else ("🔴" if it["tone"] < 0 else "⚪")
-                            st.markdown(f"- {e} [{it['title']}]({it['link']}) · _{it['source']} {it['when']}_")
-                    else:
-                        st.caption("No fresh headlines found (feeds may be rate-limited).")
+                        # ── 24-model engine: headline + per-model breakdown dropdown ──
+                        try:
+                            _eng = _cached_hp_engine(_tk)
+                            if isinstance(_eng, dict) and _eng.get("signal"):
+                                _ee2 = {"BULL": "🟢", "BEAR": "🔴", "SELL_PREMIUM": "🟠", "NEUTRAL": "⚪"}.get(_eng["signal"], "⚪")
+                                st.markdown(f"**🤖 24-Model engine:** {_ee2} **{_eng['signal']}** · "
+                                            f"{_eng.get('prob',0):.0f}% · {_eng.get('conf','')} conf "
+                                            f"({_eng.get('bull_v','?')}🟢 / {_eng.get('bear_v','?')}🔴 of {_eng.get('total_m',24)})")
+                                if _eng.get("strategy"):
+                                    st.caption(("Engine play: " + str(_eng["strategy"])).replace("$", "\\$"))
+                                with st.expander("🤖 24-model breakdown — every model's vote, weight & reason",
+                                                 expanded=False):
+                                    st.caption(f"Votes: {_eng.get('bull_v',0)} bull · {_eng.get('bear_v',0)} bear · "
+                                               f"{_eng.get('neut_v',0)} neutral · {_eng.get('sell_v',0)} sell-premium "
+                                               f"→ ensemble **{_eng['signal']} {_eng.get('prob',0):.0f}%** "
+                                               f"({_eng.get('conf','')} confidence). Probabilities are weighted by each "
+                                               "model's recent hit-rate (adaptive weights).")
+                                    _vb = _eng.get("vrvp_box") or {}
+                                    if _vb.get("poc"):
+                                        st.markdown(("**Volume profile (VRVP):** value area "
+                                                     f"\\${_vb.get('val','?')}–\\${_vb.get('vah','?')}, "
+                                                     f"POC \\${_vb.get('poc','?')}"
+                                                     + (f", box \\${_vb.get('lo')}–\\${_vb.get('hi')}" if _vb.get('lo') else "")
+                                                     + " — high-volume nodes act as magnets/support-resistance."))
+                                    _mods = _eng.get("models") or {}
+                                    _wts = _eng.get("weights") or {}
+                                    if isinstance(_mods, dict) and _mods:
+                                        _mrows = []
+                                        _eord = {"BULL": 0, "BEAR": 1, "SELL_PREMIUM": 2, "NEUTRAL": 3}
+                                        for _mn, _md in _mods.items():
+                                            if not isinstance(_md, dict):
+                                                continue
+                                            _msig = _md.get("signal", "NEUTRAL")
+                                            _me = {"BULL": "🟢", "BEAR": "🔴", "SELL_PREMIUM": "🟠",
+                                                   "NEUTRAL": "⚪"}.get(_msig, "⚪")
+                                            _mrows.append({
+                                                "Model": _mn, "Vote": f"{_me} {_msig}",
+                                                "Prob": round(float(_md.get("prob", 50)), 0),
+                                                "Weight": round(float(_wts.get(_mn, 1.0)), 2),
+                                                "Why": str(_md.get("reason", ""))[:90],
+                                                "_o": _eord.get(_msig, 3)})
+                                        _mrows.sort(key=lambda r: (r["_o"], -r["Prob"]))
+                                        for _r in _mrows:
+                                            _r.pop("_o", None)
+                                        st.dataframe(pd.DataFrame(_mrows), hide_index=True,
+                                                     use_container_width=True,
+                                                     column_config={
+                                                         "Prob": st.column_config.NumberColumn(format="%d%%"),
+                                                         "Weight": st.column_config.NumberColumn(
+                                                             format="%.2f×",
+                                                             help="Adaptive weight from the model's recent accuracy")})
+                                        st.caption("Weight >1.0 = the model has been more accurate recently and counts "
+                                                   "for more; <1.0 = recently unreliable, down-weighted. See the "
+                                                   "🎯 Signal Accuracy page for each model's forward-tracked hit-rate.")
+                        except Exception as _ee:
+                            st.caption(f"(24-model engine unavailable: {_ee})")
+                    _gp_deep_frag()
 
-                _rows = []
-                try:                                   # ex-div event for this ticker (12h-cached)
-                    import telegram_bot_optimized as _tbo_ev
-                    _dv = _tbo_ev._divcap_stats(_tk)
-                except Exception:
-                    _dv = None
-                for l in _tl:
-                    if l["typ"] == "stock":            # shares: linear economics, no Greeks/DTE
+                    with st.expander(f"📰 Latest headlines & tone ({len(_nw['items'])})", expanded=False):
+                        if _nw["items"]:
+                            for it in _nw["items"]:
+                                e = "🟢" if it["tone"] > 0 else ("🔴" if it["tone"] < 0 else "⚪")
+                                st.markdown(f"- {e} [{it['title']}]({it['link']}) · _{it['source']} {it['when']}_")
+                        else:
+                            st.caption("No fresh headlines found (feeds may be rate-limited).")
+
+                    _rows = []
+                    try:                                   # ex-div event for this ticker (12h-cached)
+                        import telegram_bot_optimized as _tbo_ev
+                        _dv = _tbo_ev._divcap_stats(_tk)
+                    except Exception:
+                        _dv = None
+                    for l in _tl:
+                        if l["typ"] == "stock":            # shares: linear economics, no Greeks/DTE
+                            pnl_pct = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
+                            _sig = l["cur"] * l["iv"] * (1 / 252.0) ** 0.5
+                            _buf = max(0.02, round(l["cur"] * 0.003, 2))
+                            _climit = (f"SELL ≤ ${max(l['cur'] - _buf, 0.01):.2f}" if l["side"] == "long"
+                                       else f"BUY ≥ ${l['cur'] + _buf:.2f}")
+                            _lb = _combo_bounds([l], l["spot"]); _pa = _pos_analytics([l], l["spot"])
+                            _win = (f"{'🟢' if _pa['pop'] >= 60 else '🟡' if _pa['pop'] >= 40 else '🔴'} "
+                                    f"{_pa['pop']:.0f}%") if _pa else "—"
+                            _ed = _earn.get("days") if _earn else None
+                            _event_s = f"📊 ER {_ed}d" if (_ed is not None and 0 <= _ed <= 14) else "—"
+                            _acts = ("up ≥50% — take profit" if pnl_pct >= 50 else
+                                     "down ≥50% — cut/hedge" if pnl_pct <= -50 else "hold & monitor")
+                            _rows.append({
+                                "Leg": f"{l['side']} {abs(l['qty']):g} sh",
+                                "Exp": "—", "DTE": None, "Money": "—", "Event": _event_s,
+                                "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
+                                "Real$": round(l["cur"], 2), "Time$": 0.0,
+                                "±$1 stk": int(l["qty"]), "Θ/day": 0,
+                                "Prev Cls": None,
+                                "Est Open": f"${l['spot']:.2f}",
+                                "Day L–H": f"${max(l['cur'] - _sig, 0.01):.2f}–${l['cur'] + _sig:.2f}",
+                                "Stk ±1σ": f"{l['cur'] + _sig:,.0f}/{max(l['cur'] - _sig, 0):,.0f}",
+                                "Hi\\Lo": "—",
+                                "Close @": _climit, "Max P": _fmt_maxp(_lb), "Max L": _fmt_maxl(_lb),
+                                "Win %": _win,
+                                "P&L %": round(pnl_pct), "P&L $": round(l["pnl"]), "Action": _acts,
+                            })
+                            continue
+                        money = "ITM" if ((l["spot"] > l["K"]) if l["typ"] == "call" else (l["spot"] < l["K"])) else "OTM"
                         pnl_pct = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
-                        _sig = l["cur"] * l["iv"] * (1 / 252.0) ** 0.5
-                        _buf = max(0.02, round(l["cur"] * 0.003, 2))
-                        _climit = (f"SELL ≤ ${max(l['cur'] - _buf, 0.01):.2f}" if l["side"] == "long"
-                                   else f"BUY ≥ ${l['cur'] + _buf:.2f}")
-                        _lb = _combo_bounds([l], l["spot"]); _pa = _pos_analytics([l], l["spot"])
+                        # ── Event column: earnings / ex-div landing before this leg's expiry ──
+                        _evt = []
+                        _ed = _earn.get("days") if _earn else None
+                        if _ed is not None:
+                            if 0 <= _ed <= l["dte"]:
+                                _evt.append(f"📊 ER {_ed}d ⚠️pre-exp")
+                            elif 0 <= _ed <= 14:
+                                _evt.append(f"📊 ER {_ed}d")
+                        _xd = _dv.get("ex_days") if _dv else None
+                        if _xd is not None and 0 <= _xd <= max(l["dte"], 0):
+                            _evt.append(f"💵 ex-div {_xd}d")
+                        _event_s = " · ".join(_evt) if _evt else "—"
+                        acts = []
+                        if _ed is not None and 0 <= _ed <= l["dte"]:
+                            acts.append("⚠️ earnings before expiry — decide pre-print (IV crush + gap)")
+                        if (_xd is not None and 0 <= _xd <= max(l["dte"], 0)
+                                and l["typ"] == "call" and l["side"] == "short" and money == "ITM"):
+                            acts.append(f"💵 ex-div {_xd}d — early-assignment risk on short ITM call")
+                        if l["dte"] <= 7:
+                            acts.append(f"{l['dte']}DTE — decide now")
+                        elif l["dte"] <= 21:
+                            acts.append(f"{l['dte']}DTE — plan exit/roll")
+                        if l["side"] == "short" and money == "ITM":
+                            acts.append("ITM short — assignment risk")
+                        if pnl_pct >= 50:
+                            acts.append("up ≥50% — take profit")
+                        elif pnl_pct <= -50:
+                            acts.append("down ≥50% — cut/roll")
+                        action = "; ".join(acts) if acts else "hold & monitor"
+                        if acts and (l["dte"] <= 21 or (l["side"] == "short" and money == "ITM")):
+                            _rs = _roll_suggestion(_gp_conn, l)
+                            if _rs:
+                                action += f" · {_rs}"
+                        # next-session economics: est. open, expected day range (1σ), fill-limit to close
+                        _Tn = max(l["dte"], 0) / 365.0
+                        _sig = l["spot"] * l["iv"] * (1 / 252.0) ** 0.5
+                        _base = bs_greeks(l["spot"], l["K"], _Tn, _R, l["iv"], l["typ"])["price"]
+                        _vu = bs_greeks(l["spot"] + _sig, l["K"], _Tn, _R, l["iv"], l["typ"])["price"]
+                        _vd = bs_greeks(max(l["spot"] - _sig, 0.01), l["K"], _Tn, _R, l["iv"], l["typ"])["price"]
+                        # anchor the modeled ±1σ swing to the real current price ("Now") so the range
+                        # always brackets it, instead of floating around a pure-model base.
+                        _olo = max(l["cur"] + min(_vu, _vd) - _base, 0.01)
+                        _ohi = max(l["cur"] + max(_vu, _vd) - _base, _olo)
+                        _topen = bs_greeks(l["spot"], l["K"], max(l["dte"] - 1, 0) / 365.0, _R, l["iv"], l["typ"])["price"]
+                        # label clearly: <0 truly expired; 0 = expires today; sub-penny reads "~0"
+                        if l["dte"] < 0:
+                            _topen_disp = "expired"
+                        elif l["dte"] == 0:
+                            _topen_disp = "exp today"
+                        elif _topen < 0.005:
+                            _topen_disp = "~$0.00"
+                        else:
+                            _topen_disp = f"${_topen:.2f}"
+                        _px, _fromq = _smart_close_limit(l["side"], l["cur"], l.get("bid"), l.get("ask"))
+                        _climit = (f"SELL ≤ ${_px:.2f}" if l["side"] == "long" else f"BUY ≥ ${_px:.2f}") \
+                                  + ("" if _fromq else " (est)")
+                        _lb = _combo_bounds([l], l["spot"])
+                        _pa = _pos_analytics([l], l["spot"])
                         _win = (f"{'🟢' if _pa['pop'] >= 60 else '🟡' if _pa['pop'] >= 40 else '🔴'} "
                                 f"{_pa['pop']:.0f}%") if _pa else "—"
-                        _ed = _earn.get("days") if _earn else None
-                        _event_s = f"📊 ER {_ed}d" if (_ed is not None and 0 <= _ed <= 14) else "—"
-                        _acts = ("up ≥50% — take profit" if pnl_pct >= 50 else
-                                 "down ≥50% — cut/hedge" if pnl_pct <= -50 else "hold & monitor")
+                        _intr_l = max(l["spot"] - l["K"], 0.0) if l["typ"] == "call" else max(l["K"] - l["spot"], 0.0)
                         _rows.append({
-                            "Leg": f"{l['side']} {abs(l['qty']):g} sh",
-                            "Exp": "—", "DTE": None, "Money": "—", "Event": _event_s,
+                            "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
+                            "Exp": l["exp"][:10], "DTE": l["dte"], "Money": money, "Event": _event_s,
                             "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
-                            "Real$": round(l["cur"], 2), "Time$": 0.0,
-                            "±$1 stk": int(l["qty"]), "Θ/day": 0,
-                            "Prev Cls": None,
-                            "Est Open": f"${l['spot']:.2f}",
-                            "Day L–H": f"${max(l['cur'] - _sig, 0.01):.2f}–${l['cur'] + _sig:.2f}",
-                            "Stk ±1σ": f"{l['cur'] + _sig:,.0f}/{max(l['cur'] - _sig, 0):,.0f}",
-                            "Hi\\Lo": "—",
-                            "Close @": _climit, "Max P": _fmt_maxp(_lb), "Max L": _fmt_maxl(_lb),
-                            "Win %": _win,
-                            "P&L %": round(pnl_pct), "P&L $": round(l["pnl"]), "Action": _acts,
+                            "Real$": round(_intr_l, 2), "Time$": round(max(l["cur"] - _intr_l, 0.0), 2),
+                            "±$1 stk": round(l["pos_delta"]), "Θ/day": round(l["pos_theta"]),
+                            "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
+                            "Est Open": _topen_disp, "Day L–H": f"${_olo:.2f}–${_ohi:.2f}",
+                            "Stk ±1σ": f"{l['spot'] + _sig:,.0f}/{max(l['spot'] - _sig, 0):,.0f}",
+                            "Hi/Lo": (f"${l['day_hi']:.2f}/${l['day_lo']:.2f}" if l.get("day_hi") and l.get("day_lo") else "—"),
+                            "Close @": _climit, "Max P": _fmt_maxp(_lb), "Max L": _fmt_maxl(_lb), "Win %": _win,
+                            "P&L %": round(pnl_pct), "P&L $": round(l["pnl"]), "Action": action,
                         })
-                        continue
-                    money = "ITM" if ((l["spot"] > l["K"]) if l["typ"] == "call" else (l["spot"] < l["K"])) else "OTM"
-                    pnl_pct = ((l["cur"] - l["entry"]) / l["entry"] * 100 * (1 if l["qty"] > 0 else -1)) if l["entry"] else 0
-                    # ── Event column: earnings / ex-div landing before this leg's expiry ──
-                    _evt = []
-                    _ed = _earn.get("days") if _earn else None
-                    if _ed is not None:
-                        if 0 <= _ed <= l["dte"]:
-                            _evt.append(f"📊 ER {_ed}d ⚠️pre-exp")
-                        elif 0 <= _ed <= 14:
-                            _evt.append(f"📊 ER {_ed}d")
-                    _xd = _dv.get("ex_days") if _dv else None
-                    if _xd is not None and 0 <= _xd <= max(l["dte"], 0):
-                        _evt.append(f"💵 ex-div {_xd}d")
-                    _event_s = " · ".join(_evt) if _evt else "—"
-                    acts = []
-                    if _ed is not None and 0 <= _ed <= l["dte"]:
-                        acts.append("⚠️ earnings before expiry — decide pre-print (IV crush + gap)")
-                    if (_xd is not None and 0 <= _xd <= max(l["dte"], 0)
-                            and l["typ"] == "call" and l["side"] == "short" and money == "ITM"):
-                        acts.append(f"💵 ex-div {_xd}d — early-assignment risk on short ITM call")
-                    if l["dte"] <= 7:
-                        acts.append(f"{l['dte']}DTE — decide now")
-                    elif l["dte"] <= 21:
-                        acts.append(f"{l['dte']}DTE — plan exit/roll")
-                    if l["side"] == "short" and money == "ITM":
-                        acts.append("ITM short — assignment risk")
-                    if pnl_pct >= 50:
-                        acts.append("up ≥50% — take profit")
-                    elif pnl_pct <= -50:
-                        acts.append("down ≥50% — cut/roll")
-                    action = "; ".join(acts) if acts else "hold & monitor"
-                    if acts and (l["dte"] <= 21 or (l["side"] == "short" and money == "ITM")):
-                        _rs = _roll_suggestion(_gp_conn, l)
-                        if _rs:
-                            action += f" · {_rs}"
-                    # next-session economics: est. open, expected day range (1σ), fill-limit to close
-                    _Tn = max(l["dte"], 0) / 365.0
-                    _sig = l["spot"] * l["iv"] * (1 / 252.0) ** 0.5
-                    _base = bs_greeks(l["spot"], l["K"], _Tn, _R, l["iv"], l["typ"])["price"]
-                    _vu = bs_greeks(l["spot"] + _sig, l["K"], _Tn, _R, l["iv"], l["typ"])["price"]
-                    _vd = bs_greeks(max(l["spot"] - _sig, 0.01), l["K"], _Tn, _R, l["iv"], l["typ"])["price"]
-                    # anchor the modeled ±1σ swing to the real current price ("Now") so the range
-                    # always brackets it, instead of floating around a pure-model base.
-                    _olo = max(l["cur"] + min(_vu, _vd) - _base, 0.01)
-                    _ohi = max(l["cur"] + max(_vu, _vd) - _base, _olo)
-                    _topen = bs_greeks(l["spot"], l["K"], max(l["dte"] - 1, 0) / 365.0, _R, l["iv"], l["typ"])["price"]
-                    # label clearly: <0 truly expired; 0 = expires today; sub-penny reads "~0"
-                    if l["dte"] < 0:
-                        _topen_disp = "expired"
-                    elif l["dte"] == 0:
-                        _topen_disp = "exp today"
-                    elif _topen < 0.005:
-                        _topen_disp = "~$0.00"
+                    st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True,
+                                 column_config={"P&L %": st.column_config.NumberColumn(format="%d%%")})
+                    st.caption("**Now** = live option mid (bid/ask) when the market's open, else the last "
+                               "close. **Real$ / Time$** = what's intrinsic (locked in if exercised now) vs time "
+                               "value — Time$ is the part that decays to $0 unless the stock moves. "
+                               "**±$1 stk** = position P&L per $1 stock move (delta in dollars — your real "
+                               "exposure). **Θ/day** = dollars gained/lost per calendar day from decay. "
+                               "**Est Open** = flat-stock decay reference — backtested: no edge over Now (one day of "
+                               "decay). *expired* = 0DTE; *~\\$0.00* = deep-OTM. **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs). "
+                               "**Close @** = marketable limit to close. **Max P / Max L** = theoretical "
+                               "max profit / loss for that leg held to expiry (*Unlimited* = uncapped).")
+
+                    # ── Best exit order: what to close first to lock profit / cut risk ──
+                    _xseq = _exit_sequence(_tl, _spot)
+                    _xact = [r for r in _xseq if r["score"] > 0]
+                    st.markdown("**🎯 Best exit order — what to close first**")
+                    if _xact:
+                        for _i, _r in enumerate(_xact, 1):
+                            _xl = _r["leg"]
+                            st.markdown(
+                                (f"{_i}. **{_xl['side']} {abs(_xl['qty'])}× ${_kf(_xl['K'])}"
+                                 f"{_xl['typ'][0].upper()}** ({_xl['dte']}DTE) — {_r['why']}").replace("$", "\\$"))
+                        _xhold = [r for r in _xseq if r["score"] == 0]
+                        if _xhold:
+                            st.caption("Hold / let work: " + ", ".join(
+                                f"${_kf(r['leg']['K'])}{r['leg']['typ'][0].upper()}" for r in _xhold).replace("$", "\\$"))
                     else:
-                        _topen_disp = f"${_topen:.2f}"
-                    _px, _fromq = _smart_close_limit(l["side"], l["cur"], l.get("bid"), l.get("ask"))
-                    _climit = (f"SELL ≤ ${_px:.2f}" if l["side"] == "long" else f"BUY ≥ ${_px:.2f}") \
-                              + ("" if _fromq else " (est)")
-                    _lb = _combo_bounds([l], l["spot"])
-                    _pa = _pos_analytics([l], l["spot"])
-                    _win = (f"{'🟢' if _pa['pop'] >= 60 else '🟡' if _pa['pop'] >= 40 else '🔴'} "
-                            f"{_pa['pop']:.0f}%") if _pa else "—"
-                    _intr_l = max(l["spot"] - l["K"], 0.0) if l["typ"] == "call" else max(l["K"] - l["spot"], 0.0)
-                    _rows.append({
-                        "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
-                        "Exp": l["exp"][:10], "DTE": l["dte"], "Money": money, "Event": _event_s,
-                        "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
-                        "Real$": round(_intr_l, 2), "Time$": round(max(l["cur"] - _intr_l, 0.0), 2),
-                        "±$1 stk": round(l["pos_delta"]), "Θ/day": round(l["pos_theta"]),
-                        "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
-                        "Est Open": _topen_disp, "Day L–H": f"${_olo:.2f}–${_ohi:.2f}",
-                        "Stk ±1σ": f"{l['spot'] + _sig:,.0f}/{max(l['spot'] - _sig, 0):,.0f}",
-                        "Hi/Lo": (f"${l['day_hi']:.2f}/${l['day_lo']:.2f}" if l.get("day_hi") and l.get("day_lo") else "—"),
-                        "Close @": _climit, "Max P": _fmt_maxp(_lb), "Max L": _fmt_maxl(_lb), "Win %": _win,
-                        "P&L %": round(pnl_pct), "P&L $": round(l["pnl"]), "Action": action,
+                        st.caption("No urgent exits — all legs can be held / left to work for now.")
+
+            # ── Morning checklist ──
+            st.markdown("#### ✅ Tomorrow's open — action checklist")
+            if _checklist:
+                for c in _checklist:
+                    st.markdown(f"- {c}")
+            else:
+                st.markdown("- No urgent actions — positions are in good shape; monitor the key levels above.")
+            if _net_ddelta > 0:
+                st.markdown(f"- **Net long bias** (${_net_ddelta:,.0f}/+1%). If you want neutral into the open, "
+                            "a small index/put hedge offsets a gap-down.")
+            elif _net_ddelta < 0:
+                st.markdown(f"- **Net short bias** (${_net_ddelta:,.0f}/+1%). A gap-up hurts — consider a call hedge "
+                            "or trimming shorts.")
+            if _net_theta < 0:
+                st.markdown(f"- You're paying **${abs(_net_theta):,.0f}/day** in decay — long premium needs the move soon.")
+            st.caption("Educational scenario analysis from your DB + Black-Scholes; not financial advice. "
+                       "Real fills, IV shifts and gaps will differ.")
+
+            try: _gp_conn.close()
+            except Exception: pass
+            # st.stop() removed (user 2026-07-24: "i don't see closed positions section anymore") --
+            # it sat at the SAME indent as `if _gp_layout.startswith("📋"):` above, i.e. it ran
+            # UNCONDITIONALLY after that block regardless of which layout was selected, halting the
+            # entire script for every Game Plan user before reaching Closed Positions / How-to-Use
+            # further down the page. No comment explained it; looks like leftover from before this
+            # was merged into the multi-mode page. Confirmed via server log (not just browser
+            # inspection): no crash was occurring, execution was being deliberately stopped here.
+
+        # ──────────────────────────────────────────────────────────────
+        # BATCH HELPER: fetch current option mid-price from yfinance
+        # ──────────────────────────────────────────────────────────────
+        def _fetch_option_mid(ticker, expiry_str, strike, opt_type):
+            """Return (mid_price, iv, spot) or (None, None, None) on failure.
+            Finds nearest available expiry when exact date not listed by yfinance."""
+            try:
+                tk = yf.Ticker(ticker)
+                hist = tk.history(period="2d")
+                spot = float(hist["Close"].iloc[-1]) if len(hist) >= 1 else None
+                try:
+                    exp_dt = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+                except Exception:
+                    return None, None, spot
+                # Find nearest available expiry
+                available = tk.options  # tuple of YYYY-MM-DD strings
+                if not available:
+                    return None, None, spot
+                exp_str = expiry_str  # default: try exact
+                if expiry_str not in available:
+                    # pick closest available expiry by calendar distance
+                    avail_dts = [datetime.strptime(e, "%Y-%m-%d").date() for e in available]
+                    nearest = min(avail_dts, key=lambda d: abs((d - exp_dt).days))
+                    exp_str = nearest.strftime("%Y-%m-%d")
+                chain = _cached_option_chain(ticker, exp_str)
+                df_c = chain.calls if opt_type.lower() == "call" else chain.puts
+                row = df_c[abs(df_c["strike"] - strike) < 0.01]
+                if row.empty:
+                    row = df_c.iloc[(df_c["strike"] - strike).abs().argsort()[:1]]
+                if row.empty:
+                    return None, None, spot
+                bid = float(row["bid"].iloc[0])
+                ask = float(row["ask"].iloc[0])
+                iv  = float(row["impliedVolatility"].iloc[0]) if "impliedVolatility" in row.columns else None
+                mid = (bid + ask) / 2 if bid >= 0 and ask >= 0 else None
+                return mid, iv, spot
+            except Exception:
+                return None, None, None
+
+        def _ep_batch_table(trades_df):
+            """Build batch exit analysis rows for a set of open trades."""
+            rows = []
+            today = datetime.now().date()
+            _ev_cache = {}                                  # ticker -> (er_days, exdiv_days), one lookup per ticker
+
+            def _leg_events(tk):
+                if tk not in _ev_cache:
+                    er = xd = None
+                    try:
+                        _e = _next_earnings(tk)
+                        er = _e.get("days") if _e else None
+                    except Exception:
+                        pass
+                    try:
+                        import telegram_bot_optimized as _tbo_ev
+                        _d = _tbo_ev._divcap_stats(tk)
+                        xd = _d.get("ex_days") if _d else None
+                    except Exception:
+                        pass
+                    _ev_cache[tk] = (er, xd)
+                return _ev_cache[tk]
+
+            for _, r in trades_df.iterrows():
+                try:
+                    strike = float(r["strike"])
+                    entry  = float(r["entry_price"])
+                    raw_qty = int(r.get("quantity", 1) or 1)
+                    side   = "SELL" if raw_qty < 0 else "BUY"
+                    qty    = abs(raw_qty)
+                    opt    = str(r["option_type"]).lower()
+                    ticker = str(r["ticker"]).upper()
+                    try:
+                        exp_dt = datetime.strptime(str(r["expiry"]), "%Y-%m-%d").date()
+                        dte = (exp_dt - today).days
+                    except Exception:
+                        dte = None
+                    mid, iv, spot = _fetch_option_mid(ticker, str(r["expiry"]), strike, opt)
+                    # P&L direction: for SELL, profit when option price goes DOWN
+                    if mid is not None:
+                        if side == "BUY":
+                            pnl = round((mid - entry) * qty * 100, 2)
+                            pnl_pct = round((mid - entry) / entry * 100, 1) if entry > 0 else None
+                        else:  # SELL — collected premium, profit = entry - mid
+                            pnl = round((entry - mid) * qty * 100, 2)
+                            pnl_pct = round((entry - mid) / entry * 100, 1) if entry > 0 else None
+                    else:
+                        pnl = pnl_pct = None
+                    # signal
+                    if pnl_pct is None:
+                        sig = "⚪ N/A"
+                    elif pnl_pct >= 50:
+                        sig = "🟢 TAKE PROFIT"
+                    elif pnl_pct <= -30:
+                        sig = "🔴 CUT LOSS"
+                    elif dte is not None and dte <= 5 and pnl_pct < 0:
+                        sig = "🔴 NEAR EXPIRY"
+                    elif dte is not None and dte <= 5 and pnl_pct > 0:
+                        sig = "🟡 CLOSE SOON"
+                    else:
+                        sig = "⚪ HOLD"
+                    # ── Event column: earnings / ex-div landing before this leg's expiry ──
+                    _er, _xd = _leg_events(ticker)
+                    _evt = []
+                    if _er is not None:
+                        if dte is not None and 0 <= _er <= dte:
+                            _evt.append(f"📊 ER {_er}d ⚠️pre-exp")
+                        elif 0 <= _er <= 14:
+                            _evt.append(f"📊 ER {_er}d")
+                    if _xd is not None and dte is not None and 0 <= _xd <= max(dte, 0):
+                        _evt.append(f"💵 ex-div {_xd}d")
+                    event_s = " · ".join(_evt) if _evt else "—"
+                    # event-aware advice: only escalate a plain HOLD, never mask profit/loss/expiry signals
+                    if sig == "⚪ HOLD":
+                        if _er is not None and dte is not None and 0 <= _er <= dte:
+                            sig = "🟡 ER PRE-EXP — decide before print"
+                        elif (_xd is not None and dte is not None and 0 <= _xd <= max(dte, 0)
+                              and side == "SELL" and opt == "call" and spot and spot > strike):
+                            sig = "🟡 EX-DIV — early-assignment risk"
+                    price_note = ""
+                    if mid is not None:
+                        direction = "↑" if mid > entry else "↓"
+                        price_note = f"${entry:.2f}→${mid:.2f} ({direction}{abs(mid-entry)/entry*100:.0f}% option Δ)"
+                    rows.append({
+                        "Side": side,
+                        "Ticker": ticker,
+                        "Type": opt.upper(),
+                        "Strike": f"${strike:.0f}",
+                        "Expiry": str(r["expiry"]),
+                        "DTE": dte,
+                        "Event": event_s,
+                        "Qty": f"{side} ×{qty}",
+                        "Premium paid→now": price_note if mid is not None else "N/A",
+                        "P&L $": f"${pnl:+,.0f}" if pnl is not None else "N/A",
+                        "P&L %": f"{pnl_pct:+.1f}%" if pnl_pct is not None else "N/A",
+                        "IV": f"{iv*100:.0f}%" if iv else "N/A",
+                        "Spot": f"${spot:.2f}" if spot else "N/A",
+                        "Signal": sig,
                     })
-                st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True,
-                             column_config={"P&L %": st.column_config.NumberColumn(format="%d%%")})
-                st.caption("**Now** = live option mid (bid/ask) when the market's open, else the last "
-                           "close. **Real$ / Time$** = what's intrinsic (locked in if exercised now) vs time "
-                           "value — Time$ is the part that decays to $0 unless the stock moves. "
-                           "**±$1 stk** = position P&L per $1 stock move (delta in dollars — your real "
-                           "exposure). **Θ/day** = dollars gained/lost per calendar day from decay. "
-                           "**Est Open** = flat-stock decay reference — backtested: no edge over Now (one day of "
-                           "decay). *expired* = 0DTE; *~\\$0.00* = deep-OTM. **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs). "
-                           "**Close @** = marketable limit to close. **Max P / Max L** = theoretical "
-                           "max profit / loss for that leg held to expiry (*Unlimited* = uncapped).")
+                except Exception:
+                    continue
+            return pd.DataFrame(rows)
 
-                # ── Best exit order: what to close first to lock profit / cut risk ──
-                _xseq = _exit_sequence(_tl, _spot)
-                _xact = [r for r in _xseq if r["score"] > 0]
-                st.markdown("**🎯 Best exit order — what to close first**")
-                if _xact:
-                    for _i, _r in enumerate(_xact, 1):
-                        _xl = _r["leg"]
-                        st.markdown(
-                            (f"{_i}. **{_xl['side']} {abs(_xl['qty'])}× ${_kf(_xl['K'])}"
-                             f"{_xl['typ'][0].upper()}** ({_xl['dte']}DTE) — {_r['why']}").replace("$", "\\$"))
-                    _xhold = [r for r in _xseq if r["score"] == 0]
-                    if _xhold:
-                        st.caption("Hold / let work: " + ", ".join(
-                            f"${_kf(r['leg']['K'])}{r['leg']['typ'][0].upper()}" for r in _xhold).replace("$", "\\$"))
-                else:
-                    st.caption("No urgent exits — all legs can be held / left to work for now.")
-
-        # ── Morning checklist ──
-        st.markdown("#### ✅ Tomorrow's open — action checklist")
-        if _checklist:
-            for c in _checklist:
-                st.markdown(f"- {c}")
-        else:
-            st.markdown("- No urgent actions — positions are in good shape; monitor the key levels above.")
-        if _net_ddelta > 0:
-            st.markdown(f"- **Net long bias** (${_net_ddelta:,.0f}/+1%). If you want neutral into the open, "
-                        "a small index/put hedge offsets a gap-down.")
-        elif _net_ddelta < 0:
-            st.markdown(f"- **Net short bias** (${_net_ddelta:,.0f}/+1%). A gap-up hurts — consider a call hedge "
-                        "or trimming shorts.")
-        if _net_theta < 0:
-            st.markdown(f"- You're paying **${abs(_net_theta):,.0f}/day** in decay — long premium needs the move soon.")
-        st.caption("Educational scenario analysis from your DB + Black-Scholes; not financial advice. "
-                   "Real fills, IV shifts and gaps will differ.")
-
-        try: _gp_conn.close()
-        except Exception: pass
-        # st.stop() removed (user 2026-07-24: "i don't see closed positions section anymore") --
-        # it sat at the SAME indent as `if _gp_layout.startswith("📋"):` above, i.e. it ran
-        # UNCONDITIONALLY after that block regardless of which layout was selected, halting the
-        # entire script for every Game Plan user before reaching Closed Positions / How-to-Use
-        # further down the page. No comment explained it; looks like leftover from before this
-        # was merged into the multi-mode page. Confirmed via server log (not just browser
-        # inspection): no crash was occurring, execution was being deliberately stopped here.
-
-    # ──────────────────────────────────────────────────────────────
-    # BATCH HELPER: fetch current option mid-price from yfinance
-    # ──────────────────────────────────────────────────────────────
-    def _fetch_option_mid(ticker, expiry_str, strike, opt_type):
-        """Return (mid_price, iv, spot) or (None, None, None) on failure.
-        Finds nearest available expiry when exact date not listed by yfinance."""
-        try:
-            tk = yf.Ticker(ticker)
-            hist = tk.history(period="2d")
-            spot = float(hist["Close"].iloc[-1]) if len(hist) >= 1 else None
-            try:
-                exp_dt = datetime.strptime(expiry_str, "%Y-%m-%d").date()
-            except Exception:
-                return None, None, spot
-            # Find nearest available expiry
-            available = tk.options  # tuple of YYYY-MM-DD strings
-            if not available:
-                return None, None, spot
-            exp_str = expiry_str  # default: try exact
-            if expiry_str not in available:
-                # pick closest available expiry by calendar distance
-                avail_dts = [datetime.strptime(e, "%Y-%m-%d").date() for e in available]
-                nearest = min(avail_dts, key=lambda d: abs((d - exp_dt).days))
-                exp_str = nearest.strftime("%Y-%m-%d")
-            chain = _cached_option_chain(ticker, exp_str)
-            df_c = chain.calls if opt_type.lower() == "call" else chain.puts
-            row = df_c[abs(df_c["strike"] - strike) < 0.01]
-            if row.empty:
-                row = df_c.iloc[(df_c["strike"] - strike).abs().argsort()[:1]]
-            if row.empty:
-                return None, None, spot
-            bid = float(row["bid"].iloc[0])
-            ask = float(row["ask"].iloc[0])
-            iv  = float(row["impliedVolatility"].iloc[0]) if "impliedVolatility" in row.columns else None
-            mid = (bid + ask) / 2 if bid >= 0 and ask >= 0 else None
-            return mid, iv, spot
-        except Exception:
-            return None, None, None
-
-    def _ep_batch_table(trades_df):
-        """Build batch exit analysis rows for a set of open trades."""
-        rows = []
-        today = datetime.now().date()
-        _ev_cache = {}                                  # ticker -> (er_days, exdiv_days), one lookup per ticker
-
-        def _leg_events(tk):
-            if tk not in _ev_cache:
-                er = xd = None
+        def _add_total_row(df):
+            """Append a TOTAL row summing P&L $ to a batch df."""
+            if df.empty:
+                return df
+            pnl_vals = []
+            for v in df["P&L $"]:
                 try:
-                    _e = _next_earnings(tk)
-                    er = _e.get("days") if _e else None
+                    pnl_vals.append(float(str(v).replace("$","").replace(",","").replace("+","")))
                 except Exception:
                     pass
-                try:
-                    import telegram_bot_optimized as _tbo_ev
-                    _d = _tbo_ev._divcap_stats(tk)
-                    xd = _d.get("ex_days") if _d else None
-                except Exception:
-                    pass
-                _ev_cache[tk] = (er, xd)
-            return _ev_cache[tk]
-
-        for _, r in trades_df.iterrows():
-            try:
-                strike = float(r["strike"])
-                entry  = float(r["entry_price"])
-                raw_qty = int(r.get("quantity", 1) or 1)
-                side   = "SELL" if raw_qty < 0 else "BUY"
-                qty    = abs(raw_qty)
-                opt    = str(r["option_type"]).lower()
-                ticker = str(r["ticker"]).upper()
-                try:
-                    exp_dt = datetime.strptime(str(r["expiry"]), "%Y-%m-%d").date()
-                    dte = (exp_dt - today).days
-                except Exception:
-                    dte = None
-                mid, iv, spot = _fetch_option_mid(ticker, str(r["expiry"]), strike, opt)
-                # P&L direction: for SELL, profit when option price goes DOWN
-                if mid is not None:
-                    if side == "BUY":
-                        pnl = round((mid - entry) * qty * 100, 2)
-                        pnl_pct = round((mid - entry) / entry * 100, 1) if entry > 0 else None
-                    else:  # SELL — collected premium, profit = entry - mid
-                        pnl = round((entry - mid) * qty * 100, 2)
-                        pnl_pct = round((entry - mid) / entry * 100, 1) if entry > 0 else None
-                else:
-                    pnl = pnl_pct = None
-                # signal
-                if pnl_pct is None:
-                    sig = "⚪ N/A"
-                elif pnl_pct >= 50:
-                    sig = "🟢 TAKE PROFIT"
-                elif pnl_pct <= -30:
-                    sig = "🔴 CUT LOSS"
-                elif dte is not None and dte <= 5 and pnl_pct < 0:
-                    sig = "🔴 NEAR EXPIRY"
-                elif dte is not None and dte <= 5 and pnl_pct > 0:
-                    sig = "🟡 CLOSE SOON"
-                else:
-                    sig = "⚪ HOLD"
-                # ── Event column: earnings / ex-div landing before this leg's expiry ──
-                _er, _xd = _leg_events(ticker)
-                _evt = []
-                if _er is not None:
-                    if dte is not None and 0 <= _er <= dte:
-                        _evt.append(f"📊 ER {_er}d ⚠️pre-exp")
-                    elif 0 <= _er <= 14:
-                        _evt.append(f"📊 ER {_er}d")
-                if _xd is not None and dte is not None and 0 <= _xd <= max(dte, 0):
-                    _evt.append(f"💵 ex-div {_xd}d")
-                event_s = " · ".join(_evt) if _evt else "—"
-                # event-aware advice: only escalate a plain HOLD, never mask profit/loss/expiry signals
-                if sig == "⚪ HOLD":
-                    if _er is not None and dte is not None and 0 <= _er <= dte:
-                        sig = "🟡 ER PRE-EXP — decide before print"
-                    elif (_xd is not None and dte is not None and 0 <= _xd <= max(dte, 0)
-                          and side == "SELL" and opt == "call" and spot and spot > strike):
-                        sig = "🟡 EX-DIV — early-assignment risk"
-                price_note = ""
-                if mid is not None:
-                    direction = "↑" if mid > entry else "↓"
-                    price_note = f"${entry:.2f}→${mid:.2f} ({direction}{abs(mid-entry)/entry*100:.0f}% option Δ)"
-                rows.append({
-                    "Side": side,
-                    "Ticker": ticker,
-                    "Type": opt.upper(),
-                    "Strike": f"${strike:.0f}",
-                    "Expiry": str(r["expiry"]),
-                    "DTE": dte,
-                    "Event": event_s,
-                    "Qty": f"{side} ×{qty}",
-                    "Premium paid→now": price_note if mid is not None else "N/A",
-                    "P&L $": f"${pnl:+,.0f}" if pnl is not None else "N/A",
-                    "P&L %": f"{pnl_pct:+.1f}%" if pnl_pct is not None else "N/A",
-                    "IV": f"{iv*100:.0f}%" if iv else "N/A",
-                    "Spot": f"${spot:.2f}" if spot else "N/A",
-                    "Signal": sig,
-                })
-            except Exception:
-                continue
-        return pd.DataFrame(rows)
-
-    def _add_total_row(df):
-        """Append a TOTAL row summing P&L $ to a batch df."""
-        if df.empty:
-            return df
-        pnl_vals = []
-        for v in df["P&L $"]:
-            try:
-                pnl_vals.append(float(str(v).replace("$","").replace(",","").replace("+","")))
-            except Exception:
-                pass
-        tot = sum(pnl_vals)
-        tot_em = "🟢" if tot >= 0 else "🔴"
-        tot_row = {c: "" for c in df.columns}
-        tot_row["Side"] = f"{tot_em} TOTAL"
-        tot_row["Ticker"] = f"{len(df)} leg(s)"
-        tot_row["P&L $"] = f"${tot:+,.0f}"
-        win_n = sum(1 for v in pnl_vals if v > 0)
-        tot_row["Signal"] = f"{win_n}W/{len(pnl_vals)-win_n}L"
-        return pd.concat([df, pd.DataFrame([tot_row])], ignore_index=True)
+            tot = sum(pnl_vals)
+            tot_em = "🟢" if tot >= 0 else "🔴"
+            tot_row = {c: "" for c in df.columns}
+            tot_row["Side"] = f"{tot_em} TOTAL"
+            tot_row["Ticker"] = f"{len(df)} leg(s)"
+            tot_row["P&L $"] = f"${tot:+,.0f}"
+            win_n = sum(1 for v in pnl_vals if v > 0)
+            tot_row["Signal"] = f"{win_n}W/{len(pnl_vals)-win_n}L"
+            return pd.concat([df, pd.DataFrame([tot_row])], ignore_index=True)
 
     if _ep_mode == "🌐 All Open Positions":
         st.markdown("#### 🌐 All Open Positions — Batch Analysis")

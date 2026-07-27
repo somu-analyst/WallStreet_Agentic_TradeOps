@@ -20457,16 +20457,23 @@ async def signal_ticker_detail(query, ticker):
                           (tk,)).fetchone()
         _lt = _lt[0] if _lt else None
         if _lt and spot > 0:
+            # A small delay between sends (user 2026-07-24: "only getting one chart" for
+            # GOOGL, verified BOTH chart functions succeed standalone -- the actual bug was
+            # sending 2 photos back-to-back with zero gap, right after the 2yr ticker chart
+            # a few lines above this loop already sent a THIRD photo in the same burst.
+            # Telegram's per-chat flood control can silently drop a rapid-fire send; the
+            # exception was also only logged at debug level, invisible without verbose logs.
             for _fn, _cap in ((_oi_money_flow_chart,
                                f"💰 {tk} — $ flow per strike (calls vs puts)"),
                               (_oi_week_heatmap,
                                f"🔥 {tk} — OI build/unwind heatmap by strike & day")):
                 try:
+                    await asyncio.sleep(0.6)
                     _p = _fn(tk, _c2, spot, _lt)
                     if _p:
                         await query.message.reply_photo(_p, caption=_cap)
-                except Exception:
-                    log.debug(f"{_fn.__name__} send failed", exc_info=True)
+                except Exception as _chart_e:
+                    log.warning(f"{_fn.__name__} send failed for {tk}: {_chart_e}", exc_info=True)
         _c2.close()
     except Exception:
         log.debug("OI chart block failed", exc_info=True)

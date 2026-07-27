@@ -86,27 +86,18 @@ personal agent runtime). Wholesale adoption of any of the three rejected — Tra
 paid LLM calls per decision (conflicts with this project's free/deterministic design); worldmonitor
 and hermes-agent are much bigger standalone products than a bolt-on. Four smaller, genuinely
 scoped pieces worth doing instead, none requiring new paid dependencies:
-- [ ] **Bull-vs-Bear adversarial round in `/debate`** — TradingAgents' Researcher-team step
-  (explicit bull/bear debate before the Trader/Risk verdict) that our existing 5-agent `/debate`
-  skips today (agents vote → straight to weighted verdict, no adversarial round in between).
-  Also add the structured output schema from the user's template: Action / Entry range /
-  Stop-loss / Take-profit / one-sentence thesis (currently `/debate` doesn't give concrete
-  entry/stop/target numbers).
-- [ ] **Optional LLM prose-polish layer** — `ANTHROPIC_API_KEY` is already set and verified live.
-  Feed `/debate`/AI Hedge Fund's existing DETERMINISTIC output through Claude to rewrite as
-  natural prose; the verdict/numbers themselves stay 100% deterministic and free — LLM only
-  touches the write-up, with graceful fallback to today's plain format if no key/budget.
+- [x] ~~Bull-vs-Bear adversarial round in `/debate`~~ — **DONE** (commit 69e23a0): `_debate_bull_bear_case()` + `_debate_verdict_schema()`, structured Action/Entry/Stop/Target output, targets sized off real 5-day realized vol. Verified against live AAPL (BUY) and SPY (HOLD).
+- [x] ~~Optional LLM prose-polish layer~~ — **DONE** (commit bd74c1f): `_debate_polish()`, `/debate TICKER polish` or a "✨ Polish" button. Verified the fallback path is bulletproof (forced a real APIConnectionError in this sandbox — Avast SSL interception, since fixed separately — confirmed identical deterministic output returned byte-for-byte).
 - [ ] **Local-LLM narrative synthesis (Ollama, free)** — worldmonitor's core pattern: synthesize
   the day's headlines into an actual brief via a locally-run model, not just a headline list +
-  `_headline_tone` score. Needs Ollama installed locally; zero API cost either way.
+  `_headline_tone` score. Needs Ollama installed locally; zero API cost either way. Deferred
+  2026-07-24 (Ollama not installed in this environment) — user to decide whether to install it.
 - [ ] **Country/supply-chain instability flag** — lightweight version of worldmonitor's Country
   Instability Index: flag `/catalysts` when a ticker's known supply-chain country (e.g. Taiwan
   for TSM-exposed chip names) has an active geopolitical event, instead of the full dashboard.
-- [ ] **Persistent user-preference memory** — hermes-agent's standout feature (builds a model of
-  "who you are" across sessions). Extend the existing `app_settings` table (already used for tax
-  settings) to remember most-checked tickers / risk tolerance / which scanners actually get acted
-  on, and quietly use it to personalize Watchlist ordering or Action Board ranking instead of
-  every session starting from a blank slate.
+- [x] ~~Persistent user-preference memory~~ — **DONE** (commit c456717): `ticker_interest` table,
+  `/debate` logs a +1 view per ticker checked, dashboard Watchlist now orders by views DESC.
+  Verified: standalone SQL test + live Playwright check against a running dashboard instance.
 
 ## Constraints / decisions locked in
 - CLAUDE.md rules win: edit `telegram_bot_optimized.py`/`dashboard.py` directly (no patch scripts), single-engine (dashboard imports the bot), dates now ISO YYYY-MM-DD everywhere (substr sort trick retired 07-14-2026), secrets never committed/printed, `US_data.db` never written by NYSE_OpenBB.py.

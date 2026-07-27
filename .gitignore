@@ -270,3 +270,6 @@ research/models/
 
 # Earnings-call transcripts — kept on disk, not in the DB (2026-07-23)
 transcripts/
+
+# Machine-specific SSL CA bundle (Avast/AV interception fix, generated at startup)
+combined_ca_bundle.pem

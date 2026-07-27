@@ -30,7 +30,7 @@
 - Old tests/`core/`/migrations + retired builders live in `archive/` (not wired in).
 
 ## 🗺️ Repo map (root)
-`telegram_bot_optimized.py` · `dashboard.py` · `run_all_offhours.py` · `NYSE_YFin.py` · `NYSE_Telegram.py` · `NYSE_intraday.py` · `NYSE_OpenBB*.py` · `skew_snapshot.py` · `_lib/` (7 loaded: event_writeup_engine+hooks, news_and_earnings, market_news_aggregator, market_news_enhanced, options_tracker).
+`telegram_bot_optimized.py` · `dashboard.py` · `run_all_offhours.py` · `NYSE_YFin.py` · `NYSE_Telegram.py` · `NYSE_intraday.py` · `NYSE_OpenBB*.py` · `skew_snapshot.py` · `_lib/`: event_writeup_engine+hooks (real, wired), market_news_enhanced (`get_aggregated_news` used; other 5 fns unused). Deleted 2026-07-24 (100% dead, verified zero call sites): options_tracker.py, market_news_aggregator.py, news_and_earnings.py — each was a superseded abstraction layer; the underlying tables (`trades`, `market_snapshots`, `news_feed`) are still alive via separate, direct code in the main files.
 
 ## DB Schema (key tables — PRIMARY DB = `US_data_OpenBB.db`, revert env `NYSE_DB_PATH`)
 - `options_change`: ticker, strike, expiry_date, trade_date_now, change_OI_Call/Put, openInt_Call/Put_now/prev, pct_change_OI_*, vol_*_now, lastPrice_*_now, R1, S1

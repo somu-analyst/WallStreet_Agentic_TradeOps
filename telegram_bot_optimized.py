@@ -13118,7 +13118,11 @@ def _positions_card_parts(trades, now_s, today):
                 _mv = _ah_cache.get(_ntk) or {}
                 _tag = (f" <i>({_mv.get('ext_chg_pct'):+.1f}% AH)</i>"
                         if _mv.get("is_extended") else "")
-                _nl.append(f"<b>{_ntk}</b>{_tag} " + " · ".join(h[:95] for h in _hs))
+                # Hyperlink to the full article (user 2026-07-24: "I asked for hyperlinks
+                # to read full news") -- falls back to plain text when no URL was found.
+                _hl = " · ".join(f'<a href="{u}">{h[:95]}</a>' if u else h[:95]
+                                 for h, u in _hs)
+                _nl.append(f"<b>{_ntk}</b>{_tag} " + _hl)
             _news_section = "📰 <b>NEWS</b>\n" + "\n".join(_nl) + "\n\n"
     except Exception:
         log.debug("positions news block failed", exc_info=True)
@@ -20430,7 +20434,8 @@ async def signal_ticker_detail(query, ticker):
         _nw = _position_news([tk], per_tk=3)
         if _nw.get(tk):
             parts.append("\n<b>📰 News:</b>\n"
-                         + "\n".join(f"• {h[:120]}" for h in _nw[tk]))
+                         + "\n".join((f'• <a href="{u}">{h[:120]}</a>' if u else f"• {h[:120]}")
+                                     for h, u in _nw[tk]))
     except Exception:
         log.debug("ticker news block failed", exc_info=True)
 
@@ -23990,10 +23995,10 @@ def _position_news(tickers, per_tk=2, max_age=1800, days=3):
     for tk in dict.fromkeys(str(t).upper() for t in tickers if t):
         hit = _POS_NEWS_CACHE.get(tk)
         if hit and (now - hit[0]) < max_age:
-            _fresh = [h for h in hit[1] if h.lower()[:40] not in _used]
+            _fresh = [(h, u) for h, u in hit[1] if h.lower()[:40] not in _used]
             if _fresh:
                 out[tk] = _fresh
-                _used.update(h.lower()[:40] for h in _fresh)
+                _used.update(h.lower()[:40] for h, u in _fresh)
             continue
         items = []
         if key:
@@ -24007,7 +24012,8 @@ def _position_news(tickers, per_tk=2, max_age=1800, days=3):
                         src = str(d.get("source") or "").lower()
                         if h and _relevant(tk, h) and (not src or
                                                        any(g in src for g in _GOOD_SRC)):
-                            items.append((h, str(d.get("summary") or "").strip()))
+                            items.append((h, str(d.get("summary") or "").strip(),
+                                         str(d.get("url") or "").strip()))
             except Exception:
                 log.debug(f"finnhub news {tk} failed", exc_info=True)
         if not items:                                   # keyless fallback
@@ -24016,26 +24022,30 @@ def _position_news(tickers, per_tk=2, max_age=1800, days=3):
                     c = it.get("content", it) or {}
                     h = str(c.get("title") or "").strip()
                     if h and _relevant(tk, h):
-                        items.append((h, str(c.get("summary") or "").strip()))
+                        _u = ((c.get("canonicalUrl") or {}).get("url")
+                              or (c.get("clickThroughUrl") or {}).get("url") or "")
+                        items.append((h, str(c.get("summary") or "").strip(), _u))
             except Exception:
                 log.debug(f"yf news {tk} failed", exc_info=True)
         # earnings-related first — that is what moves a position the day after a print
         items.sort(key=lambda x: 0 if any(k in x[0].lower() for k in _KW) else 1)
         # dedupe within the ticker AND across tickers — a market-wide headline ("Nasdaq
         # futures fall as Tesla, Alphabet earnings...") otherwise repeats on every position.
+        # Carries the article URL through now (user 2026-07-24: "I asked for hyperlinks to
+        # read full news") -- each item is (headline, url) instead of a bare headline string.
         picked, seen = [], set()
-        for h, _s in items:
+        for h, _s, _u in items:
             k = h.lower()[:40]
             if k in seen or k in _used:
                 continue
             seen.add(k)
-            picked.append(h)
+            picked.append((h, _u))
             if len(picked) >= per_tk:
                 break
         _POS_NEWS_CACHE[tk] = (now, picked)
         if picked:
             out[tk] = picked
-            _used.update(h.lower()[:40] for h in picked)
+            _used.update(h.lower()[:40] for h, _u in picked)
     return out
 
 
@@ -24068,7 +24078,11 @@ def _world_news_block(limit=6):
             continue
         seen.add(key)
         src = str(it.get("source") or "").strip()
-        out.append((head, src))
+        # url WAS already in the raw feed (market_news_enhanced's own docstring: "with
+        # links") but was being silently dropped here (user 2026-07-24: "no hyperlinks to
+        # read full news"). Carried through now as a 3rd tuple element.
+        url = str(it.get("url") or it.get("link") or "").strip()
+        out.append((head, src, url))
         if len(out) >= limit:
             break
     return out
@@ -24129,8 +24143,9 @@ def _fmt_briefing(b):
     _wn = _world_news_block()
     if _wn:
         lines += ["", "📰 <b>WORLD & MARKETS</b>"]
-        for _h, _s in _wn:
-            lines.append(f"• {_h[:110]}" + (f" <i>({_s})</i>" if _s else ""))
+        for _h, _s, _u in _wn:
+            _htxt = f'<a href="{_u}">{_h[:110]}</a>' if _u else _h[:110]
+            lines.append(f"• {_htxt}" + (f" <i>({_s})</i>" if _s else ""))
 
     lines += ["",
         "<i>Tap /event NAME for the full 1st/2nd/3rd-order chain, or /opex for the expiration radar.</i>",
@@ -28252,14 +28267,14 @@ def _country_instability_flags(tickers, headline_limit=40):
         return []
     flags = []
     seen_countries = set()
-    for headline, _src in news:
+    for headline, _src, _url in news:
         hl = headline.lower()
         for country, tks in countries.items():
             if country in seen_countries:
                 continue
             if country.lower() in hl and any(kw in hl for kw in _GEOPOLITICAL_KEYWORDS):
                 for tk in tks:
-                    flags.append((tk, country, headline))
+                    flags.append((tk, country, headline, _url))
                 seen_countries.add(country)
     return flags
 
@@ -28298,8 +28313,9 @@ def _fmt_catalysts(macro, earn, days=7, geo=None):
                  f"{(' · '+str(dt)) if dt else ''}" for n, tk, dt in earn]
         parts.append("<b>🏢 EARNINGS (your book)</b>\n" + "\n".join(lines))
     if geo:
-        lines = [f"🌐 <b>{tk}</b> — {country} supply-chain risk: “{hl[:90]}”"
-                 for tk, country, hl in geo]
+        lines = [f'🌐 <b>{tk}</b> — {country} supply-chain risk: '
+                 + (f'<a href="{u}">"{hl[:90]}"</a>' if u else f'"{hl[:90]}"')
+                 for tk, country, hl, u in geo]
         parts.append("<b>⚠️ GEOPOLITICAL / SUPPLY-CHAIN</b>\n" + "\n".join(lines))
     return "\n\n".join(parts)
 

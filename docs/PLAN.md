@@ -183,7 +183,7 @@ Compiled by re-reading the whole session. NOT DONE items are the real backlog.
 | A14 | ~~Wire PEAD into a command~~ | **DONE** — `/pead` registered (`pead_command`, telegram_bot_optimized.py:27577), stale audit line. |
 | A15 | **Dashboard Portfolio page render-check** | ~12 commits touched it; NEVER once opened. |
 | A16 | `_lib` orphan triage (B: position lifecycle, C: forex/crypto) | Only the news orphans were wired. |
-| A17 | `/debate` weight rebalance | HELD — my validation contradicted the premise (Technical IC −0.039, not +4.28). Needs a proper agent-level backtest. |
+| A17 | `/debate` weight rebalance | **DONE 2026-07-27** — ran the actual agent-level backtest (150 tickers, ~150d, fwd-5d, point-in-time formula replication). Technical: real edge, rank-IC +0.047 t=+7.05 (the −0.039 figure didn't replicate either — was also unverified). Macro: zero edge vs SPY fwd (t=−0.01), same verdict as Flow. Weights updated: Technical 1.0→1.3, Macro 0.7→0.3. Flow (1.2, zero edge, still highest) and Position (GEX, untested) left untouched — see code comment above `_AGENT_WEIGHTS`. |
 | A18 | SI buildup/covering validation vs baseline | Blocked ~2-3 months on `short_interest` history accruing. |
 
 ## ✅ DONE (for the record)

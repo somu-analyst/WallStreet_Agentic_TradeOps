@@ -805,6 +805,24 @@ def sanitize_for_telegram(s: str) -> str:
     # degrading it to plain text. _tg_balance closes/drops surgically instead.
     return _tg_balance(s)
 
+def _wrap_safe_split(text, limit=1024):
+    """Split text at a tag-safe boundary near `limit` (Telegram photo captions cap at 1024
+    chars) -- unlike a blind text[:limit]/text[limit:] slice, which cuts mid-tag whenever a
+    <blockquote expandable> or <b> straddles the boundary and produces invalid HTML on BOTH
+    halves (found 2026-07-24 via /wrap: the caption+continuation split in wrap_command/
+    wrap_view was doing exactly this). Returns (head, tail); head is tag-balanced, tail
+    starts fresh at the next clean line."""
+    if len(text) <= limit:
+        return text, ""
+    cut = text[:limit]
+    nl = cut.rfind("\n\n")
+    if nl <= 0:
+        nl = cut.rfind("\n")
+    if nl <= 0:
+        nl = limit
+    return _tg_balance(text[:nl]), text[nl:].lstrip("\n")
+
+
 def _tg_cut(text, limit=4000):
     """Length-cut for Telegram HTML WITHOUT breaking entities (root cause of the
     'plain text fallback' old-look messages, diagnosed 2026-07-18: blind [:4000]
@@ -829,13 +847,26 @@ def _tg_balance(s):
     if not isinstance(s, str) or "<" not in s:
         return s
     s = re.sub(r"<[^>]*$", "", s)                      # trailing partial tag '<pr…'
-    for tag in ("pre", "code", "b", "strong", "i", "em", "u", "s", "blockquote"):
+    for tag in ("pre", "code", "b", "strong", "i", "em", "u", "s"):
         o, c = f"<{tag}>", f"</{tag}>"
         while s.count(c) > s.count(o):                 # orphan closer -> drop last
             i = s.rfind(c)
             s = s[:i] + s[i + len(c):]
         if s.count(o) > s.count(c):                    # unclosed opener -> close
             s += c
+    # blockquote needs attribute-aware counting -- <blockquote expandable> (used by /wrap's
+    # and /plan's collapsible sections) is a real opening tag that the plain "<blockquote>"
+    # string match above does NOT recognize. Found 2026-07-24: this was silently deleting
+    # every real </blockquote> as a false "orphan closer", breaking the HTML on every send
+    # and forcing the ugly fully-escaped plain-text fallback for anything using this pattern.
+    _bq_open = len(re.findall(r"<blockquote\b[^>]*>", s))
+    _bq_close = s.count("</blockquote>")
+    while _bq_close > _bq_open:
+        i = s.rfind("</blockquote>")
+        s = s[:i] + s[i + len("</blockquote>"):]
+        _bq_close -= 1
+    if _bq_open > _bq_close:
+        s += "</blockquote>" * (_bq_open - _bq_close)
     return s
 
 
@@ -25468,9 +25499,10 @@ async def wrap_command(update, ctx):
     except Exception:
         buf = None
     if buf:
-        await update.message.reply_photo(buf, caption=txt[:1024], parse_mode=H)
-        if len(txt) > 1024:
-            await update.message.reply_text(txt[1024:], parse_mode=H, reply_markup=_kb_wrap())
+        _head, _tail = _wrap_safe_split(txt, 1024)
+        await update.message.reply_photo(buf, caption=_head, parse_mode=H)
+        if _tail:
+            await update.message.reply_text(_tail, parse_mode=H, reply_markup=_kb_wrap())
     else:
         await update.message.reply_text(txt[:4096], parse_mode=H, reply_markup=_kb_wrap())
 
@@ -25487,9 +25519,10 @@ async def wrap_view(query):
     except Exception:
         buf = None
     if buf:
-        await query.message.reply_photo(buf, caption=txt[:1024], parse_mode=H)
-        if len(txt) > 1024:
-            await query.message.reply_text(txt[1024:], parse_mode=H, reply_markup=_kb_wrap())
+        _head, _tail = _wrap_safe_split(txt, 1024)
+        await query.message.reply_photo(buf, caption=_head, parse_mode=H)
+        if _tail:
+            await query.message.reply_text(_tail, parse_mode=H, reply_markup=_kb_wrap())
     else:
         await query.message.reply_text(txt[:4096], parse_mode=H, reply_markup=_kb_wrap())
 
@@ -30907,9 +30940,10 @@ async def wrap_alert(ctx):
             buf = None
         await ctx.bot.send_message(chat_id=int(chat_id), text="📰 <b>Daily Market Wrap</b>", parse_mode=H)
         if buf:
-            await ctx.bot.send_photo(chat_id=int(chat_id), photo=buf, caption=txt[:1024], parse_mode=H)
-            if len(txt) > 1024:
-                await ctx.bot.send_message(chat_id=int(chat_id), text=txt[1024:], parse_mode=H)
+            _head, _tail = _wrap_safe_split(txt, 1024)
+            await ctx.bot.send_photo(chat_id=int(chat_id), photo=buf, caption=_head, parse_mode=H)
+            if _tail:
+                await ctx.bot.send_message(chat_id=int(chat_id), text=_tail, parse_mode=H)
         else:
             await ctx.bot.send_message(chat_id=int(chat_id), text=txt[:4096], parse_mode=H)
     except Exception as e:

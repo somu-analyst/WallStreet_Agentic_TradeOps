@@ -2800,6 +2800,27 @@ _DEBATE_AGENTS = (("Flow", _agent_flow), ("Position", _agent_position),
                   ("Macro", _agent_macro))
 
 
+def _log_ticker_interest(ticker, conn):
+    """Persistent preference memory (PLAN.md 'Adjacent-framework ideas', 2026-07-24 --
+    hermes-agent's standout feature is building a model of what you actually pay attention
+    to, not treating every session as a blank slate). Increments a view counter each time
+    a ticker is actively evaluated via /debate -- the one command that specifically means
+    'I'm weighing whether to trade this,' as opposed to passive scans that touch hundreds
+    of tickers. Read by the dashboard's Watchlist page to order by what you actually check,
+    not just insertion order. Never blocks/fails the caller -- a logging miss is silent."""
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ticker_interest "
+            "(ticker TEXT PRIMARY KEY, views INTEGER DEFAULT 0, last_viewed TEXT)")
+        conn.execute(
+            "INSERT INTO ticker_interest (ticker, views, last_viewed) VALUES (?, 1, ?) "
+            "ON CONFLICT(ticker) DO UPDATE SET views = views + 1, last_viewed = excluded.last_viewed",
+            (str(ticker).upper(), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+    except Exception:
+        log.debug("_log_ticker_interest failed (non-fatal)", exc_info=True)
+
+
 def compute_debate(tk, conn=None):
     """Run every analyst, hold the bull/bear debate, return the full decision dict."""
     tk = str(tk).upper().strip()
@@ -2807,6 +2828,7 @@ def compute_debate(tk, conn=None):
     if own:
         conn = get_conn()
     try:
+        _log_ticker_interest(tk, conn)
         spot, is_live, asof = _cur_price(tk, 0.0)
         spot = float(spot or 0.0)
         agents = []

@@ -92,9 +92,7 @@ scoped pieces worth doing instead, none requiring new paid dependencies:
   the day's headlines into an actual brief via a locally-run model, not just a headline list +
   `_headline_tone` score. Needs Ollama installed locally; zero API cost either way. Deferred
   2026-07-24 (Ollama not installed in this environment) — user to decide whether to install it.
-- [ ] **Country/supply-chain instability flag** — lightweight version of worldmonitor's Country
-  Instability Index: flag `/catalysts` when a ticker's known supply-chain country (e.g. Taiwan
-  for TSM-exposed chip names) has an active geopolitical event, instead of the full dashboard.
+- [x] ~~Country/supply-chain instability flag~~ — **DONE** (commit 2331abb): `_country_instability_flags()`, starter map (TSM/NVDA/AMD/AVGO/QCOM→Taiwan, AAPL/TSLA→China, NKE→Vietnam, ASML→Netherlands), scans existing keyless RSS aggregation for country name + geopolitical keyword. `/catalysts` gains a "GEOPOLITICAL / SUPPLY-CHAIN" section only when something fires. Verified: real call (correct empty result, no active conflict headline) + synthetic test (fake Taiwan-strait headline correctly flagged NVDA/TSM/AAPL).
 - [x] ~~Persistent user-preference memory~~ — **DONE** (commit c456717): `ticker_interest` table,
   `/debate` logs a +1 view per ticker checked, dashboard Watchlist now orders by views DESC.
   Verified: standalone SQL test + live Playwright check against a running dashboard instance.

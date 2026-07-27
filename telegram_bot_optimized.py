@@ -2949,25 +2949,66 @@ def _debate_report(tk):
         details=details)
 
 
-async def debate_view(query, tk=None):
+def _debate_polish(html_text: str) -> str:
+    """Optional LLM prose-polish over the ALREADY-COMPUTED deterministic /debate report
+    (PLAN.md 'Adjacent-framework ideas', 2026-07-24 — TradingAgents' agents write natural
+    prose; ours produce a structured table). The verdict/numbers stay 100% deterministic —
+    Claude only rewrites the SAME facts as flowing prose, never asked to add or change any
+    number. Falls back to the original deterministic text on any failure (no key, no network,
+    rate limit) so this is strictly additive, never a point of failure for /debate itself."""
+    api_key = _load_ai_key()
+    if not api_key:
+        return html_text
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            system=("Rewrite the following Telegram HTML trading report as 3-4 short flowing "
+                    "paragraphs of natural prose, for a trader reading on their phone. "
+                    "CRITICAL: do not invent, change, or drop a single number, price, ticker, "
+                    "or the Action/Entry/Stop/Target verdict — every figure in your rewrite "
+                    "must come from the input, verbatim. Keep the same <b>/<i> HTML tags for "
+                    "emphasis where natural. No markdown. Output ONLY the rewritten report, "
+                    "no preamble."),
+            messages=[{"role": "user", "content": html_text}],
+        )
+        out = "".join(b.text for b in resp.content if b.type == "text").strip()
+        return out if out else html_text
+    except Exception as e:
+        log.debug(f"_debate_polish failed, falling back to deterministic: {e}")
+        return html_text
+
+
+async def debate_view(query, tk=None, polish=False):
     tk = (tk or "").upper().strip()
     if not tk:
         pos = _positions_tickers()
         tk = pos[0] if pos else "SPY"
     try:
         msg = _debate_report(tk)
+        if polish:
+            msg = _debate_polish(msg)
     except Exception as e:
         log.warning(f"debate_view: {e}")
         msg = f"⚠️ Debate error for {tk} — try again."
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh",
-                                                    callback_data=f"debate_view:{tk}"), BACK_BTN]])
+                                                    callback_data=f"debate_view:{tk}"),
+                                InlineKeyboardButton("✨ Polish" if not polish else "📋 Plain",
+                                                    callback_data=f"debatepolish_view:{tk}" if not polish
+                                                    else f"debate_view:{tk}"),
+                                BACK_BTN]])
     await _safe_reply(query.message, msg, reply_markup=kb)
 
 
 async def debate_cmd(update, ctx):
     from types import SimpleNamespace
     args = [a.upper() for a in (getattr(ctx, "args", []) or [])]
-    await debate_view(SimpleNamespace(message=update.message), tk=(args[0] if args else None))
+    polish = "POLISH" in args
+    if polish:
+        args = [a for a in args if a != "POLISH"]
+    await debate_view(SimpleNamespace(message=update.message), tk=(args[0] if args else None), polish=polish)
 
 
 
@@ -14571,6 +14612,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await world_view(query)
         elif data == "capflow_view":
             await capflow_view(query)
+        elif data.startswith("debatepolish_view"):
+            await debate_view(query, tk=(data.split(":", 1)[1] if ":" in data else None), polish=True)
         elif data.startswith("debate_view"):
             await debate_view(query, tk=(data.split(":", 1)[1] if ":" in data else None))
         elif data == "tv_view":

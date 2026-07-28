@@ -1,18 +1,16 @@
 # Demo media
 
-Drop your demo recordings here, then they render in the main `README.md`.
+Rendered in the main `README.md`.
 
-## Recommended files
-| File | What to record | Tip |
-|------|----------------|-----|
-| `telegram-demo.gif` | A Telegram session: `/menu`, `/gex SPY`, `/hiprob`, a scanner result | Keep it 10–20s, loopable |
-| `dashboard-demo.gif` | Streamlit terminal: Market Overview → OI Analytics → Signal Accuracy | Show one full "story" |
-| `gex-profile.png` / `dashboard-home.png` | Static screenshots for quick context | High-res, dark theme |
+## Current files
+| File | What it is |
+|------|------------|
+| `dashboard-demo.gif` (2026-07-28) | Real Playwright screen-capture of the live Streamlit terminal: Next-Day Exit Planner → Market Overview → 24-model High-Prob Engine (run live on GOOG) → OI Analytics → Signal Accuracy. |
+| `telegram-demo.gif` (2026-07-28) | A styled chat mockup (not an actual phone screenshot — no visual Telegram client was available to record) populated with real, live-pulled output from `high_prob_signals_engine`/`compute_capflow`/`_verdict_grounding`. Real GOOG numbers throughout, not fabricated. |
 
-## How to capture
-1. Record the screen (Windows: **Win+Alt+R** Game Bar, or [ScreenToGif](https://www.screentogif.com/) / OBS).
-2. For autoplay-in-README, export/convert to **GIF** (ScreenToGif does this directly). Keep each GIF < ~10 MB.
-3. Save into this folder with the names above.
+To replace either with a real recording of your own device: record the screen (Windows:
+**Win+Alt+R** Game Bar, or [ScreenToGif](https://www.screentogif.com/) / OBS), export as
+GIF (keep it < ~10 MB), and overwrite the file above — the README reference doesn't change.
 
 ## Two ways to embed in README
 - **GIF (committed, autoplays):** already wired in `README.md` as

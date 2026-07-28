@@ -9521,6 +9521,7 @@ async def oi_detail(query, ticker):
         log.warning(f"oi_detail IV/strat failed: {ex}")
 
     # ── Strike-level OI breakdown + multi-week trend ─────────────────
+    _spot3, _latest3 = 0.0, ""             # MUST pre-exist: charts below need them even if this block raises
     try:
         conn3 = get_conn()
         _sd3 = pd.read_sql("""SELECT close FROM stock_daily WHERE ticker=?
@@ -9550,14 +9551,37 @@ async def oi_detail(query, ticker):
     ])
     await _safe_reply(query.message, msg, reply_markup=kb)
 
-    # Visual: today intraday + ~2yr line w/ volume-by-price (POC) + OI walls
+    # Visual: today intraday + ~2yr line w/ volume-by-price (POC) + OI walls, THEN the two
+    # OI charts (user 2026-07-27: "OI is only one one photo" -- this is the view they actually
+    # use, reached via menu_oi -> oi_detail_TICKER. The earlier fix wiring these two chart
+    # functions in was applied to signal_ticker_detail (the "sigtk_" callback) -- a DIFFERENT,
+    # rarely-used path per telegram_bot.log (last tapped 2026-07-23; oi_detail_* is tapped daily).
+    # Wiring the real fix here, where the user actually is. Same 0.6s inter-send delay pattern
+    # (b191f43) to avoid Telegram's flood control silently dropping a rapid-fire photo burst.
     try:
         _png = _ticker_chart_png(str(ticker).upper())
         if _png:
             await query.message.reply_photo(
                 _png, caption=f"📈 {str(ticker).upper()} — today + ~2yr · volume-by-price (POC) + OI walls")
     except Exception:
-        log.debug("oi_detail chart send failed", exc_info=True)
+        log.warning(f"oi_detail price chart send failed for {ticker}", exc_info=True)
+
+    if _latest3 and _spot3 > 0:
+        conn4 = get_conn()
+        try:
+            for _fn, _cap in ((_oi_money_flow_chart,
+                               f"💰 {str(ticker).upper()} — $ flow per strike (calls vs puts)"),
+                              (_oi_week_heatmap,
+                               f"🔥 {str(ticker).upper()} — OI build/unwind heatmap by strike & day")):
+                try:
+                    await asyncio.sleep(0.6)
+                    _p = _fn(str(ticker).upper(), conn4, _spot3, _latest3)
+                    if _p:
+                        await query.message.reply_photo(_p, caption=_cap)
+                except Exception as _chart_e:
+                    log.warning(f"{_fn.__name__} send failed for {ticker}: {_chart_e}", exc_info=True)
+        finally:
+            conn4.close()
 
 
 async def oi_compare_select_expiry(query, ctx, step=1):

@@ -11443,18 +11443,26 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE, force=False):
 
     now_et = _et_now().replace(tzinfo=None)   # DST-aware (was fixed UTC-5)
     parts = _positions_card_parts(trades, now_et.strftime("%H:%M ET"), now_et.date())
-    kb = _positions_card_kb(parts["first_tk"])
+    if force:
+        # Manual/adhoc trigger: user tapped a button and wants the FULL rich card right
+        # now, keyboard included -- the consolidated status message (A10) is for the
+        # scheduled recurring tick only, never for an explicit on-demand ask.
+        kb = _positions_card_kb(parts["first_tk"])
+        try:
+            if len(parts["full"]) <= 4000:
+                await ctx.bot.send_message(chat_id=int(chat_id), text=parts["full"],
+                                           parse_mode=H, reply_markup=kb)
+            else:
+                await ctx.bot.send_message(chat_id=int(chat_id), text=parts["head"], parse_mode=H)
+                await ctx.bot.send_message(chat_id=int(chat_id), text=parts["tail"],
+                                           parse_mode=H, reply_markup=kb)
+        except Exception as e:
+            log.warning(f"position_monitor send failed: {e}")
+        return
     try:
-        if len(parts["full"]) <= 4000:
-            await ctx.bot.send_message(chat_id=int(chat_id), text=parts["full"],
-                                       parse_mode=H, reply_markup=kb)
-        else:
-            # Split: header + cards, then urgent + hp + footer
-            await ctx.bot.send_message(chat_id=int(chat_id), text=parts["head"], parse_mode=H)
-            await ctx.bot.send_message(chat_id=int(chat_id), text=parts["tail"],
-                                       parse_mode=H, reply_markup=kb)
+        await _status_push(ctx, "position_monitor", parts["full"])
     except Exception as e:
-        log.warning(f"position_monitor send failed: {e}")
+        log.warning(f"position_monitor status_push failed: {e}")
 
 
 def _positions_card_kb(first_tk):
@@ -14383,9 +14391,9 @@ async def intraday_alert(ctx: ContextTypes.DEFAULT_TYPE):
     parts.append(f"\n<i>🕐 Data pulled at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>")
     msg = "\n".join(parts)
     try:
-        await ctx.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode=H)
+        await _status_push(ctx, "intraday_alert", msg)
     except Exception as e:
-        log.warning(f"intraday_alert send failed: {e}")
+        log.warning(f"intraday_alert status_push failed: {e}")
 
 
 async def global_market_view(query):
@@ -30051,6 +30059,76 @@ def _set_app_setting(conn, key, val):
     conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, val TEXT)")
     conn.execute("INSERT OR REPLACE INTO app_settings VALUES (?, ?)", (key, str(val)))
     conn.commit()
+
+
+# A10 (docs/PLAN.md, "ALERT CONSOLIDATION"): fold routine recurring status into ONE
+# message edited in place per trading day, instead of a fresh push every tick. Scoped to
+# ONLY the two jobs that ALWAYS fire on schedule regardless of content (position_monitor,
+# intraday_alert) -- heat_streamer_alert/wan_streamer_alert/building_alert are trigger-only
+# (one push per NEW state-change/signal, already deduped), which is exactly the "genuine
+# news... should interrupt" case the plan says must stay separate, not routine status.
+_STATUS_SECTIONS_ORDER = [
+    ("position_monitor", "💼 Positions"),
+    ("intraday_alert", "⚡ Intraday"),
+]
+_LAST_STATUS_EDIT = 0.0
+
+
+async def _status_push(ctx, section_key, body_html, cap=1400):
+    """Update one section of the consolidated status message and push the combined
+    result (new message on a new trading day, else an in-place edit of the same one).
+
+    Sections persist in app_settings; only sections stamped with TODAY's date are
+    included in the rebuild, so yesterday's content naturally drops off at the first
+    call of a new day rather than needing an explicit reset.
+    """
+    global _LAST_STATUS_EDIT
+    _, chat_id = load_creds()
+    conn = get_conn()
+    try:
+        today = _et_now().date().isoformat()
+        body_html = _tg_cut(body_html, cap) if len(body_html) > cap else body_html
+        _set_app_setting(conn, f"status_sec_{section_key}", body_html)
+        _set_app_setting(conn, f"status_sec_{section_key}_date", today)
+
+        blocks = []
+        for key, title in _STATUS_SECTIONS_ORDER:
+            sec = _app_setting(conn, f"status_sec_{key}")
+            sec_date = _app_setting(conn, f"status_sec_{key}_date")
+            if sec and sec_date == today:
+                blocks.append(f"<blockquote expandable><b>{title}</b>\n{sec}</blockquote>")
+        if not blocks:
+            return
+
+        now_et = _et_now().replace(tzinfo=None)
+        combined = _tg_balance(hdr(f"📟 STATUS · {now_et.strftime('%H:%M ET')}")
+                               + "\n\n" + "\n\n".join(blocks))
+
+        msg_date = _app_setting(conn, "status_msg_date")
+        msg_id = _app_setting(conn, "status_msg_id")
+        is_new_day = (msg_date != today) or not msg_id
+
+        if not is_new_day:
+            if (time.time() - _LAST_STATUS_EDIT) < 5:
+                # Telegram edit-rate guard (plan's own note: ~1/5s per chat) -- content is
+                # already persisted above, the next call's edit will carry it.
+                return
+            try:
+                await ctx.bot.edit_message_text(chat_id=int(chat_id), message_id=int(msg_id),
+                                                text=combined, parse_mode=H)
+                _LAST_STATUS_EDIT = time.time()
+                return
+            except Exception as e:
+                if "not modified" in str(e).lower():
+                    return  # identical content -- nothing to do, not an error
+                log.debug(f"status edit failed, sending fresh: {e}")
+
+        m = await ctx.bot.send_message(chat_id=int(chat_id), text=combined, parse_mode=H)
+        _set_app_setting(conn, "status_msg_id", m.message_id)
+        _set_app_setting(conn, "status_msg_date", today)
+        _LAST_STATUS_EDIT = time.time()
+    finally:
+        conn.close()
 
 
 async def tax_command(update, ctx):

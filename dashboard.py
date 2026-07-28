@@ -3807,9 +3807,14 @@ def _gp_levels_fig(tk, spot, w, r1, s1, em):
         text=labels, textposition="outside", cliponaxis=False,
         hovertemplate="%{y}: $%{x:,.2f}<extra></extra>"))
     if em:
-        fig.add_vrect(x0=spot - em, x1=spot + em, fillcolor="rgba(61,139,255,0.16)", line_width=0,
-                      annotation_text=f"±${em:.0f} 1-day expected move",
-                      annotation_position="top left", annotation_font=dict(size=10, color="#7fa8ff"))
+        # User report 2026-07-27 (screenshot, both light+dark theme): this in-plot annotation
+        # sat right where the Call wall / R1 outside-bar labels land whenever those two prices
+        # are close together, so all three overlapped into one unreadable cluster -- not really
+        # a color bug, a text-collision bug (the light-blue annotation was just the hardest of
+        # the three to make out once stacked). Dropped the in-plot annotation entirely; the
+        # ±$ figure is shown as a plain st.caption below the chart instead (see call site),
+        # which can never collide with a bar label and always uses the app's own text color.
+        fig.add_vrect(x0=spot - em, x1=spot + em, fillcolor="rgba(61,139,255,0.16)", line_width=0)
     fig.add_vline(x=spot, line_color="#ffffff", line_width=1.5, line_dash="dot")
     _lo = min(prices + [spot - (em or 0)]); _hi = max(prices + [spot + (em or 0)])
     _pad = (_hi - _lo) * 0.12 or spot * 0.02
@@ -15425,6 +15430,9 @@ elif page == "🎯 Next-Day Exit Planner":
                     with _kc1:
                         try:
                             st.plotly_chart(_gp_levels_fig(_tk, _spot, _w, _r1, _s1, _em), use_container_width=True)
+                            if _em:
+                                st.caption(f"Shaded band = ±${_em:,.0f} 1-day expected move "
+                                          f"(±{_em/_spot*100:.1f}%)")
                         except Exception:
                             pass
                     with _kc2:

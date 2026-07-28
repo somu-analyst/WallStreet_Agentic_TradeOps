@@ -7,6 +7,25 @@
 Options-trading edge system: Telegram bot + dashboard + our own capture-forward options DB
 (bid/ask/IV/delta), every signal validated against DB history — less API dependence, more provable edge.
 
+## Verdict-grounding RAG (user ask 2026-07-27 — DONE)
+- [x] MCP audit: `mcp_server.py` exposes 6 tools (get_positions/scan_premium/oi_breakdown/
+  capital_flow/backtest_signal/search_notes), all real and verified end-to-end live (stdio
+  client, real data back — not scaffolding). `search_notes` = FTS5 BM25 full-text RAG, not
+  embeddings (correct the resume framing if it implies vector search).
+- [x] Extended the RAG corpus with `sentiment_log` + `edgar_13f` (was only news/event_writeups/
+  event_catalog/journal/bookmarks/docs). No embeddings added — BM25/FTS5 beats semantic search
+  at this volume (news 1.9k, 13F 4.5k rows) for short entity-dense text; revisit only at 10-100x
+  scale.
+- [x] Moved the RAG core (`_rag_docs`/`_rag_index`/`search_notes_core`) from `mcp_server.py` into
+  `telegram_bot_optimized.py` (the canonical engine file) — `mcp_server.py` imports the bot, so
+  the bot importing `mcp_server.py` back would be circular. `mcp_server.py`'s `search_notes` tool
+  is now a 1-line delegate; one ingestion path, not two.
+- [x] `_verdict_grounding(ticker, verdict, top_k)` — builds a verdict-direction-aware query (not
+  just "recent news for ticker"), wired into both the bot's positions card (top-conviction ticker
+  only, one query/card) and dashboard.py's High-Prob Engine page (collapsed expander under the
+  Strategy box). Verified LIVE via Playwright: real GOOG BULL grounding snippets render correctly
+  in the actual DOM, not just compiled.
+
 ## Open tasks
 - [x] **Format-sweep COMPLETE 2026-07-17** — every genuine tabular reply now `_report()`/`_pipe_table`
   (/earnvol shape, ST emoji col 0). Final batches (commit 9237648): mirofish, group-save, confirm

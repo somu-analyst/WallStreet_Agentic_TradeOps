@@ -25,14 +25,13 @@ Built on Open Interest flow, dealer gamma positioning, a 24-model signal ensembl
 
 **🖥️ Streamlit terminal** — a real walkthrough: Next-Day Exit Planner → Market Overview → the 24-model High-Prob Engine (run live on GOOG) → OI Analytics → Signal Accuracy Lab.
 
-<img width="640" height="400" alt="dashboard-demo" src="https://github.com/user-attachments/assets/714c09e6-16e0-42f1-b873-79619c4a889a" />
-
+![Dashboard demo](docs/media/dashboard-demo.gif)
 
 📹 **[Full video tour — all 35 pages](docs/media/dashboard-full-tour.mp4)** (MP4, ~2 min, ~5 MB). GitHub doesn't inline-preview committed MP4s (only files dragged into its web editor get a native player), so this opens/downloads rather than plays in place — click through for the complete page-by-page tour.
 
 **📱 Telegram bot** — a styled chat mockup populated with **real, live-pulled output** from `high_prob_signals_engine`, `compute_capflow`, and the verdict-grounding RAG layer (actual GOOG numbers, actual headline hits) — not an actual phone screenshot, but not fabricated numbers either.
 
-<img width="420" height="760" alt="telegram-demo" src="https://github.com/user-attachments/assets/15179d30-d1b5-406c-80ee-8c03bee8abff" />
+![Telegram demo](docs/media/telegram-demo.gif)
 
 ---
 

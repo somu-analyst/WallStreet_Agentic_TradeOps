@@ -5872,54 +5872,61 @@ if page == "🌍 Market Overview":
     if snap.empty:
         st.warning("⚠️ Could not load market data — check network / yfinance.")
     else:
-        # ── Section ordering ──
-        _SECTIONS = [
-            ("📈 Indices",    ["S&P 500", "Nasdaq", "Dow Jones", "Russell 2000", "VIX"]),
-            ("⚡ Futures",    ["S&P 500 Futures", "Nasdaq 100 Futures", "Dow Jones Futures"]),
-            ("🛢️ Commodities", ["Gold", "WTI Oil", "Brent", "Silver", "Nat Gas", "Copper"]),
-            ("💱 FX / Crypto", ["EUR/USD", "USD/JPY", "GBP/USD", "Dollar Index", "USD/INR", "Bitcoin", "Ethereum"]),
-            ("📋 Bonds",      ["10Y Yield", "30Y Yield"]),
-        ]
+        # A12 (docs/PLAN.md): the 5-category card grid was the first big wall of scroll on this
+        # page, above everything else (VIX term structure, breadth, sector rotation, F&G,
+        # heatmap) — same "collapse into a dropdown" treatment already applied elsewhere
+        # (Portfolio max profit/loss, Tomorrow's scenarios). Collapsed by default; the Risk-Off
+        # Radar banner above already carries the "so what" summary without opening this.
+        with st.expander("🌍 Global Market Overview — Indices · Futures · Commodities · "
+                         "FX/Crypto · Bonds", expanded=False):
+            # ── Section ordering ──
+            _SECTIONS = [
+                ("📈 Indices",    ["S&P 500", "Nasdaq", "Dow Jones", "Russell 2000", "VIX"]),
+                ("⚡ Futures",    ["S&P 500 Futures", "Nasdaq 100 Futures", "Dow Jones Futures"]),
+                ("🛢️ Commodities", ["Gold", "WTI Oil", "Brent", "Silver", "Nat Gas", "Copper"]),
+                ("💱 FX / Crypto", ["EUR/USD", "USD/JPY", "GBP/USD", "Dollar Index", "USD/INR", "Bitcoin", "Ethereum"]),
+                ("📋 Bonds",      ["10Y Yield", "30Y Yield"]),
+            ]
 
-        def _em(pct):
-            return "🟢" if pct > 0.5 else ("🔴" if pct < -0.5 else "🟡")
+            def _em(pct):
+                return "🟢" if pct > 0.5 else ("🔴" if pct < -0.5 else "🟡")
 
-        def _px_fmt(name, px):
-            if "Yield" in name:   return f"{px:.3f}%"
-            if "USD/INR" in name: return f"₹{px:,.2f}"
-            if px > 999:          return f"{px:,.0f}"
-            if px < 10:           return f"{px:.4f}"
-            return f"{px:,.2f}"
+            def _px_fmt(name, px):
+                if "Yield" in name:   return f"{px:.3f}%"
+                if "USD/INR" in name: return f"₹{px:,.2f}"
+                if px > 999:          return f"{px:,.0f}"
+                if px < 10:           return f"{px:.4f}"
+                return f"{px:,.2f}"
 
-        for _sec_label, _sec_names in _SECTIONS:
-            _sec_rows = snap[snap["Name"].isin(_sec_names)].copy()
-            if _sec_rows.empty:
-                continue
-            st.markdown(f"#### {_sec_label}")
-            _rows_list = list(_sec_rows.iterrows())
-            # Render in rows of up to 5 cards each
-            _chunk_size = 5
-            for _chunk_start in range(0, len(_rows_list), _chunk_size):
-                _chunk = _rows_list[_chunk_start:_chunk_start + _chunk_size]
-                _cols = st.columns(len(_chunk))
-                for _ci, (_, _row) in enumerate(_chunk):
-                    _n   = _row["Name"]
-                    _px  = float(_row["Price"])
-                    _pct = float(_row["Pct"])
-                    _em_s = _em(_pct)
-                    _icon = SYMBOL_ICONS.get(_n, "")
-                    _border_color = "#00c853" if _pct >= 0.5 else ("#d32f2f" if _pct < -0.5 else "#ff9100")
-                    _px_s = _px_fmt(_n, _px)
-                    _cols[_ci].markdown(
-                        f"<div style='background:var(--panel-solid);color:var(--text);"
-                        f"border:1px solid var(--border);border-left:4px solid {_border_color};"
-                        f"border-radius:12px;padding:12px 12px;margin-bottom:6px;'>"
-                        f"<div>{_em_s} {_icon} <b>{_n}</b></div>"
-                        f"<div>"
-                        f"{_px_s} {_pct:+.2f}%</div>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+            for _sec_label, _sec_names in _SECTIONS:
+                _sec_rows = snap[snap["Name"].isin(_sec_names)].copy()
+                if _sec_rows.empty:
+                    continue
+                st.markdown(f"#### {_sec_label}")
+                _rows_list = list(_sec_rows.iterrows())
+                # Render in rows of up to 5 cards each
+                _chunk_size = 5
+                for _chunk_start in range(0, len(_rows_list), _chunk_size):
+                    _chunk = _rows_list[_chunk_start:_chunk_start + _chunk_size]
+                    _cols = st.columns(len(_chunk))
+                    for _ci, (_, _row) in enumerate(_chunk):
+                        _n   = _row["Name"]
+                        _px  = float(_row["Price"])
+                        _pct = float(_row["Pct"])
+                        _em_s = _em(_pct)
+                        _icon = SYMBOL_ICONS.get(_n, "")
+                        _border_color = "#00c853" if _pct >= 0.5 else ("#d32f2f" if _pct < -0.5 else "#ff9100")
+                        _px_s = _px_fmt(_n, _px)
+                        _cols[_ci].markdown(
+                            f"<div style='background:var(--panel-solid);color:var(--text);"
+                            f"border:1px solid var(--border);border-left:4px solid {_border_color};"
+                            f"border-radius:12px;padding:12px 12px;margin-bottom:6px;'>"
+                            f"<div>{_em_s} {_icon} <b>{_n}</b></div>"
+                            f"<div>"
+                            f"{_px_s} {_pct:+.2f}%</div>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
 
         # ── VIX Term Structure ──
         st.markdown("---")

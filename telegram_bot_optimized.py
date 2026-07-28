@@ -7054,6 +7054,56 @@ def _oi_intent_algo(df, spot):
                    dput_pd=dput_pd, otm_cd=otm_cd, score=score, hedge_pct=h_ratio * 100)
     return df, sig, sc, desc, details
 
+
+def _oi_buy_write_split(conn, ticker, trade_date_now, side="call"):
+    """A5: buy-to-open vs write-to-open split for one ticker/day (docs/PLAN.md).
+
+    Rising OI alone is ambiguous -- every option has a buyer AND a writer, so "call OI +5000"
+    could be aggressive buying (bullish) or covered-call writing (income, often mildly bearish).
+    OI x PRICE resolves it: OI up + price up = buyer paid up = buy-to-open; OI up + price
+    flat/down = someone sold into size = write-to-open. OI down is a CLOSE either way, not a
+    new bet, and is excluded from the split.
+
+    lastPrice_*_prev is NOT stored on options_change (only _now) -- self-join options_daily's
+    raw snapshot at whatever trade_date actually preceded trade_date_now for this ticker (never
+    assume "yesterday": weekends/holidays/missed captures make that wrong).
+
+    Returns None when there's no prior snapshot to compare against; otherwise a dict with the
+    OI-weighted buy% / write% of the RISING OI only, plus the raw open/close tallies.
+    """
+    prev_row = conn.execute(
+        "SELECT MAX(trade_date) FROM options_daily WHERE ticker=? AND trade_date<?",
+        (ticker, trade_date_now)).fetchone()
+    prev_date = prev_row[0] if prev_row else None
+    if not prev_date:
+        return None
+    oi_col, px_col = (("change_OI_Call", "lastPrice_Call_now") if side == "call"
+                      else ("change_OI_Put", "lastPrice_Put_now"))
+    prev_px_col = "lastPrice_Call" if side == "call" else "lastPrice_Put"
+    cur = pd.read_sql(f"""
+        SELECT strike, expiry_date, {oi_col} AS oi_chg, {px_col} AS px_now
+        FROM options_change WHERE ticker=? AND trade_date_now=?
+    """, conn, params=(ticker, trade_date_now))
+    prev = pd.read_sql(f"""
+        SELECT strike, expiry_date, {prev_px_col} AS px_prev
+        FROM options_daily WHERE ticker=? AND trade_date=?
+    """, conn, params=(ticker, prev_date))
+    if cur.empty or prev.empty:
+        return None
+    df = cur.merge(prev, on=["strike", "expiry_date"], how="left")
+    opened = df[df["oi_chg"] > 0].dropna(subset=["px_prev"])
+    if opened.empty:
+        return None
+    buy_oi   = float(opened.loc[opened["px_now"] > opened["px_prev"], "oi_chg"].sum())
+    write_oi = float(opened.loc[opened["px_now"] <= opened["px_prev"], "oi_chg"].sum())
+    total = buy_oi + write_oi
+    if total <= 0:
+        return None
+    return {"buy_oi": buy_oi, "write_oi": write_oi,
+            "buy_pct": buy_oi / total * 100, "write_pct": write_oi / total * 100,
+            "n_strikes": len(opened)}
+
+
 async def mirofish_ticker_detail(query, ticker):
     """MiroFish signal detail for a ticker from OI data."""
     _loading = await query.message.reply_text(f"🤖 Deep scan: {ticker}...", parse_mode=H)
@@ -10763,6 +10813,10 @@ async def signal_scanner(query):
                  "HEDGE": "deep-OTM puts — protection, not direction",
                  "STRADDLE": "both sides loading — event play",
                  "BULL+HEDGE": "calls + protective puts — hedged longs"}
+    # A5 (docs/PLAN.md): resolve buy-to-open vs write-to-open via OI x PRICE for the
+    # BULLISH/BEARISH rows only (HEDGE/STRADDLE labels are already direction-agnostic).
+    # One extra connection reused below for the strike breakdown too.
+    conn2 = get_conn()
     _rows = []; _details = []
     for _sub in (bulls, bears, hedges, unusual):
         for _, r in _sub.iterrows():
@@ -10774,18 +10828,30 @@ async def signal_scanner(query):
             # numbers already in the row and added only PCR, so 8 lines of prose carried
             # one extra field. Table now self-contained (user 2026-07-23).
             _rows.append((_em, str(r["ticker"])[:5], _fk(_c), _fk(_p), f"{_pcr:.2f}"))
+            if r["oi_sig"] in ("BULLISH", "BEARISH") and len(_details) < 8:
+                try:
+                    _bw = _oi_buy_write_split(conn2, str(r["ticker"]), latest_date,
+                                              side="call" if r["oi_sig"] == "BULLISH" else "put")
+                    if _bw and _bw["n_strikes"] >= 3:
+                        _lean = "buy-open" if _bw["buy_pct"] >= _bw["write_pct"] else "write-open"
+                        _details.append(f"  ↳ <b>{str(r['ticker'])[:5]}</b> "
+                                        f"{_bw['buy_pct']:.0f}% buy / {_bw['write_pct']:.0f}% write "
+                                        f"({_bw['n_strikes']} strikes) — mostly {_lean}")
+                except Exception:
+                    log.debug("buy/write split failed", exc_info=True)
     if _rows:
         parts.append(_pipe_table(("ST", "Tkr", "C-OI", "P-OI"), _rows,
                                  right_cols={2, 3},
                                  legend="🟢 bull · 🔴 bear · 🔵 hedge · 🟡 straddle"))
-        parts.append("\n".join(_details[:8]))
+        if _details:
+            parts.append("<i>Buy-to-open vs write-to-open (OI×price, A5):</i>\n" +
+                        "\n".join(_details))
 
     mixed = len(df) - len(bulls) - len(bears)
     parts.append(f"<i>{len(df)} tickers scanned · {mixed} mixed/neutral not shown</i>")
 
     # ── Per-ticker strike breakdown (user 2026-07-18: "so many" — cut from top
-    #    3+3 tickers x 7 tables to top 1+1 x 3 tables, compact mode) ──
-    conn2 = get_conn()
+    #    3+3 tickers x 7 tables to top 1+1 x 3 tables, compact mode) ── (conn2 opened above)
     _strike_parts = []
     for _tk_row in list(bulls.head(1).itertuples()) + list(bears.head(1).itertuples()):
         _tk = str(_tk_row.ticker)

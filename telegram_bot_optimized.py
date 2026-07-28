@@ -25394,9 +25394,15 @@ def wrap_facts(conn, universe_cap=120):
     if cand:
         try:
             for n in (yf.Ticker(cand).news or []):
-                title = (n.get("content", {}) or {}).get("title") or n.get("title")
+                c = n.get("content", {}) or {}
+                title = c.get("title") or n.get("title")
                 if title:
-                    F["catalyst"] = {"ticker": cand, "title": title}
+                    # A9 (docs/PLAN.md, "narrative as links"): this quote used to drop the
+                    # URL entirely -- same canonicalUrl/clickThroughUrl fields _position_news
+                    # already reads, just never captured here.
+                    url = (c.get("canonicalUrl") or {}).get("url") or \
+                          (c.get("clickThroughUrl") or {}).get("url") or ""
+                    F["catalyst"] = {"ticker": cand, "title": title, "url": url}
                     break
         except Exception:
             pass
@@ -25500,12 +25506,15 @@ def wrap_narrative(F, html=True):
                       f"({shape['dd_pct']:+.1f}%). It now trades at {shape['cur']:,.0f}."))
 
     if F["catalyst"]:
+        _cat_url = F["catalyst"].get("url")
+        _cat_q = (f'<a href="{_cat_url}">"{esc(F["catalyst"]["title"])}"</a>' if _cat_url
+                  else f'"{esc(F["catalyst"]["title"])}"')
         big = next((m for m in (F["movers_dn"] + F["movers_up"]) if m["t"] == F["catalyst"]["ticker"]), None)
         if big:
             line = (f"{big['t']} moved {big['pct']:+.1f}% — the session's standout — on the headline: "
-                    f"“{esc(F['catalyst']['title'])}”.")
+                    f"{_cat_q}.")
         else:
-            line = f"A key catalyst: {F['catalyst']['ticker']} — “{esc(F['catalyst']['title'])}”."
+            line = f"A key catalyst: {F['catalyst']['ticker']} — {_cat_q}."
         L.append(_sec("📰", "THE CATALYST", line))
 
     if F["vix"]:

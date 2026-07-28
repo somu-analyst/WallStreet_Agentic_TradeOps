@@ -703,6 +703,36 @@ def _smart_close_limit(side, cur, bid=None, ask=None, buf=None):
     return round(px, 2), False
 
 
+def _scenario_liquidity_gate(conn, tk, strike, expiry_iso, typ, bid=None, ask=None):
+    """Liquidity gate for the Day L-H / scenario-pricing recipe (validated 2026-07-14,
+    docs/PLAN.md: 1.2M contract-days, time-split — liquid 22-45 DTE legs hit 3.6-5.3%
+    median error; thin legs were NOT part of that validated sample and should not be
+    shown with the same implied confidence).
+
+    Gate: volume >= 100 (from the latest captured options_change row for this leg) AND
+    bid/ask spread <= 8% of mid (only checked when a live bid/ask is actually available —
+    absence of a live quote, e.g. after-hours, is NOT treated as a liquidity failure).
+    Returns True (liquid / gate passes or inconclusive) or False (flag as thin).
+    """
+    row = None
+    try:
+        row = conn.execute(
+            "SELECT vol_Call_now, vol_Put_now FROM options_change "
+            "WHERE ticker=? AND strike=? AND expiry_date=? "
+            "ORDER BY trade_date_now DESC LIMIT 1",
+            (tk, float(strike), expiry_iso[:10])).fetchone()
+        vol = float((row[0] if typ == "call" else row[1]) or 0) if row else 0.0
+    except Exception:
+        vol = 0.0
+    if row is not None and vol < 100:
+        return False
+    if bid and ask and ask > bid > 0:
+        mid = (bid + ask) / 2
+        if mid > 0 and (ask - bid) / mid > 0.08:
+            return False
+    return True
+
+
 def _fetch_option_quote(ticker: str, expiry_str: str, strike: float, opt_type: str
                         ) -> tuple:
     """Fetch real option bid/ask/mid/IV from yfinance options chain.
@@ -15155,6 +15185,9 @@ elif page == "🎯 Next-Day Exit Planner":
                         _fsrc = _spot_src(_ftk, l)
                         _fcw_n, _fpw_n = _gp_walls(_ftk, _gp_conn, l["spot"])          # next (nearest liquid) expiry
                         _fcw_o, _fpw_o = _gp_walls(_ftk, _gp_conn, l["spot"], l["exp"])  # this leg's own expiry
+                        _fliq = _scenario_liquidity_gate(_gp_conn, _ftk, l["K"], l["exp"], l["typ"],
+                                                         l.get("bid"), l.get("ask"))
+                        _fdayrange = f"${_folo:.2f}–${_fohi:.2f}" + ("" if _fliq else " ⚠️thin")
                         _flat.append({
                             "Ticker": _ftk, "Spot": round(l["spot"], 2), "Src": _fsrc,
                             "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
@@ -15162,7 +15195,7 @@ elif page == "🎯 Next-Day Exit Planner":
                             "SI %": _fsi[0], "DTC": _fsi[1], "Shorts": _fsi[2],
                             "Entry": round(l["entry"], 2), "Now": round(l["cur"], 2),
                             "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
-                            "Est Open": _ftopen_disp, "Day L–H": f"${_folo:.2f}–${_fohi:.2f}",
+                            "Est Open": _ftopen_disp, "Day L–H": _fdayrange,
                             "Stk ±1σ": f"{l['spot'] + _fsig:,.0f}/{max(l['spot'] - _fsig, 0):,.0f}",
                             "Hi/Lo": (f"${l['day_hi']:.2f}/${l['day_lo']:.2f}" if l.get("day_hi") and l.get("day_lo") else "—"),
                             "Walls (Next Exp)": f"C{_fcw_n}/P{_fpw_n}", "Walls (Opt Exp)": f"C{_fcw_o}/P{_fpw_o}",
@@ -15277,7 +15310,7 @@ elif page == "🎯 Next-Day Exit Planner":
                            f"P&L **${_ftot:,.0f}**.  **Now** = live option mid (bid/ask) when the market's "
                            "open, else the last close.  **Prev Cls** = prior session close · **Hi/Lo** = that "
                            "day's option high/low.  **Est Open** = flat-stock decay reference — backtested: NO edge over Now, trust the scenarios instead (*expired*=0DTE, "
-                           "*~\\$0.00*=deep-OTM) · **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs) · "
+                           "*~\\$0.00*=deep-OTM) · **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs — **⚠️thin** flags vol<100 or spread>8%, where that error is NOT validated) · "
                            "**Walls (Next Exp)** = call/put GEX walls for the ticker's nearest liquid expiry · "
                            "**Walls (Opt Exp)** = same, for THIS leg's own expiry (may differ from next) · "
                            "**Close @** = limit 1/3 into the bid/ask spread from the best price (falls back to "
@@ -15822,6 +15855,9 @@ elif page == "🎯 Next-Day Exit Planner":
                         _win = (f"{'🟢' if _pa['pop'] >= 60 else '🟡' if _pa['pop'] >= 40 else '🔴'} "
                                 f"{_pa['pop']:.0f}%") if _pa else "—"
                         _intr_l = max(l["spot"] - l["K"], 0.0) if l["typ"] == "call" else max(l["K"] - l["spot"], 0.0)
+                        _liq = _scenario_liquidity_gate(_gp_conn, _tk, l["K"], l["exp"], l["typ"],
+                                                        l.get("bid"), l.get("ask"))
+                        _dayrange = f"${_olo:.2f}–${_ohi:.2f}" + ("" if _liq else " ⚠️thin")
                         _rows.append({
                             "Leg": f"{l['side']} {abs(l['qty'])}× ${_kf(l['K'])}{l['typ'][0].upper()}",
                             "Exp": l["exp"][:10], "DTE": l["dte"], "Money": money, "Event": _event_s,
@@ -15829,7 +15865,7 @@ elif page == "🎯 Next-Day Exit Planner":
                             "Real$": round(_intr_l, 2), "Time$": round(max(l["cur"] - _intr_l, 0.0), 2),
                             "±$1 stk": round(l["pos_delta"]), "Θ/day": round(l["pos_theta"]),
                             "Prev Cls": (round(l["prev_close"], 2) if l.get("prev_close") else None),
-                            "Est Open": _topen_disp, "Day L–H": f"${_olo:.2f}–${_ohi:.2f}",
+                            "Est Open": _topen_disp, "Day L–H": _dayrange,
                             "Stk ±1σ": f"{l['spot'] + _sig:,.0f}/{max(l['spot'] - _sig, 0):,.0f}",
                             "Hi/Lo": (f"${l['day_hi']:.2f}/${l['day_lo']:.2f}" if l.get("day_hi") and l.get("day_lo") else "—"),
                             "Close @": _climit, "Max P": _fmt_maxp(_lb), "Max L": _fmt_maxl(_lb), "Win %": _win,
@@ -15843,7 +15879,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                "**±$1 stk** = position P&L per $1 stock move (delta in dollars — your real "
                                "exposure). **Θ/day** = dollars gained/lost per calendar day from decay. "
                                "**Est Open** = flat-stock decay reference — backtested: no edge over Now (one day of "
-                               "decay). *expired* = 0DTE; *~\\$0.00* = deep-OTM. **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs). "
+                               "decay). *expired* = 0DTE; *~\\$0.00* = deep-OTM. **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs — **⚠️thin** flags vol<100 or spread>8%, where that error is NOT validated). "
                                "**Close @** = marketable limit to close. **Max P / Max L** = theoretical "
                                "max profit / loss for that leg held to expiry (*Unlimited* = uncapped).")
 

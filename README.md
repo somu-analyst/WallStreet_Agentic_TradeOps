@@ -27,6 +27,8 @@ Built on Open Interest flow, dealer gamma positioning, a 24-model signal ensembl
 
 ![Dashboard demo](docs/media/dashboard-demo.gif)
 
+📹 **[Full video tour — all 35 pages](docs/media/dashboard-full-tour.mp4)** (MP4, ~2 min, ~5 MB). GitHub doesn't inline-preview committed MP4s (only files dragged into its web editor get a native player), so this opens/downloads rather than plays in place — click through for the complete page-by-page tour.
+
 **📱 Telegram bot** — a styled chat mockup populated with **real, live-pulled output** from `high_prob_signals_engine`, `compute_capflow`, and the verdict-grounding RAG layer (actual GOOG numbers, actual headline hits) — not an actual phone screenshot, but not fabricated numbers either.
 
 ![Telegram demo](docs/media/telegram-demo.gif)

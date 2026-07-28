@@ -5,7 +5,8 @@ Rendered in the main `README.md`.
 ## Current files
 | File | What it is |
 |------|------------|
-| `dashboard-demo.gif` (2026-07-28) | Real Playwright screen-capture of the live Streamlit terminal: Next-Day Exit Planner → Market Overview → 24-model High-Prob Engine (run live on GOOG) → OI Analytics → Signal Accuracy. |
+| `dashboard-demo.gif` (2026-07-28) | Real Playwright screen-capture of the live Streamlit terminal: Next-Day Exit Planner → Market Overview → 24-model High-Prob Engine (run live on GOOG) → OI Analytics → Signal Accuracy. Short clip, inline-autoplays in the README. |
+| `dashboard-full-tour.mp4` (2026-07-28) | Real Playwright screen-capture, all 35 nav pages (~3s dwell each, ~2 min, ~5 MB). GitHub does NOT inline-preview a committed MP4 (only files dragged into the GitHub web editor get a native `user-attachments` player) — this renders as a download/open link in the README, not an inline player. |
 | `telegram-demo.gif` (2026-07-28) | A styled chat mockup (not an actual phone screenshot — no visual Telegram client was available to record) populated with real, live-pulled output from `high_prob_signals_engine`/`compute_capflow`/`_verdict_grounding`. Real GOOG numbers throughout, not fabricated. |
 
 To replace either with a real recording of your own device: record the screen (Windows:

@@ -23,17 +23,13 @@ Built on Open Interest flow, dealer gamma positioning, a 24-model signal ensembl
 
 ## 🎬 Demo
 
-**📱 Telegram bot** — signals, GEX, and scanners on mobile
+**🖥️ Streamlit terminal** — a real walkthrough: Next-Day Exit Planner → Market Overview → the 24-model High-Prob Engine (run live on GOOG) → OI Analytics → Signal Accuracy Lab.
 
-![Telegram demo](docs/media/telegram-demo.svg)
-<!-- When ready: record a clip, save docs/media/telegram-demo.gif, and change .svg -> .gif above. -->
+![Dashboard demo](docs/media/dashboard-demo.gif)
 
-**🖥️ Streamlit terminal** — OI analytics, the 24-model engine, and the signal-accuracy lab
+**📱 Telegram bot** — a styled chat mockup populated with **real, live-pulled output** from `high_prob_signals_engine`, `compute_capflow`, and the verdict-grounding RAG layer (actual GOOG numbers, actual headline hits) — not an actual phone screenshot, but not fabricated numbers either.
 
-![Dashboard demo](docs/media/dashboard-demo.svg)
-<!-- When ready: record a clip, save docs/media/dashboard-demo.gif, and change .svg -> .gif above. -->
-
-<sub>📹 Placeholders for now — see <a href="docs/media/">docs/media/</a> for a 2-minute guide on recording the GIFs that replace these cards.</sub>
+![Telegram demo](docs/media/telegram-demo.gif)
 
 ---
 

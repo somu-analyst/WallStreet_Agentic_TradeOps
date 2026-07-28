@@ -13336,6 +13336,20 @@ def _positions_card_parts(trades, now_s, today):
                                   legend="Pull = POC vs spot (volume magnet)")
             hp_section = ("\n\n<b>🧠 HP Engine</b>\n" + _hp_tbl + "\n"
                           + "\n".join(_hp_details))
+            # RAG grounding (user 2026-07-27): WHY context for the single highest-conviction
+            # verdict only -- one query per card, not per ticker, to keep this cheap and the
+            # card from ballooning. Uses the icon already computed above (BULL/BEAR/etc), not
+            # a re-derived label, so the grounding query always matches what's actually shown.
+            try:
+                _lead_i = max(range(len(_hp_rows)), key=lambda i: abs(float(_hp_rows[i][3][:-1]) - 50))
+                _lead_tk = _hp_rows[_lead_i][1]
+                _lead_sig = {v: k for k, v in _SIG_ICON.items()}.get(_hp_rows[_lead_i][0])
+                _ground = _verdict_grounding(_lead_tk, _lead_sig, top_k=3)
+                if _ground:
+                    _gl = "; ".join(f"{g['title'][:70]}" for g in _ground[:3])
+                    hp_section += f"\n<i>🔎 Why ({_lead_tk}): {_gl}</i>"
+            except Exception:
+                log.debug("hp verdict grounding failed", exc_info=True)
         conn_hp_pm.close()
     except Exception as _e_hp_pm:
         log.debug(f"pos_mon hp block: {_e_hp_pm}")
@@ -24223,6 +24237,184 @@ def _world_news_block(limit=6):
         if len(out) >= limit:
             break
     return out
+
+
+# ─────────────────── RAG grounding (moved from mcp_server.py 2026-07-27) ───────────────────
+# Owns the notes corpus + FTS5 index HERE (the canonical engine file) so both dashboard.py
+# and this bot can call it directly. mcp_server.py's search_notes MCP tool now delegates to
+# search_notes_core() below instead of keeping its own copy -- one ingestion path, not two.
+_RAG_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rag_index.db")
+_RAG_TTL = 600  # rebuild the index if it is older than this many seconds
+
+
+def _rag_chunk_md(text: str, max_chars: int = 1200) -> list:
+    """Split a markdown doc into heading/dated-entry chunks for retrieval."""
+    parts = re.split(r"\n(?=#{1,3}\s|\d{4}-\d\d-\d\d)", text)
+    out = []
+    for p in parts:
+        p = p.strip("\n")
+        if len(p) <= max_chars:
+            out.append(p)
+        else:
+            out.extend(p[i:i + max_chars] for i in range(0, len(p), max_chars))
+    return out
+
+
+def _rag_docs() -> list:
+    """Collect (source, ref, date, title, body) docs from DB tables + docs/*.md."""
+    docs = []
+    conn = get_conn()
+
+    def _q(sql):
+        try:
+            return list(conn.execute(sql))
+        except Exception:
+            return []
+
+    try:
+        for r in _q("SELECT id, event_id, phase, writeup_text, generated_at FROM event_writeups "
+                    "WHERE writeup_text IS NOT NULL AND writeup_text != ''"):
+            docs.append(("event_writeup", f"ew{r[0]}/evt{r[1]}/{r[2]}", str(r[4] or ""),
+                         f"Event {r[1]} · {r[2]}", r[3]))
+        for r in _q("SELECT news_id, ticker, headline, summary, source, published_date, sentiment "
+                    "FROM news_feed"):
+            body = f"[{r[4] or ''} · {r[6] or ''}] {(r[2] or '')} — {(r[3] or '')}".strip()
+            docs.append(("news", f"news{r[0]}/{r[1] or ''}", str(r[5] or ""),
+                         f"{r[1] or ''}: {r[2] or ''}", body))
+        for r in _q("SELECT event_id, name, category, event_date, impact, related_tickers, "
+                    "estimate, actual, prior, unit FROM event_catalog"):
+            body = (f"{r[1]} ({r[2]}, impact {r[4]}). tickers={r[5]}. "
+                    f"est={r[6]} actual={r[7]} prior={r[8]} {r[9] or ''}")
+            docs.append(("event_catalog", f"cat{r[0]}", str(r[3] or ""), r[1] or "", body))
+        for r in _q("SELECT id, ticker, direction, note, entry_date, status FROM event_journal "
+                    "WHERE note IS NOT NULL AND note != ''"):
+            docs.append(("journal", f"jrn{r[0]}/{r[1] or ''}", str(r[4] or ""),
+                         f"{r[1] or ''} {r[2] or ''} {r[5] or ''}", r[3]))
+        for r in _q("SELECT id, kind, label, content, created FROM bookmarks "
+                    "WHERE content IS NOT NULL AND content != ''"):
+            docs.append(("bookmark", f"bm{r[0]}/{r[1] or ''}", str(r[4] or ""), r[2] or "", r[3]))
+        for r in _q("SELECT ticker, trade_date, source, label, score, fwd_ret FROM sentiment_log"):
+            body = f"{r[0]} sentiment ({r[2]}): {r[3]}, score={r[4]}, fwd_ret={r[5]}"
+            docs.append(("sentiment", f"sent/{r[0]}/{r[1]}", str(r[1] or ""), f"{r[0]} sentiment", body))
+        for r in _q("SELECT fund, quarter, cusip, issuer, shares, value, put_call FROM edgar_13f"):
+            shares = int(r[4]) if r[4] is not None else 0
+            value = float(r[5]) if r[5] is not None else 0.0
+            body = (f"{r[0]} ({r[1]}): {r[3] or r[2]} — {shares:,} shares, ${value:,.0f}"
+                    f"{(' ' + r[6]) if r[6] else ''}")
+            docs.append(("13f", f"13f/{r[0]}/{r[1]}/{r[2]}", "", f"{r[0]} 13F {r[1]}", body))
+    finally:
+        conn.close()
+
+    _here = os.path.dirname(os.path.abspath(__file__))
+    for fn in ("LOG.md", "NEXT.md", "PLAN.md"):
+        p = os.path.join(_here, "docs", fn)
+        if not os.path.exists(p):
+            continue
+        try:
+            text = open(p, encoding="utf-8").read()
+        except Exception:
+            continue
+        for i, chunk in enumerate(_rag_chunk_md(text)):
+            if chunk.strip():
+                docs.append((f"doc:{fn}", f"{fn}#{i}", "", fn, chunk))
+    return docs
+
+
+def _rag_index(force: bool = False):
+    """Open rag_index.db, (re)building the FTS5 table if missing or stale. Returns the conn."""
+    rc = sqlite3.connect(_RAG_DB)
+    rc.execute("CREATE TABLE IF NOT EXISTS rag_meta(k TEXT PRIMARY KEY, v TEXT)")
+    fresh = False
+    if not force:
+        built = rc.execute("SELECT v FROM rag_meta WHERE k='built_at'").fetchone()
+        has = rc.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='notes'").fetchone()
+        fresh = bool(built and has and (time.time() - float(built[0])) < _RAG_TTL)
+    if not fresh:
+        rc.execute("DROP TABLE IF EXISTS notes")
+        rc.execute("CREATE VIRTUAL TABLE notes USING fts5("
+                   "source, ref, date, title, body, tokenize='porter unicode61')")
+        docs = _rag_docs()
+        rc.executemany("INSERT INTO notes(source, ref, date, title, body) VALUES (?,?,?,?,?)",
+                       [(d[0], d[1], d[2], d[3], d[4] or "") for d in docs])
+        rc.execute("INSERT OR REPLACE INTO rag_meta(k,v) VALUES('built_at',?)", (str(time.time()),))
+        rc.execute("INSERT OR REPLACE INTO rag_meta(k,v) VALUES('n_docs',?)", (str(len(docs)),))
+        rc.commit()
+    return rc
+
+
+def _rag_fts_query(q: str) -> str:
+    """Turn free text into a safe FTS5 MATCH expression (strip syntax-breaking punctuation)."""
+    q2 = re.sub(r'[^\w\s"*]', ' ', q)
+    return re.sub(r'\s+', ' ', q2).strip()
+
+
+def search_notes_core(query: str, top_k: int = 6, source: str = None) -> dict:
+    """Full-text search across the engine's notes corpus (RAG retrieval) -- the single
+    implementation both mcp_server.py's search_notes tool and _verdict_grounding() call.
+    See docs/PLAN.md 13F/sentiment RAG note (2026-07-27) for why this lives here, not in
+    mcp_server.py: mcp_server imports this module, so the reverse import would be circular."""
+    q = (query or "").strip()
+    if not q:
+        return {"query": query, "results": [], "error": "empty query"}
+    rc = _rag_index()
+    try:
+        def run(expr):
+            sql = ("SELECT source, ref, date, title, "
+                   "snippet(notes, 4, '<<', '>>', ' … ', 12) AS snip, bm25(notes) AS rank "
+                   "FROM notes WHERE notes MATCH ? ")
+            params = [expr]
+            if source:
+                sql += "AND source = ? "
+                params.append(source)
+            sql += "ORDER BY rank LIMIT ?"
+            params.append(int(top_k))
+            return rc.execute(sql, params).fetchall()
+
+        expr = _rag_fts_query(q)
+        rows = []
+        if expr:
+            try:
+                rows = run(expr)
+                if not rows and " " in expr:
+                    rows = run(" OR ".join(expr.split()))
+            except Exception as e:
+                return {"query": q, "results": [], "error": f"fts: {str(e)[:150]}"}
+        meta = rc.execute("SELECT v FROM rag_meta WHERE k='n_docs'").fetchone()
+    finally:
+        rc.close()
+    results = [{"source": r[0], "ref": r[1], "date": r[2], "title": r[3], "snippet": r[4]}
+               for r in rows]
+    return {"query": q, "matched_query": expr,
+            "corpus_docs": int(meta[0]) if meta else None, "results": results}
+
+
+_VERDICT_HINTS = {
+    "BULL": "bullish call buying upside", "BULLISH": "bullish call buying upside",
+    "BEAR": "bearish put selling downside", "BEARISH": "bearish put selling downside",
+    "SELL_PREMIUM": "premium selling income theta", "NEUTRAL": "range bound mixed",
+}
+
+
+def _verdict_grounding(ticker, verdict, top_k=5):
+    """Verdict-driven RAG grounding for a signal card: news/sentiment/13F context that
+    actually matches WHY a verdict fired, not just "last N days for this ticker."
+
+    Builds the query from the ticker plus the verdict's own direction keywords (see
+    _VERDICT_HINTS) so retrieval favors passages that explain the same lean the model
+    took, rather than unrelated same-day noise. Returns [] on any failure -- this is a
+    display-layer enrichment, never allowed to block a verdict card from rendering.
+    """
+    tk = str(ticker or "").strip().upper()
+    if not tk:
+        return []
+    hint = _VERDICT_HINTS.get(str(verdict or "").strip().upper(), "")
+    q = f"{tk} {hint}".strip()
+    try:
+        res = search_notes_core(q, top_k=top_k)
+        return res.get("results") or []
+    except Exception:
+        log.debug(f"verdict grounding failed for {tk}/{verdict}", exc_info=True)
+        return []
 
 
 def _fmt_briefing(b):

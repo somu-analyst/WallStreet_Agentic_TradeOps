@@ -19786,6 +19786,21 @@ if page == "🧠 High-Prob Engine":
                     f"<b>📋 Strategy:</b> {res['strategy']}<br>"
                     + (f"⚠️ {warn}" if warn else "")
                     + "</div>", unsafe_allow_html=True)
+
+                # RAG grounding (user 2026-07-27): WHY context for this verdict — news/
+                # sentiment/13F passages that match the verdict's own direction, not just
+                # a generic recent-news dump. Same _verdict_grounding the bot's positions
+                # card uses (one shared implementation, telegram_bot_optimized.py).
+                try:
+                    _vg_fn = hp_ns.get("_verdict_grounding")
+                    _ground = _vg_fn(sel_ticker, sig, top_k=4) if _vg_fn else None
+                    if _ground:
+                        with st.expander(f"🔎 Why — grounding context for {sel_ticker} {sig}", expanded=False):
+                            for g in _ground:
+                                _src_tag = {"news": "📰", "sentiment": "💬", "13f": "🏦"}.get(g["source"], "📄")
+                                st.caption(f"{_src_tag} **{g['title']}** — {g['snippet'].replace('<<','**').replace('>>','**')}")
+                except Exception:
+                    pass
                 st.markdown("")
 
                 # ── VRVP + Walls visual section ──────────────────────────────

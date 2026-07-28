@@ -3794,9 +3794,14 @@ def _gp_levels_fig(tk, spot, w, r1, s1, em):
     names = [r[0] for r in rows]
     prices = [r[1] for r in rows]
 
+    # User ask 2026-07-27: the spot bar/line were plain white, which vanishes against this
+    # chart's white plot background (both app themes render this panel white) -- switched to
+    # a high-contrast navy so "now" is actually visible instead of blending in.
+    _SPOT_COLOR = "#1a237e"
+
     def _col(nm, x):
         if "Spot" in nm:
-            return "#ffffff"
+            return _SPOT_COLOR
         return "#00e676" if x < spot else "#ff5c6c"
     cols = [_col(nm, x) for nm, x in rows]
     labels = [f"${x:,.0f}  ({(x/spot-1)*100:+.1f}%)" if "Spot" not in nm else f"${x:,.0f}  ← now"
@@ -3804,7 +3809,7 @@ def _gp_levels_fig(tk, spot, w, r1, s1, em):
 
     fig = go.Figure(go.Bar(
         x=prices, y=names, orientation="h", marker_color=cols,
-        text=labels, textposition="outside", cliponaxis=False,
+        text=labels, textposition="outside", cliponaxis=False, textfont=dict(size=15),
         hovertemplate="%{y}: $%{x:,.2f}<extra></extra>"))
     if em:
         # User report 2026-07-27 (screenshot, both light+dark theme): this in-plot annotation
@@ -3815,13 +3820,16 @@ def _gp_levels_fig(tk, spot, w, r1, s1, em):
         # ±$ figure is shown as a plain st.caption below the chart instead (see call site),
         # which can never collide with a bar label and always uses the app's own text color.
         fig.add_vrect(x0=spot - em, x1=spot + em, fillcolor="rgba(61,139,255,0.16)", line_width=0)
-    fig.add_vline(x=spot, line_color="#ffffff", line_width=1.5, line_dash="dot")
+    fig.add_vline(x=spot, line_color=_SPOT_COLOR, line_width=2.5, line_dash="dot")
     _lo = min(prices + [spot - (em or 0)]); _hi = max(prices + [spot + (em or 0)])
     _pad = (_hi - _lo) * 0.12 or spot * 0.02
-    fig.update_layout(template="plotly_dark", height=240, margin=dict(t=30, b=24, l=10, r=10),
-                      title=f"{tk} — key levels vs spot",
-                      xaxis=dict(title="Price ($)", range=[_lo - _pad, _hi + _pad * 1.6], showgrid=False),
-                      yaxis=dict(title=""), showlegend=False, bargap=0.45)
+    fig.update_layout(template="plotly_dark", height=260, margin=dict(t=36, b=30, l=10, r=10),
+                      title=dict(text=f"{tk} — key levels vs spot", font=dict(size=16)),
+                      xaxis=dict(title=dict(text="Price ($)", font=dict(size=13)),
+                                 range=[_lo - _pad, _hi + _pad * 1.6], showgrid=False,
+                                 tickfont=dict(size=12)),
+                      yaxis=dict(title="", tickfont=dict(size=13)),
+                      showlegend=False, bargap=0.45)
     return fig
 
 

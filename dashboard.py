@@ -5581,7 +5581,8 @@ _PAGE_HELP = {
 }
 
 with st.sidebar:
-    st.markdown("## 📊 WallStreet_Agentic_TradeOps")
+    st.markdown("<div>"
+                "📊 WallStreet_Agentic_TradeOps</div>", unsafe_allow_html=True)
     st.markdown("##### *Options Intelligence Terminal*")
     st.radio("Theme", ["🌙 Dark", "☀️ Light"], key="ui_theme", horizontal=True,
              label_visibility="collapsed", on_change=_save_theme,

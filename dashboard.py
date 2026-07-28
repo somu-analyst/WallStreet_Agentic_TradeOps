@@ -6081,6 +6081,53 @@ if page == "🌍 Market Overview":
         except Exception as _fge:
             st.info(f"Fear & Greed unavailable: {_fge}")
 
+        # ── M2 Money Supply (liquidity backdrop) ──────────────────────
+        # User ask 2026-07-28: money-flow context (semis -> anti-bubble rotation, already
+        # tracked above) plus the macro liquidity tide. FRED's public fredgraph.csv endpoint
+        # needs NO API key (unlike _fred_latest, which requires FRED_API_KEY) -- matches this
+        # project's keyless-macro convention. M2SL is monthly, ~1mo reporting lag.
+        st.markdown("---")
+        st.markdown("#### 🏦 M2 Money Supply (US)")
+        @st.cache_data(ttl=86400, show_spinner=False)
+        def _fetch_m2():
+            import urllib.request, io
+            url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=M2SL"
+            with urllib.request.urlopen(url, timeout=10) as r:
+                _df = pd.read_csv(io.StringIO(r.read().decode()))
+            _df.columns = ["date", "m2"]
+            _df["date"] = pd.to_datetime(_df["date"])
+            _df["m2"] = pd.to_numeric(_df["m2"], errors="coerce")
+            return _df.dropna().sort_values("date")
+        try:
+            _m2df = _fetch_m2()
+            if len(_m2df) >= 13:
+                _m2_now = float(_m2df["m2"].iloc[-1])
+                _m2_prev = float(_m2df["m2"].iloc[-2])
+                _m2_yoy_row = _m2df[_m2df["date"] <= _m2df["date"].iloc[-1] - pd.DateOffset(years=1)]
+                _m2_yoy_val = float(_m2_yoy_row["m2"].iloc[-1]) if not _m2_yoy_row.empty else None
+                _m2_mom_pct = (_m2_now / _m2_prev - 1) * 100
+                _m2_yoy_pct = ((_m2_now / _m2_yoy_val - 1) * 100) if _m2_yoy_val else None
+                _m2c1, _m2c2, _m2c3 = st.columns(3)
+                _m2c1.metric("M2 (latest)", f"${_m2_now/1000:,.2f}T",
+                             f"{_m2_mom_pct:+.2f}% MoM")
+                if _m2_yoy_pct is not None:
+                    _m2c2.metric("YoY growth", f"{_m2_yoy_pct:+.1f}%",
+                                 "expanding liquidity" if _m2_yoy_pct > 0 else "contracting liquidity")
+                _m2c3.metric("As of", _m2df["date"].iloc[-1].strftime("%b %Y"))
+                _m2_fig = go.Figure(go.Scatter(
+                    x=_m2df["date"].tail(60), y=_m2df["m2"].tail(60) / 1000,
+                    mode="lines", line=dict(color="#00c853", width=2), fill="tozeroy",
+                    fillcolor="rgba(0,200,83,0.08)"))
+                _m2_fig.update_layout(template="plotly_dark", height=200,
+                                      margin=dict(t=10, b=24, l=10, r=10),
+                                      xaxis=dict(title=""), yaxis=dict(title="$T"), showlegend=False)
+                st.plotly_chart(_m2_fig, use_container_width=True)
+                st.caption("M2SL, FRED (keyless public CSV) — monthly, ~1mo lag. Rising M2 YoY is a "
+                          "liquidity tailwind for risk assets historically; falling/flat M2 (2022-23-style "
+                          "QT) is a headwind. Context only, not a timing signal on its own.")
+        except Exception as _m2e:
+            st.info(f"M2 data unavailable: {_m2e}")
+
         # ── Market Heatmap (Treemap — ETFs + Stocks) ──────────────────
         st.markdown("---")
         st.markdown("#### 🟥🟩 Market Heatmap — ETFs & Stocks")

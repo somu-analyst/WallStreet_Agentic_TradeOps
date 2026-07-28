@@ -13180,13 +13180,37 @@ def _positions_card_parts(trades, now_s, today):
                 "Est/Act = EPS · 🟢 beat 🔴 miss 🟡 upcoming") + "\n")
         # Call highlights for EVERY position, not just whichever ticker you drilled into
         # (user 2026-07-23). One line per name keeps it readable on a multi-position book.
+        #
+        # STALE-LABEL FIX (2026-07-27, user: "why Q1 is coming it should be Q2"): _tx_capture's
+        # quarter math was already correct (commit be21f08) -- the real cause is AlphaVantage's
+        # transcript endpoint lagging the earnings PRINT by days/weeks (GOOG reported 07-22,
+        # transcript still empty on AlphaVantage as of 07-27; verified via a live _tx_fetch
+        # call). The bot was silently showing the last transcript ON DISK with no hint it was
+        # a stale quarter, which reads as a bug even though there's genuinely nothing newer to
+        # show. Flag it: if the ticker's last-REPORTED quarter (from earnings_history, which
+        # updates same-day) is newer than the stored transcript's quarter, say so explicitly.
         _hl_lines = []
-        for _htk in (_ah_cache.keys() or []):
-            _t = _tx_latest(None, _htk)
-            if _t:
-                _first = [h for h in str(_t[1]).split("\n") if h.strip()][:1]
-                if _first:
-                    _hl_lines.append(f"<b>{_htk}</b> ({_t[0]}) {_first[0][:150]}")
+        _ec3 = get_conn()
+        try:
+            for _htk in (_ah_cache.keys() or []):
+                _t = _tx_latest(None, _htk)
+                if _t:
+                    _first = [h for h in str(_t[1]).split("\n") if h.strip()][:1]
+                    if _first:
+                        _stale = ""
+                        try:
+                            _hlast, _ = _earn_context(_ec3, _htk)
+                            if _hlast and _hlast[0]:
+                                _rd = datetime.strptime(str(_hlast[0])[:10], "%Y-%m-%d").date()
+                                _rq = (_rd.month - 1) // 3
+                                _rq_label = f"{_rd.year - 1}Q4" if _rq == 0 else f"{_rd.year}Q{_rq}"
+                                if _rq_label != _t[0]:
+                                    _stale = f" <i>(reported {_hlast[0]}, {_rq_label} call not yet transcribed)</i>"
+                        except Exception:
+                            log.debug("call-highlight staleness check failed", exc_info=True)
+                        _hl_lines.append(f"<b>{_htk}</b> ({_t[0]}){_stale} {_first[0][:150]}")
+        finally:
+            _ec3.close()
         if _hl_lines:
             _events_section += "\n🎙 <b>CALL HIGHLIGHTS</b>\n" + "\n".join(_hl_lines) + "\n"
         _events_section += "\n"

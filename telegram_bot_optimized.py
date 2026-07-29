@@ -26653,6 +26653,42 @@ _ROT_LEVELS = {
         "KWEB": "China", "ARKK": "Innov", "JETS": "Airlines", "XME": "Metals", "IYT": "Transport"}),
 }
 
+# Drilldown (user ask 2026-07-28): "if sectors in green like health care it should point me
+# stocks and so on" -- curated real top constituents per sector/theme ETF (both dicts share
+# SMH, so one combined map covers both levels). Macro equity classes (SPY/QQQ/IWM) drill into
+# the sector level instead of stocks -- an asset class isn't a stock-picking universe, but the
+# sectors that make it up are a meaningful next level down. Non-equity macro items (bonds,
+# gold, commodities, bitcoin, dollar) have no drilldown -- each IS a single instrument.
+_ROT_DRILL_STOCKS = {
+    "XLK": ["AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM", "ADBE", "AMD"],
+    "XLC": ["META", "GOOGL", "GOOG", "NFLX", "DIS", "TMUS", "VZ", "CMCSA"],
+    "XLY": ["AMZN", "TSLA", "HD", "MCD", "NKE", "LOW", "SBUX", "BKNG"],
+    "XLF": ["JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "BRK-B"],
+    "XLV": ["LLY", "UNH", "JNJ", "ABBV", "MRK", "PFE", "TMO", "ABT"],
+    "XLI": ["GE", "CAT", "HON", "UNP", "RTX", "BA", "DE", "LMT"],
+    "XLP": ["PG", "KO", "PEP", "COST", "WMT", "PM", "MO", "CL"],
+    "XLE": ["XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "OXY"],
+    "XLU": ["NEE", "DUK", "SO", "D", "AEP", "EXC", "SRE", "XEL"],
+    "XLB": ["LIN", "SHW", "ECL", "APD", "FCX", "NEM", "DOW", "NUE"],
+    "XLRE": ["PLD", "AMT", "EQIX", "PSA", "O", "WELL", "SPG", "DLR"],
+    "SMH": ["NVDA", "AVGO", "TSM", "AMD", "QCOM", "TXN", "MU", "ASML"],
+    "IGV": ["MSFT", "ORCL", "CRM", "ADBE", "INTU", "NOW", "PANW", "SNPS"],
+    "XBI": ["VRTX", "REGN", "GILD", "AMGN", "BIIB", "MRNA", "ILMN", "ALNY"],
+    "KBE": ["JPM", "BAC", "WFC", "C", "USB", "PNC", "TFC", "GS"],
+    "XRT": ["AMZN", "TJX", "ORLY", "ROST", "DG", "DLTR", "BBY", "ULTA"],
+    "XHB": ["DHI", "LEN", "NVR", "PHM", "TOL", "KBH", "MHK", "SHW"],
+    "OIH": ["SLB", "HAL", "BKR", "FTI", "NOV", "CHX", "WFRD", "TS"],
+    "GDX": ["NEM", "GOLD", "AEM", "FNV", "WPM", "KGC", "AU", "GFI"],
+    "ITA": ["LMT", "RTX", "NOC", "GD", "LHX", "TDG", "HII", "TXT"],
+    "TAN": ["FSLR", "ENPH", "SEDG", "RUN", "ARRY", "NXT", "SHLS", "CSIQ"],
+    "KWEB": ["BABA", "PDD", "JD", "BIDU", "TCEHY", "NTES", "TME", "BEKE"],
+    "ARKK": ["TSLA", "ROKU", "COIN", "PATH", "RBLX", "TER", "DKNG", "SHOP"],
+    "JETS": ["DAL", "UAL", "LUV", "AAL", "ALK", "RYAAY", "JBLU", "SAVE"],
+    "XME": ["FCX", "NUE", "STLD", "CLF", "X", "MP", "AA", "RS"],
+    "IYT": ["UNP", "UPS", "CSX", "NSC", "FDX", "ODFL", "JBHT", "CHRW"],
+}
+_ROT_DRILL_TO_SECTOR = {"SPY", "QQQ", "IWM"}   # equity macro classes -> drill into Sectors
+
 
 def _rotation_scan(conn, level="sector", tickers=None, bench="SPY", long_win=63, short_win=21):
     """RRG-style rotation for any level. Universal (DB-first history, yfinance backfill).
@@ -32474,6 +32510,7 @@ def _m2_gold_dollar_analysis():
         m2_yoy = [(m2_vals[i] / m2_vals[i - 12] - 1) * 100 for i in range(12, len(m2_vals))]
         m2_yoy_now = m2_yoy[-1]
         m2_mom_pct = (m2_now / m2_prev - 1) * 100
+        m2_qoq_pct = ((m2_now / m2_vals[-4] - 1) * 100) if len(m2_vals) > 4 else None
 
         gold_h = _yf_ticker("GC=F").history(period="10y", interval="1mo")
         dxy_h = _yf_ticker("DX-Y.NYB").history(period="10y", interval="1mo")
@@ -32508,7 +32545,7 @@ def _m2_gold_dollar_analysis():
             log.debug("M2 correlation calc failed", exc_info=True)
 
         result = {
-            "m2_now_b": m2_now, "m2_mom_pct": m2_mom_pct, "m2_yoy_pct": m2_yoy_now,
+            "m2_now_b": m2_now, "m2_mom_pct": m2_mom_pct, "m2_qoq_pct": m2_qoq_pct, "m2_yoy_pct": m2_yoy_now,
             "m2_asof": m2_dates[-1].strftime("%b %Y"),
             "gold_now": gold_now, "gold_1m_pct": gold_1m_pct,
             "dxy_now": dxy_now, "dxy_1m_pct": dxy_1m_pct,
@@ -32522,36 +32559,47 @@ def _m2_gold_dollar_analysis():
 
 
 def _fmt_m2_section(d):
-    """Plain-English money-supply + gold/dollar read from _m2_gold_dollar_analysis().
-    Context only -- explicitly NOT a directive trade call, matching this codebase's
-    established framing (Fear&Greed/Risk-Off Radar captions: 'context, not a signal')."""
+    """Money-supply + gold/dollar read from _m2_gold_dollar_analysis(), as a table (house
+    style, .claude/rules/bot-conventions.md: 'ALWAYS _report()/_pipe_table()'). Context
+    only -- explicitly NOT a directive trade call, matching this codebase's established
+    framing (Fear&Greed/Risk-Off Radar captions: 'context, not a signal')."""
     if not d:
         return ""
     expanding = d["m2_yoy_pct"] > 0
-    lines = [f"🏦 <b>M2 Money Supply</b> — ${d['m2_now_b']/1000:,.2f}T ({d['m2_asof']}), "
-             f"{d['m2_mom_pct']:+.2f}% MoM, <b>{d['m2_yoy_pct']:+.1f}% YoY</b> "
-             f"({'expanding' if expanding else 'contracting'} liquidity)"]
+    rows = [("🏦", "M2 Supply", f"${d['m2_now_b']/1000:,.2f}T", f"{d['m2_mom_pct']:+.2f}%",
+            (f"{d['m2_qoq_pct']:+.2f}%" if d.get("m2_qoq_pct") is not None else "—"),
+            f"{d['m2_yoy_pct']:+.1f}%")]
     if d.get("gold_now"):
-        lines.append(f"🥇 Gold ${d['gold_now']:,.0f} ({d['gold_1m_pct']:+.1f}% 1m)"
-                     + (f" · corr w/ M2 YoY (lag 1mo, N={d['n_obs']}): {d['corr_gold']:+.2f}"
-                        if d.get("corr_gold") is not None else ""))
+        rows.append(("🥇", "Gold", f"${d['gold_now']:,.0f}",
+                     f"{d['gold_1m_pct']:+.1f}%" if d.get("gold_1m_pct") is not None else "—",
+                     "—", "—"))
     if d.get("dxy_now"):
-        lines.append(f"💵 Dollar Index {d['dxy_now']:,.1f} ({d['dxy_1m_pct']:+.1f}% 1m)"
-                     + (f" · corr w/ M2 YoY (lag 1mo, N={d['n_obs']}): {d['corr_dxy']:+.2f}"
-                        if d.get("corr_dxy") is not None else ""))
+        rows.append(("💵", "Dollar Index", f"{d['dxy_now']:,.1f}",
+                     f"{d['dxy_1m_pct']:+.1f}%" if d.get("dxy_1m_pct") is not None else "—",
+                     "—", "—"))
+    out = [_pipe_table(("", "Item", "Level", "MoM", "QoQ", "YoY"), rows,
+                       title="🏦 M2 Money Supply vs Gold/Dollar",
+                       legend=f"as of {d['m2_asof']} · {'expanding' if expanding else 'contracting'} liquidity")]
+    if d.get("corr_gold") is not None or d.get("corr_dxy") is not None:
+        _cparts = []
+        if d.get("corr_gold") is not None:
+            _cparts.append(f"Gold {d['corr_gold']:+.2f}")
+        if d.get("corr_dxy") is not None:
+            _cparts.append(f"Dollar {d['corr_dxy']:+.2f}")
+        out.append(f"<i>Corr vs M2 YoY (lag 1mo, N={d['n_obs']}): " + " · ".join(_cparts) + "</i>")
     # Context lean, NOT advice -- and only stated when the underlying correlation is at
     # least moderate (|corr|>=0.3); weak/noisy correlations get an honest "no clear lean"
     # instead of manufacturing a call from noise.
-    cg, cd = d.get("corr_gold"), d.get("corr_dxy")
+    cg = d.get("corr_gold")
     if cg is not None and abs(cg) >= 0.3:
         lean = "supportive of" if cg > 0 else "a historical headwind for"
-        lines.append(f"<i>Context: {'expanding' if expanding else 'contracting'} M2 has "
-                     f"historically been {lean} gold over this sample — not a timing signal, "
-                     f"and correlation ≠ causation on N={d['n_obs']} monthly points.</i>")
+        out.append(f"<i>Context: {'expanding' if expanding else 'contracting'} M2 has "
+                   f"historically been {lean} gold over this sample — not a timing signal, "
+                   f"and correlation ≠ causation on N={d['n_obs']} monthly points.</i>")
     else:
-        lines.append("<i>Context only — no reliably strong M2↔gold/dollar lead-lag in this "
-                     "sample; treat money-supply trend as macro backdrop, not a trade signal.</i>")
-    return "\n".join(lines)
+        out.append("<i>Context only — no reliably strong M2↔gold/dollar lead-lag in this "
+                   "sample; treat money-supply trend as macro backdrop, not a trade signal.</i>")
+    return "\n".join(out)
 
 
 def _m2_gold_dollar_chart():

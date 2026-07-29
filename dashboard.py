@@ -10561,6 +10561,11 @@ elif page == "📈 Insider / Congress / Whales":
             "Kahn Brothers": "0001039565", "Hussman Strategic Advisors": "0001179475",
             "Pennant Investors (Fournier)": "0001759176", "Baillie Gifford": "0001088875",
             "T Rowe Price Associates": "0000080255", "PRIMECAP Management": "0000763212",
+            # Added 2026-07-28 (user ask: "victoria fernandez crossmark" -- Victoria Fernandez
+            # is CrossMark's Chief Market Strategist). Verified via SEC EDGAR company search:
+            # CIK 0001539204, conformed name "Crossmark Global Holdings, Inc.", real recent
+            # 13F-HR filings (2026-07-16, 2026-05-11, 2026-02-03) -- an active, current filer.
+            "CrossMark Global Holdings": "0001539204",
         }
         _ef1, _ef2 = st.columns([2, 1])
         _fpick = _ef1.selectbox("Fund", list(_EDGAR_FUNDS) + ["(enter CIK manually)"], key="edgar_fund")

@@ -25516,6 +25516,38 @@ def _wrap_regime(F):
     return " · ".join(bits) if bits else None
 
 
+_WRAP_SEVERE_KEYWORDS = {
+    "war/conflict": ("war", "invasion", "invade", "military strike", "missile", "troops",
+                     "ceasefire", "conflict", "sanction"),
+    "attack": ("bombing", "bombed", "explosion", "attack", "terror", "airstrike"),
+    "climate/disaster": ("hurricane", "earthquake", "wildfire", "flood", "typhoon",
+                         "drought", "heatwave", "tsunami", "cyclone"),
+}
+
+
+def _wrap_severe_news(limit=20):
+    """Scan world headlines for major war/attack/climate-disaster events (user ask
+    2026-07-28: "important news like wars, bombings, climate severities"). Broader net
+    than _country_instability_flags (ticker-supply-chain scoped) -- this is a general
+    world-event scan for the wrap. Keyless, reuses _world_news_block. Returns
+    [(category, headline, url)], deduped, capped at 5 -- [] on any failure."""
+    try:
+        news = _world_news_block(limit=limit)
+    except Exception:
+        return []
+    out, seen = [], set()
+    for hl, _src, url in news:
+        h = hl.lower()
+        for cat, kws in _WRAP_SEVERE_KEYWORDS.items():
+            if any(kw in h for kw in kws):
+                key = hl[:50].lower()
+                if key not in seen:
+                    out.append((cat, hl, url))
+                    seen.add(key)
+                break
+    return out[:5]
+
+
 def wrap_facts(conn, universe_cap=120):
     """Compute the structured fact pack for the market wrap."""
     F = {"ts": datetime.now(), "indices": [], "lead": None, "shape": None,
@@ -25705,6 +25737,26 @@ def wrap_narrative(F, html=True):
                       f"{_wrap_fmt_t(shape['t_peak'])}, then slid to {shape['trough']:,.0f} by {_wrap_fmt_t(shape['t_trough'])} "
                       f"({shape['dd_pct']:+.1f}%). It now trades at {shape['cur']:,.0f}."))
 
+    # FOMC-today flag (user 2026-07-28: "where is today Fed meeting info, why that
+    # missing" -- _FOMC_DATES already has the real schedule, the wrap just never checked
+    # it against today's date). Mechanical facts only (announcement/press-conference
+    # times) -- no rate-decision prediction, that's not something to fabricate.
+    _today_iso = datetime.now().strftime("%Y-%m-%d")
+    if _today_iso in _FOMC_DATES:
+        L.append(_sec("🏛", "FOMC DECISION TODAY",
+                      "Rate decision at 2:00pm ET, press conference 2:30pm ET. Historically the "
+                      "highest-vol window of the session — expect wide intraday swings and a real "
+                      "chance of a late-day reversal once the presser starts. Check /macro afterward."))
+
+    # Full indices table -- "index is saying" (user 2026-07-28): the narrative above only
+    # names the single biggest mover; the other 4 tracked indices were computed in F but
+    # never actually shown anywhere.
+    if F["indices"]:
+        _idx_rows = [("🟢" if d["pct"] >= 0 else "🔴", d["name"], f"{d['last']:,.0f}", f"{d['pct']:+.2f}%")
+                     for d in F["indices"]]
+        L.append("\n" + _pipe_table(("", "Index", "Last", "Day%"), _idx_rows, right_cols={2, 3},
+                                    title="📈 INDICES"))
+
     if F["catalyst"]:
         _cat_url = F["catalyst"].get("url")
         _cat_q = (f'<a href="{_cat_url}">"{esc(F["catalyst"]["title"])}"</a>' if _cat_url
@@ -25735,6 +25787,19 @@ def wrap_narrative(F, html=True):
 
     if F.get("regime"):
         L.append(_sec("🧭", "MACRO REGIME", F["regime"] + "."))
+
+    # Major world events -- war/attack/climate-disaster headlines (user 2026-07-28: "add
+    # if anything else also helps, important news like wars, bombings, climate severities
+    # etc"). Broader net than _country_instability_flags (which is ticker-supply-chain
+    # scoped) -- this is a general world-event scan, keyless, reuses _world_news_block.
+    try:
+        _severe = _wrap_severe_news()
+    except Exception:
+        _severe = []
+    if _severe:
+        _sev_lines = [f'• <a href="{u}">{esc(hl[:110])}</a>' if u else f"• {esc(hl[:110])}"
+                     for _cat, hl, u in _severe]
+        L.append("\n🌍 " + b("MAJOR WORLD EVENTS") + "\n" + "\n".join(_sev_lines))
 
     if F["cross"]:
         parts = []

@@ -31593,7 +31593,24 @@ async def briefing_alert(ctx):
             msg = _fmt_briefing(morning_briefing(conn))
         finally:
             conn.close()
+        # M2 money-supply + gold/dollar context (user ask 2026-07-28). M2 itself only
+        # updates monthly (cached 12h), so this section barely changes day to day -- that's
+        # expected, it's meant as a standing backdrop, not a daily-moving indicator.
+        try:
+            _m2d = await asyncio.get_event_loop().run_in_executor(None, _m2_gold_dollar_analysis)
+            _m2_txt = _fmt_m2_section(_m2d)
+            if _m2_txt:
+                msg = msg + "\n\n" + _m2_txt
+        except Exception as _m2e:
+            log.debug(f"briefing M2 section failed: {_m2e}")
         await ctx.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode=H)
+        try:
+            _m2_png = await asyncio.get_event_loop().run_in_executor(None, _m2_gold_dollar_chart)
+            if _m2_png:
+                await ctx.bot.send_photo(chat_id=int(chat_id), photo=_m2_png,
+                                        caption="M2 vs Gold vs Dollar Index (5y, indexed)")
+        except Exception as _m2ce:
+            log.debug(f"briefing M2 chart failed: {_m2ce}")
     except Exception as e:
         log.warning(f"briefing_alert failed: {e}")
 
@@ -32408,6 +32425,186 @@ def _fred_latest(series_id, api_key=None):
     except Exception:
         return None
     return None
+
+_M2_CACHE = {"ts": 0.0, "data": None}
+_M2_CACHE_TTL = 12 * 3600   # M2 is monthly data; no need to refetch more than ~2x/day
+
+
+def _m2_history():
+    """Full M2SL history from FRED's public CSV endpoint -- no API key needed (unlike
+    _fred_latest, which requires FRED_API_KEY). Returns a list of (date, value_billions)
+    or None on failure."""
+    try:
+        import urllib.request, csv as _csv, io
+        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=M2SL"
+        with urllib.request.urlopen(url, timeout=10) as r:
+            text = r.read().decode()
+        rows = list(_csv.reader(io.StringIO(text)))[1:]
+        out = []
+        for d, v in rows:
+            try:
+                out.append((d, float(v)))
+            except ValueError:
+                continue
+        return out or None
+    except Exception:
+        log.debug("M2 fetch failed", exc_info=True)
+        return None
+
+
+def _m2_gold_dollar_analysis():
+    """M2 money-supply level/growth + its REAL historical relationship to gold and the
+    dollar index (rank correlation of M2 YoY% vs fwd 1-month return, not received wisdom
+    asserted as fact -- this codebase's convention, see .claude/rules/bot-conventions.md
+    'Signal validation recipe'). Cached 12h since M2 itself only updates monthly.
+
+    Returns None on any failure (never blocks the caller); otherwise a dict with the
+    latest levels, growth rates, and an honestly-caveated read.
+    """
+    now = time.time()
+    if _M2_CACHE["data"] and (now - _M2_CACHE["ts"]) < _M2_CACHE_TTL:
+        return _M2_CACHE["data"]
+    try:
+        m2 = _m2_history()
+        if not m2 or len(m2) < 25:
+            return None
+        m2_dates = [datetime.strptime(d, "%Y-%m-%d") for d, _ in m2]
+        m2_vals = [v for _, v in m2]
+        m2_now, m2_prev = m2_vals[-1], m2_vals[-2]
+        m2_yoy = [(m2_vals[i] / m2_vals[i - 12] - 1) * 100 for i in range(12, len(m2_vals))]
+        m2_yoy_now = m2_yoy[-1]
+        m2_mom_pct = (m2_now / m2_prev - 1) * 100
+
+        gold_h = _yf_ticker("GC=F").history(period="10y", interval="1mo")
+        dxy_h = _yf_ticker("DX-Y.NYB").history(period="10y", interval="1mo")
+        gold_now = float(gold_h["Close"].iloc[-1]) if not gold_h.empty else None
+        dxy_now = float(dxy_h["Close"].iloc[-1]) if not dxy_h.empty else None
+        gold_1m_pct = ((gold_now / float(gold_h["Close"].iloc[-2]) - 1) * 100
+                      if not gold_h.empty and len(gold_h) > 1 else None)
+        dxy_1m_pct = ((dxy_now / float(dxy_h["Close"].iloc[-2]) - 1) * 100
+                     if not dxy_h.empty and len(dxy_h) > 1 else None)
+
+        # Real correlation: M2 YoY% (month t) vs gold/DXY forward 1-month return (t -> t+1),
+        # aligned on month-start. Small-N monthly series -- report N honestly, don't overclaim.
+        corr_gold = corr_dxy = None
+        n_obs = 0
+        try:
+            import pandas as _pd
+            m2_s = _pd.Series(m2_yoy, index=[m2_dates[i] for i in range(12, len(m2_vals))]).resample("MS").last()
+            if not gold_h.empty:
+                g_ret = gold_h["Close"].pct_change().resample("MS").last() * 100
+                g_ret.index = g_ret.index.tz_localize(None)
+                aligned = _pd.concat([m2_s.shift(1), g_ret], axis=1, join="inner").dropna()
+                if len(aligned) >= 15:
+                    corr_gold = float(aligned.iloc[:, 0].corr(aligned.iloc[:, 1]))
+                    n_obs = len(aligned)
+            if not dxy_h.empty:
+                d_ret = dxy_h["Close"].pct_change().resample("MS").last() * 100
+                d_ret.index = d_ret.index.tz_localize(None)
+                aligned_d = _pd.concat([m2_s.shift(1), d_ret], axis=1, join="inner").dropna()
+                if len(aligned_d) >= 15:
+                    corr_dxy = float(aligned_d.iloc[:, 0].corr(aligned_d.iloc[:, 1]))
+        except Exception:
+            log.debug("M2 correlation calc failed", exc_info=True)
+
+        result = {
+            "m2_now_b": m2_now, "m2_mom_pct": m2_mom_pct, "m2_yoy_pct": m2_yoy_now,
+            "m2_asof": m2_dates[-1].strftime("%b %Y"),
+            "gold_now": gold_now, "gold_1m_pct": gold_1m_pct,
+            "dxy_now": dxy_now, "dxy_1m_pct": dxy_1m_pct,
+            "corr_gold": corr_gold, "corr_dxy": corr_dxy, "n_obs": n_obs,
+        }
+        _M2_CACHE["data"], _M2_CACHE["ts"] = result, now
+        return result
+    except Exception:
+        log.debug("M2/gold/dollar analysis failed", exc_info=True)
+        return None
+
+
+def _fmt_m2_section(d):
+    """Plain-English money-supply + gold/dollar read from _m2_gold_dollar_analysis().
+    Context only -- explicitly NOT a directive trade call, matching this codebase's
+    established framing (Fear&Greed/Risk-Off Radar captions: 'context, not a signal')."""
+    if not d:
+        return ""
+    expanding = d["m2_yoy_pct"] > 0
+    lines = [f"🏦 <b>M2 Money Supply</b> — ${d['m2_now_b']/1000:,.2f}T ({d['m2_asof']}), "
+             f"{d['m2_mom_pct']:+.2f}% MoM, <b>{d['m2_yoy_pct']:+.1f}% YoY</b> "
+             f"({'expanding' if expanding else 'contracting'} liquidity)"]
+    if d.get("gold_now"):
+        lines.append(f"🥇 Gold ${d['gold_now']:,.0f} ({d['gold_1m_pct']:+.1f}% 1m)"
+                     + (f" · corr w/ M2 YoY (lag 1mo, N={d['n_obs']}): {d['corr_gold']:+.2f}"
+                        if d.get("corr_gold") is not None else ""))
+    if d.get("dxy_now"):
+        lines.append(f"💵 Dollar Index {d['dxy_now']:,.1f} ({d['dxy_1m_pct']:+.1f}% 1m)"
+                     + (f" · corr w/ M2 YoY (lag 1mo, N={d['n_obs']}): {d['corr_dxy']:+.2f}"
+                        if d.get("corr_dxy") is not None else ""))
+    # Context lean, NOT advice -- and only stated when the underlying correlation is at
+    # least moderate (|corr|>=0.3); weak/noisy correlations get an honest "no clear lean"
+    # instead of manufacturing a call from noise.
+    cg, cd = d.get("corr_gold"), d.get("corr_dxy")
+    if cg is not None and abs(cg) >= 0.3:
+        lean = "supportive of" if cg > 0 else "a historical headwind for"
+        lines.append(f"<i>Context: {'expanding' if expanding else 'contracting'} M2 has "
+                     f"historically been {lean} gold over this sample — not a timing signal, "
+                     f"and correlation ≠ causation on N={d['n_obs']} monthly points.</i>")
+    else:
+        lines.append("<i>Context only — no reliably strong M2↔gold/dollar lead-lag in this "
+                     "sample; treat money-supply trend as macro backdrop, not a trade signal.</i>")
+    return "\n".join(lines)
+
+
+def _m2_gold_dollar_chart():
+    """Normalized (indexed to 100) M2 vs Gold vs Dollar Index over the last 5 years --
+    same white-background matplotlib style as make_line_chart (reads better as a phone
+    notification). Returns PNG bytes, or None on failure."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import pandas as _pd
+    try:
+        m2 = _m2_history()
+        if not m2:
+            return None
+        m2_df = _pd.DataFrame(m2, columns=["date", "m2"])
+        m2_df["date"] = _pd.to_datetime(m2_df["date"])
+        m2_df = m2_df[m2_df["date"] >= m2_df["date"].max() - _pd.DateOffset(years=5)]
+
+        gold_h = _yf_ticker("GC=F").history(period="5y", interval="1mo")["Close"]
+        dxy_h = _yf_ticker("DX-Y.NYB").history(period="5y", interval="1mo")["Close"]
+        gold_h.index = gold_h.index.tz_localize(None)
+        dxy_h.index = dxy_h.index.tz_localize(None)
+
+        fig, ax = plt.subplots(figsize=(7, 3.4), dpi=130, facecolor="#ffffff")
+        ax.set_facecolor("#ffffff")
+        ax.grid(True, color="#e1e4e8", linewidth=0.5, linestyle="--")
+        ax.spines[:].set_visible(False)
+        ax.tick_params(colors="#24292e", labelsize=7)
+
+        def _norm(s):
+            s = s.dropna()
+            return (s / s.iloc[0] * 100) if len(s) and s.iloc[0] else s
+
+        ax.plot(m2_df["date"], _norm(m2_df.set_index("date")["m2"]),
+               color="#0969da", linewidth=1.6, label="M2 Supply")
+        if not gold_h.empty:
+            ax.plot(gold_h.index, _norm(gold_h), color="#e6a800", linewidth=1.4, label="Gold")
+        if not dxy_h.empty:
+            ax.plot(dxy_h.index, _norm(dxy_h), color="#1a7f37", linewidth=1.4, label="Dollar Index")
+
+        ax.set_title("M2 Money Supply vs Gold vs Dollar Index (indexed=100, 5y)",
+                     loc="left", fontsize=10, color="#24292e", pad=6, fontweight="bold")
+        ax.legend(loc="upper left", fontsize=7, frameon=False)
+        plt.tight_layout(pad=0.5)
+        buf = BytesIO()
+        fig.savefig(buf, format="png", facecolor="#ffffff", bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
+    except Exception:
+        log.debug("M2 chart failed", exc_info=True)
+        return None
+
 
 def _av_sentiment(tickers="SPY,QQQ", api_key=None):
     """AlphaVantage NEWS_SENTIMENT average (free key). Returns {avg,label,n,top} or None."""

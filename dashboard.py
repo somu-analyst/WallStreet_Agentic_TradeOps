@@ -8613,6 +8613,44 @@ elif page == "🔄 Rotation Tracker":
         _ch = _rt_tbo._rotation_track(_rc, _level if not _rtks else "stocks", _rows) if _rows else []
     finally:
         _rc.close()
+    def _render_rrg(rows, chart_key, title=None):
+        """Renders the quadrant summary + RRG scatter + table for any rotation row set —
+        factored out so the drilldown panel below can reuse it (was inline, duplicated
+        for the top-level view only) rather than copy-pasting ~40 lines a second time."""
+        _q1, _q2 = st.columns(2)
+        _q1.markdown("🔵 **Rotating IN** (money entering): " +
+                     (", ".join(r["name"] for r in rows if r["quad"] == "Improving") or "—"))
+        _q2.markdown("🟡 **Rotating OUT** (leaders fading): " +
+                     (", ".join(r["name"] for r in rows if r["quad"] == "Weakening") or "—"))
+        try:
+            import plotly.graph_objects as go
+            _col = {"Leading": "#16a34a", "Weakening": "#eab308", "Improving": "#2563eb", "Lagging": "#dc2626"}
+            _fig = go.Figure()
+            _xr = max(abs(r["strength"]) for r in rows) * 100 * 1.25 + 1
+            _yr = max(abs(r["momentum"]) for r in rows) * 100 * 1.25 + 1
+            _fig.add_shape(type="rect", x0=0, y0=0, x1=_xr, y1=_yr, fillcolor="#16a34a", opacity=0.06, line_width=0)
+            _fig.add_shape(type="rect", x0=0, y0=-_yr, x1=_xr, y1=0, fillcolor="#eab308", opacity=0.06, line_width=0)
+            _fig.add_shape(type="rect", x0=-_xr, y0=0, x1=0, y1=_yr, fillcolor="#2563eb", opacity=0.06, line_width=0)
+            _fig.add_shape(type="rect", x0=-_xr, y0=-_yr, x1=0, y1=0, fillcolor="#dc2626", opacity=0.06, line_width=0)
+            _fig.add_hline(y=0, line_color="gray"); _fig.add_vline(x=0, line_color="gray")
+            for r in rows:
+                _fig.add_trace(go.Scatter(x=[r["strength"] * 100], y=[r["momentum"] * 100], mode="markers+text",
+                    text=[r["name"]], textposition="top center", marker=dict(size=13, color=_col[r["quad"]]),
+                    hovertext=f"{r['name']} · {r['quad']}", showlegend=False))
+            _fig.add_annotation(x=_xr*0.6, y=_yr*0.9, text="🟢 LEADING", showarrow=False, opacity=0.7)
+            _fig.add_annotation(x=_xr*0.6, y=-_yr*0.9, text="🟡 WEAKENING (out)", showarrow=False, opacity=0.7)
+            _fig.add_annotation(x=-_xr*0.6, y=_yr*0.9, text="🔵 IMPROVING (in)", showarrow=False, opacity=0.7)
+            _fig.add_annotation(x=-_xr*0.6, y=-_yr*0.9, text="🔴 LAGGING", showarrow=False, opacity=0.7)
+            _fig.update_layout(height=440 if title else 520, xaxis_title="Leadership → (3mo excess vs SPY, %)",
+                               yaxis_title="Momentum ↑ (improving)",
+                               title=title or "Rotation map (RRG vs SPY)")
+            st.plotly_chart(_fig, use_container_width=True, key=chart_key)
+        except Exception as _pe:
+            st.caption(f"(chart unavailable: {_pe})")
+        st.dataframe(pd.DataFrame([{"": r["emoji"], "Name": r["name"], "Quadrant": r["quad"],
+            "3mo vs SPY %": round(r["strength"] * 100, 1), "1mo vs SPY %": round(r["short_exc"] * 100, 1)}
+            for r in rows]), hide_index=True, use_container_width=True)
+
     if not _rows:
         st.info("Not enough price history to compute rotation.")
     else:
@@ -8624,44 +8662,41 @@ elif page == "🔄 Rotation Tracker":
                     st.error("⚖️ **Cross-asset tilt: RISK-OFF** — defensives (bonds / gold / dollar) leading")
                 else:
                     st.success("⚖️ **Cross-asset tilt: RISK-ON** — growth / credit / crypto leading")
-        _q1, _q2 = st.columns(2)
-        _q1.markdown("🔵 **Rotating IN** (money entering): " +
-                     (", ".join(r["name"] for r in _rows if r["quad"] == "Improving") or "—"))
-        _q2.markdown("🟡 **Rotating OUT** (leaders fading): " +
-                     (", ".join(r["name"] for r in _rows if r["quad"] == "Weakening") or "—"))
         if _ch:
             st.caption("↪️ **Just shifted quadrant:** " + " · ".join(f"{n} {a}→{b}" for n, a, b in _ch[:8]))
-        # RRG rotation map
-        try:
-            import plotly.graph_objects as go
-            _col = {"Leading": "#16a34a", "Weakening": "#eab308", "Improving": "#2563eb", "Lagging": "#dc2626"}
-            _fig = go.Figure()
-            _xr = max(abs(r["strength"]) for r in _rows) * 100 * 1.25 + 1
-            _yr = max(abs(r["momentum"]) for r in _rows) * 100 * 1.25 + 1
-            _fig.add_shape(type="rect", x0=0, y0=0, x1=_xr, y1=_yr, fillcolor="#16a34a", opacity=0.06, line_width=0)
-            _fig.add_shape(type="rect", x0=0, y0=-_yr, x1=_xr, y1=0, fillcolor="#eab308", opacity=0.06, line_width=0)
-            _fig.add_shape(type="rect", x0=-_xr, y0=0, x1=0, y1=_yr, fillcolor="#2563eb", opacity=0.06, line_width=0)
-            _fig.add_shape(type="rect", x0=-_xr, y0=-_yr, x1=0, y1=0, fillcolor="#dc2626", opacity=0.06, line_width=0)
-            _fig.add_hline(y=0, line_color="gray"); _fig.add_vline(x=0, line_color="gray")
-            for r in _rows:
-                _fig.add_trace(go.Scatter(x=[r["strength"] * 100], y=[r["momentum"] * 100], mode="markers+text",
-                    text=[r["name"]], textposition="top center", marker=dict(size=13, color=_col[r["quad"]]),
-                    hovertext=f"{r['name']} · {r['quad']}", showlegend=False))
-            _fig.add_annotation(x=_xr*0.6, y=_yr*0.9, text="🟢 LEADING", showarrow=False, opacity=0.7)
-            _fig.add_annotation(x=_xr*0.6, y=-_yr*0.9, text="🟡 WEAKENING (out)", showarrow=False, opacity=0.7)
-            _fig.add_annotation(x=-_xr*0.6, y=_yr*0.9, text="🔵 IMPROVING (in)", showarrow=False, opacity=0.7)
-            _fig.add_annotation(x=-_xr*0.6, y=-_yr*0.9, text="🔴 LAGGING", showarrow=False, opacity=0.7)
-            _fig.update_layout(height=520, xaxis_title="Leadership → (3mo excess vs SPY, %)",
-                               yaxis_title="Momentum ↑ (improving)", title="Rotation map (RRG vs SPY)")
-            st.plotly_chart(_fig, use_container_width=True)
-        except Exception as _pe:
-            st.caption(f"(chart unavailable: {_pe})")
-        st.dataframe(pd.DataFrame([{"": r["emoji"], "Name": r["name"], "Quadrant": r["quad"],
-            "3mo vs SPY %": round(r["strength"] * 100, 1), "1mo vs SPY %": round(r["short_exc"] * 100, 1)}
-            for r in _rows]), hide_index=True, use_container_width=True)
+        _render_rrg(_rows, "rot_main_chart")
         st.caption("RRG vs SPY · 🔵 Improving = money entering · 🟢 Leading · 🟡 Weakening = money leaving · "
                    "🔴 Lagging. Logged daily to rotation_watch. ✅ Backtested (1,542 obs): Weakening "
                    "underperforms −1.6%/10d vs SPY; momentum axis IC +0.14, p<1e-7 (~6mo, momentum regime).")
+
+        # ── Drilldown (user ask 2026-07-28): click any item to see what's underneath it —
+        # sector/theme ETFs drill into their real top constituent stocks; equity macro
+        # classes (SPY/QQQ/IWM) drill into the Sector level; everything else (bonds, gold,
+        # commodities, bitcoin, dollar) has no drilldown, it IS the instrument. ──
+        if not _rtks:   # Stocks level is already the bottom rung, no further drill
+            st.markdown("---")
+            st.markdown("#### 🔍 Drill down")
+            _dnames = {r["name"]: r["tk"] for r in _rows}
+            _dsel = st.selectbox("Pick an item", ["—"] + list(_dnames.keys()), key="rot_drill_sel")
+            if _dsel != "—":
+                _dtk = _dnames[_dsel]
+                _rc2 = _rt_tbo.get_conn()
+                try:
+                    if _dtk in _rt_tbo._ROT_DRILL_STOCKS:
+                        _dtitle, _drows = _rt_tbo._rotation_scan(_rc2, None, _rt_tbo._ROT_DRILL_STOCKS[_dtk])
+                        _dsub = f"Top real constituents of {_dsel} ({_dtk})"
+                    elif _dtk in _rt_tbo._ROT_DRILL_TO_SECTOR:
+                        _dtitle, _drows = _rt_tbo._rotation_scan(_rc2, "sector")
+                        _dsub = f"{_dsel} ({_dtk}) is a broad equity class — sector breakdown"
+                    else:
+                        _drows, _dsub = None, f"**{_dsel}** ({_dtk}) is a single instrument — no drilldown."
+                finally:
+                    _rc2.close()
+                if _drows:
+                    st.caption(_dsub)
+                    _render_rrg(_drows, "rot_drill_chart", title=f"{_dsel} drilldown")
+                else:
+                    st.caption(_dsub)
 
 # ===================================================================
 elif page == "🫧 Anti-Bubble Radar":
@@ -23096,6 +23131,21 @@ if page == "👀 Watchlist":
             pass
         return _db_spot(tk) > 0
 
+    @st.cache_data(ttl=86400, show_spinner=False)
+    def _wl_company_name(tk):
+        """Company/fund name for the ticker (user ask 2026-07-28: 'place the name of the
+        stocks' after the ticker). options_change.company_name_now is DB-first but only
+        reliable for ETFs/funds -- it stores the bare ticker for individual stocks -- so
+        this goes straight to yfinance .info, cached 24h since a name never changes."""
+        try:
+            info = yf.Ticker(tk).info or {}
+            name = info.get("shortName") or info.get("longName")
+            if name:
+                return name
+        except Exception:
+            pass
+        return tk
+
     with st.expander("➕ Add a ticker", expanded=True):
         _wa1, _wa2, _wa3, _wa4 = st.columns([1, 1, 1, 2])
         _wa_tk = _wa1.text_input("Ticker", key="wl_add_tk", placeholder="e.g. AAPL, GLD, TLT").strip().upper()
@@ -23152,7 +23202,8 @@ if page == "👀 Watchlist":
                 _wspot = _wspot or _weod
                 if not _wspot:
                     _wl_rows.append({"id": int(_wr["id"]), "Class": _wr.get("asset_class") or "Stock",
-                                      "Ticker": _wtk, "Spot": None, "Note": "no price data"})
+                                      "Ticker": _wtk, "Name": _wl_company_name(_wtk),
+                                      "Spot": None, "Note": "no price data"})
                     continue
                 _wsrc = "EOD"
                 if _weod and abs(_wspot - _weod) > 1e-9:
@@ -23221,7 +23272,7 @@ if page == "👀 Watchlist":
                         pass
                 _wl_rows.append({
                     "id": int(_wr["id"]), "Class": _wr.get("asset_class") or "Stock",
-                    "Ticker": _wtk, "Spot": round(_wspot, 2), "Src": _wsrc,
+                    "Ticker": _wtk, "Name": _wl_company_name(_wtk), "Spot": round(_wspot, 2), "Src": _wsrc,
                     "Day%": (round(_wchg, 2) if _wchg is not None else None),
                     "Day L-H": (f"${_wdl:,.2f}-${_wdh:,.2f}" if (_wdh and _wdl) else "—"),
                     "52w L-H": (f"${_w52lo:,.2f}-${_w52hi:,.2f}" if (_w52hi and _w52lo) else "—"),
@@ -23240,7 +23291,7 @@ if page == "👀 Watchlist":
                 })
             except Exception as _e:
                 _wl_rows.append({"id": int(_wr["id"]), "Class": _wr.get("asset_class") or "Stock",
-                                  "Ticker": _wtk, "Spot": None, "Note": f"error: {_e}"})
+                                  "Ticker": _wtk, "Name": _wtk, "Spot": None, "Note": f"error: {_e}"})
 
         _WL_ICON = {"Stock": "📈", "ETF": "🧺", "Bond": "🏦", "Commodity": "🛢️"}
         _WL_PLURAL = {"Stock": "Stocks", "ETF": "ETFs", "Bond": "Bonds", "Commodity": "Commodities"}
@@ -23264,14 +23315,41 @@ if page == "👀 Watchlist":
                                                    line=dict(width=1.5), showlegend=False))
                         _wfig.add_hline(y=_wrow["_52hi"], line_dash="dot", line_color="#e74c3c", line_width=1)
                         _wfig.add_hline(y=_wrow["_52lo"], line_dash="dot", line_color="#2ecc71", line_width=1)
+                        _wl_chart_name = str(_wrow.get("Name") or _wrow["Ticker"])
+                        _wl_chart_name = (_wl_chart_name[:22] + "…") if len(_wl_chart_name) > 23 else _wl_chart_name
                         _wfig.update_layout(height=140, margin=dict(l=0, r=0, t=24, b=0),
-                                            title=dict(text=f"{_wrow['Ticker']}  ${_wrow['Spot']:,.2f}", font=dict(size=12)),
+                                            title=dict(text=f"{_wrow['Ticker']} · {_wl_chart_name}  ${_wrow['Spot']:,.2f}",
+                                                       font=dict(size=11)),
                                             xaxis=dict(visible=False), yaxis=dict(visible=False),
                                             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
                         st.plotly_chart(_wfig, use_container_width=True, config={"displayModeBar": False},
                                         key=f"wl_chart_{_wrow['Ticker']}_{_wrow.get('id', _wi)}")
                         st.caption(f"52w ${_wrow['_52lo']:,.0f}–${_wrow['_52hi']:,.0f}")
             st.markdown("---")
+
+        with st.expander("✏️ Edit a ticker (asset class / target price / note)"):
+            _wl_emap = {f"{r['Ticker']} · {r.get('Class','Stock')} (id {r['id']})": r["id"]
+                       for r in _wl_rows if "id" in r}
+            if _wl_emap:
+                _wl_ed_pick = st.selectbox("Ticker", list(_wl_emap), key="wl_edit_pick")
+                _wl_ed_id = _wl_emap[_wl_ed_pick]
+                _wl_ed_row = pd.read_sql("SELECT * FROM watchlist WHERE id=?", _wl_conn, params=(_wl_ed_id,)).iloc[0]
+                _we1, _we2, _we3 = st.columns([1, 1, 2])
+                _we_class = _we1.selectbox("Asset class", _WL_CLASSES,
+                    index=_WL_CLASSES.index(_wl_ed_row["asset_class"])
+                          if _wl_ed_row.get("asset_class") in _WL_CLASSES else 0,
+                    key="wl_edit_class")
+                _we_target = _we2.number_input("Target buy price", min_value=0.0, step=0.5,
+                    value=float(_wl_ed_row["target_price"] or 0.0), key="wl_edit_target")
+                _we_note = _we3.text_input("Note", value=_wl_ed_row.get("note") or "", key="wl_edit_note")
+                if st.button("💾 Save changes", key="wl_edit_save"):
+                    _wl_conn.execute(
+                        "UPDATE watchlist SET asset_class=?, target_price=?, note=? WHERE id=?",
+                        (_we_class, (_we_target or None), (_we_note or None), _wl_ed_id))
+                    _wl_conn.commit()
+                    st.success(f"Updated {_wl_ed_pick.split(' ·')[0]}."); st.rerun()
+            else:
+                st.caption("Nothing to edit yet.")
 
         st.markdown("**Remove a ticker** (bought it, or lost interest)")
         _wl_map = {f"{r['Ticker']} · {r.get('Class','Stock')} (id {r['id']})": r["id"]

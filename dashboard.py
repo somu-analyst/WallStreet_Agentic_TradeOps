@@ -8613,15 +8613,22 @@ elif page == "🔄 Rotation Tracker":
         _ch = _rt_tbo._rotation_track(_rc, _level if not _rtks else "stocks", _rows) if _rows else []
     finally:
         _rc.close()
-    def _render_rrg(rows, chart_key, title=None):
+    def _render_rrg(rows, chart_key, title=None, selectable=False):
         """Renders the quadrant summary + RRG scatter + table for any rotation row set —
         factored out so the drilldown panel below can reuse it (was inline, duplicated
-        for the top-level view only) rather than copy-pasting ~40 lines a second time."""
+        for the top-level view only) rather than copy-pasting ~40 lines a second time.
+
+        selectable=True (user ask 2026-07-28: "i pressed on reit or health, but it is not
+        going to stock level" -- clicking a bubble/row felt like it SHOULD drill down, but
+        the only working control was a separate selectbox below) makes the table itself
+        clickable via st.dataframe's row-selection, returning the clicked row's Name (or
+        None) so the caller can drive the drilldown directly from a click."""
         _q1, _q2 = st.columns(2)
         _q1.markdown("🔵 **Rotating IN** (money entering): " +
                      (", ".join(r["name"] for r in rows if r["quad"] == "Improving") or "—"))
         _q2.markdown("🟡 **Rotating OUT** (leaders fading): " +
                      (", ".join(r["name"] for r in rows if r["quad"] == "Weakening") or "—"))
+        _chart_clicked = None
         try:
             import plotly.graph_objects as go
             _col = {"Leading": "#16a34a", "Weakening": "#eab308", "Improving": "#2563eb", "Lagging": "#dc2626"}
@@ -8634,22 +8641,48 @@ elif page == "🔄 Rotation Tracker":
             _fig.add_shape(type="rect", x0=-_xr, y0=-_yr, x1=0, y1=0, fillcolor="#dc2626", opacity=0.06, line_width=0)
             _fig.add_hline(y=0, line_color="gray"); _fig.add_vline(x=0, line_color="gray")
             for r in rows:
+                # customdata carries the real Name (user ask 2026-07-28: drill down FROM the
+                # chart itself, not a separate selectbox) -- more reliable than parsing the
+                # text label back out of the click event.
                 _fig.add_trace(go.Scatter(x=[r["strength"] * 100], y=[r["momentum"] * 100], mode="markers+text",
-                    text=[r["name"]], textposition="top center", marker=dict(size=13, color=_col[r["quad"]]),
-                    hovertext=f"{r['name']} · {r['quad']}", showlegend=False))
+                    text=[r["name"]], textposition="top center", marker=dict(size=16, color=_col[r["quad"]]),
+                    customdata=[r["name"]], hovertext=f"{r['name']} · {r['quad']} (click to drill down)",
+                    showlegend=False))
             _fig.add_annotation(x=_xr*0.6, y=_yr*0.9, text="🟢 LEADING", showarrow=False, opacity=0.7)
             _fig.add_annotation(x=_xr*0.6, y=-_yr*0.9, text="🟡 WEAKENING (out)", showarrow=False, opacity=0.7)
             _fig.add_annotation(x=-_xr*0.6, y=_yr*0.9, text="🔵 IMPROVING (in)", showarrow=False, opacity=0.7)
             _fig.add_annotation(x=-_xr*0.6, y=-_yr*0.9, text="🔴 LAGGING", showarrow=False, opacity=0.7)
             _fig.update_layout(height=440 if title else 520, xaxis_title="Leadership → (3mo excess vs SPY, %)",
                                yaxis_title="Momentum ↑ (improving)",
-                               title=title or "Rotation map (RRG vs SPY)")
-            st.plotly_chart(_fig, use_container_width=True, key=chart_key)
+                               title=(title or "Rotation map (RRG vs SPY)") + (" · click a bubble to drill in" if selectable else ""))
+            if selectable:
+                _chart_ev = st.plotly_chart(_fig, use_container_width=True, key=chart_key,
+                                            on_select="rerun", selection_mode="points")
+                _pts = _chart_ev.selection.points if hasattr(_chart_ev, "selection") else []
+                if _pts and _pts[0].get("customdata"):
+                    _cd = _pts[0]["customdata"]
+                    _chart_clicked = _cd[0] if isinstance(_cd, (list, tuple)) else _cd
+            else:
+                st.plotly_chart(_fig, use_container_width=True, key=chart_key)
         except Exception as _pe:
             st.caption(f"(chart unavailable: {_pe})")
-        st.dataframe(pd.DataFrame([{"": r["emoji"], "Name": r["name"], "Quadrant": r["quad"],
+        _tbl_df = pd.DataFrame([{"": r["emoji"], "Name": r["name"], "Quadrant": r["quad"],
             "3mo vs SPY %": round(r["strength"] * 100, 1), "1mo vs SPY %": round(r["short_exc"] * 100, 1)}
-            for r in rows]), hide_index=True, use_container_width=True)
+            for r in rows])
+        if selectable:
+            # Chart click is primary (user ask 2026-07-28: "from chart not the separate
+            # section"); a table-row click works too as a fallback since it's free, but
+            # nothing here is a standalone selectbox section anymore.
+            _sel_ev = st.dataframe(_tbl_df, hide_index=True, use_container_width=True,
+                                   on_select="rerun", selection_mode="single-row", key=f"{chart_key}_df")
+            _sel_rows = _sel_ev.selection.rows if hasattr(_sel_ev, "selection") else []
+            if _chart_clicked:
+                return _chart_clicked
+            if _sel_rows:
+                return str(_tbl_df.iloc[_sel_rows[0]]["Name"])
+            return None
+        st.dataframe(_tbl_df, hide_index=True, use_container_width=True)
+        return None
 
     if not _rows:
         st.info("Not enough price history to compute rotation.")
@@ -8664,22 +8697,22 @@ elif page == "🔄 Rotation Tracker":
                     st.success("⚖️ **Cross-asset tilt: RISK-ON** — growth / credit / crypto leading")
         if _ch:
             st.caption("↪️ **Just shifted quadrant:** " + " · ".join(f"{n} {a}→{b}" for n, a, b in _ch[:8]))
-        _render_rrg(_rows, "rot_main_chart")
+        _clicked_name = _render_rrg(_rows, "rot_main_chart", selectable=not _rtks)
         st.caption("RRG vs SPY · 🔵 Improving = money entering · 🟢 Leading · 🟡 Weakening = money leaving · "
                    "🔴 Lagging. Logged daily to rotation_watch. ✅ Backtested (1,542 obs): Weakening "
                    "underperforms −1.6%/10d vs SPY; momentum axis IC +0.14, p<1e-7 (~6mo, momentum regime).")
 
-        # ── Drilldown (user ask 2026-07-28): click any item to see what's underneath it —
-        # sector/theme ETFs drill into their real top constituent stocks; equity macro
-        # classes (SPY/QQQ/IWM) drill into the Sector level; everything else (bonds, gold,
-        # commodities, bitcoin, dollar) has no drilldown, it IS the instrument. ──
-        if not _rtks:   # Stocks level is already the bottom rung, no further drill
-            st.markdown("---")
-            st.markdown("#### 🔍 Drill down")
+        # ── Drilldown (user ask 2026-07-28): click a BUBBLE in the chart above (not a
+        # separate selectbox section) to see what's underneath it — sector/theme ETFs
+        # drill into their real top constituent stocks; equity macro classes (SPY/QQQ/IWM)
+        # drill into the Sector level; everything else (bonds, gold, commodities, bitcoin,
+        # dollar) has no drilldown, it IS the instrument. ──
+        if not _rtks and _clicked_name:   # Stocks level is already the bottom rung
             _dnames = {r["name"]: r["tk"] for r in _rows}
-            _dsel = st.selectbox("Pick an item", ["—"] + list(_dnames.keys()), key="rot_drill_sel")
-            if _dsel != "—":
+            if _clicked_name in _dnames:
+                _dsel = _clicked_name
                 _dtk = _dnames[_dsel]
+                st.markdown("---")
                 _rc2 = _rt_tbo.get_conn()
                 try:
                     if _dtk in _rt_tbo._ROT_DRILL_STOCKS:

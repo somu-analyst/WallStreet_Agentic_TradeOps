@@ -12335,9 +12335,10 @@ async def record_earnings_history(context=None):
 
 def _si_ensure(conn):
     """short_interest history table. Exchanges publish SI TWICE MONTHLY with a ~2 week lag,
-    and yfinance exposes only `current` + `prior month` — so there is no way to backtest a
-    short-interest rule until a history exists. This is the hiprob_recs lesson again: no
-    writer, no history, no validation. Start capturing now so it becomes testable later."""
+    and yfinance exposes only `current` + `prior month`. Daily capture (record_short_interest)
+    keeps this current going forward; the full ~1yr backfill (_si_fetch_history/_si_backfill,
+    2026-07-30, docs/PLAN.md A18) came from Nasdaq's free public API instead of waiting months
+    for live accrual -- see _si_read for the resulting (null) backtest finding."""
     conn.execute("""CREATE TABLE IF NOT EXISTS short_interest(
         ticker TEXT, asof_date TEXT, captured_at TEXT,
         shares_short REAL, shares_short_prior REAL, short_ratio REAL,
@@ -12389,10 +12390,15 @@ def _si_read(d):
       % of float     <5 low · 5-10 elevated · 10-20 high · >20 extreme
     Direction is month-over-month share count: >+10% BUILDING, <-10% COVERING.
 
-    HONESTY: this is a documented heuristic, NOT a model validated on this database. It
-    cannot be validated yet — see _si_ensure. Treat it as descriptive until `short_interest`
-    has enough history to run the hit-rate-vs-baseline recipe. This repo has already found
-    that plausible-looking flow signals (/building, /uoa) FAIL as direction predictors.
+    BACKTESTED 2026-07-30 (docs/PLAN.md A18): the "no history yet" blocker was real for
+    live daily accrual, but a full ~1yr settlement-date series was backfilled for free via
+    Nasdaq's public short-interest API (_si_fetch_history) instead of waiting months.
+    Result: N=1462 (64 tickers x 23 dates), SI %-change vs fwd 10-trading-day return,
+    rank-IC +0.017 (t=+0.65, p=0.52) -- NO meaningful edge. BUILDING (SI up >5%, N=476)
+    averaged +1.36% fwd vs COVERING (SI down >5%, N=349) +1.13% -- both close to the
+    unconditional baseline (+1.55%), no real separation. Same "no directional edge" verdict
+    as /building and /uoa (see below) -- keep this a DESCRIPTIVE read (crowding/squeeze-risk
+    context), never a directional signal.
     """
     if not d or not d.get("shares_short"):
         return None
@@ -12438,6 +12444,60 @@ def _si_capture(conn, tickers):
              d["shares_short"], d["shares_short_prior"], d["short_ratio"],
              d["pct_float"], d["float_shares"], d["avg_volume"]))
         n += 1
+    conn.commit()
+    return n
+
+
+def _si_fetch_history(ticker, max_rows=40):
+    """Full historical settlement-date short-interest series for one ticker, via Nasdaq's
+    public keyless API (docs/PLAN.md A18: yfinance only exposes current+prior month, which
+    is why the backtest was blocked on live accrual -- this endpoint gives ~1yr of real
+    bi-monthly settlement history in one call, unblocking it immediately instead of waiting
+    months). Returns [(asof_iso, shares_short, days_to_cover)] oldest-first, or [] on failure.
+    """
+    import urllib.request, json as _json
+    tk = str(ticker).upper()
+    try:
+        req = urllib.request.Request(
+            f"https://api.nasdaq.com/api/quote/{tk}/short-interest?assetclass=stocks",
+            headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            d = _json.loads(r.read().decode())
+        rows = ((d.get("data") or {}).get("shortInterestTable") or {}).get("rows") or []
+        out = []
+        for row in rows[:max_rows]:
+            try:
+                m, day, y = row["settlementDate"].split("/")
+                asof = f"{y}-{m}-{day}"
+                shares = float(str(row["interest"]).replace(",", ""))
+                dtc = float(row["daysToCover"])
+                out.append((asof, shares, dtc))
+            except Exception:
+                continue
+        return list(reversed(out))   # oldest-first
+    except Exception:
+        log.debug(f"_si_fetch_history({tk}) failed", exc_info=True)
+        return []
+
+
+def _si_backfill(conn, tickers):
+    """One-time historical backfill of `short_interest` from _si_fetch_history -- turns the
+    2-3-months-of-live-accrual blocker (A18) into an immediately-testable ~1yr history.
+    Idempotent (INSERT OR REPLACE on the (ticker, asof_date) PK), safe to re-run."""
+    _si_ensure(conn)
+    n = 0
+    for tk in dict.fromkeys(str(t).upper() for t in tickers if t):
+        hist = _si_fetch_history(tk)
+        prior = None
+        for asof, shares, dtc in hist:
+            conn.execute(
+                "INSERT OR REPLACE INTO short_interest (ticker,asof_date,captured_at,shares_short,"
+                "shares_short_prior,short_ratio,pct_float,float_shares,avg_volume) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (tk, asof, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), shares, prior,
+                 dtc, None, None, None))
+            prior = shares
+            n += 1
     conn.commit()
     return n
 

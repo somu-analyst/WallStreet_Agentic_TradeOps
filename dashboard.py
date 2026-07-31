@@ -21754,7 +21754,174 @@ if page == "🎯 High-Prob Options":
         _m3.metric("Realized P&L", f"${_pnl:+,.0f}",
                    f"{_pnl/max(_cap_set,1)*100:+.1f}% on settled capital" if _cap_set else None)
         _m4.metric("Capital settled", f"${_cap_set:,.0f}")
-        _m5.metric("Capital at risk (open)", f"${_cap_open:,.0f}")
+        _m5.metric("Capital at risk (open)", f"${_cap_open:,.0f}",
+                   help="Sum of max-loss across EVERY open rec — a book nobody could actually "
+                        "hold. Use the 💰 Capital Deployed panel below for a real, size-constrained "
+                        "basket.")
+
+        # ══ 💰 CAPITAL DEPLOYED (user ask 2026-07-31: "if i want to start with 10k, what
+        #    should i take and track them"). The scoreboard above answers "were the recs
+        #    right?"; this answers "what would MY account have done?" — a real portfolio is
+        #    capital-constrained, so the selection rule is exposed rather than hardcoded. ══
+        st.markdown("---")
+        st.markdown("### 💰 Capital Deployed — size a real basket and track it")
+        _cd_conn = get_conn()
+        _cd_conn.execute("""CREATE TABLE IF NOT EXISTS rec_basket(
+            basket_id INTEGER PRIMARY KEY AUTOINCREMENT, created TEXT, start_date TEXT,
+            capital REAL, method TEXT, params TEXT, note TEXT)""")
+        _cd_conn.execute("""CREATE TABLE IF NOT EXISTS rec_basket_legs(
+            basket_id INTEGER, rec_id INTEGER, alloc REAL, PRIMARY KEY(basket_id, rec_id))""")
+        _cd_conn.commit()
+
+        with st.expander("⚙️ Sizing rules", expanded=True):
+            _s1, _s2, _s3 = st.columns([1.1, 1.4, 1])
+            _cap0 = _s1.number_input("Starting capital ($)", 500, 10_000_000, 10_000, 500,
+                                     key="cd_cap")
+            _meth = _s2.radio("Selection rule", ["Best expected value", "Highest POP",
+                                                 "Fixed % risk per trade"],
+                              key="cd_meth", horizontal=False,
+                              help="EV = pop×max_profit − (1−pop)×max_loss. 'Fixed %' sizes "
+                                   "each position so its max loss is a set share of capital.")
+            _perTk = _s3.slider("Max per ticker", 1, 5, 1, key="cd_pertk")
+            _t1, _t2, _t3 = st.columns(3)
+            _riskPct = _t1.slider("Risk per trade (%)", 0.5, 20.0, 2.0, 0.5, key="cd_risk",
+                                  help="Only used by 'Fixed % risk per trade'.")
+            _maxPos = _t2.slider("Max positions", 1, 40, 10, 1, key="cd_maxpos")
+            _minPop = _t3.slider("Min POP for basket", 70, 99, 80, 1, key="cd_minpop")
+
+        # candidate pool = the CURRENTLY-OPEN recs in the filtered slice
+        _pool = _v[_v["status"] == "OPEN"].copy()
+        for _c in ("pop", "capital", "net", "ror"):
+            if _c in _pool.columns:
+                _pool[_c] = pd.to_numeric(_pool[_c], errors="coerce")
+        _pool = _pool[(_pool["pop"] >= _minPop) & (_pool["capital"] > 0)].dropna(subset=["capital"])
+
+        if _pool.empty:
+            st.info("No open recommendations match these filters — widen the filters above.")
+        else:
+            # Max profit per CONTRACT. `net` is stored PER SHARE while `capital` is already
+            # per contract — verified against settled rows (SPY: capital 158, realized pnl
+            # +42 => credit 0.42/share x100) and against spread geometry (BIIB width $10:
+            # 1000 - 72.5 = 927.5 = capital). Mixing the two scales understates max profit
+            # 100x and makes every EV look catastrophic, so the x100 is required.
+            _pool["maxp"] = pd.to_numeric(_pool.get("net"), errors="coerce").abs().fillna(0.0) * 100.0
+            _mask = _pool["maxp"] <= 0
+            if _mask.any() and "ror" in _pool:
+                _pool.loc[_mask, "maxp"] = (_pool.loc[_mask, "ror"].fillna(0) / 100.0
+                                            * _pool.loc[_mask, "capital"])
+            _p = _pool["pop"] / 100.0
+            _pool["ev"] = _p * _pool["maxp"] - (1 - _p) * _pool["capital"]
+            _pool["ev_per_$"] = _pool["ev"] / _pool["capital"].replace(0, float("nan"))
+
+            _pool = _pool.sort_values(
+                {"Best expected value": "ev_per_$", "Highest POP": "pop",
+                 "Fixed % risk per trade": "ev_per_$"}[_meth], ascending=False)
+
+            # greedy fill under the capital constraint + per-ticker cap
+            _budget = float(_cap0); _taken = []; _seen = {}
+            for _, r in _pool.iterrows():
+                if len(_taken) >= _maxPos:
+                    break
+                _tk = str(r["ticker"])
+                if _seen.get(_tk, 0) >= _perTk:
+                    continue
+                _need = float(r["capital"])
+                if _meth == "Fixed % risk per trade":
+                    _target = float(_cap0) * _riskPct / 100.0
+                    _lots = int(_target // _need) if _need > 0 else 0
+                    if _lots < 1:
+                        continue                      # one lot already exceeds the risk budget
+                    _need = _lots * _need
+                else:
+                    _lots = 1
+                if _need > _budget:
+                    continue
+                _budget -= _need; _seen[_tk] = _seen.get(_tk, 0) + 1
+                _taken.append({"rec_id": int(r["rec_id"]), "Ticker": _tk,
+                               "Strategy": r["strategy"], "Expiry": r["expiry"],
+                               "Lots": _lots, "POP %": round(float(r["pop"]), 1),
+                               "Capital": round(_need, 2),
+                               "Max profit": round(float(r["maxp"]) * _lots, 2),
+                               "EV": round(float(r["ev"]) * _lots, 2)})
+
+            if not _taken:
+                st.warning(f"${_cap0:,.0f} isn't enough for any single position under these rules "
+                           f"— the cheapest candidate needs ${_pool['capital'].min():,.0f}.")
+            else:
+                _bk = pd.DataFrame(_taken)
+                _dep = float(_bk["Capital"].sum()); _evs = float(_bk["EV"].sum())
+                _k1, _k2, _k3, _k4 = st.columns(4)
+                _k1.metric("Deployed", f"${_dep:,.0f}", f"{_dep/_cap0*100:.0f}% of capital")
+                _k2.metric("Cash left", f"${_cap0-_dep:,.0f}")
+                _k3.metric("Positions", f"{len(_bk)}", f"{_bk['Ticker'].nunique()} tickers")
+                _k4.metric("Expected value", f"${_evs:+,.0f}",
+                           f"{_evs/max(_dep,1)*100:+.1f}% on deployed",
+                           help="Model EV from POP — NOT a forecast. POP itself is "
+                                "BS-derived and unvalidated on this book.")
+                st.dataframe(_bk.drop(columns=["rec_id"]), hide_index=True,
+                             use_container_width=True)
+                st.caption("Greedy fill: ranked by the rule above, skipping anything that "
+                           "breaches the per-ticker cap or remaining cash. Max profit/EV "
+                           "assume the credit is kept in full at expiry.")
+
+                _sv1, _sv2 = st.columns([2, 1])
+                _note = _sv1.text_input("Basket note (optional)", key="cd_note",
+                                        placeholder="e.g. 10k paper start, Aug cycle")
+                if _sv2.button("📌 Save & track this basket", key="cd_save"):
+                    _cur = _cd_conn.execute(
+                        "INSERT INTO rec_basket(created, start_date, capital, method, params, note) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                         datetime.now().strftime("%Y-%m-%d"), float(_cap0), _meth,
+                         f"perTk={_perTk};risk%={_riskPct};maxPos={_maxPos};minPop={_minPop}",
+                         _note or ""))
+                    _bid = _cur.lastrowid
+                    _cd_conn.executemany(
+                        "INSERT OR REPLACE INTO rec_basket_legs(basket_id, rec_id, alloc) VALUES (?,?,?)",
+                        [(_bid, int(r["rec_id"]), float(r["Capital"])) for _, r in _bk.iterrows()])
+                    _cd_conn.commit()
+                    st.success(f"Saved basket #{_bid} — ${_dep:,.0f} deployed across {len(_bk)} positions.")
+                    st.rerun()
+
+        # ── saved baskets: realized + mark-to-market equity ──
+        _saved = pd.read_sql("SELECT * FROM rec_basket ORDER BY basket_id DESC", _cd_conn)
+        if not _saved.empty:
+            st.markdown("#### 📈 Tracked baskets")
+            _rows = []
+            for _, b in _saved.iterrows():
+                _legs = pd.read_sql(
+                    "SELECT l.alloc, r.status, r.pnl, r.capital, r.ticker FROM rec_basket_legs l "
+                    "JOIN hiprob_recs r ON r.rec_id = l.rec_id WHERE l.basket_id=?",
+                    _cd_conn, params=(int(b["basket_id"]),))
+                if _legs.empty:
+                    continue
+                _lot = (_legs["alloc"] / _legs["capital"].replace(0, float("nan"))).fillna(1.0)
+                _cl = _legs[_legs["status"] != "OPEN"]
+                _real = float((pd.to_numeric(_cl["pnl"], errors="coerce").fillna(0)
+                               * _lot.loc[_cl.index]).sum())
+                _open_n = int((_legs["status"] == "OPEN").sum())
+                _rows.append({
+                    "#": int(b["basket_id"]), "Started": b["start_date"],
+                    "Capital": f"${b['capital']:,.0f}", "Method": b["method"],
+                    "Positions": len(_legs), "Open": _open_n, "Settled": len(_cl),
+                    "Realized P&L": round(_real, 2),
+                    "Return %": round(_real / max(float(b["capital"]), 1) * 100, 2),
+                    "Note": b["note"] or "",
+                })
+            if _rows:
+                _bt = pd.DataFrame(_rows)
+                st.dataframe(_bt, hide_index=True, use_container_width=True)
+                if (_bt["Settled"] > 0).any():
+                    _eq = _bt[_bt["Settled"] > 0].sort_values("#")
+                    _fig_eq = go.Figure(go.Bar(x=_eq["#"].astype(str), y=_eq["Realized P&L"],
+                        marker_color=["#2ecc71" if v >= 0 else "#e74c3c" for v in _eq["Realized P&L"]]))
+                    _fig_eq.update_layout(height=240, title="Realized P&L by basket",
+                                          xaxis_title="basket #", yaxis_title="$",
+                                          margin=dict(t=40, b=30, l=0, r=0))
+                    st.plotly_chart(_fig_eq, use_container_width=True, key="cd_eq")
+                else:
+                    st.caption("No legs settled yet — P&L populates as each expiry passes.")
+        _cd_conn.close()
 
         # ── P&L by period: daily / weekly / monthly ──
         _tabD, _tabW, _tabM, _tabF = st.tabs(["📅 Daily", "🗓 Weekly", "📆 Monthly", "🔬 By filter"])

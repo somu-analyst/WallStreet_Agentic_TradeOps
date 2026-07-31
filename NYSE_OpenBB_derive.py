@@ -193,10 +193,13 @@ def compute_oi_vol_change(trade_day, db_path=OB_DB):
 
 # ── step 3: stock_daily (OHLC + pcr_oi) — optional (needs yfinance) ──
 def build_stock_daily(trade_day, all_tickers, db_path=OB_DB):
-    """Source `close` from the underlying_price the CBOE chain fetch already carries (added
-    2026-07-30) instead of a separate yfinance call per ticker -- user ask: "why are we using
-    yahoo, use only bb". Zero new API calls, no Yahoo dependency, and immune to yfinance
-    rate-limiting (which is what silently zeroed this table out the night this was written).
+    """Source `close` from the option chain itself, not a separate yfinance call per ticker
+    (user ask 2026-07-30: "why are we using yahoo, use only bb"). Zero new API calls, no
+    Yahoo dependency, immune to the yfinance rate-limiting that silently zeroed this table
+    out the night this was written.
+
+    Spot precedence: put-call parity off the captured chain (best -- same instant as the
+    quotes, see below) > underlying_price stored at capture > yfinance fallback.
 
     Honest limitation: a chain snapshot is one point-in-time price, not a true intraday bar,
     so open/high/low/volume stay NULL here -- they need a real daily-bar source if ever wanted.
@@ -208,17 +211,35 @@ def build_stock_daily(trade_day, all_tickers, db_path=OB_DB):
     print(f"Building stock_daily for {trade_day_str_db} [{os.path.basename(db_path)}]...")
     conn = sqlite3.connect(db_path, timeout=30)
     try:
-        spot_df = pd.read_sql(
-            "SELECT ticker, AVG(underlying_price) AS spot FROM options_openbb "
-            "WHERE trade_date=? AND underlying_price IS NOT NULL GROUP BY ticker",
+        # PUT-CALL PARITY spot (2026-07-30) -- preferred source. Derived from the option
+        # prices themselves at the instant the chain was captured, so it can't drift the way
+        # a separately-timed quote does. Measured on the earnings evening this was written:
+        # a same-night CBOE quote had AAPL 6.4% and AMZN 9.4% off the chain's own implied
+        # spot, because both reported after the close and moved between the two calls.
+        #   C - P = S - K*e^(-rT)  =>  S ~= C_mid - P_mid + K   (r*T negligible here)
+        # Median across every two-sided strike, so one wide/stale quote can't move it.
+        par = pd.read_sql(
+            "SELECT ticker, strike, bid_Call, ask_Call, bid_Put, ask_Put FROM options_openbb "
+            "WHERE trade_date=? AND bid_Call>0 AND ask_Call>0 AND bid_Put>0 AND ask_Put>0",
             conn, params=(trade_day_str_db,))
         oi_df = pd.read_sql(
             "SELECT ticker, SUM(openInt_Call) AS coi, SUM(openInt_Put) AS poi FROM options_daily "
             "WHERE trade_date=? GROUP BY ticker", conn, params=(trade_day_str_db,))
+        spot_df = pd.read_sql(
+            "SELECT ticker, AVG(underlying_price) AS spot FROM options_openbb "
+            "WHERE trade_date=? AND underlying_price IS NOT NULL GROUP BY ticker",
+            conn, params=(trade_day_str_db,))
     finally:
         conn.close()
 
     spot_map = dict(zip(spot_df["ticker"], spot_df["spot"]))
+    if not par.empty:
+        par["_s"] = ((par["bid_Call"] + par["ask_Call"]) / 2
+                    - (par["bid_Put"] + par["ask_Put"]) / 2 + par["strike"])
+        _parity = {t: float(v) for t, v in par.groupby("ticker")["_s"].median().items()
+                   if v is not None and v > 0}
+        print(f"  parity spot derived for {len(_parity)} tickers (preferred over quote)")
+        spot_map.update(_parity)      # parity wins wherever it exists
     oi_map = {r["ticker"]: (r["coi"] or 0, r["poi"] or 0) for _, r in oi_df.iterrows()}
 
     records = []

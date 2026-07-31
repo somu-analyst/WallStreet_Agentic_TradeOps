@@ -21795,6 +21795,12 @@ if page == "🎯 High-Prob Options":
             if _c in _pool.columns:
                 _pool[_c] = pd.to_numeric(_pool[_c], errors="coerce")
         _pool = _pool[(_pool["pop"] >= _minPop) & (_pool["capital"] > 0)].dropna(subset=["capital"])
+        # Drop POP >= 99.5 from SELECTION, not just flag it. These are model artifacts, and
+        # because a fake ~100% POP produces a fake-huge EV they sort straight to the top and
+        # would soak up real capital. Verified degenerate: ARKX 29-put stored POP 100.0 while
+        # BS on its own captured IV (38.7%, 44 DTE, spot 32.21) gives 78.3%.
+        _bogus = int((_pool["pop"] >= 99.5).sum())
+        _pool = _pool[_pool["pop"] < 99.5]
 
         if _pool.empty:
             st.info("No open recommendations match these filters — widen the filters above.")
@@ -21804,7 +21810,16 @@ if page == "🎯 High-Prob Options":
             # +42 => credit 0.42/share x100) and against spread geometry (BIIB width $10:
             # 1000 - 72.5 = 927.5 = capital). Mixing the two scales understates max profit
             # 100x and makes every EV look catastrophic, so the x100 is required.
-            _pool["maxp"] = pd.to_numeric(_pool.get("net"), errors="coerce").abs().fillna(0.0) * 100.0
+            #
+            # CREDIT vs DEBIT matters: for a credit spread `net` IS the max profit, but for a
+            # DEBIT spread `net` is the COST paid (max profit = width − cost). Treating a
+            # debit's cost as its profit flatters it badly — EFA 100/105 showed max profit
+            # $283 when the real figure is (5 − 2.83)×100 = $217.
+            _net100 = pd.to_numeric(_pool.get("net"), errors="coerce").abs().fillna(0.0) * 100.0
+            _isdebit = _pool["strategy"].astype(str).str.contains("debit|buy", case=False, na=False)
+            _width100 = (pd.to_numeric(_pool.get("k1"), errors="coerce")
+                         - pd.to_numeric(_pool.get("k2"), errors="coerce")).abs() * 100.0
+            _pool["maxp"] = _net100.where(~_isdebit, (_width100 - _net100).clip(lower=0.0))
             _mask = _pool["maxp"] <= 0
             if _mask.any() and "ror" in _pool:
                 _pool.loc[_mask, "maxp"] = (_pool.loc[_mask, "ror"].fillna(0) / 100.0
@@ -21837,12 +21852,42 @@ if page == "🎯 High-Prob Options":
                 if _need > _budget:
                     continue
                 _budget -= _need; _seen[_tk] = _seen.get(_tk, 0) + 1
+                # ── per-row verdict ──────────────────────────────────────────────
+                # The whole trade reduces to ONE comparison. With payoff ratio
+                #   c = max_profit / (max_profit + max_loss)
+                # EV > 0  <=>  c > (1 − POP).   [algebra: pop·c > (1−pop)(1−c) => c > 1−pop]
+                # So "80% POP" is only worth taking if you're paid MORE than 20% of the
+                # width. That single line is what separates a real edge from the classic
+                # premium-selling trap, and it's why a high win-rate alone proves nothing.
+                _mp1 = float(r["maxp"]); _ml1 = float(r["capital"])
+                _c = _mp1 / (_mp1 + _ml1) if (_mp1 + _ml1) > 0 else 0.0
+                _popf = float(r["pop"]) / 100.0
+                _need_c = 1.0 - _popf
+                if float(r["pop"]) >= 99.5:
+                    _verdict = "🔴 POP not credible"
+                    _why = ("POP ≈100% is a model artifact, not a real probability — "
+                            "recomputed from live IV this is nowhere near certain. Ignore.")
+                elif _c > _need_c * 1.15:
+                    _verdict = "✅ Real edge"
+                    _why = (f"paid {_c:.0%} of width, only {_need_c:.0%} needed at "
+                            f"{_popf:.0%} POP — compensated for the risk")
+                elif _c > _need_c:
+                    _verdict = "🟡 Thin edge"
+                    _why = (f"paid {_c:.0%} vs {_need_c:.0%} needed — positive but the "
+                            f"margin is inside fees/slippage")
+                else:
+                    _verdict = "⚠️ Premium trap"
+                    _why = (f"paid only {_c:.0%} of width but need {_need_c:.0%} at "
+                            f"{_popf:.0%} POP — the {1-_popf:.0%} losses outweigh the "
+                            f"{_popf:.0%} wins")
                 _taken.append({"rec_id": int(r["rec_id"]), "Ticker": _tk,
                                "Strategy": r["strategy"], "Expiry": r["expiry"],
                                "Lots": _lots, "POP %": round(float(r["pop"]), 1),
                                "Capital": round(_need, 2),
-                               "Max profit": round(float(r["maxp"]) * _lots, 2),
-                               "EV": round(float(r["ev"]) * _lots, 2)})
+                               "Max profit": round(_mp1 * _lots, 2),
+                               "Paid %": round(_c * 100, 1), "Need %": round(_need_c * 100, 1),
+                               "EV": round(float(r["ev"]) * _lots, 2),
+                               "Verdict": _verdict, "Why": _why})
 
             if not _taken:
                 st.warning(f"${_cap0:,.0f} isn't enough for any single position under these rules "
@@ -21860,9 +21905,29 @@ if page == "🎯 High-Prob Options":
                                 "BS-derived and unvalidated on this book.")
                 st.dataframe(_bk.drop(columns=["rec_id"]), hide_index=True,
                              use_container_width=True)
-                st.caption("Greedy fill: ranked by the rule above, skipping anything that "
-                           "breaches the per-ticker cap or remaining cash. Max profit/EV "
-                           "assume the credit is kept in full at expiry.")
+
+                # basket-level read — the "so what" above the row detail
+                _n_trap = int(_bk["Verdict"].str.contains("trap", case=False).sum())
+                _n_edge = int(_bk["Verdict"].str.contains("Real edge").sum())
+                if _bogus:
+                    st.error(f"🔴 Excluded {_bogus} recommendation(s) showing POP ≈100%. That is "
+                             f"a model artifact, not a real probability — recomputed from the "
+                             f"captured IV, one of them (ARKX 29-put) is actually ~78%. Because a "
+                             f"fake POP produces a fake-huge EV, they would otherwise rank first "
+                             f"and absorb real capital.")
+                if _n_trap > len(_bk) / 2:
+                    st.warning(
+                        f"⚠️ **{_n_trap} of {len(_bk)} are premium traps.** They pay less than "
+                        f"(1 − POP) of the width, so the rare losses outweigh the frequent wins. "
+                        f"A high win rate is not an edge by itself — switch **Selection rule** to "
+                        f"*Best expected value* to rank by payoff-vs-probability instead of POP.")
+                elif _n_edge:
+                    st.success(f"✅ **{_n_edge} of {len(_bk)} clear the bar** — paid more than "
+                               f"(1 − POP) of the width, so the credit compensates for the risk.")
+                st.caption("**The rule on every row:** a trade is +EV only when *Paid %* > "
+                           "*Need %*, where Need = 1 − POP. Hover **Why** for the per-row "
+                           "reasoning. Max profit assumes the credit is kept in full at expiry; "
+                           "debit spreads use width − cost.")
 
                 _sv1, _sv2 = st.columns([2, 1])
                 _note = _sv1.text_input("Basket note (optional)", key="cd_note",

@@ -850,7 +850,7 @@ def merge_calls_puts_per_strike_parallel(trade_day, company_name_map, all_ticker
     df_daily = df_final.copy()
     df_daily["load_date"] = load_date
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     print("Writing to DB:", DB_PATH)
 
     if not df_daily.empty and "trade_date" in df_daily.columns:
@@ -938,7 +938,7 @@ def compute_oi_vol_change(trade_day, db_path=None):
 
     trade_date_now_db = trade_day.strftime("%Y-%m-%d")  # matches trade_date in options_daily
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
 
     # 1) Find last previous trade_date in options_daily
     q_prev_date = """
@@ -1131,7 +1131,7 @@ def build_stock_daily(trade_day, all_tickers, db_path=None):
             c = float(row.get("Close", np.nan))
             v = float(row.get("Volume", np.nan))
 
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(db_path, timeout=30)
             df_opt = pd.read_sql(
                 """
                 SELECT openInt_Call, openInt_Put
@@ -1170,7 +1170,7 @@ def build_stock_daily(trade_day, all_tickers, db_path=None):
 
     df_stock = pd.DataFrame(records)
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     try:
         conn.execute(f"DELETE FROM {TABLE_STOCK_DAILY} WHERE trade_date = ?", (trade_day_str_db,))
         conn.commit()

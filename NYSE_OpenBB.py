@@ -165,7 +165,7 @@ def compare_vs_yfinance(trade_date=None):
     report coverage + OI/price agreement. Run daily during the trial period."""
     prod = os.path.join(DATA_DIR, "US_data.db")
     td = trade_date or _effective_trade_date().strftime("%Y-%m-%d")
-    co = sqlite3.connect(OUT_DB_PATH); cy = sqlite3.connect(f"file:{prod}?mode=ro", uri=True)
+    co = sqlite3.connect(OUT_DB_PATH, timeout=30); cy = sqlite3.connect(f"file:{prod}?mode=ro", uri=True)
     try:
         ob = pd.read_sql("SELECT ticker,expiry_date,strike,openInt_Call,openInt_Put,"
                          "lastPrice_Call,lastPrice_Put FROM options_openbb WHERE trade_date=?", co, params=(td,))
@@ -676,7 +676,11 @@ def main():
 
     t0 = time.time()
     today_str = pd.Timestamp(trade_dt).strftime("%Y-%m-%d")
-    conn = sqlite3.connect(OUT_DB_PATH)
+    # timeout=30 (2026-07-30, after a real crash): an ad-hoc script writing to the same DB
+    # from another process caused an immediate "database is locked" here instead of a wait,
+    # killing the whole 734-ticker run at 11%. Every writer to this DB needs to wait on a
+    # transient lock rather than error out -- see the matching fix in get_conn() elsewhere.
+    conn = sqlite3.connect(OUT_DB_PATH, timeout=30)
     # ── RESUME (2026-07-18): chunks APPEND + commit as they land, so a halted/killed
     # run leaves whole tickers safely in the DB. Default = skip those and fetch only
     # what's missing for the day (laptop closed mid-run, Ctrl+C, crash — just rerun).
@@ -820,14 +824,14 @@ def main():
 
     # --full: one-shot recovery — derive + skew run in-process (no subprocess)
     if getattr(args, "full", False):
-        _sc = sqlite3.connect(OB_DB)
+        _sc = sqlite3.connect(OB_DB, timeout=30)
         _dates = [r[0] for r in _sc.execute(
             "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
         _sc.close()
         print(f"\n{'='*60}\n  derive (options_daily/options_change/stock_daily)\n{'='*60}")
         derive(dates=_dates, do_stock=True)
         print(f"\n{'='*60}\n  skew_snapshot\n{'='*60}")
-        _sc = sqlite3.connect(OB_DB)
+        _sc = sqlite3.connect(OB_DB, timeout=30)
         try:
             build_skew(_sc)
         finally:
@@ -895,7 +899,7 @@ def _map_raw_to_options_daily(conn, date):
 def _compute_oi_vol_change(trade_day, db_path=OB_DB):
     trade_date_now_db = trade_day.strftime("%Y-%m-%d")
     print(f"Computing OI/vol changes for {trade_date_now_db}...")
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     row = conn.execute("SELECT DISTINCT trade_date FROM options_daily WHERE trade_date < ? "
                        "ORDER BY trade_date DESC LIMIT 1", (trade_date_now_db,)).fetchone()
     if not row:
@@ -975,7 +979,7 @@ def _build_stock_daily(trade_day, all_tickers, db_path=OB_DB):
             if hist.empty: hist = tk.history(period="1d")
             if hist.empty: continue
             r = hist.iloc[-1]
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(db_path, timeout=30)
             df_opt = pd.read_sql("SELECT openInt_Call, openInt_Put FROM options_daily "
                                  "WHERE ticker=? AND trade_date=?", conn, params=(ticker, trade_day_str))
             conn.close()
@@ -992,7 +996,7 @@ def _build_stock_daily(trade_day, all_tickers, db_path=OB_DB):
     if not records:
         print("  stock_daily: no records"); return None
     df_stock = pd.DataFrame(records)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     try:
         conn.execute("DELETE FROM stock_daily WHERE trade_date=?", (trade_day_str,)); conn.commit()
     except Exception:
@@ -1090,7 +1094,7 @@ def _build_fundamentals(conn, min_oi=10000, max_names=500):
 
 def derive(dates=None, do_stock=False):
     """Full derive pipeline: options_daily -> options_change -> stock_daily -> serving layer."""
-    conn = sqlite3.connect(OB_DB)
+    conn = sqlite3.connect(OB_DB, timeout=30)
     all_dates = [r[0] for r in conn.execute(
         "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
     dates = dates or all_dates
@@ -1105,7 +1109,7 @@ def derive(dates=None, do_stock=False):
         except Exception as e: print(f"  {d}: change failed: {e}")
     if do_stock:
         print("\nSTEP 3: build_stock_daily")
-        c = sqlite3.connect(OB_DB)
+        c = sqlite3.connect(OB_DB, timeout=30)
         tickers = [r[0] for r in c.execute(
             "SELECT DISTINCT ticker FROM options_daily WHERE trade_date=?", (dates[-1],))]
         c.close()
@@ -1113,12 +1117,12 @@ def derive(dates=None, do_stock=False):
             try: _build_stock_daily(datetime.strptime(d, "%Y-%m-%d"), tickers)
             except Exception as e: print(f"  {d}: stock_daily failed: {e}")
     print("\nSTEP 4: build serving layer")
-    c = sqlite3.connect(OB_DB)
+    c = sqlite3.connect(OB_DB, timeout=30)
     try: _build_serving_layer(c, dates=dates)
     except Exception as e: print(f"  serving layer failed: {e}")
     finally: c.close()
     print("\nSTEP 5: build fundamentals")
-    c = sqlite3.connect(OB_DB)
+    c = sqlite3.connect(OB_DB, timeout=30)
     try: _build_fundamentals(c)
     except Exception as e: print(f"  fundamentals failed: {e}")
     finally: c.close()

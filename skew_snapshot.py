@@ -81,7 +81,7 @@ def build(conn):
 
 if __name__ == "__main__":
     print(f"skew_snapshot -> {DB}")
-    c = sqlite3.connect(DB)
+    c = sqlite3.connect(DB, timeout=30)
     try:
         build(c)
         n = c.execute("SELECT COUNT(*), COUNT(DISTINCT trade_date) FROM skew_snapshot").fetchone()

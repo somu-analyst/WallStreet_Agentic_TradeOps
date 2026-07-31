@@ -66,7 +66,7 @@ def mmddyyyy_to_str(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
 
 def get_conn():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(DB_PATH, timeout=30)
 
 def latest_trade_date_now():
     with get_conn() as conn:

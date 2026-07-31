@@ -28425,6 +28425,88 @@ def _daily_history(ticker, years=6, conn=None):
             conn.close()
 
 
+def _daily_ohlc(ticker, years=2, conn=None):
+    """Full OHLC DataFrame from stock_history (same lazy-backfill path as _daily_history,
+    which returns close only). Needed by the range-based volatility estimators below —
+    they use the high/low the DB already stores but nothing was reading. None if empty."""
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        _daily_history(ticker, years, conn)      # reuse the backfill/write-through path
+        df = pd.read_sql(
+            "SELECT trade_date, open, high, low, close FROM stock_history "
+            "WHERE ticker=? ORDER BY trade_date", conn, params=(str(ticker).upper(),))
+        if df.empty:
+            return None
+        df.index = pd.to_datetime(df["trade_date"])
+        return df[["open", "high", "low", "close"]].astype(float)
+    finally:
+        if own:
+            conn.close()
+
+
+def _realized_vol(ohlc, window=30, method="yang_zhang"):
+    """Annualized realized volatility via range-based estimators (adopted from the
+    `volest` reference in awesome-systematic-trading, 2026-07-30 — see docs/ADOPTED.md).
+
+    Close-to-close throws away the intraday range the DB already stores. Range-based
+    estimators use the same data with far lower variance (Parkinson ~5x more efficient
+    than close-to-close; Garman-Klass ~7x), so the SAME history yields a steadier vol
+    number -- which matters directly for VRP (IV-RV), where a noisy RV creates fake
+    richness/cheapness signals.
+
+      close_close    baseline sigma of log returns
+      parkinson      high/low range only; ignores gaps and drift
+      garman_klass   OHLC; more efficient still, but downward-biased on gappy names
+      rogers_satchell OHLC; drift-independent (handles trending names correctly)
+      yang_zhang     overnight + open-close + Rogers-Satchell; handles BOTH gaps and
+                     drift -- the most robust default for equities with earnings gaps
+
+    Returns annualized vol as a decimal (0.32 = 32%), or None when data is insufficient.
+    """
+    import numpy as _np
+    if ohlc is None or len(ohlc) < window + 2:
+        return None
+    o, h, l, c = (ohlc["open"], ohlc["high"], ohlc["low"], ohlc["close"])
+    if (h <= 0).any() or (l <= 0).any() or (c <= 0).any():
+        return None
+    A = _np.sqrt(252.0)
+    try:
+        if method == "close_close":
+            return float(_np.log(c / c.shift(1)).tail(window).std(ddof=1) * A)
+
+        if method == "parkinson":
+            hl = _np.log(h / l) ** 2
+            return float(_np.sqrt(hl.tail(window).mean() / (4 * _np.log(2))) * A)
+
+        if method == "garman_klass":
+            hl = 0.5 * _np.log(h / l) ** 2
+            co = (2 * _np.log(2) - 1) * _np.log(c / o) ** 2
+            return float(_np.sqrt((hl - co).tail(window).mean()) * A)
+
+        if method == "rogers_satchell":
+            rs = (_np.log(h / c) * _np.log(h / o)) + (_np.log(l / c) * _np.log(l / o))
+            return float(_np.sqrt(rs.tail(window).mean()) * A)
+
+        # yang_zhang (default): overnight + open-close + Rogers-Satchell, k per the paper
+        oc_prev = _np.log(o / c.shift(1))            # overnight (gap) component
+        cc_open = _np.log(c / o)                     # open-to-close component
+        rs = (_np.log(h / c) * _np.log(h / o)) + (_np.log(l / c) * _np.log(l / o))
+        n = window
+        k = 0.34 / (1.34 + (n + 1) / (n - 1))
+        v_o = oc_prev.tail(n).var(ddof=1)
+        v_c = cc_open.tail(n).var(ddof=1)
+        v_rs = rs.tail(n).mean()
+        val = v_o + k * v_c + (1 - k) * v_rs
+        if not (val > 0):
+            return None
+        return float(_np.sqrt(val) * A)
+    except Exception:
+        log.debug("realized vol (%s) failed", method, exc_info=True)
+        return None
+
+
 def _history_matrix(tickers, years=6, conn=None):
     """Wide close matrix (dates × tickers) from stock_history, lazily backfilling
     any missing tickers. For universe-wide factor/pairs work with real history."""
@@ -30431,11 +30513,20 @@ async def uoa_view(query):
 
 
 # ── VARIANCE RISK PREMIUM (implied vol vs realized vol) ──────────
-def _vrp_scan(conn, tickers=None, rv_window=30, sell_thr=0.03, buy_thr=-0.02):
+def _vrp_scan(conn, tickers=None, rv_window=30, sell_thr=0.03, buy_thr=-0.02,
+              rv_method="yang_zhang"):
     """VRP = ATM implied vol − realized vol. High VRP → options rich (sell
-    premium); negative → cheap (buy vol / long gamma). IV from _iv_rank (DB);
-    RV = jump-robust MAD estimator (1.4826·MAD·√252) so a single earnings gap
-    doesn't inflate 'normal' vol. Returns dicts sorted by VRP desc."""
+    premium); negative → cheap (buy vol / long gamma). IV from _iv_rank (DB).
+
+    RV = Yang-Zhang range estimator (2026-07-30, adopted from `volest` — see
+    docs/ADOPTED.md). Previously a close-to-close MAD estimator, which threw away the
+    intraday high/low the DB already stores AND (being close-to-close) ignored overnight
+    gaps entirely. Yang-Zhang captures both the gap and the intraday range, so an
+    earnings-gap name is no longer scored as if it were calm: measured 2026-07-30, MU
+    reads 73% under Parkinson vs 136% under Yang-Zhang — a ~2x difference in RV that
+    flips the VRP verdict outright. Falls back to the old MAD estimator when OHLC is
+    unavailable, so nothing regresses to no-signal.
+    """
     import numpy as _np
     tickers = tickers or SCAN_UNIVERSE
     rows = []
@@ -30446,12 +30537,17 @@ def _vrp_scan(conn, tickers=None, rv_window=30, sell_thr=0.03, buy_thr=-0.02):
             iv = ivr.get("iv") if ivr else None
             if not iv or iv <= 0:
                 continue
-            h = _daily_history(tk, 1, conn)
-            if h is None or len(h) < rv_window + 2:
-                continue
-            r = h.pct_change().dropna().tail(rv_window)
-            mad = float((r - r.median()).abs().median())        # robust to earnings jumps
-            rv = 1.4826 * mad * _np.sqrt(252)
+            rv = None
+            _ohlc = _daily_ohlc(tk, 2, conn)
+            if _ohlc is not None:
+                rv = _realized_vol(_ohlc, rv_window, rv_method)
+            if not rv or rv <= 0:                      # fallback: close-to-close MAD
+                h = _daily_history(tk, 1, conn)
+                if h is None or len(h) < rv_window + 2:
+                    continue
+                r = h.pct_change().dropna().tail(rv_window)
+                mad = float((r - r.median()).abs().median())
+                rv = 1.4826 * mad * _np.sqrt(252)
             if rv <= 0:
                 continue
             vrp = iv - rv
@@ -30482,7 +30578,8 @@ async def _send_vrp(msg, rows):
             f"<b>Cheapest (buy vol):</b> {', '.join(r['ticker'] for r in buys) or '—'}")
     txt = ("🌪️ <b>Variance Risk Premium — IV vs Realized</b>\n"
            "<i>IV richer than realized → premium-selling edge (ICs/strangles); IV below realized → "
-           "long-gamma. RV = 20d. Not advice.</i>\n\n" + table + "\n\n" + best)
+           "long-gamma. RV = 30d Yang-Zhang (gap+range aware). Not advice.</i>\n\n"
+           + table + "\n\n" + best)
     await msg.reply_text(txt[:4000], parse_mode=H,
                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="vrp_view"),
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))

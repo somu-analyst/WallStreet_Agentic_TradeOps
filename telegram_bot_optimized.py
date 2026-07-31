@@ -11571,7 +11571,8 @@ def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0
                 if pop is None or pop < min_pop:
                     continue
                 out.append({"tk": tk, "kind": "CSP", "setup": f"{K:g}P", "credit": cr,
-                            "risk": None, "be": K - cr, "pop": pop, "dte": dte, "exp": exp,
+                            "risk": (K - cr) * 100,   # CSP collateral, see _hiprob_scan note
+                            "be": K - cr, "pop": pop, "dte": dte, "exp": exp,
                             "spot": spot, "ret": cr / max(K - cr, 0.01) * 100})
                 if i + 2 < len(pl):
                     Kl, cl = pl[i + 2]
@@ -26429,7 +26430,12 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
                 if pop is None or pop < min_pop:
                     continue
                 out.append({"tk": tk, "kind": "CSP", "setup": f"{K:g}P", "credit": cr,
-                            "risk": None, "be": K - cr, "pop": pop, "dte": dte,
+                            "risk": (K - cr) * 100,   # CSP collateral = (strike - credit) x 100.
+                            # Was None -> persisted as capital 0 (found 2026-07-31),
+                            # which dropped cash-secured puts out of every
+                            # return-on-capital denominator and made a backfilled
+                            # book look ~9x more efficient than it really was.
+                            "be": K - cr, "pop": pop, "dte": dte,
                             "ret": cr / max(K - cr, 0.01) * 100})
                 if i + 2 < len(pl):
                     Kl = float(pl.loc[i + 2, "strike"]); cl = float(pl.loc[i + 2, "mid"]); net = cr - cl; width = K - Kl

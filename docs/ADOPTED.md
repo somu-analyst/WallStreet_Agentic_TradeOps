@@ -347,8 +347,18 @@ One calm cohort cannot separate "model is conservative" from "we got a quiet mon
 |---|---|---|---|---|
 | LIVE | trap (paid<need) | 185 | **96.8%** | **+1.89%** |
 | LIVE | edge (paid>need) | 51 | 90.2% | **+16.95%** |
-| BACKFILL | trap | 16 | **100.0%** | +21.3% |
-| BACKFILL | edge | 59 | 89.8% | **+136.8%** |
+| BACKFILL | trap | 16 | **100.0%** | ~~+21.3%~~ |
+| BACKFILL | edge | 59 | 89.8% | ~~+136.8%~~ |
+
+> **CORRECTION (same day).** The BACKFILL percentages above were an artifact and are
+> withdrawn. `_hiprob_scan_asof` set `risk: None` for cash-secured puts, so they persisted
+> with `capital = 0` — 25 CSPs contributed $15,532 of P&L against a **zero denominator**.
+> Fixed at source in both scanners (`risk = (K − credit) × 100`) and 89 historical rows
+> repaired. Restated on real capital, **spreads only**, the two sources agree:
+> BACKFILL **+18.79%** vs LIVE **+14.84%** — no "same inversion", just the same bug.
+> Whole-book restated: LIVE +2.07%, BACKFILL +1.56%.
+> The LIVE trap-vs-edge inversion (+1.89% vs +16.95%) is unaffected — it was never
+> distorted by this, since LIVE CSPs always carried correct collateral.
 
 The "trap" group wins *more often* and returns *~9x less per dollar risked*. This is the
 clearest possible confirmation that **win rate is the wrong objective** and that the

@@ -394,3 +394,69 @@ spreads return ~10x better per dollar. The book's headline +2.07% is CSP drag.
 
 **Actionable:** filter CSPs out of the basket (or size them far smaller) and the same
 selection returns materially more on the same capital.
+
+---
+
+# Part 6 — Crash behaviour & index-vs-stock (2026-07-31)
+
+Correcting an earlier claim of mine: I said we could not backtest before 2026-07-02. **Wrong.**
+A credit spread's OUTCOME depends only on where the underlying lands, and `stock_history`
+has that from 1990 (9,227 days, 749 tickers). Only the ENTRY CREDIT needs modelling. So a
+decade including 2018, COVID-2020 and the 2022 bear IS testable.
+
+Method: 1σ-OTM put credit spread, 23 DTE, held to expiry, credit priced by Black-Scholes on
+trailing 20d realised vol × 1.15 VRP.
+
+**Calibration caveat (important):** the model collects a median **11.0%** of width where the
+live book collects **19.0%**. Short-dated OTM puts carry a skew premium the model misses, so
+**every absolute number below is too pessimistic.** The STRUCTURE is what's robust, not the levels.
+
+## Crash behaviour — the structural finding
+
+| Date | SPY move | Result |
+|---|---|---|
+| 2020-02-05 (COVID) | −13.4% | **−100% of risk** |
+| 2022-08-25 | −11.3% | **−100%** |
+| 2022-04-13 | −7.9% | **−100%** |
+| 2025-02-18 | −7.5% | **−100%** |
+| 2018-09-20 | −6.4% | **−100%** |
+
+**A ~6–7% index drop is a total loss on the spread.** Max loss isn't a tail event; it's a
+routine monthly move.
+
+## One bad year erases many good ones — SPY by year
+
+| Year | Win % | Return on risk |
+|---|---|---|
+| 2017 | 100% | +22.2% |
+| 2018 | 73% | **−66.7%** |
+| 2019 | 100% | +70.5% |
+| 2020 | 82% | **−46.6%** |
+| 2021 | 100% | +82.6% |
+| **2022** | **64%** | **−179.4%** |
+| 2023 | 91% | +61.4% |
+| 2024 | 91% | +29.8% |
+| 2025 | 91% | −14.0% |
+
+10-year total: **−45%**. 2022 alone lost more than 2019+2021 gained. Answers the question
+directly: **yes, emphatically.**
+
+## Index vs single stocks — NOT significant
+
+Common window 2020-08 → 2026-07 (every ticker sees the same tape, incl. 2022):
+
+| Group | n | Win % | Per cycle | Worst | Sharpe |
+|---|---|---|---|---|---|
+| INDEX | 4 | 85.5% | −1.37% | **−100%** | −0.039 |
+| STOCK | 20 | 86.7% | +0.97% | **−100%** | +0.050 |
+
+**t = 1.49, p = 0.186 — not significant.** Stocks look better on the mean but the sample
+cannot support the claim.
+
+**A prior version of this ranking was contaminated** and is withdrawn: XOM/NVDA/MU/COST/
+UNH/BA only have history from 2020-07 and therefore skipped the COVID crash entirely, while
+SPY/QQQ/IWM/AMD/AAPL absorbed 2018 + COVID + 2022. Comparing them was survivorship, not skill.
+
+**What actually dominates:** dispersion WITHIN single stocks (UNH −6.82%/cycle to NVDA
++8.54%) is far larger than any index-vs-stock gap. Ticker selection matters more than the
+index/stock question — and worst case is −100% for every name in the table, both groups.

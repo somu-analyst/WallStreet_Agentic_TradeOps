@@ -11516,7 +11516,8 @@ def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0
     def _pa(S, X, T, iv):
         if min(S, X, T, iv) <= 0:
             return None
-        return float(_nm.cdf((np.log(S / X) + (r - 0.5 * iv * iv) * T) / (iv * np.sqrt(T))))
+        p = float(_nm.cdf((np.log(S / X) + (r - 0.5 * iv * iv) * T) / (iv * np.sqrt(T))))
+        return min(p, 0.99)      # same 99% cap as _hiprob_scan — see note there (2026-07-31)
 
     def _mid(bid, ask, last):
         b, a = float(bid or 0), float(ask or 0)
@@ -26363,7 +26364,12 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
     def _pa(S, X, T, iv):
         if min(S, X, T, iv) <= 0:
             return None
-        return float(_nm.cdf((np.log(S / X) + (r - 0.5 * iv * iv) * T) / (iv * np.sqrt(T))))
+        p = float(_nm.cdf((np.log(S / X) + (r - 0.5 * iv * iv) * T) / (iv * np.sqrt(T))))
+        # Cap at 99%. A lognormal model claiming ~100% certainty over weeks is stating more
+        # confidence than the model can support, and because EV ranking divides by (1-POP)
+        # a fake 100% produces a fake-infinite edge that sorts straight to the top.
+        # (2026-07-31: ARKX 29-put was stored at POP 100.0; its own captured IV gives ~83%.)
+        return min(p, 0.99)
 
     for tk in tickers:
         tk = str(tk).strip().upper()
@@ -26395,14 +26401,27 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
             # ~100% so EVERYTHING passed min_pop (audit 2026-07-21). Back it out of the ATM call mid.
             iv_ref = 0.40
             try:
-                _at = calls.iloc[(calls["strike"] - spot).abs().argsort()[:1]]
-                if len(_at) and float(_at["mid"].iloc[0]) > 0:
-                    _iv = _implied_vol_hp(float(_at["mid"].iloc[0]), spot, float(_at["strike"].iloc[0]), T, r)
+                # MEDIAN of the nearest few strikes, not a single ATM mid (2026-07-31). One
+                # stale/wide mid was setting iv_ref for the entire ticker; when it solved low
+                # the 0.10 floor took over and every POP came out ~100%, which then dominated
+                # any EV ranking. A median across ~5 strikes ignores a single bad quote.
+                _at = calls.iloc[(calls["strike"] - spot).abs().argsort()[:5]]
+                _ivs = []
+                for _j in range(len(_at)):
+                    _m = float(_at["mid"].iloc[_j])
+                    if _m <= 0:
+                        continue
+                    _iv = _implied_vol_hp(_m, spot, float(_at["strike"].iloc[_j]), T, r)
                     if _iv and 0.05 < _iv < 3.0:
-                        iv_ref = _iv
+                        _ivs.append(_iv)
+                if _ivs:
+                    iv_ref = float(np.median(_ivs))
             except Exception:
                 pass
-            iv_ref = max(iv_ref, 0.10)
+            # Floor raised 0.10 -> 0.15: a sub-15% IV on a multi-week equity option is almost
+            # always a bad quote rather than a real market, and it is exactly what manufactured
+            # the ~100% POPs. Still low enough to leave genuinely quiet index names alone.
+            iv_ref = max(iv_ref, 0.15)
             pl = puts[(puts["strike"] < spot) & (puts["mid"] > 0.05)].sort_values("strike", ascending=False).reset_index(drop=True)
             for i in range(len(pl)):
                 K = float(pl.loc[i, "strike"]); cr = float(pl.loc[i, "mid"]); iv = iv_ref

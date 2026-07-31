@@ -313,3 +313,74 @@ strategies would have produced confident nonsense faster. Ranked honestly:
 The base rate supports this: of ~8 signals rigorously tested here, 3 validated and 5 came
 back null. That ~37% is a realistic hit rate for *economically reasoned* signals. Mined
 signals would be worse, not better.
+
+---
+
+# Part 5 — Backtest of every settled recommendation (2026-07-31)
+
+311 settled recs (236 LIVE, 75 BACKFILL). Tested per the corrected rule: the unit of
+independence is the **expiry cohort**, not the individual rec.
+
+## The finding that governs everything else
+
+| src | cohorts | rec_dates | expiries |
+|---|---|---|---|
+| LIVE | **1** | 2026-07-08 only | 2026-07-31 only |
+| BACKFILL | 2 | 5 | 07-24, 07-31 |
+
+**All 236 LIVE recs were written on one day into one expiry.** They share a single market
+path. That is **one observation**, not 236 — no significance test on them is meaningful.
+Everything below is description, not evidence of edge.
+
+## POP calibration
+
+| src | predicted | actual | miss |
+|---|---|---|---|
+| LIVE | 81.6% | 95.3% | +13.7pp |
+| BACKFILL | 80.5% | 92.0% | +11.5pp |
+
+One calm cohort cannot separate "model is conservative" from "we got a quiet month".
+
+## The EV rule validated — and it inverts the win rate
+
+| src | group | n | win % | return on capital |
+|---|---|---|---|---|
+| LIVE | trap (paid<need) | 185 | **96.8%** | **+1.89%** |
+| LIVE | edge (paid>need) | 51 | 90.2% | **+16.95%** |
+| BACKFILL | trap | 16 | **100.0%** | +21.3% |
+| BACKFILL | edge | 59 | 89.8% | **+136.8%** |
+
+The "trap" group wins *more often* and returns *~9x less per dollar risked*. This is the
+clearest possible confirmation that **win rate is the wrong objective** and that the
+`paid% > need%` column is the one to sort on.
+
+## Payoff asymmetry (LIVE)
+
+avg win **$207** · avg loss **−$476** · ratio **2.30x** · breakeven win rate **69.7%**
+
+Stress on the realized fill quality:
+
+| win rate | P&L | on capital |
+|---|---|---|
+| 95.3% (actual) | +$41,429 | +2.07% |
+| 90% | +$32,812 | +1.64% |
+| 80% (the POP target) | +$16,672 | +0.83% |
+| 70% | +$533 | **+0.03%** |
+
+At its own stated 80% target the book returns <1%. At 70% it is flat. The +2.07% came
+from the tape being kind, not from the edge being large.
+
+## Where the capital actually goes
+
+| strategy | n | win % | P&L | ret/cap | paid | need |
+|---|---|---|---|---|---|---|
+| Cash-secured put | 84 | 97.6% | $29,193 | **+1.52%** | **0.018** | 0.180 |
+| Call credit spread | 77 | 93.5% | $6,051 | **+14.81%** | 0.178 | 0.188 |
+| Put credit spread | 74 | 94.6% | $5,968 | **+14.44%** | 0.168 | 0.186 |
+
+**CSPs are the capital sink.** They collect 1.8% of width against a 18% requirement,
+tie up the overwhelming majority of the $2.0M capital base, and return 1.52%. The
+spreads return ~10x better per dollar. The book's headline +2.07% is CSP drag.
+
+**Actionable:** filter CSPs out of the basket (or size them far smaller) and the same
+selection returns materially more on the same capital.

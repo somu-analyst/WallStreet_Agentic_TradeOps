@@ -181,3 +181,61 @@ Not "features other repos have" — these are real gaps found while comparing:
    to do it already exists).
 
 Item 3 is the most interesting: the data to do it is already being collected.
+
+---
+
+# Part 3 — Cross-strategy allocator: investigated, NOT built (2026-07-30)
+
+Attempted gap #3 above. **Correct call was to stop.** Recording why, so it isn't
+re-attempted prematurely.
+
+## Two false alarms I raised first (corrected)
+
+1. *"All models share one `actual_ret` — data is corrupt."* **Wrong.** Every model predicts
+   the same underlying, so they are graded against the same forward return. Correct design.
+2. *"NEUTRAL is graded as a bearish call — grading bug."* **Wrong.** `_score_signal()` is
+   sound and well-documented: BULL needs `ret > +0.3%`, BEAR `ret < -0.3%`,
+   NEUTRAL/SELL_PREMIUM `|ret| < 1.2%` — the last is a *volatility* call (move contained),
+   not direction. Every aggregate reconciles against it. There's even a documented fix from
+   2026-07-22 for a genuine earlier scoring bug.
+
+Lesson (same one as the TradingKey scrape): check the implementation before alleging a bug
+from aggregates.
+
+## The real blocker: the measurement is too imprecise to allocate on
+
+`signal_accuracy` holds 16,311 rows / 30 models / 730 tickers, but only 2026-05-13 →
+2026-07-31 (~2.5 months). Per model that's ~262 graded fires.
+
+**Median 95% CI width on per-model hit-rate: 12.0 percentage points.**
+
+| Model | n | hit% | 95% CI |
+|---|---:|---:|---|
+| scn_building | 1333 | 47.9 | 45.2 – 50.5 |
+| scn_breakout | 302 | 44.7 | 39.1 – 50.3 |
+| scn_revert | 289 | 34.3 | 28.8 – 39.7 |
+| gex | 262 | 38.9 | 33.0 – 44.8 |
+| gamma_pin | 262 | 49.2 | 43.2 – 55.3 |
+| left_skew | 262 | 40.8 | 34.9 – 46.8 |
+
+At n=262 a 44% model is statistically indistinguishable from a 50% model. Sizing capital
+across strategies on that would be **fitting noise** — precisely the failure this project
+has repeatedly avoided (`/building`, `/uoa`, capflow, A18 all ended in honest null results).
+
+**Revisit at n≈1000+ per model** (CI ≈ ±3 pts). At the current ~100 graded fires/model/month
+that is roughly 7 more months of accrual. No code needed meanwhile — the writer already runs.
+
+## Worth a look NOW, though: possible inverted edges
+
+Most CIs straddle 50% (no demonstrated edge). Three sit **entirely below** it:
+
+- `scn_revert` 28.8 – 39.7
+- `gex` 33.0 – 44.8
+- `left_skew` 34.9 – 46.8
+
+A directional signal that is reliably *wrong* is as useful as one that is right — this is
+exactly the `/debate` Vol-agent case, which was sign-flipped on 2026-07-22 after the same
+observation. Caveats before acting: the sample has negative drift (only ~45% of forward
+returns positive), so a long-biased signal will look bad for reasons that are not its own
+fault, and 2.5 months is one regime. Treat as a **hypothesis to test properly**, not a
+finding — same bar every other signal here had to clear.

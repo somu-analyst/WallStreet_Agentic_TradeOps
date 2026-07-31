@@ -239,3 +239,77 @@ observation. Caveats before acting: the sample has negative drift (only ~45% of 
 returns positive), so a long-biased signal will look bad for reasons that are not its own
 fault, and 2.5 months is one regime. Treat as a **hypothesis to test properly**, not a
 finding — same bar every other signal here had to clear.
+
+---
+
+# Part 4 — The validation harness was broken (2026-07-31)
+
+Triggered by asking whether the strategy additions in Part 2/3 would "create value or
+better results". Testing that honestly surfaced a bigger problem than any missing feature.
+
+## The test
+
+Generated random alpha expressions from the standard operator vocabulary (rank, delay,
+rolling mean/std, ratios) over the real 149-ticker x 756-day price matrix, and scored each
+by rank-IC vs forward returns — exactly as a real alpha search would.
+
+Any "alpha" found this way is meaningless by construction. A sound harness should reject
+~95% of them.
+
+| Method | Random alphas passing p<0.05 | Passing \|t\|>4 | Best random \|t\| |
+|---|---:|---:|---:|
+| **Pooled rank-IC** (what the recipe used) | **68–79%** | **35–46%** | **10.80** |
+| **Daily cross-sectional IC** (correct) | **0%** | **0%** | 1.57 |
+
+## Why
+
+`t = IC·√(N−2)/√(1−IC²)` assumes independent observations. Neither holds:
+1. **Overlap** — fwd-5d returns sampled daily share 4 of 5 days with the next row.
+2. **Cross-correlation** — 149 tickers all load on the market; one day is not 149 draws.
+
+Nominal N (~100k) is ~100x overstated, inflating t by roughly √100 ≈ 10x. A random
+expression reached **|t| = 10.80** — higher than the "+7.05" used the night before to
+justify a live weight change.
+
+## Consequence: one shipped result was wrong, and is reverted
+
+`/debate` Technical weight was raised 1.0 → 1.3 on 2026-07-30 citing rank-IC +0.047,
+t=+7.05. Re-run correctly, the **full `_agent_technical` composite** scores:
+
+| Horizon | Pooled (invalid) | Daily-IC (correct) |
+|---|---|---|
+| fwd-5d | t = −1.21 | **t = +1.04** |
+| fwd-10d | t = −0.69 | **t = +1.10** |
+
+No edge. **Weight reverted to 1.0.** Note the pooled stat doesn't even reproduce its own
+earlier sign — it is unstable, not merely inflated.
+
+**Macro's 0.3 stands.** It was lowered on a *null* result, and inflation can only create
+false positives — a null under an inflation-prone test is still a null.
+
+## What is and isn't affected
+
+- ✅ **Hit-rate vs baseline is fine** — makes no independence claim. `/revert`, `/pead`,
+  `/building`, `/uoa` verdicts stand.
+- ✅ **All null results stand** — A18 short interest, capflow, Macro agent. Inflation
+  cannot manufacture a null.
+- ⚠️ **Positive results from a pooled IC must be re-tested.** Caveated in-place pending
+  re-test: Market Radar "QQQ t+5 corr +0.37", Rotation Tracker "momentum axis IC +0.14",
+  and the ~20d positioning tilt "IC +0.03, t≈3".
+
+## Answer to "will the new strategies create value?"
+
+**Mostly no — and this is why.** With a harness that passes 68% of random noise, adding
+strategies would have produced confident nonsense faster. Ranked honestly:
+
+| Item | Real expected value |
+|---|---|
+| **Fix the harness** (done) | **Highest.** Determines whether any result can be trusted. |
+| **Realistic fill modelling** | High — makes existing results *honest* (worse-looking, truer). Doesn't chase new edge. |
+| **Inverted-edge test** | Medium — must now be run with the daily-IC method. |
+| **Formulaic alpha discovery** | **Downgraded from #1 to "do not build yet."** It is an overfitting machine; on this sample size it would have found the same garbage the random test just did. Revisit only with walk-forward + the corrected harness. |
+| Extra indicators (SAR, Heikin-Ashi…) | ~Zero. More indicators is not more edge. |
+
+The base rate supports this: of ~8 signals rigorously tested here, 3 validated and 5 came
+back null. That ~37% is a realistic hit rate for *economically reasoned* signals. Mined
+signals would be worse, not better.

@@ -5892,7 +5892,9 @@ if page == "🌍 Market Overview":
                                         "Reading": p["reading"], "Note": p["why"]} for p in _ro["pillars"]]),
                          hide_index=True, use_container_width=True)
             st.caption("Backtest (Jan–Jul 2026): index put-flow predicts move SIZE "
-                       "(QQQ t+5 corr +0.37, p<0.001); direction is a weak hint; froth/vol-pricing are context only.")
+                       "(QQQ t+5 corr +0.37, p<0.001 — POOLED stat, pending re-test under the corrected "
+                       "daily-IC method, see .claude/rules/bot-conventions.md); direction is a weak "
+                       "hint; froth/vol-pricing are context only.")
     except Exception as _roe:
         st.caption(f"🛡️ Market Radar unavailable: {_roe}")
 
@@ -8700,7 +8702,8 @@ elif page == "🔄 Rotation Tracker":
         _clicked_name = _render_rrg(_rows, "rot_main_chart", selectable=not _rtks)
         st.caption("RRG vs SPY · 🔵 Improving = money entering · 🟢 Leading · 🟡 Weakening = money leaving · "
                    "🔴 Lagging. Logged daily to rotation_watch. ✅ Backtested (1,542 obs): Weakening "
-                   "underperforms −1.6%/10d vs SPY; momentum axis IC +0.14, p<1e-7 (~6mo, momentum regime).")
+                   "underperforms −1.6%/10d vs SPY. Momentum-axis IC +0.14 (p<1e-7) was a POOLED stat — "
+                   "pending re-test under the corrected daily-IC method.")
 
         # ── Drilldown (user ask 2026-07-28): click a BUBBLE in the chart above (not a
         # separate selectbox section) to see what's underneath it — sector/theme ETFs

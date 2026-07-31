@@ -50,6 +50,30 @@ Emoji/width-aware (`_disp_w`: emoji/CJK=2). Status emoji in column 0 only (🟢/
 4. Persist to `signal_accuracy` → adaptive weights flow to `signal_weights`.
 5. Report `_pipe_table` (signal·N·hit%·avg fwd·vs base); flag thin N (~6-mo history is weak).
 
+### ⛔ NEVER use a pooled rank-IC t-stat (proven broken here, 2026-07-31)
+Stacking every (ticker, date) into one correlation and computing
+`t = IC·√(N−2)/√(1−IC²)` is INVALID on this data and will manufacture edge:
+- **Overlap** — fwd-5d returns sampled daily share 4 of 5 days with the next observation.
+- **Cross-correlation** — 700+ tickers all load on the market; one day is nowhere near
+  700 independent draws.
+Nominal N (~100k) is therefore ~100x overstated and t inflates by roughly √100 ≈ 10x.
+
+**Measured on this exact DB:** of randomly generated alpha expressions, **68% clear p<0.05**
+under the pooled test and **46% clear |t|>4** (best random hit |t|=8.15). A correct test
+rejects **0%** of them. This is not theoretical — it already produced one wrong shipped
+result (`/debate` Technical weight, reverted).
+
+**Use instead — daily cross-sectional IC:**
+1. For each date, rank-correlate the signal against fwd return ACROSS tickers → one IC per day.
+2. Sample dates `[::N]` so windows don't overlap.
+3. `scipy.stats.ttest_1samp(daily_ics, 0)` — N is now ~days, not ~observations.
+4. Sanity-gate any new harness by running random signals through it first; if more than
+   ~5% pass p<0.05, the harness is broken, not the signal.
+
+Hit-rate-vs-baseline (steps 1–5 above) is unaffected — it makes no independence claim.
+Null results from the pooled method remain valid (inflation can only create false
+POSITIVES); positive results from it must be re-tested.
+
 ## Dashboard (Streamlit) specifics
 - `@st.cache_data(ttl=60)` on yfinance readers (`_cached_history/_cached_price/load_oi_for_date/load_stock_daily`); `ttl=30` `_cached_trades`. Never `st.cache_data.clear()` app-wide — clear per function.
 - Nested `st.expander` is forbidden → use `st.toggle` for inner reveals.

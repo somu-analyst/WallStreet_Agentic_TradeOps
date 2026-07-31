@@ -2733,7 +2733,17 @@ async def news_refresh(context=None):
 #   Position (GEX-based): NOT tested — replicating _compute_gex point-in-time historically is
 #     invasive and risks corrupting the live gamma-wall logic; deferred rather than guessed at.
 #     Weight left unchanged.
-_AGENT_WEIGHTS = {"Flow": 1.2, "Position": 1.1, "Technical": 1.3, "Vol": 0.4, "Macro": 0.3}
+# REVERTED 2026-07-31: Technical 1.3 -> 1.0. The 2026-07-30 backtest that justified the
+# raise (reported rank-IC +0.047, t=+7.05) used a POOLED rank-IC t-stat, which is invalid
+# here: fwd-5d returns sampled daily overlap 4-of-5 days, and 149 tickers all load on the
+# market, so nominal N~100k is nothing like 100k independent draws and t is inflated ~10x.
+# Demonstrated empirically on this exact data: 68% of RANDOMLY GENERATED alpha expressions
+# clear p<0.05 under the pooled test (46% clear |t|>4, best random hit |t|=8.15), while a
+# correct daily cross-sectional IC t-test rejects 0% of them. Re-run correctly, the full
+# _agent_technical composite scores t=+1.04 (fwd5d) / t=+1.10 (fwd10d) -- no edge.
+# Macro's 0.3 STANDS: it was lowered on a null result, and a null under an inflation-prone
+# test is still null. See docs/ADOPTED.md Part 4 and .claude/rules/bot-conventions.md.
+_AGENT_WEIGHTS = {"Flow": 1.2, "Position": 1.1, "Technical": 1.0, "Vol": 0.4, "Macro": 0.3}
 
 
 def _dbt_clamp(x, lo=-100.0, hi=100.0):

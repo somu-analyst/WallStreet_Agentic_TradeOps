@@ -105,7 +105,7 @@ def compute_oi_vol_change(trade_day, db_path=OB_DB):
     (Self-contained copy of the Yahoo pipeline's logic; targets the OpenBB DB.)"""
     trade_date_now_db = trade_day.strftime("%Y-%m-%d")
     print(f"Computing OI/vol changes for {trade_date_now_db} [{os.path.basename(db_path)}]...")
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     row = conn.execute("SELECT DISTINCT trade_date FROM options_daily WHERE trade_date < ? "
                        "ORDER BY trade_date DESC LIMIT 1", (trade_date_now_db,)).fetchone()
     if not row:
@@ -193,41 +193,77 @@ def compute_oi_vol_change(trade_day, db_path=OB_DB):
 
 # ── step 3: stock_daily (OHLC + pcr_oi) — optional (needs yfinance) ──
 def build_stock_daily(trade_day, all_tickers, db_path=OB_DB):
-    if yf is None:
-        print("  yfinance unavailable — skip stock_daily"); return None
+    """Source `close` from the underlying_price the CBOE chain fetch already carries (added
+    2026-07-30) instead of a separate yfinance call per ticker -- user ask: "why are we using
+    yahoo, use only bb". Zero new API calls, no Yahoo dependency, and immune to yfinance
+    rate-limiting (which is what silently zeroed this table out the night this was written).
+
+    Honest limitation: a chain snapshot is one point-in-time price, not a true intraday bar,
+    so open/high/low/volume stay NULL here -- they need a real daily-bar source if ever wanted.
+    Falls back to yfinance ONLY for tickers where the BB capture has no underlying_price at all
+    (e.g. old data captured before this column existed), so already-good BB coverage never
+    regresses to a yfinance dependency it doesn't need.
+    """
     trade_day_str_db = trade_day.strftime("%Y-%m-%d")
     print(f"Building stock_daily for {trade_day_str_db} [{os.path.basename(db_path)}]...")
-    session = curl_requests.Session(impersonate="chrome") if curl_requests else None
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        spot_df = pd.read_sql(
+            "SELECT ticker, AVG(underlying_price) AS spot FROM options_openbb "
+            "WHERE trade_date=? AND underlying_price IS NOT NULL GROUP BY ticker",
+            conn, params=(trade_day_str_db,))
+        oi_df = pd.read_sql(
+            "SELECT ticker, SUM(openInt_Call) AS coi, SUM(openInt_Put) AS poi FROM options_daily "
+            "WHERE trade_date=? GROUP BY ticker", conn, params=(trade_day_str_db,))
+    finally:
+        conn.close()
+
+    spot_map = dict(zip(spot_df["ticker"], spot_df["spot"]))
+    oi_map = {r["ticker"]: (r["coi"] or 0, r["poi"] or 0) for _, r in oi_df.iterrows()}
+
     records = []
+    missing = []
     for ticker in all_tickers:
-        try:
-            tk = yf.Ticker(ticker, session=session)
-            end_iso = (trade_day + timedelta(days=1)).strftime("%Y-%m-%d")
-            hist = tk.history(start=trade_day_str_db, end=end_iso, interval="1d")
-            if hist.empty:
-                hist = tk.history(period="1d")
-            if hist.empty:
-                continue
-            r = hist.iloc[-1]
-            conn = sqlite3.connect(db_path)
-            df_opt = pd.read_sql("SELECT openInt_Call, openInt_Put FROM options_daily "
-                                 "WHERE ticker = ? AND trade_date = ?", conn, params=(ticker, trade_day_str_db))
-            conn.close()
-            coi = df_opt["openInt_Call"].fillna(0).sum() if not df_opt.empty else 0
-            poi = df_opt["openInt_Put"].fillna(0).sum() if not df_opt.empty else 0
+        spot = spot_map.get(ticker)
+        coi, poi = oi_map.get(ticker, (0, 0))
+        pcr = (poi / coi) if coi else np.nan
+        if spot is not None and spot > 0:
             records.append({"ticker": ticker, "trade_date": trade_day_str_db,
-                            "open": float(r.get("Open", np.nan)), "high": float(r.get("High", np.nan)),
-                            "low": float(r.get("Low", np.nan)), "close": float(r.get("Close", np.nan)),
-                            "volume": float(r.get("Volume", np.nan)),
-                            "pcr_oi": (poi / coi if coi > 0 else np.nan),
+                            "open": np.nan, "high": np.nan, "low": np.nan,
+                            "close": float(spot), "volume": np.nan, "pcr_oi": pcr,
                             "load_date": current_load_date()})
-        except Exception as e:
-            print(f"  stock_daily {ticker}: {e}")
-            continue
+        else:
+            missing.append(ticker)
+
+    if missing and yf is not None:
+        print(f"  stock_daily: {len(missing)} tickers have no BB underlying_price "
+             f"(old capture predates the column) -- yfinance fallback for those only")
+        session = curl_requests.Session(impersonate="chrome") if curl_requests else None
+        end_iso = (trade_day + timedelta(days=1)).strftime("%Y-%m-%d")
+        for ticker in missing:
+            try:
+                tk = yf.Ticker(ticker, session=session)
+                hist = tk.history(start=trade_day_str_db, end=end_iso, interval="1d")
+                if hist.empty:
+                    hist = tk.history(period="1d")
+                if hist.empty:
+                    continue
+                r = hist.iloc[-1]
+                coi, poi = oi_map.get(ticker, (0, 0))
+                records.append({"ticker": ticker, "trade_date": trade_day_str_db,
+                                "open": float(r.get("Open", np.nan)), "high": float(r.get("High", np.nan)),
+                                "low": float(r.get("Low", np.nan)), "close": float(r.get("Close", np.nan)),
+                                "volume": float(r.get("Volume", np.nan)),
+                                "pcr_oi": (poi / coi if coi else np.nan),
+                                "load_date": current_load_date()})
+            except Exception as e:
+                print(f"  stock_daily {ticker}: {e}")
+                continue
+
     if not records:
         print("  stock_daily: no records"); return None
     df_stock = pd.DataFrame(records)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     try:
         conn.execute(f"DELETE FROM {TABLE_STOCK_DAILY} WHERE trade_date = ?", (trade_day_str_db,))
         conn.commit()
@@ -235,7 +271,8 @@ def build_stock_daily(trade_day, all_tickers, db_path=OB_DB):
         pass
     df_stock.to_sql(TABLE_STOCK_DAILY, conn, if_exists="append", index=False)
     conn.close()
-    print(f"  stock_daily: appended {len(df_stock)} rows")
+    print(f"  stock_daily: appended {len(df_stock)} rows ({len(records) - len(missing)} from BB, "
+         f"{sum(1 for r in records if r['ticker'] in missing)} via yfinance fallback)")
     return df_stock
 
 
@@ -339,7 +376,7 @@ def build_fundamentals(conn, min_oi=10000, max_names=500):
 
 
 def derive(dates=None, do_stock=False):
-    conn = sqlite3.connect(OB_DB)
+    conn = sqlite3.connect(OB_DB, timeout=30)
     all_dates = [r[0] for r in conn.execute(
         "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
     dates = dates or all_dates
@@ -356,7 +393,7 @@ def derive(dates=None, do_stock=False):
             print(f"  {d}: compute_oi_vol_change failed: {e}")
     if do_stock:
         print("\nSTEP 3: build_stock_daily")
-        c = sqlite3.connect(OB_DB)
+        c = sqlite3.connect(OB_DB, timeout=30)
         tickers = [r[0] for r in c.execute(
             "SELECT DISTINCT ticker FROM options_daily WHERE trade_date=?", (dates[-1],))]
         c.close()
@@ -367,7 +404,7 @@ def derive(dates=None, do_stock=False):
                 print(f"  {d}: build_stock_daily failed: {e}")
 
     print("\nSTEP 4: build serving layer (daily_ticker_summary)")
-    c = sqlite3.connect(OB_DB)
+    c = sqlite3.connect(OB_DB, timeout=30)
     try:
         build_serving_layer(c, dates=dates)
     except Exception as e:
@@ -376,7 +413,7 @@ def derive(dates=None, do_stock=False):
         c.close()
 
     print("\nSTEP 5: build fundamentals (beta / market cap for sliders)")
-    c = sqlite3.connect(OB_DB)
+    c = sqlite3.connect(OB_DB, timeout=30)
     try:
         build_fundamentals(c)
     except Exception as e:

@@ -600,6 +600,11 @@ def fetch_chain_openbb(obb, ticker, provider, trade_dt):
         return None
     merged["ticker"] = ticker
     merged["trade_date"] = pd.Timestamp(trade_dt).strftime("%Y-%m-%d")
+    # underlying_price (2026-07-30): the chain fetch ALREADY carries the spot used above for
+    # the strike-window filter -- it was being computed and thrown away. Persisting it means
+    # build_stock_daily can source `close` straight from this capture, zero extra API calls,
+    # no yfinance dependency for that step (user ask: "why are we using yahoo, use only bb").
+    merged["underlying_price"] = np.float32(spot) if spot is not None else np.nan
     return merged
 
 
@@ -681,6 +686,13 @@ def main():
     # killing the whole 734-ticker run at 11%. Every writer to this DB needs to wait on a
     # transient lock rather than error out -- see the matching fix in get_conn() elsewhere.
     conn = sqlite3.connect(OUT_DB_PATH, timeout=30)
+    # underlying_price column (2026-07-30): ALTER is a no-op once it exists, safe every run —
+    # same idempotent-migration pattern used elsewhere in this codebase (e.g. watchlist.asset_class).
+    try:
+        conn.execute(f"ALTER TABLE {TEST_TABLE} ADD COLUMN underlying_price REAL")
+        conn.commit()
+    except Exception:
+        pass
     # ── RESUME (2026-07-18): chunks APPEND + commit as they land, so a halted/killed
     # run leaves whole tickers safely in the DB. Default = skip those and fetch only
     # what's missing for the day (laptop closed mid-run, Ctrl+C, crash — just rerun).

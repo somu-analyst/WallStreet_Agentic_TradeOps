@@ -460,3 +460,49 @@ SPY/QQQ/IWM/AMD/AAPL absorbed 2018 + COVID + 2022. Comparing them was survivorsh
 **What actually dominates:** dispersion WITHIN single stocks (UNH −6.82%/cycle to NVDA
 +8.54%) is far larger than any index-vs-stock gap. Ticker selection matters more than the
 index/stock question — and worst case is −100% for every name in the table, both groups.
+
+---
+
+# Part 7 — Hedging a premium-selling book (2026-07-31)
+
+Question: what hedges this? Tested on the same 2017-2026 cycles (SPY/QQQ/IWM, 23 DTE).
+
+## The methodology trap, caught mid-analysis
+
+First run priced every option at a single ATM vol. Results said tail puts and collars were
+excellent. **Then I measured the actual skew in our own captured chains:**
+
+| Underlying | ATM IV | 5% OTM | 10% OTM | 15% OTM |
+|---|---|---|---|---|
+| SPY | 14.1% | 20.0% (1.42x) | 25.4% (**1.80x**) | 33.0% (**2.34x**) |
+| QQQ | 24.8% | 28.4% (1.15x) | 32.7% (1.32x) | 38.8% (1.56x) |
+| IWM | 19.0% | 23.9% (1.26x) | 28.7% (1.51x) | 36.4% (1.92x) |
+
+Flat vol underprices OTM puts badly. Re-run with skew fitted to that surface
+(`iv_mult = 1 + 5.4 x OTM_fraction`) — **every conclusion reversed:**
+
+| Variant | Flat vol (WRONG) | With real skew |
+|---|---|---|
+| BASE | +83% | **+121%** |
+| TAIL PUT | +223% | **−506%** |
+| COLLARED | **+1451%** | **−4016%** |
+| WIDE OTM | −462% | **+271%** (best Sharpe 0.043) |
+
+## Conclusions
+
+**Buying tail protection is systematically −EV here.** Not because puts fail in crashes —
+they pay — but you buy them EVERY cycle at a 1.5–2x vol markup and they expire worthless
+~95% of the time. Premium bleed dwarfs the crash payoffs. Collars were worse: selling
+closer to fund the hedge added risk *and* paid up for insurance.
+
+**Selling FURTHER OTM won under skew** (+271%), reversing the flat-vol result — that is
+where the skew premium is richest. Better to sell expensive tail risk than buy it.
+
+**Structural facts surviving every variant:** worst case −100% on all of them; a 6–7% index
+drop is still a total loss. No configuration removed the tail.
+
+**Position sizing is the hedge.** If a full loss on any single cycle is survivable, there is
+no need to buy protection at a 2x markup.
+
+**Caveat:** calibration still off (model 9.8% of width vs 19.0% live), so RANKINGS are the
+finding, not magnitudes.

@@ -274,6 +274,10 @@ ROWS = [
  "Multi-persona investor ensemble",
  "DONE","2026-07-25","Borrowed the PATTERN, not the dependency: built the AI Hedge Fund dashboard page as a free/deterministic rule-based ensemble (no LLM keys, no paid data). Confirmed in the Part 2 survey as already-absorbed",
  "-","P2","-"),
+(76,"2026-08-02","Claude","Strategy","Scanner liquidity gate + realistic fill",
+ "Direct follow-up to the ID 33 fill measurement",
+ "DONE","2026-08-02","Added _hp_fill (shared by _hiprob_scan and _hiprob_scan_asof): rejects legs with no two-sided market or spread >35% of mid, and prices shorts at the sell side / longs at the buy side (f=0.50) instead of the mid. Verified on the 2026-07-21 universe: all 15 setups still qualify, credits fall a median 7% (up to 31% on two-leg spreads, 0.3% on index CSPs). Gate bites where measured: EFA rejects 79% of legs, SPXS 75%, BIIB 53%, liquid mega-caps 0%. Live yfinance path smoke-tested",
+ "-","P1","-"),
 ]
 
 def build():

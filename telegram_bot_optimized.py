@@ -11500,6 +11500,33 @@ def _recs_ensure_src(conn):
         conn.commit()
 
 
+# ── Liquidity gate + realistic fill, shared by both hiprob scanners (2026-08-02) ──────
+_HP_MAX_SPREAD = 0.35      # reject a leg quoting wider than this fraction of its own mid
+_HP_FILL_F     = 0.50      # give up this fraction of the half-spread on EACH leg
+
+
+def _hp_fill(bid, ask):
+    """Executable prices for one contract, or None if the leg fails the liquidity gate.
+
+    Measured 2026-08-02 over 204 settled recs re-priced off their OWN real bid/ask: booking
+    entry at the mid overstates mean return ~2x (+7.25% -> +3.81% at f=0.50). Win rate barely
+    moves (94.6% -> 94.2%) — the point is not being wrong more often, it is that the credit
+    IS the edge and the quoted spread eats half of it. Median short-leg spread was 17.6% of
+    mid; the 75th percentile (35.8%) sets the gate below.
+
+    Legs with no bid at all (BIIB/GILD/SPXS/EFA/FXI quoted spread = 200% of mid) are rejected
+    outright rather than haircut — there is no price at which they fill. See ADOPTED.md 9.4.
+    """
+    b, a = float(bid or 0), float(ask or 0)
+    if b <= 0 or a <= 0 or a < b:
+        return None                                  # no two-sided market
+    mid = (b + a) / 2.0
+    if mid <= 0 or (a - b) / mid > _HP_MAX_SPREAD:
+        return None                                  # quoted too wide to trade
+    hs = (a - b) / 2.0
+    return {"mid": mid, "sell": max(mid - _HP_FILL_F * hs, 0.0), "buy": mid + _HP_FILL_F * hs}
+
+
 def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
     """`_hiprob_scan` replayed as-of a past date, from captured data instead of live yfinance.
 
@@ -11510,6 +11537,12 @@ def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0
     Verified 2026-07-22: replaying 2026-07-21 reproduced all 15 rows the live scanner wrote
     that day — same strikes, same expiry, same credit to the cent, same POP. Keep the maths
     below in lockstep with `_hiprob_scan`; if that changes, this must change with it.
+
+    2026-08-02: credits DELIBERATELY no longer match those stored rows. Both scanners now
+    price legs through `_hp_fill` (sell side for shorts, buy side for longs) instead of the
+    mid, and reject legs failing the liquidity gate. Re-checked on the same 2026-07-21
+    universe: all 15 setups still qualify, credits fall a median 7% (up to 31% on two-leg
+    spreads, ~0.3% on single-leg index CSPs). Strikes and POP are unchanged.
     """
     from scipy.stats import norm as _nm
 
@@ -11553,8 +11586,14 @@ def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0
                 "expiry_date=? ORDER BY strike", (tk, td, exp)).fetchall()
             if not chain:
                 continue
-            calls = [(float(s), _mid(bc, ac, lc)) for s, bc, ac, lc, _, _, _ in chain]
-            puts = [(float(s), _mid(bp, ap, lp)) for s, _, _, _, bp, ap, lp in chain]
+            # (strike, mid, sell, buy) — `mid` still drives the ATM IV back-out, but every
+            # tradeable price now comes from the liquidity gate, so illiquid strikes never
+            # reach the candidate list at all (2026-08-02, see _hp_fill).
+            def _leg(s, b, a):
+                f = _hp_fill(b, a)
+                return None if not f else (float(s), f["mid"], f["sell"], f["buy"])
+            calls = [x for x in (_leg(s, bc, ac) for s, bc, ac, lc, _, _, _ in chain) if x]
+            puts = [x for x in (_leg(s, bp, ap) for s, _, _, _, bp, ap, lp in chain) if x]
 
             iv_ref = 0.40                      # ATM-backed IV — same ladder as the live scanner
             atm = min(calls, key=lambda c: abs(c[0] - spot)) if calls else None
@@ -11566,7 +11605,7 @@ def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0
 
             pl = sorted([p for p in puts if p[0] < spot and p[1] > 0.05], key=lambda p: -p[0])
             for i in range(len(pl)):
-                K, cr = pl[i]
+                K, cr = pl[i][0], pl[i][2]            # sell the short leg at the sell side
                 pop = _pa(spot, K - cr, T, iv_ref)
                 if pop is None or pop < min_pop:
                     continue
@@ -11575,7 +11614,7 @@ def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0
                             "be": K - cr, "pop": pop, "dte": dte, "exp": exp,
                             "spot": spot, "ret": cr / max(K - cr, 0.01) * 100})
                 if i + 2 < len(pl):
-                    Kl, cl = pl[i + 2]
+                    Kl, cl = pl[i + 2][0], pl[i + 2][3]    # buy the long leg at the buy side
                     net, width = cr - cl, K - Kl
                     if 0.03 < net < width:
                         out.append({"tk": tk, "kind": "PS", "setup": f"{K:g}/{Kl:g}P",
@@ -11586,7 +11625,7 @@ def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0
 
             cu = sorted([c for c in calls if c[0] > spot and c[1] > 0.05], key=lambda c: c[0])
             for i in range(len(cu)):
-                K, cr = cu[i]
+                K, cr = cu[i][0], cu[i][2]            # sell the short leg at the sell side
                 pa = _pa(spot, K + cr, T, iv_ref)
                 if pa is None:
                     continue
@@ -11594,7 +11633,7 @@ def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0
                 if pop < min_pop:
                     continue
                 if i + 2 < len(cu):
-                    Kl, cl = cu[i + 2]
+                    Kl, cl = cu[i + 2][0], cu[i + 2][3]   # buy the long leg at the buy side
                     net, width = cr - cl, Kl - K
                     if 0.03 < net < width:
                         out.append({"tk": tk, "kind": "CS", "setup": f"{K:g}/{Kl:g}C",
@@ -26398,6 +26437,17 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
             for df in (puts, calls):
                 df["mid"] = ((df["bid"].fillna(0) + df["ask"].fillna(0)) / 2).where(
                     (df["bid"] > 0) & (df["ask"] > 0), df["lastPrice"])
+                # Liquidity gate + realistic fill (2026-08-02) — must stay in lockstep with
+                # `_hp_fill` / `_hiprob_scan_asof`. `_liq` False = no two-sided market or a
+                # spread wider than _HP_MAX_SPREAD of mid; such a leg never becomes a
+                # candidate. `_sell`/`_buy` are what the two sides actually execute at.
+                _b = df["bid"].fillna(0); _a = df["ask"].fillna(0)
+                _tw = (_b > 0) & (_a > 0) & (_a >= _b)
+                _hs = ((_a - _b) / 2.0).where(_tw, 0.0)
+                _sp = ((_a - _b) / df["mid"].replace(0, np.nan)).where(_tw)
+                df["_liq"] = _tw & (_sp <= _HP_MAX_SPREAD)
+                df["_sell"] = (df["mid"] - _HP_FILL_F * _hs).clip(lower=0.0)
+                df["_buy"] = df["mid"] + _HP_FILL_F * _hs
             # reliable ATM vol — yfinance per-strike IV is garbage (~1e-5) which collapsed POP to
             # ~100% so EVERYTHING passed min_pop (audit 2026-07-21). Back it out of the ATM call mid.
             iv_ref = 0.40
@@ -26423,9 +26473,9 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
             # always a bad quote rather than a real market, and it is exactly what manufactured
             # the ~100% POPs. Still low enough to leave genuinely quiet index names alone.
             iv_ref = max(iv_ref, 0.15)
-            pl = puts[(puts["strike"] < spot) & (puts["mid"] > 0.05)].sort_values("strike", ascending=False).reset_index(drop=True)
+            pl = puts[(puts["strike"] < spot) & (puts["mid"] > 0.05) & puts["_liq"]].sort_values("strike", ascending=False).reset_index(drop=True)
             for i in range(len(pl)):
-                K = float(pl.loc[i, "strike"]); cr = float(pl.loc[i, "mid"]); iv = iv_ref
+                K = float(pl.loc[i, "strike"]); cr = float(pl.loc[i, "_sell"]); iv = iv_ref
                 pop = _pa(spot, K - cr, T, iv)
                 if pop is None or pop < min_pop:
                     continue
@@ -26438,15 +26488,15 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
                             "be": K - cr, "pop": pop, "dte": dte,
                             "ret": cr / max(K - cr, 0.01) * 100})
                 if i + 2 < len(pl):
-                    Kl = float(pl.loc[i + 2, "strike"]); cl = float(pl.loc[i + 2, "mid"]); net = cr - cl; width = K - Kl
+                    Kl = float(pl.loc[i + 2, "strike"]); cl = float(pl.loc[i + 2, "_buy"]); net = cr - cl; width = K - Kl
                     if 0.03 < net < width:                # credit can't exceed width (drops bad mids)
                         out.append({"tk": tk, "kind": "PS", "setup": f"{K:g}/{Kl:g}P", "credit": net,
                                     "risk": (width - net) * 100, "be": None, "pop": pop, "dte": dte,
                                     "ret": net / max(width - net, 0.01) * 100})
                 break
-            cu = calls[(calls["strike"] > spot) & (calls["mid"] > 0.05)].sort_values("strike").reset_index(drop=True)
+            cu = calls[(calls["strike"] > spot) & (calls["mid"] > 0.05) & calls["_liq"]].sort_values("strike").reset_index(drop=True)
             for i in range(len(cu)):
-                K = float(cu.loc[i, "strike"]); cr = float(cu.loc[i, "mid"]); iv = iv_ref
+                K = float(cu.loc[i, "strike"]); cr = float(cu.loc[i, "_sell"]); iv = iv_ref
                 pa = _pa(spot, K + cr, T, iv)
                 if pa is None:
                     continue
@@ -26454,7 +26504,7 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
                 if pop < min_pop:
                     continue
                 if i + 2 < len(cu):
-                    Kl = float(cu.loc[i + 2, "strike"]); cl = float(cu.loc[i + 2, "mid"]); net = cr - cl; width = Kl - K
+                    Kl = float(cu.loc[i + 2, "strike"]); cl = float(cu.loc[i + 2, "_buy"]); net = cr - cl; width = Kl - K
                     if 0.03 < net < width:                # credit can't exceed width (drops bad mids)
                         out.append({"tk": tk, "kind": "CS", "setup": f"{K:g}/{Kl:g}C", "credit": net,
                                     "risk": (width - net) * 100, "be": None, "pop": pop, "dte": dte,
@@ -28366,24 +28416,51 @@ def _ensure_stock_history(conn):
 def _sync_history_from_daily(conn):
     """Keep stock_history current for FREE (no API): fold any newer stock_daily
     rows into stock_history. The EOD pipeline already fills stock_daily daily, so
-    this is how history is maintained without repeat yfinance calls. Idempotent."""
+    this is how history is maintained without repeat yfinance calls. Idempotent.
+
+    Self-heals partial rows (2026-08-02). This was INSERT OR IGNORE, which takes the
+    FIRST value ever seen for (ticker, trade_date) and never revisits it. If a
+    mid-session stock_daily row is folded in before the official close lands, the
+    intraday price is frozen into stock_history permanently -- stock_daily is later
+    corrected by the EOD run, but history keeps the stale value forever. That is
+    exactly what happened on 2026-07-30: 474 close-only rows (high/low/volume NULL),
+    117 of them materially wrong (AAPL 312.33 vs a true 333.43 close), silently
+    corrupting any backtest spanning that date.
+
+    The upsert refreshes a stored row ONLY when it is incomplete (high/volume NULL),
+    so a partial row heals on the next run while complete rows -- including
+    yfinance-sourced ones carrying `open` and dividend-adjusted closes that
+    stock_daily does not have -- are left untouched."""
     try:
         conn.execute(
-            "INSERT OR IGNORE INTO stock_history (ticker, trade_date, open, high, low, close, volume) "
+            "INSERT INTO stock_history (ticker, trade_date, open, high, low, close, volume) "
             "SELECT UPPER(ticker), trade_date, NULL, high, low, close, volume "
-            "FROM stock_daily WHERE close IS NOT NULL")
+            "FROM stock_daily WHERE close IS NOT NULL "
+            "ON CONFLICT(ticker, trade_date) DO UPDATE SET "
+            "  high=excluded.high, low=excluded.low, "
+            "  close=excluded.close, volume=excluded.volume "
+            "WHERE stock_history.high IS NULL OR stock_history.volume IS NULL")
         conn.commit()
     except Exception:
         log.debug("stock_history sync-from-daily failed", exc_info=True)
 
 
 def _fetch_yf_history(tk, years):
-    """Backfill rows from yfinance (primary source). None on failure."""
+    """Backfill rows from yfinance (primary source). None on failure.
+
+    Today's bar is dropped (2026-08-02): during the session yfinance returns a LIVE
+    incomplete bar, and the caller writes with INSERT OR REPLACE, so a backfill
+    triggered intraday would overwrite a settled close with a mid-session price --
+    the same class of corruption that hit stock_history on 2026-07-30. Today's row
+    is not needed here anyway: _sync_history_from_daily folds it in from stock_daily
+    once the EOD pipeline has posted the official close."""
     try:
+        _today = datetime.now().strftime("%Y-%m-%d")
         h = yf.Ticker(tk).history(period=f"{years}y")[["Open", "High", "Low", "Close", "Volume"]].dropna()
         if len(h):
             return [(tk, d.strftime("%Y-%m-%d"), float(r.Open), float(r.High),
-                     float(r.Low), float(r.Close), float(r.Volume)) for d, r in h.iterrows()]
+                     float(r.Low), float(r.Close), float(r.Volume)) for d, r in h.iterrows()
+                    if d.strftime("%Y-%m-%d") != _today]
     except Exception:
         log.debug("yf history failed for %s", tk, exc_info=True)
     return None

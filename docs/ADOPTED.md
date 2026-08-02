@@ -573,3 +573,40 @@ the discipline problem is ours to keep solving either way — a better engine fe
 flawed assumptions returns better-looking wrong answers.
 
 Sources: QuantConnect docs — Equity Options historical data, US Equity Options (AlgoSeek).
+
+---
+
+## Head-to-head: QuantConnect vs Quantiacs (both reviewed 2026-07-31)
+
+Vitals from the **GitHub API**, not marketing pages:
+
+| | **QuantConnect / LEAN** | **Quantiacs** |
+|---|---|---|
+| Main repo stars | **21,011** | 82 (`toolbox`) |
+| Last push | **2026-07-31 (today)** | 2025-12-19 (**~7 mo stale**) |
+| Public repos | 93 | 33 (mostly small strategy samples) |
+| **OPTIONS data** | ✅ **Yes** — bid/ask `QuoteBar`, AlgoSeek + a `Lean.DataSource.ThetaData` integration | ❌ **None found** |
+| Asset classes | Equities, **options**, futures, FX, crypto, CFD | Futures (49), S&P500/NASDAQ equities, crypto |
+| History depth | Multi-year (dataset dependent) | Up to **25 years, free**, back to 1990 |
+| Survivorship-free | Yes | Yes (explicitly marketed) |
+| Frictions modelled | Yes (fill/slippage/fee models) | Yes (fees, slippage) |
+| Cost | Free engine; **options data is a paid tier** | **Free** data + toolbox |
+| Language | C# (engine), Python | Python, Matlab |
+| Business model | Platform + data subscriptions | Futures/crypto **contests**, allocates capital to winners |
+
+### Verdict for THIS project
+
+**QuantConnect — trial it (research lane only).** It is the only one of the two that carries
+the thing we actually lack: years of real option quotes with bid/ask. That single asset
+would fix the 1-cohort problem, the 9.8%-vs-19.0% calibration gap, and the mid-price fill
+assumption in one move.
+
+**Quantiacs — not applicable. No options data.** This is not a quality judgement; it is a
+category mismatch. Quantiacs is a strong, genuinely free futures/crypto research platform
+whose business is contest-based capital allocation. For an equity-**options** book it cannot
+answer any of our open questions, and its main toolbox has been stale ~7 months.
+
+**If cost blocks QuantConnect's options tier**, the fallback is not Quantiacs — it is to
+keep accruing our own capture-forward DB (already ~20 days and growing daily, which is
+exactly how it reaches multi-cohort on its own), or price a direct options-data vendor
+(ThetaData appears as a first-party LEAN integration and is worth a quote).

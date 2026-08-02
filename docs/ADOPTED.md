@@ -610,3 +610,137 @@ answer any of our open questions, and its main toolbox has been stale ~7 months.
 keep accruing our own capture-forward DB (already ~20 days and growing daily, which is
 exactly how it reaches multi-cohort on its own), or price a direct options-data vendor
 (ThetaData appears as a first-party LEAN integration and is worth a quote).
+
+---
+
+# Part 9 — Validation pass: re-testing what we already claimed (2026-08-02)
+
+Three backlog items (tracker IDs 7, 32, 33) asked the same question from three angles:
+**does this system have edge, or does the measurement flatter it?** Everything downstream —
+sizing, CSP filtering, allocation — rests on numbers this pass re-checks. Ran together
+because fixing sizing against a fake signal would be optimising noise.
+
+Method throughout: daily cross-sectional IC, de-overlapped, per
+`.claude/rules/bot-conventions.md`. **Harness sanity gate: 300 random signals → 3.0% false
+positives (expected 5%).** The harness is sound; results below are about the signals.
+
+## 9.1 — Claim A: Rotation RRG momentum axis · **WITHDRAWN**
+
+Claimed `IC +0.14 (p<1e-7), 1,542 obs`.
+
+First problem: `rotation_watch` holds **6 distinct dates**. The 1,542-obs figure cannot
+have come from it. Rebuilt the RRG axes from price history (33 ETFs × 1,500 days, RS vs
+SPY, 63d ratio / 21d momentum), scored against **excess** fwd return vs SPY:
+
+| horizon | pooled (banned) | daily-IC (correct) | verdict |
+|---|---|---|---|
+| fwd 5d  | IC +0.010, t=+2.25, N=46,596 | IC −0.005, **t=−0.28, p=0.78**, N=282 days | no edge |
+| fwd 10d | IC +0.028, t=+5.98, N=46,431 | IC +0.012, **t=+0.41, p=0.68**, N=140 days | no edge |
+
+The pooled stat turned t=+0.41 into t=+5.98. Same inflation as the `/debate` weight.
+
+**The separate quadrant result stands** — "Weakening underperforms −1.6%/10d vs SPY" is a
+hit-rate-vs-baseline measurement, which makes no independence claim and was never affected.
+
+## 9.2 — Claim B: Market Radar put-flow · **DOWNGRADED to suggestive**
+
+Claimed `QQQ t+5 corr +0.37, p<0.001` on ~104 days.
+
+This one is a *time series*, not a cross-section, so the fix is de-overlapping rather than
+daily IC. t+5 windows sampled daily overlap 4-of-5 days: **104 days is ~21 independent
+draws, and +0.37 at n=21 is p≈0.10 — not p<0.001.** The reported p-value was never
+attainable from that sample size.
+
+Reconstructing the nearest available proxy (index put/call volume ratio vs |QQQ fwd-5d|,
+146 days) and sweeping the five equivalent sampling offsets:
+
+| offset | 0 | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|---|
+| corr | +0.007 | **+0.360** | +0.002 | −0.172 | −0.057 |
+
+Five equally-valid samples of the same data swing +0.36 to −0.17. Note offset 1 reproduces
+roughly the originally-claimed magnitude — which is the point: that number was reachable by
+sampling luck.
+
+**Caveat:** this proxy is not certainly the original pillar's exact definition (the source
+script's signal lived in scratchpad). The n=21 arithmetic is definitive regardless of
+definition; the offset sweep is corroborating, not conclusive.
+
+Kept in the UI as **SUGGESTIVE**, not established. Turbulence remains the primary gauge.
+
+## 9.3 — ID 32: Inverted-edge test · **NO inverted edge — do not build it**
+
+`scn_revert` / `gex` / `left_skew` had hit-rate 95% CIs entirely below 50%. A reliably wrong
+signal is tradeable inverted, so this was worth checking. It does not survive.
+
+The fires are **clustered**: `scn_revert`'s 1,516 observations span **17 dates** across 354
+tickers. On a given day almost every ticker resolves with the market, so 1,516 is nearer 17
+independent draws. Collapsing each date to one observation:
+
+| model | n | naive hit% | naive p | → de-overlapped hit% | independent dates |
+|---|---|---|---|---|---|
+| scn_revert | 1,162 | 45.3% | 0.0014 "INVERTED" | **53.9%** | 3 |
+| scn_zrev | 379 | 43.3% | 0.0101 "INVERTED" | **53.2%** | 3 |
+| gex | 107 | 40.2% | 0.053 | 29.7% (p=0.21) | 7 |
+| scn_building | 3,620 | 54.1% | 0.0000 "EDGE" | 58.1% | 4 |
+
+Both "inverted" signals **flip to above 50%** once dates stop double-counting. The wrongness
+was an artefact, not a signal. `gamma_pin` shows p=0.019 de-overlapped, but at n=6 dates
+across 13 models tested (~0.65 false positives expected at α=0.05) that is not evidence.
+
+**`scn_building`'s edge is also not established** — 3,620 fires over 4 independent dates.
+It is not disproven either; it simply has not been tested yet at an honest sample size.
+
+**Outcome: no inverse scanner built.** This item is closed as a save, not a feature.
+
+## 9.4 — ID 33: Realistic fill modelling · **the real cost, measured**
+
+Every backtest except the 50%-exit test books entry at the **mid**. Re-priced all settled
+put recommendations off their own real `options_openbb` bid/ask on their own `rec_date`.
+`f` = fraction of the half-spread given up on each leg. Outcome re-derived from strikes +
+`settle_px`, so only the entry credit changes.
+
+**Median quoted spread on the short leg: 17.6% of mid. 75th pct 35.8%. 90th pct 54.4%.**
+
+| fill assumption | n | win% | mean ret | total ret | credit kept |
+|---|---|---|---|---|---|
+| mid (what we assume today) | 203 | 94.6% | **+7.25%** | +1471% | 100% |
+| good execution (f=0.25) | 201 | 94.5% | +5.31% | +1067% | 93% |
+| midway to touch (f=0.50) | 190 | 94.2% | **+3.81%** | +724% | 87% |
+| cross the spread (f=1.00) | 169 | 93.5% | +2.54% | +428% | 74% |
+
+**Mid-pricing overstates per-trade return by roughly 2× at a realistic fill.** Win rate
+barely moves (94.6% → 94.2%) — this is not about being wrong more often, it is that the
+credit collected is the entire edge, and the spread eats half of it.
+
+Note the shrinking `n`: at f=0.5, **13 recs no longer have a positive credit at all** and at
+f=1.0, 34 do not. Those are structures that only exist at mid.
+
+| source | mid | f=0.25 | f=0.50 | cross |
+|---|---|---|---|---|
+| LIVE (n=154) | +8.02% | +5.86% | +4.27% | +3.31% |
+| BACKFILL (n=50) | +4.88% | +3.65% | +2.53% | +0.65% |
+
+Widest-spread names (BIIB, GILD, SPXS, EFA, FXI) quote **spread = 200% of mid — i.e. no bid
+at all**. Those legs are untradeable at any modelled price and need a liquidity gate, not a
+slippage haircut.
+
+### What to change
+1. **Adopt f=0.50 as the default backtest assumption.** It is the honest midpoint and the
+   one a limit order at the mid actually achieves only sometimes.
+2. **Add a liquidity gate to the scanner** — reject legs with no bid, or spread > ~35% of
+   mid (the 75th percentile). This is the single highest-value fix here.
+3. Restate the $10k projection at f=0.50 — the existing figure is a mid-fill number.
+
+## 9.5 — Standing
+
+| ID | item | outcome |
+|---|---|---|
+| 7 | Re-test 3 caveated claims | Rotation **withdrawn**; Radar **downgraded**; skew panel **untestable** (21 dates → 4 independent) |
+| 32 | Inverted-edge test | **No inverted edge.** Closed, nothing built |
+| 33 | Realistic fill modelling | **Measured: ~2× overstatement.** Two follow-ups queued |
+
+Net: two claims removed from the UI, one strategy idea correctly killed before it was built,
+and one quantified correction that makes every existing backtest number honest. No new edge
+was found in this pass — that is the expected outcome of a validation pass, and preferable
+to the alternative.

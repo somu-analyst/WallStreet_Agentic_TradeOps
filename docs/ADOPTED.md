@@ -506,3 +506,70 @@ no need to buy protection at a 2x markup.
 
 **Caveat:** calibration still off (model 9.8% of width vs 19.0% live), so RANKINGS are the
 finding, not magnitudes.
+
+---
+
+# Part 8 — QuantConnect / LEAN for backtesting? (suggestion, 2026-07-31)
+
+Asked whether to use QuantConnect for backtests. Evaluated against the limitations this
+session actually exposed, not against its feature list.
+
+## The honest framing: our bottleneck is DATA, not tooling
+
+Tonight's three biggest problems were all data problems:
+
+| Problem found | Root cause |
+|---|---|
+| LIVE recs = **1 cohort** (one rec_date, one expiry) | `options_openbb` starts 2026-07-02 — 20 days of quotes |
+| Model collects **9.8% of width** vs **19.0%** live | No historical IV surface, so credits are modelled not observed |
+| Every backtest assumes **mid-price fills** | No historical bid/ask before 07-02 |
+
+We already have a perfectly good backtest *engine* — we wrote several tonight. What we do
+not have is **years of real option quotes**. That is exactly what LEAN sells.
+
+## What it would genuinely solve
+
+- **Historical options quotes with bid/ask.** LEAN exposes `QuoteBar` objects carrying
+  bid/ask OHLC consolidated from NBBO (AlgoSeek US Equity Options dataset). This is the
+  single thing blocking a multi-cohort credit-spread study.
+- **Realistic fills** — fill models price off bid/ask rather than mid. That is open item #9.
+- **Real historical skew** — instead of our fitted `1 + 5.4 x OTM` approximation, the actual
+  surface. Tonight proved this is not a detail: pricing at flat vol reversed every hedge
+  conclusion (TAIL PUT +223% became −506%).
+
+## What it would NOT solve
+
+- **Statistical discipline.** Cohort independence, overlap, cross-correlation — LEAN will
+  happily compute a beautiful, meaningless Sharpe. We produced the pooled-IC error with our
+  own code and would reproduce it there. Tooling does not confer rigour.
+- **The live system.** LEAN is a separate C#/Python research ecosystem. It does not replace
+  the Telegram bot, the dashboard, the capture lane, or the MCP server.
+- **The capture-forward DB.** Still needed for live ops and for data LEAN does not carry.
+
+## Suggested use — research lane only, and scoped
+
+Use it for the specific questions our own data **cannot** answer, then bring the *findings*
+back. Do not migrate the platform.
+
+1. Multi-year, multi-cohort put-credit-spread study on **real quotes** — the study that is
+   currently impossible (we have 2 expiry cohorts; this needs ~50+).
+2. Re-run the hedge comparison (Part 7) against the **real** historical skew surface, to
+   confirm or overturn the tail-put finding.
+3. Calibrate `paid%` vs `need%` against years of actual credits, replacing the single
+   19.0% observation.
+
+## Before committing
+
+- **Verify options data cost.** Options quote data is the expensive tier everywhere; confirm
+  the actual subscription/download price for the coverage years wanted.
+- **Verify coverage start date** for the underlyings that matter here.
+- Budget real learning time — LEAN's architecture is nothing like this codebase.
+
+## Verdict
+
+**Worth trialling for research, not for migration.** It plugs the one hole we cannot plug
+ourselves (historical option quotes) and leaves everything we do well untouched. But note
+the discipline problem is ours to keep solving either way — a better engine fed the same
+flawed assumptions returns better-looking wrong answers.
+
+Sources: QuantConnect docs — Equity Options historical data, US Equity Options (AlgoSeek).

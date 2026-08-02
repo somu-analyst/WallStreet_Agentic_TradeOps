@@ -257,6 +257,23 @@ ROWS = [
 (71,"2026-07-28","Claude","Infra","Sidebar rebrand to WallStreet_Agentic_TradeOps",
  "Repo renamed from NYSE_DATA",
  "DONE","2026-07-28","Heading text + font size","8c46bb8 f414493","P3","-"),
+# ------------------------- added 2026-08-01: repo asks that were done but never tracked
+(72,"2026-07-24","User","Research","Scraping tools: which is best? (crawl4ai / firecrawl)",
+ "User gave both repos: unclecode/crawl4ai and firecrawl/firecrawl, asked to analyse, plan, then do",
+ "DONE","2026-07-24","Shortlisted Firecrawl (~155k stars, cloud or self-host) vs Crawl4AI (~75k, Playwright-based, LLM-ready markdown) vs Playwright (already installed). Recommendation: Playwright for one-off JS pages, Crawl4AI only if recurring structured scraping starts. Neither installed - not needed. Written up in docs/SCRAPING_TOOLS.md",
+ "-","P3","-"),
+(73,"2026-07-24","Claude","Methodology","TradingKey was assumed JS-gated - it was not",
+ "The reason the scraping-tool question came up at all",
+ "DONE","2026-07-24","Checked the raw HTML properly: page is server-rendered (Next.js SSR) and ships all 88 investors as a JSON blob. Plain requests.get + ?page=N works. No browser needed. Lesson recorded: verify the raw HTML before reaching for browser automation",
+ "-","P2","-"),
+(74,"2026-07-24","User","Research","worldmonitor / TradingAgents / hermes-agent",
+ "User gave 3 repos as a possible AI hedge fund desk architecture",
+ "DONE","2026-07-27","Wholesale adoption rejected (TradingAgents needs paid LLM calls per decision; the other two are large standalone products). Scoped 4 smaller pieces instead - 3 shipped (Bull-vs-Bear round, prose polish, geopolitical flag, preference memory), 1 deferred (Ollama, needs install)",
+ "69e23a0 bd74c1f 2331abb c456717","P2","-"),
+(75,"2026-07-25","User","Feature","virattt/ai-hedge-fund",
+ "Multi-persona investor ensemble",
+ "DONE","2026-07-25","Borrowed the PATTERN, not the dependency: built the AI Hedge Fund dashboard page as a free/deterministic rule-based ensemble (no LLM keys, no paid data). Confirmed in the Part 2 survey as already-absorbed",
+ "-","P2","-"),
 ]
 
 def build():

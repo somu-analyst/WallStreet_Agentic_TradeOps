@@ -32704,6 +32704,212 @@ def _gex_spot(conn, tk):
         s = _last_price(tk)
     return s
 
+def _gex_trend(conn, tk):
+    """Daily 9/21/50 EMA stack — the co-pilot's macro direction filter.
+
+    Bullish 9>21>50 (longs only) · Bearish 9<21<50 (shorts only) · anything else Tangled
+    (no trades). Returns (label, emoji, dict of the three EMAs).
+    """
+    h = _daily_history(tk, 2, conn)
+    if h is None or len(h) < 60:
+        return "Unknown", "⚪", {}
+    s = pd.Series([float(x) for x in h])
+    e9, e21, e50 = (s.ewm(span=n, adjust=False).mean().iloc[-1] for n in (9, 21, 50))
+    d = {"9": e9, "21": e21, "50": e50}
+    if e9 > e21 > e50:
+        return "Bullish", "🟢", d
+    if e9 < e21 < e50:
+        return "Bearish", "🔴", d
+    return "Tangled", "🟡", d
+
+
+def _gex_levels(conn, tk, spot):
+    """The structural map: gamma flip, call/put wall, control node (highest-OI strike)."""
+    g = _compute_gex(tk, conn, spot) or {}
+    node = None
+    try:
+        sig = analyze_inst_signals(tk, conn) or {}
+        walls = sig.get("gamma_walls") or []
+        # anchor to SPOT: analyze_inst_signals bands its walls around the median strike, so
+        # on a wide chain the biggest-OI strike can sit far from where price actually is
+        # (SPY returned a $550 "control node" against a $756 spot). A magnet 27% away is
+        # not a magnet, so only strikes within +/-10% of spot qualify.
+        near = [w for w in walls if abs(float(w.get("strike", 0)) - spot) <= spot * 0.10]
+        if near:
+            node = float(max(near, key=lambda w: w.get("total_oi", 0))["strike"])
+        mp = sig.get("max_pain")
+        if node is None and mp:
+            _m = float(mp[0]["strike"]) if isinstance(mp, list) and mp else None
+            node = _m if (_m and abs(_m - spot) <= spot * 0.10) else None
+    except Exception:
+        pass
+    return {"flip": g.get("zero_gamma"), "call_wall": g.get("call_wall"),
+            "put_wall": g.get("put_wall"), "node": node,
+            "regime": g.get("gex_signal"), "gex_m": g.get("total_gex_m", 0.0),
+            "expiry": g.get("expiry"), "dte": g.get("dte")}
+
+
+_GEX_HONESTY = ("<i>⚠️ These are STRUCTURE, not a forecast. Tested on this DB the `gex` "
+                "model hit 40.2% over 107 fires and, once same-day fires stop double-"
+                "counting, p=0.21 — no measurable edge either way. What this framework "
+                "actually gives you is a trade FILTER (trend gate + confirmation before "
+                "entry), and that discipline is worth more than the levels are.</i>")
+
+
+def _gex_blueprint(conn, tk):
+    """MODE 1 — pre-market structural map, auto-filled from our own capture.
+
+    The source prompt has you paste levels in by hand from SpotGamma/Tradytics. We already
+    compute all four from the captured chain, so this reads them straight out of the DB.
+    """
+    tk = tk.upper()
+    spot = _gex_spot(conn, tk)
+    if not spot:
+        return f"📐 <b>{tk}</b>: no price available."
+    L = _gex_levels(conn, tk, spot)
+    trend, temoji, emas = _gex_trend(conn, tk)
+    flip, cw, pw, node = L["flip"], L["call_wall"], L["put_wall"], L["node"]
+    f = lambda v: (f"${v:,.2f}" if isinstance(v, (int, float)) and v else "n/a")
+
+    out = [hdr(f"🔎 GEX BLUEPRINT — {tk}"), ""]
+    out.append(_pipe_table(("Level", "Value"), [
+        ("Spot", f(spot)),
+        ("Trend filter", f"{temoji} {trend}"),
+        ("Gamma flip", f(flip)),
+        ("Call wall", f(cw)),
+        ("Put wall", f(pw)),
+        ("Control node", f(node)),
+        ("Net GEX", f"{L['gex_m']:+,.0f}M"),
+        ("Expiry", f"{L['expiry']} ({L['dte']}d)"),
+    ]))
+    if emas:
+        out.append(f"<i>EMA 9 {emas['9']:.2f} · 21 {emas['21']:.2f} · 50 {emas['50']:.2f}</i>")
+    out.append("")
+
+    if trend == "Tangled":
+        out.append("🟡 <b>NO-TRADE — moving averages are tangled.</b> The framework's own "
+                   "first rule is to sit in cash when the daily stack is not clean. "
+                   "Everything below is context only.")
+        out.append("")
+
+    above = bool(flip) and spot >= flip
+    out.append(shdr("📈 Scenario A — above the flip (+GEX)"))
+    out.append(f"• Condition: holds above {f(flip)}")
+    out.append("• Dealer effect: they buy dips / sell rallies — moves get DAMPENED. "
+               "Expect chop and mean reversion, not clean breakouts.")
+    if trend == "Bearish":
+        out.append("• ⛔ <b>PASS</b> — longs here fight a bearish daily stack.")
+    else:
+        out.append(f"• Play: bounce off {f(flip)} or {f(node)} <b>on a volume surge</b> → "
+                   f"target {f(cw)}. Cut if a candle closes back under {f(flip)}.")
+    out.append("")
+    out.append(shdr("📉 Scenario B — below the flip (−GEX)"))
+    out.append(f"• Condition: breaks and holds below {f(flip)}")
+    out.append("• Dealer effect: they sell into weakness — moves get AMPLIFIED. "
+               "Velocity expands; trail stops tighter.")
+    if trend == "Bullish":
+        out.append("• ⛔ <b>PASS</b> — shorts here fight a bullish daily stack. "
+                   "Sit out rather than trade against your own filter.")
+    else:
+        out.append(f"• Play: retest of {f(flip)} from underneath, or breakdown under "
+                   f"{f(node)} → target {f(pw)}.")
+    out.append("")
+    out.append(f"<b>Now:</b> price is {'ABOVE' if above else 'BELOW'} the flip → "
+               f"{'+GEX / mean-reverting' if above else '−GEX / expansion'} regime.")
+    out.append("")
+    out.append(_GEX_HONESTY)
+    return "\n".join(out)
+
+
+def _gex_check(conn, tk, side):
+    """MODE 2 — live execution filter. Gates a PROPOSED trade against the 3-part checklist."""
+    tk, side = tk.upper(), (side or "").lower()
+    want_long = side.startswith("c") or side in ("long", "buy", "bull")
+    spot = _gex_spot(conn, tk)
+    if not spot:
+        return f"📐 <b>{tk}</b>: no price available."
+    L = _gex_levels(conn, tk, spot)
+    trend, temoji, _ = _gex_trend(conn, tk)
+    flip, cw, pw, node = L["flip"], L["call_wall"], L["put_wall"], L["node"]
+    f = lambda v: (f"${v:,.2f}" if isinstance(v, (int, float)) and v else "n/a")
+    above = bool(flip) and spot >= flip
+
+    aligned = (trend == "Bullish" and want_long) or (trend == "Bearish" and not want_long)
+    regime_ok = (want_long and above) or ((not want_long) and not above)
+    # nearest mapped level, and how far price sits from it in %
+    lv = [(n, v) for n, v in (("gamma flip", flip), ("call wall", cw),
+                              ("put wall", pw), ("control node", node)) if v]
+    near, dist = ("none mapped", None)
+    if lv:
+        n_, v_ = min(lv, key=lambda x: abs(spot - x[1]))
+        near, dist = n_, abs(spot - v_) / spot * 100
+
+    checks = [
+        ("Macro trend", aligned,
+         f"daily stack {trend}, you want {'CALLS' if want_long else 'PUTS'}"),
+        ("GEX regime", regime_ok,
+         f"price {'above' if above else 'below'} flip → "
+         f"{'+GEX dampening' if above else '−GEX expansion'}"),
+        ("At a level", dist is not None and dist <= 0.75,
+         f"nearest is {near}" + (f", {dist:.2f}% away" if dist is not None else "")),
+    ]
+    go = all(ok for _, ok, _ in checks)
+    out = [hdr(f"🚦 {'GREEN LIGHT' if go else 'RED LIGHT — PASS'} · {tk} "
+               f"{'CALLS' if want_long else 'PUTS'}"), ""]
+    out.append(_pipe_table(("Check", "", "Detail"),
+                           [(n, "✅" if ok else "❌", d[:40]) for n, ok, d in checks]))
+    out.append("")
+    if go:
+        tgt = cw if want_long else pw
+        stop = flip if flip else node
+        out.append(f"• <b>Entry trigger:</b> needs BOTH — a reversal candle at {f(near and spot)} "
+                   f"and a local volume surge. Structure alone is not an entry.")
+        out.append(f"• <b>Stop:</b> just beyond {f(stop)} (behind the level being defended)")
+        out.append(f"• <b>Target:</b> {f(tgt)}")
+        out.append("• <b>Abort</b> if volume dries up or price stalls at the level.")
+    else:
+        fails = [n for n, ok, _ in checks if not ok]
+        out.append(f"• <b>Blocked by:</b> {', '.join(fails)}")
+        if not aligned:
+            out.append(f"• Taking {'calls' if want_long else 'puts'} against a {trend} daily "
+                       f"stack is the exact trade this framework exists to stop.")
+        if not regime_ok and want_long and not above:
+            out.append(f"• Below the flip dealers must SELL into weakness — buying calls here "
+                       f"is catching a falling knife. Reclaim {f(flip)} on volume first.")
+        out.append("• No entry authorised. Stand down.")
+    out.append("")
+    out.append(_GEX_HONESTY)
+    return "\n".join(out)
+
+
+async def gexplan_command(update, ctx):
+    """/gexplan TICKER — Mode 1 pre-market structural map."""
+    tk = (ctx.args[0] if ctx.args else "SPY").upper()
+    conn = get_conn()
+    try:
+        txt = _gex_blueprint(conn, tk)
+    finally:
+        conn.close()
+    await update.message.reply_text(txt[:4096], parse_mode=H)
+
+
+async def gexcheck_command(update, ctx):
+    """/gexcheck TICKER call|put — Mode 2 live execution filter."""
+    if not ctx.args:
+        await update.message.reply_text(
+            "Usage: <code>/gexcheck SPY call</code> — gates a proposed trade against the "
+            "trend filter, the GEX regime and level proximity.", parse_mode=H)
+        return
+    tk = ctx.args[0].upper()
+    side = ctx.args[1] if len(ctx.args) > 1 else "call"
+    conn = get_conn()
+    try:
+        txt = _gex_check(conn, tk, side)
+    finally:
+        conn.close()
+    await update.message.reply_text(txt[:4096], parse_mode=H)
+
+
 def _fmt_gex_report(g, tk, spot, pos=None):
     if not g or not g.get("total_gex"):
         return f"📐 <b>{tk} GEX</b>: no options data in DB for this ticker."
@@ -34569,6 +34775,8 @@ def main():
     app.add_handler(CommandHandler("watchlist", watchlist_command))
     app.add_handler(CommandHandler("paper", paper_command))
     app.add_handler(CommandHandler("gex", gex_command))
+    app.add_handler(CommandHandler("gexplan", gexplan_command))    # GEX co-pilot Mode 1
+    app.add_handler(CommandHandler("gexcheck", gexcheck_command))  # GEX co-pilot Mode 2
     app.add_handler(CommandHandler("macro", macro_command))
     app.add_handler(CommandHandler("momentum", momentum_command))
     app.add_handler(CommandHandler("regime", regime_command))

@@ -26,7 +26,8 @@ ROWS = [
  "DONE","2026-07-31","Revoked via BotFather; new token installed; bot restarted, 0 auth errors","-","P0","-"),
 (2,"2026-07-31","Claude","Security","Second bot @CE448_bot (8018716820) also leaked",
  "Token in 3 public commits; verified STILL ALIVE via getMe",
- "USER-ACTION","","Only BotFather /revoke or /deletebot can close it","-","P0",
+ "CLOSED","2026-08-02",
+ "NOT THE USER'S BOT - closed on their instruction. Token still answers getMe (verified 2026-08-02), but it belongs to someone else so there is no revoke path from here. Its presence in this repo history remains a dangling-blob artifact only","-","P0",
  "You: @BotFather -> /revoke or /deletebot -> @CE448_bot"),
 (3,"2026-07-31","User","Security","Purge git history / dangling commit 24e2ab8",
  "Asked whether to rewrite history to remove leaked tokens",
@@ -284,6 +285,14 @@ ROWS = [
  "Direct follow-up to the ID 33 fill measurement",
  "DONE","2026-08-02","Added _hp_fill (shared by _hiprob_scan and _hiprob_scan_asof): rejects legs with no two-sided market or spread >35% of mid, and prices shorts at the sell side / longs at the buy side (f=0.50) instead of the mid. Verified on the 2026-07-21 universe: all 15 setups still qualify, credits fall a median 7% (up to 31% on two-leg spreads, 0.3% on index CSPs). Gate bites where measured: EFA rejects 79% of legs, SPXS 75%, BIIB 53%, liquid mega-caps 0%. Live yfinance path smoke-tested",
  "-","P1","-"),
+(78,"2026-08-02","User","Feature","GEX Master Trading co-pilot (Nick Ireland framework)",
+ "User pasted the full two-mode co-pilot spec; Claude initially read it as forwarded reading material and did NOT action it - caught by the user the next day",
+ "DONE","2026-08-02","Built /gexplan (Mode 1 pre-market blueprint) and /gexcheck (Mode 2 live execution filter). Improves on the source prompt by auto-filling gamma flip / call wall / put wall / control node from our OWN captured chain via _compute_gex + analyze_inst_signals, instead of pasting them by hand from SpotGamma. Adds the daily 9/21/50 EMA trend gate (Bullish/Bearish/Tangled -> no-trade) and the 3-part checklist as a hard gate. Fixed a real defect during verification: the control node was picked from walls banded around the MEDIAN strike, giving SPY a $550 node against a $756 spot - now constrained to +/-10% of spot. Carries an honesty footer: on this DB the gex model hit 40.2% over 107 fires, p=0.21 de-overlapped, so levels are structure not forecast; the value is the filter",
+ "-","P2","-"),
+(79,"2026-08-02","Claude","Process","A pasted spec was treated as reading material, not a task",
+ "The GEX prompt arrived as a forwarded WhatsApp-style thread and was answered with a critique instead of being built or logged",
+ "DONE","2026-08-02","Owned and corrected. Lesson: when the user pastes a spec, log it in the tracker even if unsure whether to build it - the tracker exists precisely so an ask cannot be silently dropped. Nothing else from that day was missed (re-checked the session)",
+ "-","P2","-"),
 ]
 
 def build():

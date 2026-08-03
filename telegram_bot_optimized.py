@@ -33291,6 +33291,26 @@ def _event_news_google(keys=None):
     return res
 
 def _gex_spot(conn, tk):
+    """Spot for GEX/co-pilot maths — LIVE first, EOD only as a fallback.
+
+    Was EOD-first: _opex_spot() reads the last captured close, so during the session the
+    co-pilot priced GOOG at 356.65 while it actually traded 367.65 -- 3% stale, which
+    silently invalidates every "distance to a level" test built on it (user 2026-08-03).
+    """
+    live = 0.0
+    try:                       # freshest: our own 1m intraday lane
+        _b = _intraday_last(tk)
+        if _b and _b[0] and (_b[1] is None or _b[1] <= 90):   # bar no older than ~90 min
+            live = float(_b[0])
+    except Exception:
+        pass
+    if live <= 0:
+        try:
+            live = float(_last_price(tk) or 0)
+        except Exception:
+            live = 0.0
+    if live > 0:
+        return live
     s = _opex_spot(conn, tk)
     if s <= 0:
         s = _last_price(tk)
@@ -33400,6 +33420,11 @@ def _gex_confirm(tk, lookback=20):
         return None
     if df is None or len(df) < lookback + 2:
         return None
+    # The most recent 1m row is often a PARTIAL bar still being filled: volume 0 while the
+    # minute is in progress. Scoring it made the surge check read "0.0x its 20-bar average"
+    # and fail the volume leg for everything, all session (2026-08-03).
+    if len(df) > lookback + 2 and float(df["volume"].iloc[-1] or 0) <= 0:
+        df = df.iloc[:-1]
     last = df.iloc[-1]
     prior = df.iloc[-(lookback + 1):-1]
     avg_v = float(prior["volume"].mean() or 0)

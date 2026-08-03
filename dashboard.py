@@ -9180,6 +9180,8 @@ elif page == "💼 Portfolio & Suggestions":
 
     updated_rows = []
     _spot_cache: dict = {}
+    # lazily-opened DB handle used to read OUR captured EOD option marks (see below)
+    _eodq: dict = {"conn": None}
     if not trades.empty:
         for _, _t in trades.iterrows():
             _tk  = str(_t.get("ticker","")).upper()
@@ -9229,10 +9231,31 @@ elif page == "💼 Portfolio & Suggestions":
                                              fallback=_hv))
                     _g = bs_greeks(_spot_eod, _k, _T, 0.045, _iv_used, _opt.lower())
                 else:
-                    # Market closed → BS with historical vol at confirmed DB EOD spot
-                    _iv_used = _hv
-                    _g   = bs_greeks(_spot_eod, _k, _T, 0.045, _iv_used, _opt.lower())
-                    _cp  = _g["price"]
+                    # No live quote. Use OUR OWN captured EOD chain before falling back to a
+                    # model. This mattered: with yfinance returning bid=ask=0 all session,
+                    # the BS branch priced GOOG 355P at 7.28 using TODAY's spot and called it
+                    # "EOD Premium", while the real 2026-07-31 capture was bid 11.00 / ask
+                    # 12.00 -> mid 11.50. Entry was 11.21, so a roughly FLAT leg was shown as
+                    # -35% (user 2026-08-03). A model price at live spot is not an EOD mark.
+                    _cp = None
+                    try:
+                        if _TB_ENGINE is not None:
+                            if _eodq.get("conn") is None:
+                                _eodq["conn"] = get_conn()
+                            _bq = _TB_ENGINE._bb_quote(_eodq["conn"], _tk, _k, _exp,
+                                                       _opt.lower())
+                        else:
+                            _bq = None
+                        if _bq and float(_bq.get("mid") or 0) > 0:
+                            _cp = float(_bq["mid"])
+                            _iv_used = _bq.get("iv") or _hv
+                            _g = bs_greeks(_spot_eod, _k, _T, 0.045, _iv_used, _opt.lower())
+                    except Exception:
+                        _cp = None
+                    if _cp is None:
+                        _iv_used = _hv
+                        _g   = bs_greeks(_spot_eod, _k, _T, 0.045, _iv_used, _opt.lower())
+                        _cp  = _g["price"]
                 _d   = _g["delta"]*_qty; _gm=_g["gamma"]*abs(_qty)
                 _th  = _g["theta"]*abs(_qty); _ve=_g["vega"]*abs(_qty)
             except:

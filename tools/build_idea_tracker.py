@@ -426,6 +426,10 @@ ROWS = [
  "User: can you refresh time after this",
  "DONE","2026-08-03","Per-leg detail now shows: refresh clock, market state (OPEN/PRE/AFTER/CLOSED), and the newest lastTradeDate found in the option chain itself. If that trade date is a previous session it prints an explicit warning that the Now column is a stale mark, not a live price - which is exactly the condition seen at 09:43 ET Monday when yfinance was still serving Fridays chain. Verified live: Refreshed 09:47:28 - market OPEN",
  "-","P1","-"),
+(113,"2026-08-03","User","Bug","Merged GEX/Gamma pages are nowhere to be found",
+ "User: yesterday you merged gamma things, where are they, I do not see anywhere",
+ "DONE","2026-08-03","NOT lost - the merge shipped and works. Verified live: navigated to the page, sub-view radio renders, all three views present, zero errors. It is at Sidebar > section 'Trade Ideas' > 'GEX Command', with a GEX view radio switching Co-Pilot / GEX Profile / Gamma Wall Advisor. The user could not find it because it sits under Trade Ideas rather than where GEX Profile used to be, and the jump box virtualises to ~10 options until you type. Caveat recorded: my nav enumeration returned an EMPTY list for GEX/Gamma because of that virtualisation - trusting it would have produced a false 'page is missing' report",
+ "-","P1","Consider a one-line note under the old section pointing to the new home"),
 ]
 
 def build():

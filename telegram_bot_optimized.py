@@ -32830,11 +32830,14 @@ def _gex_confirm(tk, lookback=20):
                     else ("9-EMA reclaim" if (reclaim_up or reclaim_dn) else "no trigger"))}
 
 
-_GEX_HONESTY = ("<i>⚠️ These are STRUCTURE, not a forecast. Tested on this DB the `gex` "
-                "model hit 40.2% over 107 fires and, once same-day fires stop double-"
-                "counting, p=0.21 — no measurable edge either way. What this framework "
-                "actually gives you is a trade FILTER (trend gate + confirmation before "
-                "entry), and that discipline is worth more than the levels are.</i>")
+_GEX_HONESTY = ("<i>⚠️ <b>Direction:</b> no edge — the `gex` model hit 40.2% over 107 fires "
+                "(p=0.21 de-overlapped). Don't trade these levels for direction. "
+                "<b>Volatility:</b> measured 2026-08-02, SPY's own high-GEX days were "
+                "followed by 10.2% realised vol vs 14.0% after low-GEX days (QQQ 16.6% vs "
+                "23.6%) — correctly signed and economically large, but n=12 per bucket, "
+                "p≈0.06–0.09, NOT significant. So treat GEX as a regime read (chop vs "
+                "velocity) that suits sizing and strategy choice, never as an entry signal. "
+                "The FILTER below is what's actually worth following. See ADOPTED.md Part 10.</i>")
 
 
 def _gex_blueprint(conn, tk, want_exp=None):

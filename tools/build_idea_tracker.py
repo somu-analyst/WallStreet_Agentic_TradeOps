@@ -297,6 +297,10 @@ ROWS = [
  "User asked whether everything in the GEX spec existed in BOTH Telegram and Streamlit, then to merge the duplicate gamma tabs",
  "DONE","2026-08-02","Audit found 3 gaps: price-action and volume legs were only PRINTED as requirements (so a GREEN LIGHT could fire on structure alone), no 0DTE/weekly expiry choice, and NOTHING in Streamlit. All closed. (1) _gex_confirm reads real 1m bars from US_intraday.db - volume vs 20-bar mean (>=1.5x) and rejection-candle / 9-EMA-reclaim detection; tickers outside the 32-name intraday lane report UNVERIFIED and FAIL the leg rather than pass unseen. (2) expiry basis selector: SPY reads TRENDING -16M on the monthly but PINNING +43M on 0DTE - opposite regimes at the same moment. (3) merged the two dedicated pages (GEX Profile, Gamma Wall Advisor) into one 'GEX Command' page with a sidebar sub-view + new Co-Pilot view; GEX sections inside OTHER pages left untouched per user instruction. Verified in live DOM",
  "-","P2","-"),
+(81,"2026-08-02","User","Research","Can anything be salvaged from GEX?",
+ "Asked after being told the GEX levels have no measured edge",
+ "DONE","2026-08-02","Found we had been testing the WRONG CLAIM: every prior test scored GEX on DIRECTION (40.2% hit, p=0.21), but dealer-hedging theory makes no directional claim - it predicts realised VOL. Tested properly. First harness gave IC +0.146 t=+3.85 p=0.0008 but FAILED its sanity gate (15% of random signals passed) - discarded, not reported. Causes: cross-ticker level effect + vol persistence. Framed as the theory actually states it (time-series, per-underlying): SPY high-GEX days -> 10.2% fwd vol vs 14.0% after low-GEX; QQQ 16.6% vs 23.6%. Correctly signed and economically large (~27-30% lower) but n=12/bucket, p=0.06-0.09, NOT significant. Conclusion: keep GEX as a volatility-REGIME read for sizing/strategy choice, never for direction; do not build a directional GEX scanner. Re-test at >=40 obs per bucket. ADOPTED.md Part 10",
+ "-","P2","Re-test when ~8 more months accrue, or sooner using options_openbb real gamma"),
 ]
 
 def build():

@@ -744,3 +744,77 @@ Net: two claims removed from the UI, one strategy idea correctly killed before i
 and one quantified correction that makes every existing backtest number honest. No new edge
 was found in this pass — that is the expected outcome of a validation pass, and preferable
 to the alternative.
+
+---
+
+# Part 10 — GEX: we had been testing the wrong claim (2026-08-02)
+
+Every prior test scored GEX on **direction** — the `gex` model's 40.2% hit rate over 107
+fires, p=0.21 once same-day fires stop double-counting. On that basis it was written off.
+
+But the dealer-hedging story makes **no directional claim at all**. It says positive net
+GEX means dealers buy dips and sell rallies, so realised vol is *suppressed*; negative
+means they sell weakness and buy strength, so vol is *amplified*. The testable claim is
+about the SIZE of subsequent moves. That is what this measures.
+
+**Proxy note:** real GEX needs per-strike Black-Scholes gamma, which needs IV — available
+only in `options_openbb` (21 days). To reach 7 months this uses the OI-weighted proxy
+(net OI × strike², the same shape `dashboard.py` already uses). It preserves sign and
+ordering, which is all these tests need, but it is not the gamma-weighted quantity.
+
+## 10.1 — The first harness failed its own sanity gate
+
+Raw net-GEX scored cross-sectionally against forward realised vol gave **IC +0.146,
+t=+3.85, p=0.0008**. Then the gate: **15% of RANDOM signals also passed** (expect ~5%).
+The number was discarded, not reported. Two causes, both the same mistake:
+
+1. **Level effect.** Comparing raw GEX *across tickers* mostly ranks tickers, not states —
+   big-OI index names sit at systematically different GEX *and* vol levels, so any
+   persistent per-ticker quantity scores. Fixed by z-scoring each ticker against its own
+   history.
+2. **Persistence.** Forward realised vol is strongly autocorrelated, so consecutive daily
+   ICs aren't independent even sampled every 5 days. Fixed by sampling at 2× the horizon.
+
+| H | step | signal | IC | t | p | days | gate | verdict |
+|---|---|---|---|---|---|---|---|---|
+| 5 | 5 | raw | +0.146 | +3.85 | 0.0008 | 25 | **14.5%** | harness unreliable |
+| 5 | 10 | raw | +0.143 | +2.25 | 0.048 | 11 | 6.5% | significant, **sign wrong** |
+| 5 | 10 | z-scored | +0.131 | +1.86 | 0.096 | 10 | 6.5% | not significant |
+| 10 | 10 | z-scored | +0.186 | +2.53 | 0.035 | 9 | 9.0% | significant, **sign wrong** |
+
+Cross-sectionally, higher GEX goes with *higher* forward vol — the opposite of theory.
+That is the level effect surviving even the z-score: the names carrying the most gamma are
+simply the most volatile names.
+
+## 10.2 — Framed as the theory actually states it, the sign flips to correct
+
+The claim is a **time-series** one: *when this underlying's own GEX is high, its own next
+week is quieter*. Split each index against its own median:
+
+| horizon | ticker | high-GEX fwd vol | low-GEX fwd vol | diff | t | p | n |
+|---|---|---|---|---|---|---|---|
+| 5d | SPY | **10.2%** | **14.0%** | −3.8pp | −1.77 | 0.091 | 12/12 |
+| 5d | QQQ | **16.6%** | **23.6%** | −7.0pp | −1.97 | 0.061 | 12/13 |
+
+Both **correctly signed**, both economically large (SPY's forward vol is ~27% lower in the
+high-GEX half; QQQ's ~30% lower), and **neither significant** at n=12 per bucket.
+
+## 10.3 — What this changes
+
+**This is the first GEX result in this project that points the right way.** It is not proof
+— p≈0.06–0.09 on 12 observations is exactly the sample size that produces false positives,
+and this project has already been burned twice by acting on underpowered results.
+
+What it does justify:
+- **Keep GEX as a volatility-REGIME read, drop it as a direction signal.** That is already
+  how `/gexplan` frames it ("expect chop" vs "expect velocity") — this is the first
+  evidence that framing is the right one.
+- **The natural use is strategy selection and sizing**, not entries: premium-selling suits
+  a +GEX regime, and −GEX argues for smaller size or long premium. That is directly
+  testable against the existing `hiprob_recs` book.
+- **Do not build a directional GEX scanner.** Cross-sectionally the sign is wrong, and
+  directionally it is a coin flip.
+
+**Re-test gate:** revisit when there are ≥40 independent observations per bucket (roughly
+8 more months at 5-day sampling), or sooner using `options_openbb`'s real gamma once that
+table has more history.

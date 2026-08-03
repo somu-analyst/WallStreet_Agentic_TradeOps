@@ -23852,6 +23852,7 @@ if page == "👀 Watchlist":
                     # same idea on TODAY's range: 0 = printed the day's low, 1 = the day's high
                     "Day Pos": (round(max(0.0, min(1.0, (_wspot - _wdl) / (_wdh - _wdl))), 3)
                                 if (_wdh and _wdl and _wdh > _wdl and _wspot) else None),
+                    "Day line": None,          # filled after the intraday map is built
                     "Call Wall": (f"${_wcw:,.0f}" if _wcw else "—"),
                     "Put Wall": (f"${_wpw:,.0f}" if _wpw else "—"),
                     "Target": (round(_wtarget, 2) if _wtarget else None),
@@ -23869,6 +23870,28 @@ if page == "👀 Watchlist":
                 _wl_rows.append({"id": int(_wr["id"]), "Class": _wr.get("asset_class") or "Stock",
                                   "Ticker": _wtk, "Name": _wtk, "Spot": None, "Note": f"error: {_e}"})
 
+        # Intraday path per ticker for the in-cell day line (ID 111, a REPEAT ask). One
+        # query for the whole watchlist, from US_intraday.db (1m bars, ~31 tickers). Names
+        # outside the intraday lane simply get no line rather than a fabricated one.
+        _wl_paths = {}
+        try:
+            import sqlite3 as _sq3, os as _os3
+            _ip = _os3.path.join(os.path.dirname(DB_PATH), "US_intraday.db")
+            if _os3.path.exists(_ip):
+                _ic = _sq3.connect(_ip, timeout=10)
+                _iday = _ic.execute("SELECT MAX(trade_date) FROM intraday_bars").fetchone()[0]
+                if _iday:
+                    _ib = pd.read_sql(
+                        "SELECT ticker, ts, close FROM intraday_bars WHERE trade_date=? "
+                        "ORDER BY ticker, ts", _ic, params=(_iday,))
+                    for _tkk, _g in _ib.groupby("ticker"):
+                        _ser = [float(x) for x in _g["close"].tolist() if x == x]
+                        if len(_ser) >= 5:
+                            _wl_paths[str(_tkk).upper()] = _ser[-120:]   # last ~2h of 1m bars
+                _ic.close()
+        except Exception:
+            _wl_paths = {}
+
         _WL_ICON = {"Stock": "📈", "ETF": "🧺", "Bond": "🏦", "Commodity": "🛢️"}
         _WL_PLURAL = {"Stock": "Stocks", "ETF": "ETFs", "Bond": "Bonds", "Commodity": "Commodities"}
         for _wcls in _WL_CLASSES:
@@ -23876,6 +23899,8 @@ if page == "👀 Watchlist":
             if not _cls_rows:
                 continue
             st.markdown(f"### {_WL_ICON.get(_wcls, '•')} {_WL_PLURAL.get(_wcls, _wcls)} ({len(_cls_rows)})")
+            for _r0 in _cls_rows:
+                _r0["Day line"] = _wl_paths.get(str(_r0.get("Ticker") or "").upper())
             _cls_show = pd.DataFrame(_cls_rows)
             # Ticker / Name / Spot stay put when the table is scrolled right (pinned=True,
             # Streamlit >=1.42) and every header carries a hover explanation, so the
@@ -23893,6 +23918,11 @@ if page == "👀 Watchlist":
                     help="Change vs the previous close."),
                 "Day L-H": st.column_config.TextColumn("Day low–high",
                     help="Today's trading range (low to high)."),
+                "Day line": st.column_config.LineChartColumn(
+                    "Day path", width="small",
+                    help="Today's actual intraday price path from 1-minute bars — the shape "
+                         "behind the low-high range, not just its endpoints. Blank when the "
+                         "ticker is outside the intraday lane (~31 names)."),
                 "Day Pos": st.column_config.ProgressColumn("Day position", min_value=0.0,
                     max_value=1.0, format="%.0f%%",
                     help="Where the current price sits inside TODAY's low-high range. "
@@ -23941,7 +23971,8 @@ if page == "👀 Watchlist":
                 "Added": st.column_config.TextColumn("Added on",
                     help="Date this ticker was added to the watchlist."),
             }
-            _wl_order = ["Ticker", "Name", "Spot", "Day%", "Day Pos", "52w Pos", "52w L-H", "Day L-H",
+            _wl_order = ["Ticker", "Name", "Spot", "Day%", "Day line", "Day Pos", "52w Pos",
+                         "52w L-H", "Day L-H",
                          "Call Wall", "Put Wall", "Target", "Dist to Target", "RSI(14)",
                          "PCR(OI)", "SI %", "DTC", "Shorts", "Earnings", "Ex-Div",
                          "Signal", "Src", "Note", "Added"]

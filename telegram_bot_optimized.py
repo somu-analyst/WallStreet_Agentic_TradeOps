@@ -26023,6 +26023,148 @@ def _kb_wrap():
                                   InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]])
 
 
+def _eod_digest(conn, max_news=5, max_uoa=8, max_plays=6):
+    """/digest — end-of-day newsletter built ONLY from things this repo actually has.
+
+    Modelled on the InsiderFinance EOD format (tracker ID 37). Four of its five sections
+    are buildable here; the fifth ("AI Noteworthy Trades") needs a real-time options TAPE
+    — individual prints with time and aggressor side — which no free source gives us, and
+    faking it from EOD volume would be a different thing wearing its name. It is omitted
+    rather than approximated.
+
+    Every section states what it is worth. Rotation carries a measured result; unusual
+    activity does NOT (scn_uoa hit 47.1%, i.e. noise) and says so; POP is model output,
+    not a validated probability. See docs/ADOPTED.md Part 9.
+    """
+    parts = [hdr("📰 EOD DIGEST"), ""]
+
+    # ── 1. headlines ──────────────────────────────────────────────────────────────
+    try:
+        news = _world_news_block(limit=max_news * 3) or []
+    except Exception:
+        news = []
+    # The RSS mix carries MarketWatch/Yahoo personal-finance advice columns ("Can she claim
+    # her late husband's Social Security...") alongside real market copy. In a MARKET digest
+    # those are noise, so drop the obvious ones rather than pad the section with them.
+    _PF = ("social security", "my husband", "my wife", "my girlfriend", "my boyfriend",
+           "my son", "my daughter", "my mother", "my father", "should i tip", "in our 60s",
+           "in our 70s", "retirement account", "dear ", "i'm ", "we're in our")
+    news = [n for n in news
+            if not any(w in str(n[0] if isinstance(n, (tuple, list)) else n).lower()
+                       for w in _PF)]
+    parts.append(shdr("1 · What moved the tape"))
+    if news:
+        for n in news[:max_news]:
+            # `_world_news_block` yields (headline, source, url) tuples — not dicts
+            if isinstance(n, (tuple, list)):
+                h = str(n[0] if len(n) > 0 else "").strip()
+                src = str(n[1] if len(n) > 1 else "").strip()
+                u = str(n[2] if len(n) > 2 else "").strip()
+            elif isinstance(n, dict):
+                h = str(n.get("headline") or n.get("title") or "").strip()
+                src = str(n.get("source") or "").strip()
+                u = str(n.get("url") or n.get("link") or "").strip()
+            else:
+                h, src, u = str(n).strip(), "", ""
+            if not h:
+                continue
+            tag = f" <i>({src})</i>" if src else ""
+            parts.append(f"• <a href=\"{u}\">{h[:110]}</a>{tag}" if u else f"• {h[:110]}{tag}")
+    else:
+        parts.append("<i>News feed unavailable right now.</i>")
+    parts.append("")
+
+    # ── 2. sector rotation ────────────────────────────────────────────────────────
+    parts.append(shdr("2 · Where money is rotating"))
+    try:
+        _title, rows = _rotation_scan(conn, level="sector")
+    except Exception:
+        rows = []
+    if rows:
+        # _rotation_scan rows carry `name` (human label) and `tk` — there is no `item` key
+        _q = {}
+        for r in rows:
+            _q.setdefault(str(r.get("quad", "?")), []).append(
+                str(r.get("name") or r.get("tk") or "?"))
+        trs = [(k, ", ".join(v[:5])[:44]) for k, v in _q.items()]
+        parts.append(_pipe_table(("Quadrant", "Sectors"), trs))
+        parts.append("<i>Backtested (1,542 obs): <b>Weakening</b> underperforms −1.6%/10d "
+                     "vs SPY. That quadrant read is the only rotation claim that survived "
+                     "re-testing — the momentum-axis IC claim was withdrawn.</i>")
+    else:
+        parts.append("<i>Not enough history for a rotation read.</i>")
+    parts.append("")
+
+    # ── 3. today's option setups ──────────────────────────────────────────────────
+    parts.append(shdr("3 · Option setups on the board"))
+    try:
+        d0 = conn.execute("SELECT MAX(rec_date) FROM hiprob_recs WHERE src='LIVE'").fetchone()[0]
+        recs = conn.execute(
+            "SELECT ticker, strategy, legs, expiry, pop, net, capital FROM hiprob_recs "
+            # capital>0: a handful of legacy CSP rows persisted capital 0 (the bug fixed in
+            # 5c76fe7). A row showing "$0 capital" in a digest reads as a free trade.
+            "WHERE rec_date=? AND src='LIVE' AND status='OPEN' AND capital>0 "
+            "ORDER BY pop DESC LIMIT ?", (d0, max_plays)).fetchall() if d0 else []
+    except Exception:
+        d0, recs = None, []
+    if recs:
+        rr = [(str(t)[:6], str(l)[:11], f"{float(p or 0):.0f}%", f"${float(c or 0):,.0f}")
+              for t, s, l, e, p, n, c in recs]
+        parts.append(_pipe_table(("Tkr", "Legs", "POP", "Capital"), rr, right_cols={2, 3},
+                                 title=f"Issued {d0}"))
+        parts.append("<i>POP is Black-Scholes model output, NOT a validated probability, and "
+                     "a high win rate is not an edge: a trade only pays if credit/width > "
+                     "(1−POP). Credits are quoted at a realistic fill, not the mid.</i>")
+    else:
+        parts.append("<i>No live setups issued today.</i>")
+    parts.append("")
+
+    # ── 4. unusual activity ───────────────────────────────────────────────────────
+    parts.append(shdr("4 · Unusual options activity"))
+    try:
+        u = _uoa_scan(conn, top=max_uoa)
+        urows = u if isinstance(u, list) else (u.to_dict("records") if hasattr(u, "to_dict") else [])
+    except Exception:
+        urows = []
+    if urows:
+        # _uoa_scan rows: ticker / strike / side ('C'|'P') / ratio / notional
+        ur = []
+        for r in urows[:max_uoa]:
+            if not isinstance(r, dict):
+                continue
+            ur.append((str(r.get("ticker", ""))[:6],
+                       "CALL" if str(r.get("side", "")).upper().startswith("C") else "PUT",
+                       f"{float(r.get('strike') or 0):g}",
+                       f"{float(r.get('ratio') or 0):.1f}x",
+                       f"${float(r.get('notional') or 0)/1e6:,.0f}M"))
+        parts.append(_pipe_table(("Tkr", "Type", "Strike", "V/OI", "Notional"), ur,
+                                 right_cols={2, 3, 4}))
+        parts.append("<i>⚠️ Descriptive only — NOT predictive. The scn_uoa scanner hit 47.1% "
+                     "(coin-flip) over 204 fires, and once same-day fires stop double-counting "
+                     "there is no edge either way. Read it as what happened, never as a signal.</i>")
+    else:
+        parts.append("<i>No unusual activity above threshold.</i>")
+
+    parts.append("")
+    parts.append("<i>Omitted on purpose: a real-time 'noteworthy trades' tape. That needs "
+                 "per-print time-and-sales with the aggressor side, which no free feed "
+                 "provides — approximating it from EOD volume would be a different thing "
+                 "wearing its name.</i>")
+    return "\n".join(parts)
+
+
+async def digest_command(update, ctx):
+    """/digest — end-of-day newsletter (news · rotation · setups · unusual activity)."""
+    conn = get_conn()
+    try:
+        txt = _eod_digest(conn)
+    finally:
+        conn.close()
+    for i in range(0, len(txt), 3900):
+        await update.message.reply_text(txt[i:i + 3900], parse_mode=H,
+                                        disable_web_page_preview=True)
+
+
 async def wrap_command(update, ctx):
     """/wrap - 'what just happened' market write-up from your own data."""
     conn = get_conn()
@@ -34387,6 +34529,7 @@ def main():
     app.add_handler(CommandHandler("status", data_status_cmd))   # alias for /data
     app.add_handler(InlineQueryHandler(inline_query_handler))   # @bot TICKER search (BotFather /setinline)
     app.add_handler(CommandHandler("wrap", wrap_command))
+    app.add_handler(CommandHandler("digest", digest_command))  # EOD newsletter (ID 37)
     app.add_handler(CommandHandler("tv", tv_command))
     app.add_handler(CommandHandler("hiprob", hiprob_command))
     app.add_handler(CommandHandler("spreads", spreads_command))

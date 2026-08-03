@@ -26070,8 +26070,17 @@ def _kb_wrap():
                                   InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]])
 
 
-def _eod_digest(conn, max_news=5, max_uoa=8, max_plays=6):
-    """/digest — end-of-day newsletter built ONLY from things this repo actually has.
+def _eod_digest(conn, max_news=5, max_uoa=8, max_plays=6, edition="evening"):
+    """/digest — newsletter built ONLY from things this repo actually has.
+
+    `edition` shifts the emphasis rather than the sources, because what is KNOWN differs
+    by time of day (user 2026-08-03):
+      morning  — overnight news + today's catalysts + the setups that qualify. Written
+                 before the open, so it leads with what to watch, not what happened.
+      midday   — what has actually moved and whether the morning read is holding. Skips
+                 the setup list: the recs are built off EOD chains and do not change
+                 intraday, so re-printing them at noon would imply a freshness they lack.
+      evening  — the full EOD wrap (unchanged default).
 
     Modelled on the InsiderFinance EOD format (tracker ID 37). Four of its five sections
     are buildable here; the fifth ("AI Noteworthy Trades") needs a real-time options TAPE
@@ -26083,7 +26092,19 @@ def _eod_digest(conn, max_news=5, max_uoa=8, max_plays=6):
     activity does NOT (scn_uoa hit 47.1%, i.e. noise) and says so; POP is model output,
     not a validated probability. See docs/ADOPTED.md Part 9.
     """
-    parts = [hdr("📰 EOD DIGEST"), ""]
+    _ed = str(edition).lower()
+    _TITLES = {"morning": "☀️ MORNING EDGE", "midday": "🕛 MIDDAY CHECK",
+               "evening": "📰 EOD DIGEST", "news": "🚨 NEWS BREAK"}
+    _SUBS = {
+        "morning": "Overnight news, today's catalysts, and what qualifies before the open.",
+        "midday": "What has actually moved, and whether the morning read is holding.",
+        "evening": "",
+        "news": "Fired off a large move — context, not a recommendation.",
+    }
+    parts = [hdr(_TITLES.get(_ed, "📰 DIGEST")), ""]
+    if _SUBS.get(_ed):
+        parts.append(f"<i>{_SUBS[_ed]}</i>")
+        parts.append("")
 
     # ── 1. headlines ──────────────────────────────────────────────────────────────
     try:
@@ -26200,11 +26221,77 @@ def _eod_digest(conn, max_news=5, max_uoa=8, max_plays=6):
     return "\n".join(parts)
 
 
-async def digest_command(update, ctx):
-    """/digest — end-of-day newsletter (news · rotation · setups · unusual activity)."""
+
+async def _digest_push(ctx, txt):
+    """Send a digest to the configured chat, chunked to Telegram's limit."""
+    try:
+        _, chat_id = load_creds()
+    except Exception:
+        log.warning("digest push: no creds"); return
+    for i in range(0, len(txt), 3900):
+        try:
+            await ctx.bot.send_message(chat_id=int(chat_id), text=txt[i:i + 3900],
+                                       parse_mode=H, disable_web_page_preview=True)
+        except Exception:
+            log.warning("digest push failed", exc_info=True); return
+
+
+async def digest_morning_alert(ctx):
+    """Pre-open edition ~8:15 AM ET."""
     conn = get_conn()
     try:
-        txt = _eod_digest(conn)
+        txt = _eod_digest(conn, edition="morning")
+    finally:
+        conn.close()
+    await _digest_push(ctx, txt)
+
+
+async def digest_midday_alert(ctx):
+    """Midday edition ~12:30 PM ET — only on a session that is actually doing something."""
+    conn = get_conn()
+    try:
+        # A midday push every single day becomes wallpaper and stops being read. Fire only
+        # when the tape has moved enough to be worth interrupting for: SPY or QQQ >=1%.
+        _mv = 0.0
+        for _tk in ("SPY", "QQQ"):
+            try:
+                _r = conn.execute(
+                    "SELECT close FROM stock_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT 2",
+                    (_tk,)).fetchall()
+                _live = _last_price(_tk)
+                if _r and len(_r) >= 1 and _live:
+                    _mv = max(_mv, abs(_live / float(_r[0][0]) - 1) * 100)
+            except Exception:
+                pass
+        if _mv < 1.0:
+            log.info("digest_midday: quiet tape (%.2f%%), skipping push", _mv)
+            return
+        txt = _eod_digest(conn, edition="midday")
+    finally:
+        conn.close()
+    await _digest_push(ctx, txt)
+
+
+async def digest_evening_alert(ctx):
+    """EOD edition ~5:15 PM ET, after the capture lane has landed."""
+    conn = get_conn()
+    try:
+        txt = _eod_digest(conn, edition="evening")
+    finally:
+        conn.close()
+    await _digest_push(ctx, txt)
+
+
+async def digest_command(update, ctx):
+    """/digest [morning|midday|evening] — newsletter, emphasis by time of day."""
+    _ed = (ctx.args[0].lower() if ctx.args else None)
+    if _ed not in ("morning", "midday", "evening"):
+        # default to whatever edition suits the current NY session
+        _h = datetime.now(ZoneInfo("America/New_York")).hour
+        _ed = "morning" if _h < 11 else ("midday" if _h < 15 else "evening")
+    conn = get_conn()
+    try:
+        txt = _eod_digest(conn, edition=_ed)
     finally:
         conn.close()
     for i in range(0, len(txt), 3900):
@@ -27732,9 +27819,59 @@ def _pairs_scan(conn, lookback=90, min_obs=60, min_corr=0.6, z_entry=2.0):
                     "group": grp, "a": a, "b": b, "pair": f"{a}/{b}",
                     "corr": corr, "beta": beta, "z": z, "hl": hl,
                     "action": action, "long_first": long_first, "n": len(pair),
+                    # needed to turn a z-score into an actual trade (2026-08-03)
+                    "sd": float(sd), "px_a": float(pa[-1]), "px_b": float(pb[-1]),
                 })
     rows.sort(key=lambda r: -abs(r["z"]))
     return rows
+
+
+def _pairs_plan(r, capital=10000.0, stop_extra=1.0):
+    """Turn a z-score into a trade: share counts, target, stop, time stop, expected P&L.
+
+    Maths, stated so the numbers can be checked:
+      spread = ln(A) - beta*ln(B), z = (spread - mean) / sd
+      Hold $N of A and $beta*N of B, so gross exposure = N*(1+beta) = capital
+      A full reversion (z -> 0) moves the spread by |z|*sd, and the paired position
+      gains approximately |z| * sd * N.
+      Stop is set `stop_extra` further out (z widening against you), losing ~stop_extra*sd*N.
+      TIME STOP = 2 half-lives: if the spread has not reverted in the time the model says
+      it should, the relationship has changed and the thesis is void, not "early".
+    """
+    beta = abs(float(r.get("beta") or 1.0)) or 1.0
+    sd = float(r.get("sd") or 0.0)
+    z = float(r.get("z") or 0.0)
+    pa, pb = float(r.get("px_a") or 0.0), float(r.get("px_b") or 0.0)
+    if min(pa, pb) <= 0 or sd <= 0:
+        return None
+    n_a = capital / (1.0 + beta)                 # $ on the A leg
+    n_b = capital - n_a                          # $ on the B leg (beta-weighted)
+    sh_a, sh_b = n_a / pa, n_b / pb
+    gain = abs(z) * sd * n_a                     # full reversion to the mean
+    loss = stop_extra * sd * n_a                 # stop, spread widens further
+    hl = r.get("hl")
+    return {
+        "capital": capital, "beta": beta,
+        "leg_a_side": "SHORT" if z > 0 else "LONG",
+        "leg_b_side": "LONG" if z > 0 else "SHORT",
+        "sh_a": sh_a, "sh_b": sh_b, "n_a": n_a, "n_b": n_b,
+        "target_z": 0.0, "stop_z": z + (stop_extra if z > 0 else -stop_extra),
+        "gain": gain, "loss": loss, "rr": (gain / loss) if loss > 0 else None,
+        "days": (2 * hl) if hl else None,
+        "gain_pct": gain / capital * 100.0, "loss_pct": loss / capital * 100.0,
+    }
+
+
+def _both_tails(rows, is_first_side, n_first=8, n_second=7):
+    """Take the head of BOTH tails of a monotonically sorted scan.
+
+    Scanner rows are sorted most-extreme-of-one-side first, so rows[:15] silently drops the
+    other side entirely. `is_first_side(row)` picks which tail a row belongs to; the second
+    tail is read from the end and reversed so its most extreme entry leads.
+    """
+    a = [r for r in rows if is_first_side(r)][:n_first]
+    b = [r for r in rows if not is_first_side(r)][-n_second:][::-1]
+    return a + b
 
 
 async def _send_pairs(msg, rows):
@@ -27751,11 +27888,33 @@ async def _send_pairs(msg, rows):
                         legend="🟢 long 1st/short 2nd · 🔴 short 1st/long 2nd · Z=spread stdevs · HLd=half-life days")
     top = rows[0]
     hl_s = f"{top['hl']:.0f}d half-life" if top["hl"] else "half-life n/a"
-    best = (f"<b>Top:</b> {top['action']} (β{top['beta']:.2f}) · z {top['z']:+.1f} · "
-            f"corr {top['corr']:.2f} · {hl_s} · {top['group']}")
+    plan = _pairs_plan(top)
+    card = [f"<b>▶ TOP TRADE — {top['action']}</b>",
+            f"<i>{top['a']} is {'rich' if top['z'] > 0 else 'cheap'} vs {top['b']} by "
+            f"{abs(top['z']):.1f} standard deviations. The bet is that the GAP closes — "
+            f"you do not need either stock to go a particular way.</i>"]
+    if plan:
+        card.append(_pipe_table(("Leg", "Side", "Shares", "$"), [
+            (top["a"], plan["leg_a_side"], f"{plan['sh_a']:.0f}", f"${plan['n_a']:,.0f}"),
+            (top["b"], plan["leg_b_side"], f"{plan['sh_b']:.0f}", f"${plan['n_b']:,.0f}"),
+        ], right_cols={2, 3}, title=f"Sizing on $10,000 gross (β {plan['beta']:.2f})"))
+        _tgt = (f"Target z 0.0 → <b>+${plan['gain']:,.0f}</b> ({plan['gain_pct']:+.1f}%)")
+        _stp = (f"Stop z {plan['stop_z']:+.1f} → <b>−${plan['loss']:,.0f}</b> "
+                f"({plan['loss_pct']:.1f}%)")
+        card.append(f"🎯 {_tgt}\n🛑 {_stp}"
+                    + (f"\n⏳ Time stop <b>{plan['days']:.0f} days</b> (2× half-life) — if it "
+                       f"has not reverted by then the relationship has changed, so close it"
+                       if plan["days"] else ""))
+        if plan["rr"]:
+            card.append(f"⚖️ Reward:risk <b>{plan['rr']:.1f}:1</b> · corr {top['corr']:.2f} · "
+                        f"{hl_s} · {top['group']}")
+    card.append("<i>⚠️ Both legs are real positions: shorting needs margin and borrow, and "
+                "the loss is uncapped if the pair keeps diverging. The z-score says the gap "
+                "is unusual, NOT that it must close — pairs break permanently when something "
+                "changes at one company. Sizing above is gross exposure, not cash needed.</i>")
     txt = ("🔗 <b>Pairs — Statistical Mean-Reversion</b>\n"
            "<i>risky stat-reversion screen, NOT riskless arbitrage · thin ~6mo history · not advice</i>\n\n"
-           + table + "\n\n" + best)
+           + table + "\n\n" + "\n".join(card))
     await msg.reply_text(txt[:4000], parse_mode=H,
                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="pairs_view"),
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
@@ -28002,8 +28161,11 @@ async def _send_revert(msg, rows, lookback=5):
         await msg.reply_text("No stretched names (|z|≥1) right now.", parse_mode=H)
         return
     _hdrs = ("ST", "Tkr", f"{lookback}d%", "Z")
+    # rows are sorted most-oversold-first, so a plain rows[:15] showed FIFTEEN oversold
+    # names and never a single overbought one — while the footer went on to name the
+    # overbought tickers the table had just hidden (reported 2026-08-03). Take both tails.
     _data = []
-    for r in rows[:15]:
+    for r in _both_tails(rows, lambda r: r["side"] == "LONG"):
         emoji = "🟢" if r["side"] == "LONG" else "🔴"
         _data.append((emoji, r["ticker"], f"{r['ret']*100:+.1f}", f"{r['z']:+.1f}"))
     table = _pipe_table(_hdrs, _data, right_cols={2, 3},
@@ -31016,9 +31178,13 @@ async def _send_rs(msg, rows):
         await msg.reply_text("Relative-strength data unavailable.", parse_mode=H)
         return
     n = len(rows); top = max(1, n // 3)
-    lead = rows[:10]
-    _data = [("🟢" if i < top else ("🔴" if i >= n - top else "🟡"), r["ticker"],
-             f"{r['r3']*100:+.0f}", f"{r['ex3']*100:+.0f}") for i, r in enumerate(lead)]
+    # rows[:10] took the ten strongest only, so the legend promised laggards the table
+    # could never contain — and the footer then named the very tickers it had hidden
+    # (reported 2026-08-03). Show both ends of the ranking.
+    lead = rows[:7] + rows[-5:] if n > 12 else rows[:12]
+    _rank = {id(r): i for i, r in enumerate(rows)}
+    _data = [("🟢" if _rank[id(r)] < top else ("🔴" if _rank[id(r)] >= n - top else "🟡"),
+              r["ticker"], f"{r['r3']*100:+.0f}", f"{r['ex3']*100:+.0f}") for r in lead]
     table = _pipe_table(("ST", "Tkr", "3M%", "vsSPY"), _data, right_cols={2, 3},
                         legend="ranked by RS vs SPY · 🟢 leaders / 🔴 laggards · vsSPY=3M excess")
     txt = ("💪 <b>Relative Strength — stocks vs SPY</b>\n"
@@ -31083,7 +31249,8 @@ async def _send_breakout(msg, rows):
         await msg.reply_text("Nothing at 52-week extremes right now.", parse_mode=H)
         return
     _data = [("🟢" if r["sig"] == "HIGH" else "🔴", r["ticker"],
-             f"{r['from_hi']*100:+.0f}", f"{r['from_lo']*100:+.0f}") for r in rows[:15]]
+             f"{r['from_hi']*100:+.0f}", f"{r['from_lo']*100:+.0f}")
+            for r in _both_tails(rows, lambda r: r.get("sig") == "HIGH")]
     table = _pipe_table(("ST", "Tkr", "%Hi", "%Lo"), _data, right_cols={2, 3},
                         legend="🟢 at 52w HIGH (breakout) · 🔴 at 52w LOW (breakdown) · %Hi/%Lo=dist to extreme")
     hi = [r["ticker"] for r in rows if r["sig"] == "HIGH"][:5]
@@ -31147,7 +31314,8 @@ async def _send_zrev(msg, rows):
         await msg.reply_text("No single-name z-score extremes (|z|≥2) right now.", parse_mode=H)
         return
     _data = [("🟢" if r["side"] == "LONG" else "🔴", r["ticker"], f"{r['z']:+.1f}",
-             f"{(r['px']/r['mean']-1)*100:+.1f}") for r in rows[:15]]
+             f"{(r['px']/r['mean']-1)*100:+.1f}")
+            for r in _both_tails(rows, lambda r: r["z"] < 0)]
     table = _pipe_table(("ST", "Tkr", "Z", "vsAvg"), _data, right_cols={2, 3},
                         legend="price z vs 20d mean · 🟢 oversold(long) · 🔴 overbought(short)")
     txt = ("↕️ <b>Single-Name Mean Reversion (z-score)</b>\n"
@@ -35203,7 +35371,7 @@ def main():
     app.add_handler(CommandHandler("status", data_status_cmd))   # alias for /data
     app.add_handler(InlineQueryHandler(inline_query_handler))   # @bot TICKER search (BotFather /setinline)
     app.add_handler(CommandHandler("wrap", wrap_command))
-    app.add_handler(CommandHandler("digest", digest_command))  # EOD newsletter (ID 37)
+    app.add_handler(CommandHandler("digest", digest_command))  # newsletter: morning/midday/evening
     app.add_handler(CommandHandler("tv", tv_command))
     app.add_handler(CommandHandler("hiprob", hiprob_command))
     app.add_handler(CommandHandler("spreads", spreads_command))
@@ -35269,6 +35437,9 @@ def main():
         job_queue.run_daily(morning_alert, time=dt_time(14, 0, 0))  # 9 AM ET = 14:00 UTC
         job_queue.run_daily(briefing_alert, time=dt_time(14, 5, 0))  # daily brief 9:05 AM ET
         job_queue.run_daily(plan_alert, time=dt_time(13, 30, 0))     # next-day game plan ~8:30 AM ET pre-market
+        job_queue.run_daily(digest_morning_alert, time=dt_time(12, 15, 0))  # ~8:15 AM ET pre-open
+        job_queue.run_daily(digest_midday_alert, time=dt_time(16, 30, 0))   # ~12:30 PM ET, gated on a >=1% move
+        job_queue.run_daily(digest_evening_alert, time=dt_time(21, 15, 0))  # ~5:15 PM ET post-close
         job_queue.run_daily(wrap_alert, time=dt_time(21, 15, 0))     # daily market wrap ~4:15 PM ET post-close
         job_queue.run_daily(catalyst_alert, time=dt_time(13, 20, 0))  # Catalyst Radar ~8:20 AM ET pre-market
         job_queue.run_daily(action_board_alert, time=dt_time(13, 35, 0)) # Action Board ~8:35 AM ET pre-market

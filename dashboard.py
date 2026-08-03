@@ -22248,6 +22248,24 @@ def _ss_dataframe(_tbo, conn, choice, tks):
         return pd.DataFrame([{"Ticker": r["ticker"], "Report": r["date"], "Days": r["days_since"],
                               "Surprise %": round(r["surprise"] * 100, 0), "Actual": r["actual"],
                               "Estimate": r["estimate"], "Drift": r["side"]} for r in rows])
+    if choice.startswith("🎓"):                                   # Master-investor screens
+        _mm = {"Graham": "graham", "Schloss": "schloss", "Lynch": "lynch", "Buffett": "buffett",
+               "Munger": "munger", "Greenblatt": "greenblatt", "Fisher": "fisher",
+               "O'Neil": "oneil"}
+        _model = next((v for k, v in _mm.items() if k in choice), "graham")
+        rows = _tbo._screen_masters(conn, _model, tickers=(list(tks) or None), top=25)
+        if not rows:
+            return pd.DataFrame([{"Note": f"No names cleared the {_model} bar — these are "
+                                          "demanding checklists, an empty result is normal."}])
+        return pd.DataFrame([{
+            "Ticker": r["ticker"], "Name": r["name"], "Sector": r["sector"],
+            "Score": f"{r['score']}/{r['of']}",
+            "P/E": (round(r["pe"], 1) if r["pe"] else None),
+            "P/B": (round(r["pb"], 2) if r["pb"] else None),
+            "ROE %": (round(r["roe"] * 100, 0) if r["roe"] is not None else None),
+            "D/E": (round(r["de"], 0) if r["de"] is not None else None),
+            "Gross margin %": (round(r["gm"] * 100, 0) if r["gm"] is not None else None),
+            "Misses": ", ".join(r["failed"][:3]) or "clears every test"} for r in rows])
     if choice.startswith("🔗"):                                   # Pairs
         rows = _tbo._pairs_scan(conn)
         return pd.DataFrame([{"Pair": r["pair"], "Group": r["group"], "Z": round(r["z"], 2),
@@ -22398,7 +22416,11 @@ if page == "⚙️ Strategy Scanners":
                 "🎡 Wheel (CSP)", "📞 Covered call",
                 "🦅 Iron condor", "🗓️ Calendar spreads", "💵 Dividend calendar",
                 "💪 Relative strength", "🚀 52-week breakout", "↕️ Mean reversion (z)", "📈 Put-write index",
-                "⭐ Analyst ratings", "🔬 Factor IC validation", "🧪 Reversal sweep (vectorbt)"]
+                "⭐ Analyst ratings", "🔬 Factor IC validation", "🧪 Reversal sweep (vectorbt)",
+                "🎓 Graham (defensive value)", "🎓 Schloss (deep asset value)",
+                "🎓 Lynch (GARP / PEG<1)", "🎓 Buffett (durable compounder)",
+                "🎓 Munger (great biz, fair price)", "🎓 Greenblatt (magic formula)",
+                "🎓 Fisher (quality growth)", "🎓 O'Neil (CANSLIM momentum)"]
     _c1, _c2 = st.columns([2, 3])
     _ss_choice = _c1.selectbox("Scanner", _ss_opts, key="ss_choice")
     _ss_tk_in = _c2.text_input("Tickers (optional; blank = sensible defaults)", "", key="ss_tks")
@@ -23693,6 +23715,13 @@ if page == "👀 Watchlist":
                     "Day%": (round(_wchg, 2) if _wchg is not None else None),
                     "Day L-H": (f"${_wdl:,.2f}-${_wdh:,.2f}" if (_wdh and _wdl) else "—"),
                     "52w L-H": (f"${_w52lo:,.2f}-${_w52hi:,.2f}" if (_w52hi and _w52lo) else "—"),
+                    # 0 = sitting on the 52w low, 1 = on the high. Rendered as a bar so the
+                    # position in the range is readable at a glance (user 2026-08-03).
+                    "52w Pos": (round(max(0.0, min(1.0, (_wspot - _w52lo) / (_w52hi - _w52lo))), 3)
+                                if (_w52hi and _w52lo and _w52hi > _w52lo and _wspot) else None),
+                    # same idea on TODAY's range: 0 = printed the day's low, 1 = the day's high
+                    "Day Pos": (round(max(0.0, min(1.0, (_wspot - _wdl) / (_wdh - _wdl))), 3)
+                                if (_wdh and _wdl and _wdh > _wdl and _wspot) else None),
                     "Call Wall": (f"${_wcw:,.0f}" if _wcw else "—"),
                     "Put Wall": (f"${_wpw:,.0f}" if _wpw else "—"),
                     "Target": (round(_wtarget, 2) if _wtarget else None),
@@ -23718,26 +23747,126 @@ if page == "👀 Watchlist":
                 continue
             st.markdown(f"### {_WL_ICON.get(_wcls, '•')} {_WL_PLURAL.get(_wcls, _wcls)} ({len(_cls_rows)})")
             _cls_show = pd.DataFrame(_cls_rows)
-            st.dataframe(_cls_show.drop(columns=["id", "Class", "_52hi", "_52lo", "_hist"], errors="ignore"),
-                         use_container_width=True, hide_index=True)
+            # Ticker / Name / Spot stay put when the table is scrolled right (pinned=True,
+            # Streamlit >=1.42) and every header carries a hover explanation, so the
+            # abbreviations do not have to be guessed at (user 2026-08-03).
+            _wl_cfg = {
+                "Ticker": st.column_config.TextColumn("Ticker", pinned=True, width="small",
+                    help="Exchange symbol. Pinned — stays visible while you scroll right."),
+                "Name": st.column_config.TextColumn("Company", pinned=True, width="medium",
+                    help="Company / instrument name."),
+                "Spot": st.column_config.NumberColumn("Spot $", pinned=True, format="$%.2f",
+                    help="Latest price. Live during market hours, else the last close."),
+                "Src": st.column_config.TextColumn("Source",
+                    help="Where the price came from: live quote, after-hours, or DB close."),
+                "Day%": st.column_config.NumberColumn("Day %", format="%.2f%%",
+                    help="Change vs the previous close."),
+                "Day L-H": st.column_config.TextColumn("Day low–high",
+                    help="Today's trading range (low to high)."),
+                "Day Pos": st.column_config.ProgressColumn("Day position", min_value=0.0,
+                    max_value=1.0, format="%.0f%%",
+                    help="Where the current price sits inside TODAY's low-high range. "
+                         "0%% = trading at the session low, 100%% = at the session high. "
+                         "Closing near the high or low is what the number is telling you."),
+                "52w L-H": st.column_config.TextColumn("52-week low–high",
+                    help="Lowest and highest price over the past 252 trading days."),
+                "52w Pos": st.column_config.ProgressColumn("52w position", min_value=0.0,
+                    max_value=1.0, format="%.0f%%",
+                    help="Percent of the way UP the 52-week range, not a return. "
+                         "0%% = trading at the 52-week LOW, 50%% = exactly midway between "
+                         "low and high, 100%% = at the 52-week HIGH. "
+                         "Formula: (price - 52w low) / (52w high - 52w low)."),
+                "Call Wall": st.column_config.TextColumn("Call wall",
+                    help="Strike with the heaviest call open interest — acts as resistance "
+                         "while price is below it. Structure, not a forecast."),
+                "Put Wall": st.column_config.TextColumn("Put wall",
+                    help="Strike with the heaviest put open interest — acts as a support "
+                         "shelf while price is above it."),
+                "Target": st.column_config.NumberColumn("Your target $", format="$%.2f",
+                    help="Target price you set in the edit panel below."),
+                "Dist to Target": st.column_config.TextColumn("To target %",
+                    help="How far spot is from your target, in percent."),
+                "Earnings": st.column_config.TextColumn("Next earnings",
+                    help="Next scheduled earnings date — options get expensive into it."),
+                "Ex-Div": st.column_config.TextColumn("Ex-dividend",
+                    help="Ex-dividend date. Buy before it to receive the dividend; early "
+                         "assignment risk rises on short calls."),
+                "SI %": st.column_config.TextColumn("Short interest %",
+                    help="Percent of float sold short. High = crowded short, squeeze fuel."),
+                "DTC": st.column_config.TextColumn("Days to cover",
+                    help="Short interest divided by average daily volume — how many days "
+                         "shorts would need to buy back. Higher = more squeeze potential."),
+                "Shorts": st.column_config.TextColumn("Shares short",
+                    help="Total shares held short."),
+                "PCR(OI)": st.column_config.NumberColumn("Put/call OI", format="%.2f",
+                    help="Put open interest / call open interest. >1 = more puts. On index "
+                         "ETFs this spikes at expiry and is not a signal."),
+                "RSI(14)": st.column_config.NumberColumn("RSI (14d)", format="%.1f",
+                    help="Relative Strength Index, 14 days. >70 conventionally overbought, "
+                         "<30 oversold — descriptive, not validated here."),
+                "Signal": st.column_config.TextColumn("Signal",
+                    help="Composite read from the scanners. Context, not advice."),
+                "Note": st.column_config.TextColumn("Your note", width="medium",
+                    help="Free text you set in the edit panel below."),
+                "Added": st.column_config.TextColumn("Added on",
+                    help="Date this ticker was added to the watchlist."),
+            }
+            _wl_order = ["Ticker", "Name", "Spot", "Day%", "Day Pos", "52w Pos", "52w L-H", "Day L-H",
+                         "Call Wall", "Put Wall", "Target", "Dist to Target", "RSI(14)",
+                         "PCR(OI)", "SI %", "DTC", "Shorts", "Earnings", "Ex-Div",
+                         "Signal", "Src", "Note", "Added"]
+            _wl_disp = _cls_show.drop(columns=["id", "Class", "_52hi", "_52lo", "_hist"],
+                                      errors="ignore")
+            st.dataframe(_wl_disp, use_container_width=True, hide_index=True,
+                         column_config=_wl_cfg,
+                         column_order=[c for c in _wl_order if c in _wl_disp.columns])
+            st.caption("↔️ Ticker, Company and Spot stay pinned when you scroll right · "
+                       "hover any column header for what it means · **52w position** bar: "
+                       "empty = at the 52-week low, full = at the high.")
 
             _cls_chart_rows = [r for r in _cls_rows
                                if r.get("_52hi") and r.get("_52lo") and r.get("_hist") is not None]
             if _cls_chart_rows:
-                _wl_chart_cols = st.columns(min(len(_cls_chart_rows), 4) or 1)
+                _wl_chart_cols = st.columns(min(len(_cls_chart_rows), 3) or 1)
                 for _wi, _wrow in enumerate(_cls_chart_rows):
                     with _wl_chart_cols[_wi % len(_wl_chart_cols)]:
                         _wfig = go.Figure()
                         _wfig.add_trace(go.Scatter(y=_wrow["_hist"]["Close"], mode="lines",
                                                    line=dict(width=1.5), showlegend=False))
-                        _wfig.add_hline(y=_wrow["_52hi"], line_dash="dot", line_color="#e74c3c", line_width=1)
-                        _wfig.add_hline(y=_wrow["_52lo"], line_dash="dot", line_color="#2ecc71", line_width=1)
+                        # Label the lines with their actual prices. Previously both axes were
+                        # hidden, so the chart showed a shape with no numbers on it at all
+                        # (user 2026-08-03).
+                        _wfig.add_hline(y=_wrow["_52hi"], line_dash="dot", line_color="#e74c3c",
+                                        line_width=1, annotation_text=f"52w high ${_wrow['_52hi']:,.2f}",
+                                        annotation_position="top left",
+                                        annotation_font=dict(size=9, color="#e74c3c"))
+                        _wfig.add_hline(y=_wrow["_52lo"], line_dash="dot", line_color="#2ecc71",
+                                        line_width=1, annotation_text=f"52w low ${_wrow['_52lo']:,.2f}",
+                                        annotation_position="bottom left",
+                                        annotation_font=dict(size=9, color="#2ecc71"))
+                        if _wrow.get("Spot"):
+                            _wfig.add_hline(y=float(_wrow["Spot"]), line_dash="solid",
+                                            line_color="#3498db", line_width=1.2,
+                                            annotation_text=f"now ${float(_wrow['Spot']):,.2f}",
+                                            annotation_position="top right",
+                                            annotation_font=dict(size=9, color="#3498db"))
                         _wl_chart_name = str(_wrow.get("Name") or _wrow["Ticker"])
                         _wl_chart_name = (_wl_chart_name[:22] + "…") if len(_wl_chart_name) > 23 else _wl_chart_name
-                        _wfig.update_layout(height=140, margin=dict(l=0, r=0, t=24, b=0),
+                        # Taller, with a visible price axis pinned to the three levels that
+                        # matter (low / spot / high) instead of an unlabelled sparkline.
+                        _wt_vals = sorted({round(float(_wrow["_52lo"]), 2),
+                                           round(float(_wrow["Spot"] or _wrow["_52lo"]), 2),
+                                           round(float(_wrow["_52hi"]), 2)})
+                        _wfig.update_layout(height=210, margin=dict(l=4, r=4, t=26, b=20),
                                             title=dict(text=f"{_wrow['Ticker']} · {_wl_chart_name}  ${_wrow['Spot']:,.2f}",
                                                        font=dict(size=11)),
-                                            xaxis=dict(visible=False), yaxis=dict(visible=False),
+                                            xaxis=dict(visible=True, showticklabels=False,
+                                                       showgrid=False, title=None, ticks=""),
+                                            yaxis=dict(visible=True, side="right",
+                                                       tickmode="array", tickvals=_wt_vals,
+                                                       ticktext=[f"${v:,.2f}" for v in _wt_vals],
+                                                       tickfont=dict(size=9), showgrid=False),
+                                            hovermode="x unified",
                                             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
                         st.plotly_chart(_wfig, use_container_width=True, config={"displayModeBar": False},
                                         key=f"wl_chart_{_wrow['Ticker']}_{_wrow.get('id', _wi)}")

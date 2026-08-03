@@ -309,6 +309,18 @@ ROWS = [
  "Raised while building the master screeners",
  "DONE","2026-08-03","We store only the CURRENT fundamentals snapshot. Scoring past prices against todays numbers is look-ahead bias and would manufacture a fake edge - the same failure class as ADOPTED.md Parts 4 and 9. Screens therefore ship labelled NOT BACKTESTED / research filter, not validated signal. Noted that O Neil CANSLIM is the one model whose PRICE half (52wk-high proximity, move off the low) is genuinely testable, because we own price history back to 1990",
  "-","P2","Option: capture a fundamentals snapshot weekly to build point-in-time history going forward"),
+(84,"2026-08-03","User","Bug","Scanner tables showed only ONE side of a two-sided signal",
+ "User: /revert shows only oversold, /rs shows no laggards - yet the footer names the hidden tickers",
+ "DONE","2026-08-03","Systemic, not a one-off: rows are sorted most-extreme-of-one-side first and then cut with rows[:15], so the opposite tail can never survive the cut while the legend still promises two colours. Added a shared _both_tails() helper and wired it into revert / zrev / breakout, plus a head+tail slice for rs. Verified live: revert has 56 oversold + 52 overbought and showed 15/0 before, now 8/7; rs 190 leaders + 280 laggards, was 10/0, now 7/5; zrev 15/15 -> 8/7; breakout 45/17 -> 8/7",
+ "-","P1","Audit vrp / pairs / uoa / positioning for the same pattern - they were too slow to include in the sweep"),
+(85,"2026-08-03","User","Feature","Master screeners on the Streamlit side too",
+ "User asked whether /screen was added to the dashboard",
+ "DONE","2026-08-03","It was Telegram-only. Added all 8 models to the Strategy Scanners page dispatcher, reusing _screen_masters from the bot engine - no logic duplicated. Columns richer than Telegram allows: Name, Sector, Score, P/E, P/B, ROE, D/E, gross margin, and which tests each name MISSES",
+ "-","P2","-"),
+(86,"2026-08-03","User","Feature","Make /pairs action-oriented",
+ "User: what is this, give a trade-oriented message",
+ "DONE","2026-08-03","Added _pairs_plan(): converts a z-score into an actual trade - share counts per leg sized off the beta hedge ratio on $10k gross, target (z->0) with expected $, stop (z widens 1 sd) with expected loss, reward:risk, and a TIME STOP at 2x half-life on the reasoning that if it has not reverted in the time the model implies, the relationship has changed rather than the trade being early. Kept the uncapped-loss / needs-borrow warning explicit",
+ "-","P2","-"),
 ]
 
 def build():

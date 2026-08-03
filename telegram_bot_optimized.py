@@ -32723,9 +32723,35 @@ def _gex_trend(conn, tk):
     return "Tangled", "🟡", d
 
 
-def _gex_levels(conn, tk, spot):
+def _gex_pick_expiry(conn, tk, want=None):
+    """Resolve an expiry preference to a real captured expiry.
+
+    The framework leans on 0DTE/weekly walls, but `_compute_gex` defaults to the monthly
+    (~21 DTE), which is a different structure entirely. `want`: None/'monthly' = default,
+    '0dte' = nearest, 'weekly' = nearest beyond today.
+    """
+    if not want:
+        return None
+    try:
+        rows = [r[0] for r in conn.execute(
+            "SELECT DISTINCT expiry_date FROM options_openbb WHERE ticker=? AND "
+            "trade_date=(SELECT MAX(trade_date) FROM options_openbb WHERE ticker=?) "
+            "ORDER BY expiry_date", (tk.upper(), tk.upper()))]
+    except Exception:
+        return None
+    if not rows:
+        return None
+    w = str(want).lower()
+    if w in ("0dte", "today", "nearest"):
+        return _exp_iso(rows[0])
+    if w in ("weekly", "week"):
+        return _exp_iso(rows[1] if len(rows) > 1 else rows[0])
+    return None
+
+
+def _gex_levels(conn, tk, spot, expiry=None):
     """The structural map: gamma flip, call/put wall, control node (highest-OI strike)."""
-    g = _compute_gex(tk, conn, spot) or {}
+    g = _compute_gex(tk, conn, spot, expiry=expiry) or {}
     node = None
     try:
         sig = analyze_inst_signals(tk, conn) or {}
@@ -32749,6 +32775,61 @@ def _gex_levels(conn, tk, spot):
             "expiry": g.get("expiry"), "dte": g.get("dte")}
 
 
+def _gex_confirm(tk, lookback=20):
+    """Legs 2 and 3 of the confirmation triad, verified from real 1-minute bars.
+
+    The source framework requires THREE things before an entry: price at a mapped level
+    (structure), a price-action trigger, and a localized volume surge. Structure we can
+    always check. Until now the other two were only PRINTED as requirements, which meant a
+    GREEN LIGHT could fire on structure alone — weaker than the framework intends.
+
+    US_intraday.db carries 1m OHLCV, so both are now measured:
+      volume  — last bar vs the mean of the prior `lookback` bars (>=1.5x = surge)
+      action  — rejection candle (long wick, close in the top/bottom third of the range)
+                or a close back through the 9-EMA of the 1m series
+
+    Returns None when the ticker is not in the intraday lane (32 tickers, from 2026-07-15),
+    and the caller then reports UNVERIFIED rather than silently passing the leg.
+    """
+    import os as _os, sqlite3 as _sql
+    try:
+        p = _os.path.join(DATA_DIR, "US_intraday.db")
+        if not _os.path.exists(p):
+            return None
+        ic = _sql.connect(p, timeout=15)
+        df = pd.read_sql(
+            "SELECT ts, open, high, low, close, volume FROM intraday_bars WHERE ticker=? AND "
+            "trade_date=(SELECT MAX(trade_date) FROM intraday_bars WHERE ticker=?) "
+            "ORDER BY ts", ic, params=(tk, tk))
+        day = ic.execute("SELECT MAX(trade_date) FROM intraday_bars WHERE ticker=?",
+                         (tk,)).fetchone()
+        ic.close()
+    except Exception:
+        return None
+    if df is None or len(df) < lookback + 2:
+        return None
+    last = df.iloc[-1]
+    prior = df.iloc[-(lookback + 1):-1]
+    avg_v = float(prior["volume"].mean() or 0)
+    vol_x = (float(last["volume"]) / avg_v) if avg_v > 0 else 0.0
+
+    o, h, l, c = (float(last[k]) for k in ("open", "high", "low", "close"))
+    rng = max(h - l, 1e-9)
+    pos = (c - l) / rng                       # 1.0 = closed on the high, 0.0 = on the low
+    ema9 = float(df["close"].ewm(span=9, adjust=False).mean().iloc[-1])
+    prev_c = float(df["close"].iloc[-2])
+    rejection_up = pos >= 0.66 and (min(o, c) - l) / rng >= 0.33      # long lower wick
+    rejection_dn = pos <= 0.34 and (h - max(o, c)) / rng >= 0.33      # long upper wick
+    reclaim_up = prev_c < ema9 <= c
+    reclaim_dn = prev_c > ema9 >= c
+    return {"day": (day or [None])[0], "bars": len(df), "vol_x": vol_x,
+            "vol_ok": vol_x >= 1.5, "close": c, "ema9": ema9,
+            "pa_up": bool(rejection_up or reclaim_up),
+            "pa_dn": bool(rejection_dn or reclaim_dn),
+            "why": ("rejection candle" if (rejection_up or rejection_dn)
+                    else ("9-EMA reclaim" if (reclaim_up or reclaim_dn) else "no trigger"))}
+
+
 _GEX_HONESTY = ("<i>⚠️ These are STRUCTURE, not a forecast. Tested on this DB the `gex` "
                 "model hit 40.2% over 107 fires and, once same-day fires stop double-"
                 "counting, p=0.21 — no measurable edge either way. What this framework "
@@ -32756,7 +32837,7 @@ _GEX_HONESTY = ("<i>⚠️ These are STRUCTURE, not a forecast. Tested on this D
                 "entry), and that discipline is worth more than the levels are.</i>")
 
 
-def _gex_blueprint(conn, tk):
+def _gex_blueprint(conn, tk, want_exp=None):
     """MODE 1 — pre-market structural map, auto-filled from our own capture.
 
     The source prompt has you paste levels in by hand from SpotGamma/Tradytics. We already
@@ -32766,7 +32847,7 @@ def _gex_blueprint(conn, tk):
     spot = _gex_spot(conn, tk)
     if not spot:
         return f"📐 <b>{tk}</b>: no price available."
-    L = _gex_levels(conn, tk, spot)
+    L = _gex_levels(conn, tk, spot, _gex_pick_expiry(conn, tk, want_exp))
     trend, temoji, emas = _gex_trend(conn, tk)
     flip, cw, pw, node = L["flip"], L["call_wall"], L["put_wall"], L["node"]
     f = lambda v: (f"${v:,.2f}" if isinstance(v, (int, float)) and v else "n/a")
@@ -32821,14 +32902,14 @@ def _gex_blueprint(conn, tk):
     return "\n".join(out)
 
 
-def _gex_check(conn, tk, side):
+def _gex_check(conn, tk, side, want_exp=None):
     """MODE 2 — live execution filter. Gates a PROPOSED trade against the 3-part checklist."""
     tk, side = tk.upper(), (side or "").lower()
     want_long = side.startswith("c") or side in ("long", "buy", "bull")
     spot = _gex_spot(conn, tk)
     if not spot:
         return f"📐 <b>{tk}</b>: no price available."
-    L = _gex_levels(conn, tk, spot)
+    L = _gex_levels(conn, tk, spot, _gex_pick_expiry(conn, tk, want_exp))
     trend, temoji, _ = _gex_trend(conn, tk)
     flip, cw, pw, node = L["flip"], L["call_wall"], L["put_wall"], L["node"]
     f = lambda v: (f"${v:,.2f}" if isinstance(v, (int, float)) and v else "n/a")
@@ -32844,6 +32925,17 @@ def _gex_check(conn, tk, side):
         n_, v_ = min(lv, key=lambda x: abs(spot - x[1]))
         near, dist = n_, abs(spot - v_) / spot * 100
 
+    cf = _gex_confirm(tk)                      # legs 2+3 from real 1m bars
+    if cf:
+        pa_ok = cf["pa_up"] if want_long else cf["pa_dn"]
+        pa_txt = f"{cf['why']} on {cf['day']}"
+        vol_ok, vol_txt = cf["vol_ok"], f"last bar {cf['vol_x']:.1f}x its 20-bar average"
+    else:
+        # not in the intraday lane -> report UNVERIFIED and fail the leg. A checklist that
+        # passes what it cannot see is worse than one that admits the gap.
+        pa_ok = vol_ok = False
+        pa_txt = vol_txt = "no 1m bars for this ticker (intraday lane covers 32 names)"
+
     checks = [
         ("Macro trend", aligned,
          f"daily stack {trend}, you want {'CALLS' if want_long else 'PUTS'}"),
@@ -32852,6 +32944,8 @@ def _gex_check(conn, tk, side):
          f"{'+GEX dampening' if above else '−GEX expansion'}"),
         ("At a level", dist is not None and dist <= 0.75,
          f"nearest is {near}" + (f", {dist:.2f}% away" if dist is not None else "")),
+        ("Price action", pa_ok, pa_txt),
+        ("Volume surge", vol_ok, vol_txt),
     ]
     go = all(ok for _, ok, _ in checks)
     out = [hdr(f"🚦 {'GREEN LIGHT' if go else 'RED LIGHT — PASS'} · {tk} "
@@ -32862,8 +32956,8 @@ def _gex_check(conn, tk, side):
     if go:
         tgt = cw if want_long else pw
         stop = flip if flip else node
-        out.append(f"• <b>Entry trigger:</b> needs BOTH — a reversal candle at {f(near and spot)} "
-                   f"and a local volume surge. Structure alone is not an entry.")
+        out.append(f"• <b>Entry trigger CONFIRMED:</b> {pa_txt} with {vol_txt} — "
+                   f"all three legs of the checklist verified, not assumed.")
         out.append(f"• <b>Stop:</b> just beyond {f(stop)} (behind the level being defended)")
         out.append(f"• <b>Target:</b> {f(tgt)}")
         out.append("• <b>Abort</b> if volume dries up or price stalls at the level.")
@@ -32885,9 +32979,11 @@ def _gex_check(conn, tk, side):
 async def gexplan_command(update, ctx):
     """/gexplan TICKER — Mode 1 pre-market structural map."""
     tk = (ctx.args[0] if ctx.args else "SPY").upper()
+    want = next((a for a in ctx.args[1:] if a.lower() in
+                 ("0dte", "weekly", "monthly")), None) if len(ctx.args) > 1 else None
     conn = get_conn()
     try:
-        txt = _gex_blueprint(conn, tk)
+        txt = _gex_blueprint(conn, tk, want)
     finally:
         conn.close()
     await update.message.reply_text(txt[:4096], parse_mode=H)
@@ -32902,9 +32998,11 @@ async def gexcheck_command(update, ctx):
         return
     tk = ctx.args[0].upper()
     side = ctx.args[1] if len(ctx.args) > 1 else "call"
+    want = next((a for a in ctx.args[2:] if a.lower() in
+                 ("0dte", "weekly", "monthly")), None) if len(ctx.args) > 2 else None
     conn = get_conn()
     try:
-        txt = _gex_check(conn, tk, side)
+        txt = _gex_check(conn, tk, side, want)
     finally:
         conn.close()
     await update.message.reply_text(txt[:4096], parse_mode=H)

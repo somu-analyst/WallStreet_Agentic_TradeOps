@@ -5605,7 +5605,7 @@ _PAGE_HELP = {
     "🎯 Signal Accuracy":        "Validation lab: replays each signal (OI bias, PCR, momentum, RSI, SMA) across stored history and scores its hit-rate + directional edge vs the forward N-day move. Also surfaces the 24-model ensemble's forward-tracked accuracy. Answers: do my signals actually work?",
     "📐 Spreads Scanner":        "Bull Call, Bear Call, and Bear Put vertical spreads across your tickers, ranked by a composite Score (POP, reward/risk, breakeven cushion, leg liquidity). Defined risk on every spread; built from live chains + Black-Scholes.",
     "🎡 Wheel / CSP":            "Wheel-strategy screener: cash-secured puts ranked by annualized yield vs assignment risk (POP), plus covered-call candidates for shares you hold. The premium/yield/breakeven math is done for you.",
-    "📊 GEX Profile":            "Dealer Gamma Exposure by strike (calls +, puts −) with the zero-gamma flip price and call/put walls. Positive total GEX = dealers dampen moves (range-bound); negative = dealers amplify moves (trending).",
+    "📐 GEX Command":            "One home for everything gamma: the Co-Pilot (pre-market blueprint + live entry filter on the Nick Ireland framework), the GEX Profile, and the Gamma Wall Advisor — previously three separate pages. Dealer Gamma Exposure by strike (calls +, puts −) with the zero-gamma flip price and call/put walls. Positive total GEX = dealers dampen moves (range-bound); negative = dealers amplify moves (trending).",
     "🏁 Spread Backtest":        "Model-based vertical-spread backtest: replays ATM spreads across stock_daily history (BS-priced, trailing realized vol), exiting at a profit target or loss threshold, and reports how often each strategy hit target vs stop.",
     "💡 Action Board":           "Every indicator's best ideas on ONE page — UOA flow, positioning builder, 52-week breakouts, z-score reversion, 5-day reversal, VRP and relative strength — each with a concrete strike/expiry to act on, a ⭐ consensus view where multiple signals agree, and one-click add-to-my-positions (paper) tracking.",
 }
@@ -5637,13 +5637,12 @@ with st.sidebar:
             "📐 Spreads Scanner",
             "🎡 Wheel / CSP",
             "⚙️ Strategy Scanners",
-            "📊 GEX Profile",
+            "📐 GEX Command",
             "🏁 Spread Backtest",
             "🔎 Smart-Money Flow",
             "🎯 Prop Trading Screen",
             "🧠 High-Prob Engine",
             "🧑‍💼 AI Hedge Fund",
-            "🎯 Gamma Wall Advisor",
             "🚀 Live Momentum Scanner",
             "📐 DMA & Mean Reversion",
         ],
@@ -5698,6 +5697,20 @@ with st.sidebar:
         st.caption("↑ jump active — reset it to *browse* to use the section list")
 
     st.markdown("---")
+    # ── GEX Command sub-view ────────────────────────────────────────────────────
+    # "📊 GEX Profile" and "🎯 Gamma Wall Advisor" used to be two separate nav entries
+    # for one subject. They are now sub-views of a single page, plus the Co-Pilot. The
+    # selector is defined HERE, before either page block runs, because the Gamma Wall
+    # Advisor body sits ~10k lines above the GEX Profile body and both test this value.
+    # GEX sections embedded in OTHER pages (Smart Money Hub, OI Analytics) are untouched.
+    _gexsub = None
+    if page == "📐 GEX Command":
+        _gexsub = st.sidebar.radio(
+            "GEX view", ["🧭 Co-Pilot", "📊 GEX Profile", "🎯 Gamma Wall Advisor"],
+            key="gex_subview",
+            help="Co-Pilot = pre-market blueprint + live entry filter. Profile = signed "
+                 "gamma by strike. Advisor = wall-based trade construction.")
+
     # ── Global price source — applies to every page via _spot() ──
     _gms = _market_state()
     _src_now = {"OPEN": "🔴 LIVE", "PRE": "🌅 PM", "AFTER": "🌙 AH",
@@ -12091,7 +12104,7 @@ elif page == "\U0001f9e0 Smart Money Hub":
 # ===================================================================
 # ──  GAMMA WALL ADVISOR — Professional advisor + position tracking
 # ===================================================================
-elif page == "\U0001f3af Gamma Wall Advisor":
+elif page == "\U0001f4d0 GEX Command" and _gexsub == "\U0001f3af Gamma Wall Advisor":
     import math as _gmath
     import plotly.graph_objects as _ggo
     from plotly.subplots import make_subplots as _gmsp
@@ -22399,7 +22412,77 @@ if page == "⚙️ Strategy Scanners":
                "Put-write is a Black-Scholes approximation, not real option marks.")
 
 
-if page == "📊 GEX Profile":
+if page == "📐 GEX Command" and _gexsub == "🧭 Co-Pilot":
+    _page_header("🧭 GEX Co-Pilot — structural map & entry filter")
+    st.caption("The Nick Ireland framework, driven by **our own captured chain** instead of "
+               "hand-typed SpotGamma levels. Mode 1 maps the session; Mode 2 gates a "
+               "specific trade against the 3-part checklist.")
+    try:
+        import telegram_bot_optimized as _cpb
+    except Exception as _e:
+        _cpb = None
+        st.error(f"Engine unavailable: {_e}")
+    if _cpb is not None:
+        _q1, _q2, _q3 = st.columns([2, 2, 2])
+        _cptk = _q1.text_input("Ticker", value="SPY", key="cp_tk").strip().upper()
+        _cpexp = _q2.selectbox("Expiry basis", ["monthly (default)", "0dte", "weekly"],
+                               key="cp_exp",
+                               help="The framework leans on 0DTE/weekly walls. Regime can "
+                                    "FLIP between them — SPY reads TRENDING on the monthly "
+                                    "and PINNING on 0DTE at the same moment.")
+        _cpside = _q3.selectbox("Mode 2 — trade you're considering", ["call", "put"],
+                                key="cp_side")
+        _want = None if _cpexp.startswith("monthly") else _cpexp
+
+        def _cp_render(_html):
+            """Render Telegram-flavoured engine HTML in Streamlit.
+
+            Streamlit STRIPS <pre> even with unsafe_allow_html=True, which collapsed every
+            aligned table onto one unreadable line. So split the output on <pre> blocks:
+            tables go to st.code (monospace, alignment preserved), prose to st.markdown.
+            """
+            import html as _h, re as _re
+            for _i, _seg in enumerate(_re.split(r"<pre>(.*?)</pre>", _html, flags=_re.S)):
+                if not _seg or not _seg.strip():
+                    continue
+                _txt = _h.unescape(_re.sub(r"<[^>]+>", "", _seg)).strip("\n")
+                if _i % 2:                                  # odd segments are the <pre> bodies
+                    st.code(_txt, language=None)
+                else:
+                    st.markdown(_txt.replace("\n", "  \n"))
+
+        _cpconn = get_conn()
+        try:
+            _m1, _m2 = st.tabs(["🔎 Mode 1 · Blueprint", "🚦 Mode 2 · Entry filter"])
+            with _m1:
+                _lv = _cpb._gex_levels(_cpconn, _cptk, _cpb._gex_spot(_cpconn, _cptk),
+                                       _cpb._gex_pick_expiry(_cpconn, _cptk, _want))
+                _tr, _te, _em = _cpb._gex_trend(_cpconn, _cptk)
+                _k = st.columns(5)
+                _k[0].metric("Trend filter", f"{_te} {_tr}")
+                _k[1].metric("Gamma flip", f"${_lv['flip']:,.2f}" if _lv['flip'] else "n/a")
+                _k[2].metric("Call wall", f"${_lv['call_wall']:,.2f}" if _lv['call_wall'] else "n/a")
+                _k[3].metric("Put wall", f"${_lv['put_wall']:,.2f}" if _lv['put_wall'] else "n/a")
+                _k[4].metric("Control node", f"${_lv['node']:,.2f}" if _lv['node'] else "n/a")
+                if _tr == "Tangled":
+                    st.warning("🟡 **NO-TRADE — daily EMAs are tangled.** The framework's own "
+                               "first rule is cash when the stack isn't clean.")
+                # Engine output is Telegram HTML (<b>, <pre> grids). Rendering it as
+                # markdown collapsed every <pre> table onto a single unreadable line, so
+                # pass it through as HTML untouched — same approach as the _render_tg bridge.
+                _cp_render(_cpb._gex_blueprint(_cpconn, _cptk, _want))
+            with _m2:
+                _cf = _cpb._gex_confirm(_cptk)
+                if _cf is None:
+                    st.info(f"No 1-minute bars for {_cptk} — the intraday lane covers 32 "
+                            "tickers since 2026-07-15. Price-action and volume legs will "
+                            "report UNVERIFIED and the gate will refuse rather than pass "
+                            "what it cannot see.")
+                _cp_render(_cpb._gex_check(_cpconn, _cptk, _cpside, _want))
+        finally:
+            _cpconn.close()
+
+elif page == "📐 GEX Command" and _gexsub == "📊 GEX Profile":
     _page_header("📊 GEX Profile — Dealer Gamma Exposure")
     st.caption("Signed dealer gamma by strike (calls **+**, puts **−**), the **zero-gamma flip** price, and "
                "call/put walls. Positive total GEX → dealers dampen moves (mean-reverting); negative → dealers "

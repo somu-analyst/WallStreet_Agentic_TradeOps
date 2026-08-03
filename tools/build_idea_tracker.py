@@ -293,6 +293,10 @@ ROWS = [
  "The GEX prompt arrived as a forwarded WhatsApp-style thread and was answered with a critique instead of being built or logged",
  "DONE","2026-08-02","Owned and corrected. Lesson: when the user pastes a spec, log it in the tracker even if unsure whether to build it - the tracker exists precisely so an ask cannot be silently dropped. Nothing else from that day was missed (re-checked the session)",
  "-","P2","-"),
+(80,"2026-08-02","User","Feature","GEX co-pilot: complete the checklist + merge the gamma pages",
+ "User asked whether everything in the GEX spec existed in BOTH Telegram and Streamlit, then to merge the duplicate gamma tabs",
+ "DONE","2026-08-02","Audit found 3 gaps: price-action and volume legs were only PRINTED as requirements (so a GREEN LIGHT could fire on structure alone), no 0DTE/weekly expiry choice, and NOTHING in Streamlit. All closed. (1) _gex_confirm reads real 1m bars from US_intraday.db - volume vs 20-bar mean (>=1.5x) and rejection-candle / 9-EMA-reclaim detection; tickers outside the 32-name intraday lane report UNVERIFIED and FAIL the leg rather than pass unseen. (2) expiry basis selector: SPY reads TRENDING -16M on the monthly but PINNING +43M on 0DTE - opposite regimes at the same moment. (3) merged the two dedicated pages (GEX Profile, Gamma Wall Advisor) into one 'GEX Command' page with a sidebar sub-view + new Co-Pilot view; GEX sections inside OTHER pages left untouched per user instruction. Verified in live DOM",
+ "-","P2","-"),
 ]
 
 def build():

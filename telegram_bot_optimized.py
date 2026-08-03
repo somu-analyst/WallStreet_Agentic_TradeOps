@@ -2529,6 +2529,19 @@ async def world_view(query):
         msg = _world_report()
     except Exception as e:
         log.warning(f"world_view: {e}"); msg = "⚠️ Cross-market error — try again."
+    # Regional market table + a real choropleth of today's move by country. The map was
+    # built 2026-08-03 but never attached to a command, so it was unreachable until now.
+    try:
+        _mrows = _plan_markets_rows()
+        _png = _world_market_map_png(_mrows)
+        if _png:
+            await query.message.reply_photo(
+                _png, caption="🗺️ World markets — today's move by country", parse_mode=H)
+        _tbl = _plan_markets_snapshot(_mrows)
+        if _tbl:
+            await _safe_reply(query.message, _tbl)
+    except Exception:
+        log.debug("world map/table failed", exc_info=True)
     try: await _loading.delete()
     except Exception: pass
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="world_view"), BACK_BTN]])
@@ -35065,9 +35078,23 @@ def _fmt_vanna_report(ticker, conn, spot):
 
     # ── plain English first. These two greeks describe what DEALERS are forced to do,
     # which is why they read as a background current rather than a signal.
-    lines.append("<i>Vanna = what dealers must do when VOLATILITY moves. "
-                 "Charm = what they must do as TIME passes. Neither predicts direction; "
-                 "they describe a hedging current you are trading with or against.</i>")
+    # Plain-language first. The greek names mean nothing to most readers, and the previous
+    # one-liner still assumed you knew what "hedging current" meant (user 2026-08-03).
+    _chm_now = vc.get("charm", 0.0) or 0.0
+    _vex_now = vc.get("vex", 0.0) or 0.0
+    lines.append("<b>In plain English</b>")
+    lines.append("• Market makers sold you these options. To stay neutral they must keep "
+                 "buying and selling the stock. That forced buying/selling is a CURRENT "
+                 "under the price.")
+    lines.append("• <b>Charm</b> = the current caused by TIME passing. Every day that ticks "
+                 "by, they must adjust — and it gets stronger as expiry nears.")
+    lines.append(f"   → right now that current pushes <b>{'UP' if _chm_now > 0 else 'DOWN'}</b>.")
+    lines.append("• <b>Vanna</b> = the current caused by FEAR moving. When volatility "
+                 "falls (calm), they must trade one way; when it spikes, the other.")
+    lines.append(f"   → right now, if things get calmer they must "
+                 f"<b>{'BUY' if _vex_now > 0 else 'SELL'}</b>.")
+    lines.append("• <b>It is a tide, not a forecast.</b> It says which way the water is "
+                 "moving. You can still swim against it — it is just harder.")
     lines.append("")
 
     # ── per-expiry table: the single-expiry view hid where the pressure actually sits ──

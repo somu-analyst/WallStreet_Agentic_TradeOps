@@ -31216,7 +31216,10 @@ async def _send_vrp(msg, rows):
         await msg.reply_text("No notable VRP dislocation right now.", parse_mode=H)
         return
     _data = []
-    for r in rows[:15]:
+    # rows are sorted by VRP descending, so rows[:15] was fifteen RICH names and never a
+    # cheap one -- while the legend promised both colours and the footer then named the
+    # cheap tickers the table had hidden (user 2026-08-03, same class as /revert and /rs).
+    for r in _both_tails(rows, lambda r: r["side"] == "SELL"):
         emoji = "🔴" if r["side"] == "SELL" else "🟢"
         _data.append((emoji, r["ticker"], f"{r['iv']*100:.0f}", f"{r['rv']*100:.0f}", f"{r['vrp']*100:+.0f}"))
     table = _pipe_table(("ST", "Tkr", "IV%", "RV%", "VRP"), _data, right_cols={2, 3, 4},
@@ -35160,6 +35163,54 @@ def _fmt_vanna_report(ticker, conn, spot):
     _ideas.append("• <b>Size for the current, not on it</b>: these flows explain WHY a tape "
                   "grinds or slips, they do not tell you it will.")
     lines.append("\n".join(_ideas))
+
+    # ── YOUR BOOK: does this hedging current run with or against what is actually open? ──
+    try:
+        _pos = pd.read_sql(
+            "SELECT strike, option_type, expiry, quantity FROM trades "
+            "WHERE status='OPEN' AND UPPER(ticker)=?", conn, params=(ticker.upper(),))
+    except Exception:
+        _pos = None
+    if _pos is not None and not _pos.empty:
+        _pl = [f"<b>▶ YOUR {ticker} POSITIONS vs THIS FLOW</b>"]
+        _tdy = _et_now().date()
+        _bad = _ok = 0
+        for _, q in _pos.iterrows():
+            _typ = str(q.get("option_type") or "").lower()
+            if _typ == "stock":
+                _pl.append(f"⚪ <b>STOCK</b> {int(float(q.get('quantity') or 0))} sh — charm and "
+                           f"vanna do not act on shares, but they move the underlying you hold.")
+                continue
+            _K = float(q.get("strike") or 0)
+            _exp = _exp_iso(str(q.get("expiry") or ""))
+            _qty = float(q.get("quantity") or 0)
+            _short = _qty < 0
+            try:
+                _dd = (datetime.strptime(_exp, "%Y-%m-%d").date() - _tdy).days
+            except Exception:
+                _dd = None
+            _wants_up = (_typ == "call" and not _short) or (_typ == "put" and _short)
+            _with = (_c > 0) == _wants_up
+            _ok += _with; _bad += (not _with)
+            _urg = ("bites hardest NOW" if (_dd is not None and _dd <= 7)
+                    else ("building" if (_dd is not None and _dd <= 21) else "still weak"))
+            _pl.append(f"{'🟢' if _with else '🔴'} <b>{'SHORT' if _short else 'LONG'} "
+                       f"{_K:g}{_typ[:1].upper()}</b> {_exp} ({_dd}d) — charm runs "
+                       f"<b>{'WITH' if _with else 'AGAINST'}</b> this leg, {_urg}")
+        if _bad or _ok:
+            if _bad > _ok:
+                _pl.append(f"<b>Assessment:</b> {_bad} of {_bad + _ok} option legs sit AGAINST the "
+                           f"charm drift — a headwind on top of your directional thesis. Not a "
+                           f"reason to close, but size and stops should assume the current pushes "
+                           f"the other way into expiry.")
+            elif _ok > _bad:
+                _pl.append(f"<b>Assessment:</b> {_ok} of {_bad + _ok} legs run WITH the drift. The "
+                           f"flow is helping — do not mistake that tailwind for the thesis being right.")
+            else:
+                _pl.append("<b>Assessment:</b> the book is balanced against this flow; charm is "
+                           "not the deciding factor here.")
+        lines.append("\n".join(_pl))
+        lines.append("")
     lines.append("")
     lines.append("<i>⚠️ Structural read, NOT a validated signal. Computed from EOD open "
                  "interest with a modelled IV — dealer positioning is inferred, not observed. "
@@ -35579,6 +35630,10 @@ async def _post_init(app):
             BotCommand("building", "Positioning: new long/short OI building"),
             BotCommand("uoa", "Unusual options activity (vol>>OI)"),
             BotCommand("vrp", "Variance risk premium (IV vs realized)"),
+            BotCommand("screen", "Master-investor screens (graham/lynch/munger/...)"),
+            BotCommand("gexplan", "GEX pre-market blueprint (flip/walls/scenarios)"),
+            BotCommand("gexcheck", "GEX live entry filter: /gexcheck SPY call"),
+            BotCommand("digest", "Newsletter: /digest morning|midday|evening"),
             BotCommand("hiprob", "High-probability option setups"),
             BotCommand("momentum", "Momentum 12-1 ranks"),
             BotCommand("rotate", "Sector-ETF relative strength"),
@@ -35642,7 +35697,12 @@ def main():
     token, chat_id = load_creds()
     log.info(f"Starting bot... Chat ID: {chat_id} (PID: {os.getpid()})")
 
-    app = Application.builder().token(token).post_init(_post_init).build()
+    # concurrent_updates: without it python-telegram-bot handles ONE update at a time, so a
+    # slow command (a cold /vrp, a screener fetching fundamentals) blocked every other
+    # command until it finished (user 2026-08-03). Handlers here are independent -- each
+    # opens its own DB connection -- so concurrency is safe.
+    app = (Application.builder().token(token).post_init(_post_init)
+           .concurrent_updates(True).build())
 
     # Auto-open local dashboard URL on bot startup.
     open_dashboard_on_startup()

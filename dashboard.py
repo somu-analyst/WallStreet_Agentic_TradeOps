@@ -21791,6 +21791,17 @@ if page == "🎯 High-Prob Options":
                                   help="Only used by 'Fixed % risk per trade'.")
             _maxPos = _t2.slider("Max positions", 1, 40, 10, 1, key="cd_maxpos")
             _minPop = _t3.slider("Min POP for basket", 70, 99, 80, 1, key="cd_minpop")
+            _u1, _u2 = st.columns(2)
+            # Deployment, not selection, dominates the outcome at this account size: taking
+            # ONE lot of each pick left $7,276 of $10,000 idle, which turned a +21.6%
+            # fully-deployed result into −0.21% after fees. The scale-up pass below fixes it.
+            _tgtDep = _u1.slider("Target deployment (%)", 10, 100, 90, 5, key="cd_tgtdep",
+                                 help="Scale lots up until this much of capital is working. "
+                                      "Idle cash earns nothing but still absorbs the fees.")
+            _maxPosPct = _u2.slider("Max per position (% of capital)", 5, 100, 25, 5,
+                                    key="cd_maxpospct",
+                                    help="Concentration cap — no single position may exceed "
+                                         "this share of capital, however good its EV looks.")
 
         # candidate pool = the CURRENTLY-OPEN recs in the filtered slice
         _pool = _v[_v["status"] == "OPEN"].copy()
@@ -21886,17 +21897,52 @@ if page == "🎯 High-Prob Options":
                 _taken.append({"rec_id": int(r["rec_id"]), "Ticker": _tk,
                                "Strategy": r["strategy"], "Expiry": r["expiry"],
                                "Lots": _lots, "POP %": round(float(r["pop"]), 1),
-                               "Capital": round(_need, 2),
-                               "Max profit": round(_mp1 * _lots, 2),
+                               "_unit": float(r["capital"]),    # capital for ONE lot
+                               "_mp1": _mp1, "_ev1": float(r["ev"]),
                                "Paid %": round(_c * 100, 1), "Need %": round(_need_c * 100, 1),
-                               "EV": round(float(r["ev"]) * _lots, 2),
                                "Verdict": _verdict, "Why": _why})
+
+            # ── scale-up pass: put the idle cash to work ───────────────────────────────
+            # The selection loop above takes ONE lot of each pick, which is what left 73% of
+            # a $10k account in cash. Walk the picks in ranked order adding a lot at a time,
+            # subject to the per-position concentration cap, until the deployment target is
+            # met or nothing more fits. Premium traps are skipped — scaling a negative-EV
+            # position just loses money faster.
+            # 'Fixed % risk' already sizes its own lots to the user's risk budget — scaling
+            # those up would silently override the very control they set.
+            if _taken and _meth != "Fixed % risk per trade":
+                _cap_room = float(_cap0) * _maxPosPct / 100.0
+                _target_dep = float(_cap0) * _tgtDep / 100.0
+                _progress = True
+                while _progress and (float(_cap0) - _budget) < _target_dep:
+                    _progress = False
+                    for _it in _taken:
+                        if "trap" in _it["Verdict"].lower() or "not credible" in _it["Verdict"].lower():
+                            continue
+                        _u = _it["_unit"]
+                        if _u <= 0 or _u > _budget:
+                            continue
+                        if (_it["Lots"] + 1) * _u > _cap_room:
+                            continue                       # concentration cap
+                        _it["Lots"] += 1; _budget -= _u; _progress = True
+                        if (float(_cap0) - _budget) >= _target_dep:
+                            break
+            for _it in _taken:                              # finalise lot-scaled columns
+                _it["Capital"] = round(_it["_unit"] * _it["Lots"], 2)
+                _it["Max profit"] = round(_it["_mp1"] * _it["Lots"], 2)
+                _it["EV"] = round(_it["_ev1"] * _it["Lots"], 2)
+                for _k in ("_unit", "_mp1", "_ev1"):
+                    _it.pop(_k, None)
 
             if not _taken:
                 st.warning(f"${_cap0:,.0f} isn't enough for any single position under these rules "
                            f"— the cheapest candidate needs ${_pool['capital'].min():,.0f}.")
             else:
-                _bk = pd.DataFrame(_taken)
+                # explicit column order — the lot-scaled fields are filled in after the
+                # selection loop, so dict insertion order no longer matches the display
+                _bk = pd.DataFrame(_taken)[
+                    ["rec_id", "Ticker", "Strategy", "Expiry", "Lots", "POP %", "Capital",
+                     "Max profit", "Paid %", "Need %", "EV", "Verdict", "Why"]]
                 _dep = float(_bk["Capital"].sum()); _evs = float(_bk["EV"].sum())
                 _k1, _k2, _k3, _k4 = st.columns(4)
                 _k1.metric("Deployed", f"${_dep:,.0f}", f"{_dep/_cap0*100:.0f}% of capital")

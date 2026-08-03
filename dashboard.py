@@ -1403,7 +1403,7 @@ def _gp_live_strip():
             (_chg / _base * 100.0) if (_chg is not None and _base > 0) else None)
         # delta vs the LAST TICK, so you can see which quote just moved
         _tick = _px - float(_prev.get(_tk, _px))
-        _arrow = "▲" if _tick > 0 else ("▼" if _tick < 0 else "·")
+        _arrow = "up" if _tick > 0 else ("dn" if _tick < 0 else "flat")
         _cols[_i].metric(f"{_arrow} {_tk}", f"${_px:,.2f}",
                          (f"{_chg:+.2f} ({_pct:+.2f}%)" if _pct is not None else None))
     st.session_state["_live_last_px"] = _now
@@ -6650,7 +6650,7 @@ if page == "🌍 Market Overview":
                         _cur_px = float(_inst_row["Price"])
                         _chg_pct = float(_inst_row["Pct"])
                         _chg_color = "#00c853" if _chg_pct >= 0 else "#ff1744"
-                        _arrow = "▲" if _chg_pct >= 0 else "▼"
+                        _arrow = ""
                         _px_display = f"{_cur_px:,.4f}" if _cur_px < 1 else f"${_cur_px:,.2f}"
                         st.markdown(
                             f"<div style='background:var(--panel-solid);color:var(--text);border-radius:12px;"
@@ -10233,7 +10233,7 @@ This creates a self-reinforcing ceiling — the wall repels price.
                         for _, r in valid.iterrows():
                             color = "#00c853" if r["signal"] == "BULLISH" else "#ff1744" if r["signal"] == "BEARISH" else "#888"
                             fig.add_annotation(x=r["date"], y=r.get("next_day_move", 0),
-                                              text="▲" if r["signal"] == "BULLISH" else "▼" if r["signal"] == "BEARISH" else "●",
+                                              text="BULL" if r["signal"] == "BULLISH" else "BEAR" if r["signal"] == "BEARISH" else "flat",
                                               showarrow=False, font=dict(color=color, size=14), row=2, col=1)
                         fig.update_layout(template="plotly_white", height=480, showlegend=False,
                                           title=f"{bt_ticker} — OI Signal vs Actual Next-Day Move")
@@ -10359,7 +10359,7 @@ elif page == "🔮 Live Position Predictor":
         for i, (_, row) in enumerate(live.iterrows()):
             c = cols[i % 4]
             color = "#00c853" if row["Pct"] >= 0 else "#ff1744"
-            arrow = "▲" if row["Pct"] >= 0 else "▼"
+            arrow = ""
             c.markdown(
                 f"<div><b>{row['Name']}</b><br>"
                 f"${row['Price']:,.2f} {arrow} {row['Pct']:+.2f}%</div>",
@@ -10483,10 +10483,10 @@ elif page == "🔮 Live Position Predictor":
                     f"padding:8px 12px;border-radius:4px;margin:4px 0'>"
                     f"<b>Prediction:</b> {pred} &nbsp; "
                     f"<b>Action:</b> {action}<br>"
-                    f"OI: {'▲' if oi_signal > 0 else '▼'} | "
+                    f"OI: {'up' if oi_signal > 0 else 'dn'} | "
                     f"PCR: {'Bull' if pcr_signal > 0 else 'Bear' if pcr_signal < 0 else 'Neut'} | "
                     f"Vol: {'Bull' if vol_signal > 0 else 'Bear' if vol_signal < 0 else 'Neut'} | "
-                    f"Futures: {'▲' if futures_signal > 0 else '▼' if futures_signal < 0 else '—'} | "
+                    f"Futures: {'up' if futures_signal > 0 else 'dn' if futures_signal < 0 else 'flat'} | "
                     f"VIX: {'Low' if vix_signal > 0 else 'High' if vix_signal < 0 else 'Norm'}<br>"
                     f"<small>Price: {_spot_src_lbl}</small>"
                     f"</div>",
@@ -12687,7 +12687,7 @@ Professional options desk — dealer GEX analysis, expiry-level walls, position 
                                         _fig_wall.add_annotation(
                                             x=_sel_ga_expiry, y=1.0,
                                             xref="x", yref="paper",
-                                            text="▼ Selected",
+                                            text=" Selected",
                                             showarrow=False,
                                             font=dict(color="#FFD700", size=11),
                                             bgcolor="rgba(0,0,0,0.5)",
@@ -12724,7 +12724,7 @@ Professional options desk — dealer GEX analysis, expiry-level walls, position 
                                 margin=dict(t=65, b=65, l=65, r=20),
                             )
                             st.plotly_chart(_fig_wall, use_container_width=True)
-                            st.caption("🟢 ▲ = Call Wall (ceiling)  |  🔴 ▼ = Put Wall (floor)  "
+                            st.caption("🟢  = Call Wall (ceiling)  |  🔴  = Put Wall (floor) "
                                        "|  🟡 line = Spot  |  🟡 dashed = selected expiry  "
                                        "|  🟩 table row = ideal 21–50 DTE zone")
 

@@ -875,7 +875,12 @@ try:
     _orig_reply = Message.reply_text
     async def _reply_text_sanitized(self, text, *args, **kwargs):
         orig_text = text
-        text2 = _tg_balance(sanitize_for_telegram(text)) if isinstance(text, str) else text
+        # Only escape when a parse mode is actually in play. With parse_mode=None
+        # Telegram renders plain text, so '&amp;' would be shown literally -- the
+        # cause of 'S&amp;P 500' in photo captions (found 2026-08-03).
+        _pm = kwargs.get("parse_mode")
+        text2 = (_tg_balance(sanitize_for_telegram(text))
+                 if isinstance(text, str) and _pm else text)
         try:
             return await _orig_reply(self, text2, *args, **kwargs)
         except Exception as e:
@@ -911,7 +916,12 @@ try:
     _orig_send = Bot.send_message
     async def _send_message_sanitized(self, chat_id, text=None, *args, **kwargs):
         orig_text = text
-        text2 = _tg_balance(sanitize_for_telegram(text)) if isinstance(text, str) else text
+        # Only escape when a parse mode is actually in play. With parse_mode=None
+        # Telegram renders plain text, so '&amp;' would be shown literally -- the
+        # cause of 'S&amp;P 500' in photo captions (found 2026-08-03).
+        _pm = kwargs.get("parse_mode")
+        text2 = (_tg_balance(sanitize_for_telegram(text))
+                 if isinstance(text, str) and _pm else text)
         try:
             return await _orig_send(self, chat_id=chat_id, text=text2, *args, **kwargs)
         except Exception as e:
@@ -943,7 +953,12 @@ try:
     # Message.edit_text and CallbackQuery.edit_message_text both delegate here.
     _orig_editmt = Bot.edit_message_text
     async def _edit_mt_sanitized(self, text=None, *args, **kwargs):
-        text2 = _tg_balance(sanitize_for_telegram(text)) if isinstance(text, str) else text
+        # Only escape when a parse mode is actually in play. With parse_mode=None
+        # Telegram renders plain text, so '&amp;' would be shown literally -- the
+        # cause of 'S&amp;P 500' in photo captions (found 2026-08-03).
+        _pm = kwargs.get("parse_mode")
+        text2 = (_tg_balance(sanitize_for_telegram(text))
+                 if isinstance(text, str) and _pm else text)
         try:
             return await _orig_editmt(self, *args, text=text2, **kwargs)
         except Exception as e:
@@ -963,7 +978,11 @@ try:
     _orig_send_photo = Bot.send_photo
     async def _send_photo_sanitized(self, chat_id, photo, caption=None, *args, **kwargs):
         orig_cap = caption
-        cap2 = sanitize_for_telegram(caption) if isinstance(caption, str) else caption
+        # Only escape when a parse mode is actually in play. With parse_mode=None
+        # Telegram renders plain text, so '&amp;' would be shown literally -- the
+        # cause of 'S&amp;P 500' in photo captions (found 2026-08-03).
+        _pm = kwargs.get("parse_mode")
+        cap2 = sanitize_for_telegram(caption) if isinstance(caption, str) and _pm else caption
         try:
             return await _orig_send_photo(self, chat_id=chat_id, photo=photo, caption=cap2, *args, **kwargs)
         except Exception as e:
@@ -984,7 +1003,11 @@ try:
     _orig_reply_photo = Message.reply_photo
     async def _reply_photo_sanitized(self, photo, caption=None, *args, **kwargs):
         orig_cap = caption
-        cap2 = sanitize_for_telegram(caption) if isinstance(caption, str) else caption
+        # Only escape when a parse mode is actually in play. With parse_mode=None
+        # Telegram renders plain text, so '&amp;' would be shown literally -- the
+        # cause of 'S&amp;P 500' in photo captions (found 2026-08-03).
+        _pm = kwargs.get("parse_mode")
+        cap2 = sanitize_for_telegram(caption) if isinstance(caption, str) and _pm else caption
         try:
             return await _orig_reply_photo(self, photo, caption=cap2, *args, **kwargs)
         except Exception as e:
@@ -2256,7 +2279,7 @@ def compute_money_flow():
             col = _corr[s].drop(labels=[s], errors="ignore").dropna()
             pos = col.sort_values(ascending=False).head(3)
             neg = col.sort_values().head(2)
-            rels.append({"name": r["name"], "dir": ("▲" if r["flow"] == "IN" else "▼"),
+            rels.append({"name": r["name"], "dir": ("IN" if r["flow"] == "IN" else "OUT"),
                          "with": [(_nm.get(k, k), float(v)) for k, v in pos.items() if v > 0.2],
                          "opp":  [(_nm.get(k, k), float(v)) for k, v in neg.items() if v < -0.2]})
     except Exception as _e:
@@ -3433,7 +3456,7 @@ def _disp_w(s):
         o = ord(ch)
         if 0xFE00 <= o <= 0xFE0F or 0x0300 <= o <= 0x036F or o == 0x200D:
             continue  # variation selector / combining mark / zero-width joiner
-        # NOTE: bare arrows (→↑↓←) and unfilled shapes (▲▼◆) default to NARROW
+        # NOTE: bare arrows (→↑↓←) and unfilled shapes (◆) default to NARROW
         # text presentation in Telegram's monospace font unless paired with a
         # variation selector — do NOT add them here, they broke column alignment
         # (found 2026-07-17). Stick to solid emoji (🟢🔴🟡⚪🟩🟥) inside table cells.
@@ -3622,12 +3645,12 @@ def _get_short_data(ticker: str) -> dict:
 
 def _col_arrow(chg: float, strong: float = 0.5, weak: float = 0.1) -> str:
     """Return a colored-emoji arrow based on % change.
-    🟢▲ / 🔴▼ / 🟡→ — strong threshold is 0.5%, weak is 0.1%.
+    🟢 / 🔴 / 🟡→ — strong threshold is 0.5%, weak is 0.1%.
     """
-    if chg > strong:   return "🟢▲"
-    if chg > weak:     return "🟡▲"
-    if chg < -strong:  return "🔴▼"
-    if chg < -weak:    return "🟡▼"
+    if chg > strong:   return "🟢"
+    if chg > weak:     return "🟡"
+    if chg < -strong:  return "🔴"
+    if chg < -weak:    return "🟡"
     return "🟡→"
 
 
@@ -6448,7 +6471,7 @@ def _oi_money_flow_chart(ticker: str, conn, spot: float, latest_date: str):
     ax2.set_xticks(x)
     ax2.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
     ax2.set_ylabel("Net $M", color="#8B949E", fontsize=8)
-    ax2.set_title("Net Flow (Call$ − Put$)  ▲=Bull bias  ▼=Bear bias",
+    ax2.set_title("Net Flow (Call$ − Put$)  =Bull bias  =Bear bias",
                   color="#8B949E", fontsize=8, pad=3)
 
     # ── Panel 3: contract VOLUME per strike, green calls / red puts (user 2026-07-23).
@@ -7925,8 +7948,14 @@ async def inst_signals_detail(query, ticker):
         _mp_rows = []
         for mp in mp_list[:4]:
             dte_s = f"{mp['dte']}d" if mp.get("dte") is not None else "-"
-            dist  = f"{(spot - mp['strike']) / spot * 100:+.1f}%" if spot > 0 else "-"
-            _mp_rows.append((mp["expiry"][:8], f"${mp['strike']:.0f}", dte_s, dist))
+            # SIGN: quote max pain RELATIVE TO SPOT, which is what "vs Spot" says and what
+            # the plain-English section uses. It was (spot - strike)/spot, i.e. spot vs max
+            # pain — the exact opposite, so a max pain BELOW price printed +7.5% (2026-08-03).
+            dist  = f"{(mp['strike'] - spot) / spot * 100:+.1f}%" if spot > 0 else "-"
+            # expiry[:8] cut '2026-07-31' to '2026-07-', losing the day. These are all
+            # near-dated, so MM-DD carries the information that matters and keeps the
+            # table inside the 28-char Telegram <pre> width.
+            _mp_rows.append((_exp_iso(mp["expiry"])[5:10], f"${mp['strike']:.0f}", dte_s, dist))
         parts.append("\n" + _pipe_table(("Expiry", "Strike", "DTE", "vs Spot"), _mp_rows,
                      right_cols={1, 2, 3}, title="MAX PAIN  (Expiry Price Magnet)"))
         parts.append("<i>Fade moves away from max pain as expiry nears</i>")
@@ -9890,8 +9919,8 @@ def _generate_oi_change_chart(ticker, today_date, prev_date):
                 plt.FuncFormatter(lambda x, _: f"{abs(x)/1000:.0f}K" if abs(x) >= 1000 else f"{x:.0f}"))
 
             # ── Bottom-left stats box ──────────────────────────────────
-            _c_arrow = "▲" if total_call_chg > 0 else ("▼" if total_call_chg < 0 else "→")
-            _p_arrow = "▲" if total_put_chg  > 0 else ("▼" if total_put_chg  < 0 else "→")
+            _c_arrow = "up" if total_call_chg > 0 else ("dn" if total_call_chg < 0 else "flat")
+            _p_arrow = "up" if total_put_chg  > 0 else ("dn" if total_put_chg  < 0 else "flat")
             _pcr_note = "Bearish lean" if pcr_today > 1.3 else ("Bullish lean" if pcr_today < 0.7 else "Neutral")
             _hedge_line = f"\nHedge flow: {hedge_pct:.0f}% of put OI" if hedge_pct > 20 else ""
             ax.text(0.01, 0.02,
@@ -14553,16 +14582,16 @@ async def global_market_view(query):
         _vix_v  = market_data.get("prices", {}).get("^VIX", 20.0) or 20.0
         if abs(_oil_c) > 0.8:
             cascade_lines.append(f"🛢 Oil{"↑" if _oil_c>0 else "↓"}{_oil_c:+.1f}%  →  "
-                                 f"{"▼DAL/UAL/AAL  ▲XLE/XOM/CVX" if _oil_c>0 else "▲DAL/UAL  ▼XLE/CVX"}")
+                                 f"{"DAL/UAL/AAL  XLE/XOM/CVX" if _oil_c>0 else "DAL/UAL  XLE/CVX"}")
         if abs(_gld_c) > 0.5:
             cascade_lines.append(f"🥇 Gold{"↑" if _gld_c>0 else "↓"}{_gld_c:+.1f}% →  "
-                                 f"{"▲GDX/NEM  ▼DXY  ▲EEM" if _gld_c>0 else "▲DXY  ▼GDX/NEM"}")
+                                 f"{"GDX/NEM  DXY  EEM" if _gld_c>0 else "DXY  GDX/NEM"}")
         if abs(_tnx_c) > 0.3:
             cascade_lines.append(f"📈 10Y{"↑" if _tnx_c>0 else "↓"}{_tnx_c:+.1f}% →  "
-                                 f"{"▲JPM/BAC  ▼VNQ/XLU  ▼Growth" if _tnx_c>0 else "▲VNQ/TLT  ▲Growth  ▼Banks"}")
+                                 f"{"JPM/BAC  VNQ/XLU  Growth" if _tnx_c>0 else "VNQ/TLT  Growth  Banks"}")
         if abs(_btc_c) > 3.0:
             cascade_lines.append(f"₿ BTC{"↑" if _btc_c>0 else "↓"}{_btc_c:+.1f}% →  "
-                                 f"{"Risk-ON: ▲MSTR/COIN/RIOT" if _btc_c>0 else "Risk-OFF: ▼spec"}")
+                                 f"{"Risk-ON: MSTR/COIN/RIOT" if _btc_c>0 else "Risk-OFF: spec"}")
         if _vix_v > 25:
             cascade_lines.append(f"😨 VIX {_vix_v:.1f} ELEVATED → Sell premium, buy hedges")
         elif _vix_v < 15:
@@ -14575,26 +14604,26 @@ async def global_market_view(query):
         rel_text = (f"\n\n{hdr('📡 KEY STOCK RELATIONS')}\n"
             "<i>Who moves what, and why (ticker = company).</i>\n\n"
             "🤖 <b>AI / Semis</b>\n"
-            "NVDA↑ (Nvidia) → ▲SMCI (Super Micro), ANET (Arista), AMD, TSM (TSMC), MSFT\n"
+ "NVDA↑ (Nvidia) → SMCI (Super Micro), ANET (Arista), AMD, TSM (TSMC), MSFT\n"
             "  <i>GPU demand → server build-out + cloud capex.</i>\n"
-            "AAPL↑ (Apple) → ▲TSM, QCOM (Qualcomm), AVGO (Broadcom), SWKS (Skyworks)\n"
+ "AAPL↑ (Apple) → TSM, QCOM (Qualcomm), AVGO (Broadcom), SWKS (Skyworks)\n"
             "  <i>iPhone cycle pulls the whole supply chain.</i>\n\n"
             "📱 <b>Ad-tech</b>\n"
-            "GOOGL↑ (Alphabet) → ▲META; watch TTD (Trade Desk), MGNI (Magnite), DV (DoubleVerify)\n"
+ "GOOGL↑ (Alphabet) → META; watch TTD (Trade Desk), MGNI (Magnite), DV (DoubleVerify)\n"
             "  <i>Digital-ad pricing sets the ceiling for every ad platform.</i>\n\n"
             "🛢 <b>Oil / Energy</b>\n"
-            "Oil↑ → ▼DAL (Delta), UAL (United), AAL (American) <i>— jet fuel is a top cost for airlines</i>\n"
-            "     → ▲XLE (energy ETF), CVX (Chevron), XOM (Exxon), OXY (Occidental), SLB (Schlumberger)\n"
-            "     → ▼XRT (retail ETF) <i>— gas at the pump eats consumer wallets</i>\n\n"
+ "Oil↑ → DAL (Delta), UAL (United), AAL (American) <i>— jet fuel is a top cost for airlines</i>\n"
+ "     → XLE (energy ETF), CVX (Chevron), XOM (Exxon), OXY (Occidental), SLB (Schlumberger)\n"
+ "     → XRT (retail ETF) <i>— gas at the pump eats consumer wallets</i>\n\n"
             "🥇 <b>Gold / Dollar</b>\n"
-            "Gold↑ → ▲GDX (miners ETF), NEM (Newmont); usually ▼DXY (US dollar)\n"
-            "     → weak $ → ▲EEM (emerging mkts), FXI (China) <i>— cheaper $ lifts EM</i>\n\n"
+ "Gold↑ → GDX (miners ETF), NEM (Newmont); usually DXY (US dollar)\n"
+ "     → weak $ → EEM (emerging mkts), FXI (China) <i>— cheaper $ lifts EM</i>\n\n"
             "📈 <b>Rates (10Y yield)</b>\n"
-            "Rates↑ → ▲JPM, BAC, WFC (banks) <i>— wider lending margins</i>\n"
-            "       → ▼VNQ (REITs), O (Realty Income), XLU (utilities) <i>— higher discount rate</i>\n"
-            "       → ▼ARKK <i>— long-duration / unprofitable tech hit hardest</i>\n\n"
+ "Rates↑ → JPM, BAC, WFC (banks) <i>— wider lending margins</i>\n"
+ "       → VNQ (REITs), O (Realty Income), XLU (utilities) <i>— higher discount rate</i>\n"
+ "       → ARKK <i>— long-duration / unprofitable tech hit hardest</i>\n\n"
             "₿ <b>Crypto</b>\n"
-            "BTC↑ → ▲COIN (Coinbase), MSTR (MicroStrategy), RIOT, MARA <i>(exchanges + miners)</i>")
+ "BTC↑ → COIN (Coinbase), MSTR (MicroStrategy), RIOT, MARA <i>(exchanges + miners)</i>")
         full_message = (
             f"{summary}\n\n"
             f"{hdr('💡 OPTIONS STRATEGY IMPLICATIONS')}\n"
@@ -20404,14 +20433,32 @@ def _ticker_writeup(tk, conn, spot=0.0, call_chg=0.0, put_chg=0.0, pcr=1.0,
 
         # ── walls vs price ──
         if spot > 0 and cw > 0 and pw > 0:
-            up = (cw - spot) / spot * 100      # +% : call wall above spot
-            dn = (pw - spot) / spot * 100      # signed vs spot: put wall below spot -> negative
-            lines.append(f"Price <b>${spot:,.0f}</b> sits between the put-wall floor <b>${pw:,.0f}</b> "
-                         f"({dn:+.1f}%) and the call-wall ceiling <b>${cw:,.0f}</b> ({up:+.1f}%).")
+            up = (cw - spot) / spot * 100      # signed vs spot; POSITIVE only if wall is above
+            dn = (pw - spot) / spot * 100
+            # Price does NOT always sit between the walls. Saying "sits between" and calling
+            # $330 a "ceiling" while price is $357 is simply false, and it printed a negative
+            # % next to the word ceiling (reported 2026-08-03). Branch on where spot actually
+            # is — and when a wall has been breached, say what it becomes.
+            if pw <= spot <= cw:
+                lines.append(f"Price <b>${spot:,.0f}</b> sits between the put-wall floor "
+                             f"<b>${pw:,.0f}</b> ({dn:+.1f}%) and the call-wall ceiling "
+                             f"<b>${cw:,.0f}</b> ({up:+.1f}%).")
+            elif spot > cw:
+                lines.append(f"Price <b>${spot:,.0f}</b> has <b>cleared both walls</b> — the call wall "
+                             f"<b>${cw:,.0f}</b> ({up:+.1f}%) and put wall <b>${pw:,.0f}</b> ({dn:+.1f}%) "
+                             f"now sit BELOW price. That call wall is no longer resistance; it is the "
+                             f"first support shelf on a pullback.")
+            else:
+                lines.append(f"Price <b>${spot:,.0f}</b> is <b>below both walls</b> — the put wall "
+                             f"<b>${pw:,.0f}</b> ({dn:+.1f}%) and call wall <b>${cw:,.0f}</b> ({up:+.1f}%) "
+                             f"are overhead. The put-wall support has already broken; it becomes "
+                             f"resistance on the way back up.")
             if mp > 0:
                 dmp = (mp - spot) / spot * 100
-                lines.append(f"Max-pain <b>${mp:,.0f}</b> ({dmp:+.1f}%) is where most options expire worthless — "
-                             f"price often drifts toward it into Friday's expiry.")
+                _dir = "DOWN" if dmp < -0.2 else ("UP" if dmp > 0.2 else "sideways to")
+                lines.append(f"Max-pain <b>${mp:,.0f}</b> ({dmp:+.1f}%) is where most options expire "
+                             f"worthless — the pin, if it happens, pulls price <b>{_dir}</b> "
+                             f"{abs(dmp):.1f}% into Friday's expiry.")
             if spot >= cw * 0.99:
                 lines.append("⚠️ Right at the <b>call wall</b>: heavy call OI = resistance. Needs a volume break to go higher; dealers sell strength.")
             elif spot <= pw * 1.01:
@@ -22698,16 +22745,16 @@ async def recommend_engine(query):
     btc = macro_chg.get("btc", 0)
     if abs(oil) > 1.0:
         mc.append(f"Oil{'↑' if oil>0 else '↓'}{oil:+.1f}% → "
-                  f"{'▼DAL/UAL  ▲XLE/XOM' if oil > 0 else '▲DAL/UAL  ▼XLE'}")
+                  f"{'DAL/UAL  XLE/XOM' if oil > 0 else 'DAL/UAL  XLE'}")
     if abs(gld) > 0.5:
         mc.append(f"Gold{'↑' if gld>0 else '↓'}{gld:+.1f}% → "
-                  f"{'▲GDX/NEM  ▼DXY→▲EEM' if gld > 0 else '▲DXY  ▼GDX/NEM'}")
+                  f"{'GDX/NEM  DXY→EEM' if gld > 0 else 'DXY  GDX/NEM'}")
     if abs(tnx) > 0.3:
         mc.append(f"10Y{'↑' if tnx>0 else '↓'}{tnx:+.1f}% → "
-                  f"{'▲Banks  ▼REITs/Tech' if tnx > 0 else '▲Growth/REITs  ▼Banks'}")
+                  f"{'Banks  REITs/Tech' if tnx > 0 else 'Growth/REITs  Banks'}")
     if abs(btc) > 3.0:
         mc.append(f"BTC{'↑' if btc>0 else '↓'}{btc:+.1f}% → "
-                  f"{'Risk-ON: ▲MSTR/COIN/RIOT' if btc > 0 else 'Risk-OFF: ▼spec positions'}")
+                  f"{'Risk-ON: MSTR/COIN/RIOT' if btc > 0 else 'Risk-OFF: spec positions'}")
     if vix_val > 25:
         mc.append(f"VIX {vix_val:.1f} ELEVATED → sell premium, hedge longs")
     elif vix_val < 15:

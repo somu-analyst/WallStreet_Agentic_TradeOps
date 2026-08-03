@@ -34648,7 +34648,11 @@ def _fmt_macro_report():
         if rows:
             lines.append(_pipe_table(("Indicator", "Value"), rows, right_cols={1},
                                      legend="BLS prints + market yields · no API key needed"))
-            lines.append("<i>Set FRED_API_KEY for full FRED series.</i>")
+            lines.append("<i>Above is the keyless lane: BLS prints + live market yields. A "
+                         "FREE FRED key (fred.stlouisfed.org/docs/api/api_key.html) adds the "
+                         "full St. Louis Fed series — history, revisions and many more "
+                         "indicators. Put FRED_API_KEY=... in api_keys.env next to the bot and "
+                         "it is picked up automatically.</i>")
         else:
             lines.append("<i>Macro data unavailable right now — try again shortly.</i>")
     else:
@@ -35038,7 +35042,11 @@ def _fmt_momentum_leaderboard(conn, n=8, highlight=None):
         data = [(("⭐" if str(r["ticker"])[:5] in highlight else ("🟢" if int(r["above200"]) else "🔴")),
                  f"{int(r['mom_rank'])}", str(r["ticker"])[:5],
                  f"{r['ret_12_1']:+.0f}%", f"{r['ret_1m']:+.0f}%") for _, r in sub.iterrows()]
-        return title + "\n" + _pipe_table(("ST", "Rk", "Tkr", "12-1", "1m"), data, right_cols={1, 3, 4})
+        return title + "\n" + _pipe_table(
+            ("ST", "Rk", "Tkr", "12-1", "1m"), data, right_cols={1, 3, 4},
+            legend="Rk = rank in the universe (1 = strongest) · 12-1 = 12-month return "
+                   "EXCLUDING the last month — the standard momentum measure, skipping a "
+                   "month avoids short-term reversal · 1m = last month's return")
 
     parts = ["🚀 <b>MOMENTUM 12-1 — UNIVERSE</b>",
              f"<i>as of {_mom_asof_disp(asof)} · {total} names · 12-mo ret, skip 1m</i>"]
@@ -35053,7 +35061,9 @@ def _fmt_momentum_leaderboard(conn, n=8, highlight=None):
             _md = [("⭐", str(r["ticker"])[:5], f"{r['ret_12_1']:+.0f}%",
                     f"{int(r['mom_rank'])}/{int(r['decile'])}") for _, r in mine.iterrows()]
             parts.append("⭐ <b>Your positions ranked</b>\n"
-                         + _pipe_table(("ST", "Tkr", "12-1", "Rk/D"), _md, right_cols={2, 3}))
+                         + _pipe_table(("ST", "Tkr", "12-1", "Rk/D"), _md, right_cols={2, 3},
+                                       legend="Rk/D = rank / decile. Decile 1 = strongest "
+                                              "10% of the universe, 10 = weakest"))
     parts.append("<i>Top decile = strongest trend (long bias); bottom decile = weakest "
                  "(short/avoid). Leveraged/inverse/vol ETFs excluded. Best when aligned "
                  "with Risk Regime — press longs in RISK-ON.</i>")

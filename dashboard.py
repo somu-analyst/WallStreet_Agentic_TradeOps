@@ -5877,6 +5877,194 @@ def _render_closed_positions_table(closed: pd.DataFrame):
 # ===================================================================
 # ──  PAGE 1: MARKET OVERVIEW
 # ===================================================================
+# ---------------------------------------------------------------------------
+# Hoisted 2026-08-02: these three are called from the Command Center page body,
+# ~13k lines BEFORE their original definitions next to the Action Board. This
+# file executes top-down, so on Command Center the names did not exist yet and
+# 'Top Ideas' failed with NameError every time. Definitions moved, bodies as-is.
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=600, show_spinner=False)
+def _sm_strike_map(d0):
+    """WHERE the flow went, per ticker, on the OI snapshot date: hottest call strike by ΔOI
+    (conviction build) and by volume (speculation), each with expiry + last price, plus spot."""
+    with get_conn() as c:
+        df = pd.read_sql(
+            "SELECT ticker, strike, expiry_date, change_OI_Call, vol_Call_now, lastPrice_Call_now, "
+            "change_OI_Put, lastPrice_Put_now "
+            "FROM options_change WHERE trade_date_now=?", c, params=(d0,))
+        sp = pd.read_sql(
+            "SELECT s.ticker, s.close FROM stock_daily s JOIN ("
+            " SELECT ticker, MAX(trade_date) mk FROM stock_daily GROUP BY ticker) m"
+            " ON s.ticker=m.ticker AND s.trade_date=m.mk", c)
+    out = {"doi": {}, "vol": {}, "doi_p": {}, "spot": {}}
+    if df.empty:
+        return out
+    df["ticker"] = df["ticker"].astype(str).str.upper()
+    for col in ("strike", "change_OI_Call", "vol_Call_now", "lastPrice_Call_now",
+                "change_OI_Put", "lastPrice_Put_now"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    def _lbl(r, cp="C"):
+        lp = r["lastPrice_Call_now"] if cp == "C" else r["lastPrice_Put_now"]
+        px = f" @ ${lp:.2f}" if lp > 0 else ""
+        return f"${r['strike']:g}{cp} {str(r['expiry_date'])[:10]}{px}"
+
+    for tk, gg in df.groupby("ticker"):
+        r1 = gg.loc[gg["change_OI_Call"].idxmax()]
+        if r1["change_OI_Call"] > 0:
+            out["doi"][tk] = _lbl(r1)
+        r2 = gg.loc[gg["vol_Call_now"].idxmax()]
+        if r2["vol_Call_now"] > 0:
+            out["vol"][tk] = _lbl(r2)
+        r3 = gg.loc[gg["change_OI_Put"].idxmax()]
+        if r3["change_OI_Put"] > 0:
+            out["doi_p"][tk] = _lbl(r3, "P")
+    if not sp.empty:
+        out["spot"] = {str(t).upper(): float(v) for t, v in zip(sp["ticker"], sp["close"]) if v}
+    return out
+
+
+def _ab_norm_exp(e):
+    """Any stored expiry format → YYYY-MM-DD (the trades-table format)."""
+    for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(str(e)[:10], fmt).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+    return str(e)[:10]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _ab_ideas():
+    """One row per actionable idea across every DB-first scanner in the bot engine, each with a
+    concrete option (strike/expiry/last price) so it can be tracked as a position. Returns
+    (ideas list, snapshot date)."""
+    import telegram_bot_optimized as _tb
+    ideas = []
+    with get_conn() as c:
+        row = c.execute("SELECT MAX(trade_date_now) FROM options_change").fetchone()
+        d0 = row[0] if row else None
+        snap = pd.DataFrame()
+        if d0:
+            snap = pd.read_sql("SELECT ticker, strike, expiry_date, lastPrice_Call_now, lastPrice_Put_now "
+                               "FROM options_change WHERE trade_date_now=?", c, params=(d0,))
+        spots = _sm_strike_map(d0)["spot"] if d0 else {}
+        if not snap.empty:
+            snap["tk"] = snap["ticker"].astype(str).str.upper()
+            for col in ("strike", "lastPrice_Call_now", "lastPrice_Put_now"):
+                snap[col] = pd.to_numeric(snap[col], errors="coerce").fillna(0)
+            _tdy = datetime.now().date()
+            snap["dte"] = snap["expiry_date"].map(
+                lambda e: (datetime.strptime(_ab_norm_exp(e), "%Y-%m-%d").date() - _tdy).days
+                if _ab_norm_exp(e)[:4].isdigit() else None)
+
+        def _pick(tk, typ):
+            """Nearest-ATM contract, expiry ≥10 DTE closest to ~30d, with a real last price."""
+            tk = tk.upper()
+            spot = spots.get(tk)
+            if snap.empty or not spot:
+                return None
+            pcol = "lastPrice_Call_now" if typ == "call" else "lastPrice_Put_now"
+            g = snap[(snap["tk"] == tk) & (snap["dte"].notna()) & (snap["dte"] >= 10) & (snap[pcol] > 0)].copy()
+            if g.empty:
+                return None
+            g["_dd"] = (g["dte"] - 30).abs()
+            best_exp = g.sort_values("_dd")["expiry_date"].iloc[0]
+            g2 = g[g["expiry_date"] == best_exp].copy()
+            g2["_kd"] = (g2["strike"] - spot).abs()
+            r = g2.sort_values("_kd").iloc[0]
+            return {"K": float(r["strike"]), "exp": _ab_norm_exp(best_exp), "px": float(r[pcol])}
+
+        def _add(source, tk, bias, why, legs, label):
+            ideas.append({"Source": source, "Ticker": tk.upper(), "Bias": bias,
+                          "Why": why, "Trade": label, "legs": legs})
+
+        def _dir_idea(source, tk, long_side, why):
+            """Directional idea → long call (bullish) or long put (bearish) near ATM ~30d."""
+            typ = "call" if long_side else "put"
+            p = _pick(tk, typ)
+            bias = "🟢 LONG" if long_side else "🔴 SHORT"
+            if p:
+                lab = f"BUY ${p['K']:g}{typ[0].upper()} {p['exp']} @ ${p['px']:.2f}"
+                _add(source, tk, bias, why, [(typ, p["K"], p["exp"], p["px"], +1)], lab)
+            else:
+                _add(source, tk, bias, why, [], "— no chain in snapshot")
+
+        try:                                            # 🐋 unusual options activity (actual contract)
+            for r in _tb._uoa_scan(c)[:5]:
+                typ = "call" if r["side"] == "C" else "put"
+                p = _pick(r["ticker"], typ)             # price lookup for THE flow contract
+                px = 0.0
+                gg = snap[(snap["tk"] == r["ticker"].upper()) & (snap["strike"] == r["strike"]) &
+                          (snap["expiry_date"] == r["expiry"])] if not snap.empty else pd.DataFrame()
+                if not gg.empty:
+                    px = float(gg.iloc[0]["lastPrice_Call_now" if typ == "call" else "lastPrice_Put_now"])
+                exp = _ab_norm_exp(r["expiry"])
+                lab = f"FOLLOW ${r['strike']:g}{r['side']} {exp}" + (f" @ ${px:.2f}" if px > 0 else "")
+                _add("🐋 UOA flow", r["ticker"], "🟢 LONG" if r["side"] == "C" else "🔴 SHORT",
+                     f"vol {r['ratio']:.1f}× OI · ${_tb._knum(r['notional'])} fresh flow",
+                     [(typ, float(r["strike"]), exp, px, +1)] if px > 0 else [], lab)
+        except Exception:
+            pass
+        try:                                            # 🏗️ positioning builder
+            for r in _tb._positioning_scan(c)[:5]:
+                _dir_idea("🏗️ Building", r["ticker"], r["bias"] == "LONG",
+                          f"new {'call' if r['bias']=='LONG' else 'put'} OI +{r['build_pct']*100:.0f}% · stage {r['stage']}")
+        except Exception:
+            pass
+        try:                                            # 📈 52-week breakout / breakdown
+            for r in _tb._breakout_scan(c)[:4]:
+                hi = r["sig"] == "HIGH"
+                _dir_idea("📈 Breakout", r["ticker"], hi,
+                          f"{'at 52w HIGH' if hi else 'at 52w LOW'} ({(r['from_hi'] if hi else r['from_lo'])*100:+.1f}%)")
+        except Exception:
+            pass
+        try:                                            # 📏 z-score reversion
+            for r in _tb._zrev_scan(c)[:4]:
+                _dir_idea("📏 Z-Rev", r["ticker"], r["side"] == "LONG", f"z={r['z']:+.1f} vs 20d mean")
+        except Exception:
+            pass
+        try:                                            # 🔄 5-day reversal
+            for r in _tb._revert_scan(c)[:4]:
+                _dir_idea("🔄 Revert", r["ticker"], r["side"] == "LONG",
+                          f"5d ret {r['ret']*100:+.1f}% · z={r['z']:+.1f}")
+        except Exception:
+            pass
+        try:                                            # 💪 relative-strength leaders
+            for r in _tb._rs_scan(c)[:4]:
+                _dir_idea("💪 RS leader", r["ticker"], True, f"3M {r['r3']*100:+.0f}% · vs SPY {r['ex3']*100:+.0f}%")
+        except Exception:
+            pass
+        try:                                            # 🌪️ VRP — only on names already on the board (full scan too slow)
+            _board_tks = list(dict.fromkeys(i["Ticker"] for i in ideas))[:12]
+            for r in _tb._vrp_scan(c, tickers=_board_tks)[:4]:
+                why = f"IV {r['iv']*100:.0f}% vs RV {r['rv']*100:.0f}% (VRP {r['vrp']*100:+.0f}pt)"
+                if r["side"] == "SELL":
+                    p = _pick(r["ticker"], "put")
+                    if p:
+                        _add("🌪️ VRP", r["ticker"], "🟡 SELL VOL", why,
+                             [("put", p["K"], p["exp"], p["px"], -1)],
+                             f"SELL ${p['K']:g}P {p['exp']} @ ${p['px']:.2f} (CSP)")
+                    else:
+                        _add("🌪️ VRP", r["ticker"], "🟡 SELL VOL", why, [], "sell premium (CSP/condor)")
+                else:
+                    pc, pp = _pick(r["ticker"], "call"), _pick(r["ticker"], "put")
+                    if pc and pp:
+                        _add("🌪️ VRP", r["ticker"], "🟣 BUY VOL", why,
+                             [("call", pc["K"], pc["exp"], pc["px"], +1), ("put", pp["K"], pp["exp"], pp["px"], +1)],
+                             f"BUY straddle ${pc['K']:g} {pc['exp']} @ ${pc['px']+pp['px']:.2f}")
+                    else:
+                        _add("🌪️ VRP", r["ticker"], "🟣 BUY VOL", why, [], "buy vol (straddle)")
+        except Exception:
+            pass
+    # ⭐ consensus: same ticker + same direction from ≥2 different indicators
+    from collections import Counter
+    _cnt = Counter((i["Ticker"], i["Bias"]) for i in ideas)
+    for i in ideas:
+        i["⭐"] = "⭐" if _cnt[(i["Ticker"], i["Bias"])] >= 2 and i["Bias"] in ("🟢 LONG", "🔴 SHORT") else ""
+    return ideas, d0
+
+
 if page == "🌍 Market Overview":
     _page_header("🌍 Market Overview", _PAGE_HELP["🌍 Market Overview"])
 
@@ -21267,45 +21455,6 @@ def _leaps_screen(tickers):
     return pd.DataFrame(out).sort_values("LEAPS call OI", ascending=False) if out else pd.DataFrame()
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def _sm_strike_map(d0):
-    """WHERE the flow went, per ticker, on the OI snapshot date: hottest call strike by ΔOI
-    (conviction build) and by volume (speculation), each with expiry + last price, plus spot."""
-    with get_conn() as c:
-        df = pd.read_sql(
-            "SELECT ticker, strike, expiry_date, change_OI_Call, vol_Call_now, lastPrice_Call_now, "
-            "change_OI_Put, lastPrice_Put_now "
-            "FROM options_change WHERE trade_date_now=?", c, params=(d0,))
-        sp = pd.read_sql(
-            "SELECT s.ticker, s.close FROM stock_daily s JOIN ("
-            " SELECT ticker, MAX(trade_date) mk FROM stock_daily GROUP BY ticker) m"
-            " ON s.ticker=m.ticker AND s.trade_date=m.mk", c)
-    out = {"doi": {}, "vol": {}, "doi_p": {}, "spot": {}}
-    if df.empty:
-        return out
-    df["ticker"] = df["ticker"].astype(str).str.upper()
-    for col in ("strike", "change_OI_Call", "vol_Call_now", "lastPrice_Call_now",
-                "change_OI_Put", "lastPrice_Put_now"):
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-    def _lbl(r, cp="C"):
-        lp = r["lastPrice_Call_now"] if cp == "C" else r["lastPrice_Put_now"]
-        px = f" @ ${lp:.2f}" if lp > 0 else ""
-        return f"${r['strike']:g}{cp} {str(r['expiry_date'])[:10]}{px}"
-
-    for tk, gg in df.groupby("ticker"):
-        r1 = gg.loc[gg["change_OI_Call"].idxmax()]
-        if r1["change_OI_Call"] > 0:
-            out["doi"][tk] = _lbl(r1)
-        r2 = gg.loc[gg["vol_Call_now"].idxmax()]
-        if r2["vol_Call_now"] > 0:
-            out["vol"][tk] = _lbl(r2)
-        r3 = gg.loc[gg["change_OI_Put"].idxmax()]
-        if r3["change_OI_Put"] > 0:
-            out["doi_p"][tk] = _lbl(r3, "P")
-    if not sp.empty:
-        out["spot"] = {str(t).upper(): float(v) for t, v in zip(sp["ticker"], sp["close"]) if v}
-    return out
 
 
 if page == "🔎 Smart-Money Flow":
@@ -21426,145 +21575,8 @@ if page == "🔎 Smart-Money Flow":
 
 
 # ═══════════════════ 💡 ACTION BOARD — all indicators, one page ═══════════════════
-def _ab_norm_exp(e):
-    """Any stored expiry format → YYYY-MM-DD (the trades-table format)."""
-    for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%Y/%m/%d"):
-        try:
-            return datetime.strptime(str(e)[:10], fmt).strftime("%Y-%m-%d")
-        except Exception:
-            continue
-    return str(e)[:10]
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def _ab_ideas():
-    """One row per actionable idea across every DB-first scanner in the bot engine, each with a
-    concrete option (strike/expiry/last price) so it can be tracked as a position. Returns
-    (ideas list, snapshot date)."""
-    import telegram_bot_optimized as _tb
-    ideas = []
-    with get_conn() as c:
-        row = c.execute("SELECT MAX(trade_date_now) FROM options_change").fetchone()
-        d0 = row[0] if row else None
-        snap = pd.DataFrame()
-        if d0:
-            snap = pd.read_sql("SELECT ticker, strike, expiry_date, lastPrice_Call_now, lastPrice_Put_now "
-                               "FROM options_change WHERE trade_date_now=?", c, params=(d0,))
-        spots = _sm_strike_map(d0)["spot"] if d0 else {}
-        if not snap.empty:
-            snap["tk"] = snap["ticker"].astype(str).str.upper()
-            for col in ("strike", "lastPrice_Call_now", "lastPrice_Put_now"):
-                snap[col] = pd.to_numeric(snap[col], errors="coerce").fillna(0)
-            _tdy = datetime.now().date()
-            snap["dte"] = snap["expiry_date"].map(
-                lambda e: (datetime.strptime(_ab_norm_exp(e), "%Y-%m-%d").date() - _tdy).days
-                if _ab_norm_exp(e)[:4].isdigit() else None)
-
-        def _pick(tk, typ):
-            """Nearest-ATM contract, expiry ≥10 DTE closest to ~30d, with a real last price."""
-            tk = tk.upper()
-            spot = spots.get(tk)
-            if snap.empty or not spot:
-                return None
-            pcol = "lastPrice_Call_now" if typ == "call" else "lastPrice_Put_now"
-            g = snap[(snap["tk"] == tk) & (snap["dte"].notna()) & (snap["dte"] >= 10) & (snap[pcol] > 0)].copy()
-            if g.empty:
-                return None
-            g["_dd"] = (g["dte"] - 30).abs()
-            best_exp = g.sort_values("_dd")["expiry_date"].iloc[0]
-            g2 = g[g["expiry_date"] == best_exp].copy()
-            g2["_kd"] = (g2["strike"] - spot).abs()
-            r = g2.sort_values("_kd").iloc[0]
-            return {"K": float(r["strike"]), "exp": _ab_norm_exp(best_exp), "px": float(r[pcol])}
-
-        def _add(source, tk, bias, why, legs, label):
-            ideas.append({"Source": source, "Ticker": tk.upper(), "Bias": bias,
-                          "Why": why, "Trade": label, "legs": legs})
-
-        def _dir_idea(source, tk, long_side, why):
-            """Directional idea → long call (bullish) or long put (bearish) near ATM ~30d."""
-            typ = "call" if long_side else "put"
-            p = _pick(tk, typ)
-            bias = "🟢 LONG" if long_side else "🔴 SHORT"
-            if p:
-                lab = f"BUY ${p['K']:g}{typ[0].upper()} {p['exp']} @ ${p['px']:.2f}"
-                _add(source, tk, bias, why, [(typ, p["K"], p["exp"], p["px"], +1)], lab)
-            else:
-                _add(source, tk, bias, why, [], "— no chain in snapshot")
-
-        try:                                            # 🐋 unusual options activity (actual contract)
-            for r in _tb._uoa_scan(c)[:5]:
-                typ = "call" if r["side"] == "C" else "put"
-                p = _pick(r["ticker"], typ)             # price lookup for THE flow contract
-                px = 0.0
-                gg = snap[(snap["tk"] == r["ticker"].upper()) & (snap["strike"] == r["strike"]) &
-                          (snap["expiry_date"] == r["expiry"])] if not snap.empty else pd.DataFrame()
-                if not gg.empty:
-                    px = float(gg.iloc[0]["lastPrice_Call_now" if typ == "call" else "lastPrice_Put_now"])
-                exp = _ab_norm_exp(r["expiry"])
-                lab = f"FOLLOW ${r['strike']:g}{r['side']} {exp}" + (f" @ ${px:.2f}" if px > 0 else "")
-                _add("🐋 UOA flow", r["ticker"], "🟢 LONG" if r["side"] == "C" else "🔴 SHORT",
-                     f"vol {r['ratio']:.1f}× OI · ${_tb._knum(r['notional'])} fresh flow",
-                     [(typ, float(r["strike"]), exp, px, +1)] if px > 0 else [], lab)
-        except Exception:
-            pass
-        try:                                            # 🏗️ positioning builder
-            for r in _tb._positioning_scan(c)[:5]:
-                _dir_idea("🏗️ Building", r["ticker"], r["bias"] == "LONG",
-                          f"new {'call' if r['bias']=='LONG' else 'put'} OI +{r['build_pct']*100:.0f}% · stage {r['stage']}")
-        except Exception:
-            pass
-        try:                                            # 📈 52-week breakout / breakdown
-            for r in _tb._breakout_scan(c)[:4]:
-                hi = r["sig"] == "HIGH"
-                _dir_idea("📈 Breakout", r["ticker"], hi,
-                          f"{'at 52w HIGH' if hi else 'at 52w LOW'} ({(r['from_hi'] if hi else r['from_lo'])*100:+.1f}%)")
-        except Exception:
-            pass
-        try:                                            # 📏 z-score reversion
-            for r in _tb._zrev_scan(c)[:4]:
-                _dir_idea("📏 Z-Rev", r["ticker"], r["side"] == "LONG", f"z={r['z']:+.1f} vs 20d mean")
-        except Exception:
-            pass
-        try:                                            # 🔄 5-day reversal
-            for r in _tb._revert_scan(c)[:4]:
-                _dir_idea("🔄 Revert", r["ticker"], r["side"] == "LONG",
-                          f"5d ret {r['ret']*100:+.1f}% · z={r['z']:+.1f}")
-        except Exception:
-            pass
-        try:                                            # 💪 relative-strength leaders
-            for r in _tb._rs_scan(c)[:4]:
-                _dir_idea("💪 RS leader", r["ticker"], True, f"3M {r['r3']*100:+.0f}% · vs SPY {r['ex3']*100:+.0f}%")
-        except Exception:
-            pass
-        try:                                            # 🌪️ VRP — only on names already on the board (full scan too slow)
-            _board_tks = list(dict.fromkeys(i["Ticker"] for i in ideas))[:12]
-            for r in _tb._vrp_scan(c, tickers=_board_tks)[:4]:
-                why = f"IV {r['iv']*100:.0f}% vs RV {r['rv']*100:.0f}% (VRP {r['vrp']*100:+.0f}pt)"
-                if r["side"] == "SELL":
-                    p = _pick(r["ticker"], "put")
-                    if p:
-                        _add("🌪️ VRP", r["ticker"], "🟡 SELL VOL", why,
-                             [("put", p["K"], p["exp"], p["px"], -1)],
-                             f"SELL ${p['K']:g}P {p['exp']} @ ${p['px']:.2f} (CSP)")
-                    else:
-                        _add("🌪️ VRP", r["ticker"], "🟡 SELL VOL", why, [], "sell premium (CSP/condor)")
-                else:
-                    pc, pp = _pick(r["ticker"], "call"), _pick(r["ticker"], "put")
-                    if pc and pp:
-                        _add("🌪️ VRP", r["ticker"], "🟣 BUY VOL", why,
-                             [("call", pc["K"], pc["exp"], pc["px"], +1), ("put", pp["K"], pp["exp"], pp["px"], +1)],
-                             f"BUY straddle ${pc['K']:g} {pc['exp']} @ ${pc['px']+pp['px']:.2f}")
-                    else:
-                        _add("🌪️ VRP", r["ticker"], "🟣 BUY VOL", why, [], "buy vol (straddle)")
-        except Exception:
-            pass
-    # ⭐ consensus: same ticker + same direction from ≥2 different indicators
-    from collections import Counter
-    _cnt = Counter((i["Ticker"], i["Bias"]) for i in ideas)
-    for i in ideas:
-        i["⭐"] = "⭐" if _cnt[(i["Ticker"], i["Bias"])] >= 2 and i["Bias"] in ("🟢 LONG", "🔴 SHORT") else ""
-    return ideas, d0
 
 
 if page == "💡 Action Board":

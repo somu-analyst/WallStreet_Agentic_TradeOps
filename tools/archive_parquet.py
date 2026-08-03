@@ -106,15 +106,61 @@ def verify_only(man: dict) -> None:
     conn.close()
 
 
+def verify_existing(table: str = "options_openbb") -> None:
+    """Verify the backups NYSE_OpenBB.py already writes to Options_chain_data/openbb_chains.
+
+    That folder is the real archive: every capture run drops the day's rows there as
+    parquet-zstd (~3.8 MB/day, same rows, same compression as this script produces). What
+    it never had was VERIFICATION -- nothing ever re-read a backup to prove it matched the
+    DB. So the useful job here is checking those files, not writing a second copy of them.
+
+    `underlying_price` is expected to be missing from early files: the column was added to
+    the capture after those days were written, so it is reported as INFO, not a mismatch.
+    """
+    src_dir = os.path.join(os.path.dirname(DB), "openbb_chains")
+    if not os.path.isdir(src_dir):
+        print(f"no such folder: {src_dir}"); return
+    conn = sqlite3.connect(DB, timeout=30)
+    files = sorted(f for f in os.listdir(src_dir) if f.endswith(".parquet"))
+    print(f"verifying {len(files)} existing backup(s) in {src_dir}\n")
+    print(f"  {'day':12s} {'rows':>9s} {'MB':>6s} {'status':>12s}  note")
+    okn = 0
+    for fn in files:
+        day = fn.replace("chains_", "").replace(".parquet", "")
+        path = os.path.join(src_dir, fn)
+        back = pd.read_parquet(path)
+        src = pd.read_sql(f"SELECT * FROM {table} WHERE trade_date=?", conn, params=(day,))
+        if src.empty:
+            print(f"  {day:12s} {len(back):>9,d} {os.path.getsize(path)/1e6:>6.1f} "
+                  f"{'DB PRUNED':>12s}  parquet is now the only copy")
+            continue
+        shared = [c for c in back.columns if c in src.columns]
+        fs, fb = _fingerprint(src[shared]), _fingerprint(back[shared])
+        missing = sorted(set(map(str, src.columns)) - set(map(str, back.columns)))
+        ok = fs == fb
+        okn += bool(ok)
+        note = ("" if not missing else
+                f"INFO: {','.join(missing)} added to capture after this file")
+        print(f"  {day:12s} {len(back):>9,d} {os.path.getsize(path)/1e6:>6.1f} "
+              f"{'VERIFIED' if ok else 'MISMATCH':>12s}  {note}")
+    conn.close()
+    print(f"\n  {okn}/{len(files)} existing backups verified against SQLite. Nothing written, "
+          "nothing deleted.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--table", default="options_openbb")
     ap.add_argument("--before", help="archive trade_date < this ISO date")
     ap.add_argument("--limit", type=int, default=0, help="cap days processed (0 = all)")
     ap.add_argument("--verify-only", action="store_true")
+    ap.add_argument("--verify-existing", action="store_true",
+                    help="verify the openbb_chains backups the capture already writes")
     a = ap.parse_args()
 
     man = _load_manifest()
+    if a.verify_existing:
+        verify_existing(a.table); return
     if a.verify_only:
         verify_only(man); return
 

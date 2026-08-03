@@ -2523,6 +2523,51 @@ def _world_report():
                  "Leveraged ETFs (2x/3x) decay = trades, never holds. Educational, not advice.</i>")
     return "\n".join(parts)
 
+async def _send_world_markets(msg, with_map=True, with_bars=True):
+    """Regional market table + choropleth + 21-session bars. ONE implementation.
+
+    Previously the map existed only inside /world, so Market Overview showed neither the
+    flags nor the map (user 2026-08-03). Anything that reports "markets" should call this.
+    """
+    try:
+        rows = _plan_markets_rows()
+    except Exception:
+        log.debug("world markets fetch failed", exc_info=True)
+        return
+    if not rows:
+        return
+    if with_map:
+        try:
+            png = _world_market_map_png(rows)
+            if png:
+                await msg.reply_photo(png, caption="🗺️ World markets — today's move by country",
+                                      parse_mode=H)
+        except Exception:
+            log.debug("world map send failed", exc_info=True)
+    try:
+        tbl = _plan_markets_snapshot(rows)
+        if tbl:
+            await _safe_reply(msg, tbl)
+    except Exception:
+        log.debug("world table send failed", exc_info=True)
+    if with_bars:
+        _c = get_conn()
+        try:
+            bars = _market_bars_png(_c)
+        except Exception:
+            bars = None
+            log.debug("market bars failed", exc_info=True)
+        finally:
+            _c.close()
+        if bars:
+            try:
+                await msg.reply_photo(
+                    bars, caption="📊 Daily moves — last 21 sessions (green up / red down)",
+                    parse_mode=H)
+            except Exception:
+                log.debug("bars send failed", exc_info=True)
+
+
 async def world_view(query):
     _loading = await query.message.reply_text("🌐 Mapping cross-market linkages…", parse_mode=H)
     try:
@@ -2532,25 +2577,9 @@ async def world_view(query):
     # Regional market table + a real choropleth of today's move by country. The map was
     # built 2026-08-03 but never attached to a command, so it was unreachable until now.
     try:
-        _mrows = _plan_markets_rows()
-        _png = _world_market_map_png(_mrows)
-        if _png:
-            await query.message.reply_photo(
-                _png, caption="🗺️ World markets — today's move by country", parse_mode=H)
-        _tbl = _plan_markets_snapshot(_mrows)
-        if _tbl:
-            await _safe_reply(query.message, _tbl)
-        _c2 = get_conn()
-        try:
-            _bars = _market_bars_png(_c2)
-        finally:
-            _c2.close()
-        if _bars:
-            await query.message.reply_photo(
-                _bars, caption="📊 Daily moves — last 21 sessions (green up / red down)",
-                parse_mode=H)
+        await _send_world_markets(query.message)
     except Exception:
-        log.debug("world map/table failed", exc_info=True)
+        log.debug("world markets block failed", exc_info=True)
     try: await _loading.delete()
     except Exception: pass
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="world_view"), BACK_BTN]])
@@ -3956,6 +3985,12 @@ async def market_overview(query):
             await query.message.reply_photo(sp500_chart_bytes, caption="S&P 500 — 7d mini chart")
         except Exception as e:
             log.warning(f"Failed to send mini chart: {e}")
+    # The regional table (flags + commodity symbols), the world map and the 21-session bars
+    # belong on EVERY markets surface, not just /world (user 2026-08-03).
+    try:
+        await _send_world_markets(query.message)
+    except Exception:
+        log.debug("market_overview world block failed", exc_info=True)
     try: await _loading.delete()
     except Exception: pass
 
@@ -25478,6 +25513,16 @@ def _world_market_map_png(rows=None):
         return None
     try:
         import plotly.graph_objects as _go
+        # A PNG has no hover, so hovertemplate labels were invisible — the user saw a
+        # coloured map with no country names or percentages on it (2026-08-03). Text is
+        # drawn permanently instead, at approximate country centroids.
+        # Label anchors are nudged off the true centroid where countries crowd together --
+        # FTSE/DAX/CAC printed on top of each other in western Europe, and HSI sat on
+        # Shanghai. These are label positions, not geography.
+        _LATLON = {"USA": (39.0, -98.0), "CAN": (58.0, -100.0), "BRA": (-10.0, -52.0),
+                   "GBR": (58.5, -12.0), "DEU": (54.5, 14.0), "FRA": (44.5, -2.0),
+                   "JPN": (39.0, 143.0), "HKG": (17.0, 118.0), "CHN": (38.0, 100.0),
+                   "IND": (21.0, 77.0), "AUS": (-27.0, 134.0)}
         fig = _go.Figure(_go.Choropleth(
             locations=[r["iso"] for r in geo],
             z=[r["pct"] for r in geo],
@@ -25487,6 +25532,15 @@ def _world_market_map_png(rows=None):
             zmid=0, marker_line_color="#888", marker_line_width=0.4,
             colorbar=dict(title="% chg", thickness=12, len=0.7),
         ))
+        _lab = [r for r in geo if r["iso"] in _LATLON]
+        if _lab:
+            fig.add_trace(_go.Scattergeo(
+                lat=[_LATLON[r["iso"]][0] for r in _lab],
+                lon=[_LATLON[r["iso"]][1] for r in _lab],
+                text=[f"{r['name']}<br>{r['pct']:+.1f}%" for r in _lab],
+                mode="text", textfont=dict(size=11, color="#111",
+                                           family="DejaVu Sans, Arial"),
+                showlegend=False, hoverinfo="skip"))
         fig.update_layout(
             title=dict(text="World markets — today's move by country", font=dict(size=15)),
             geo=dict(showframe=False, showcoastlines=True, coastlinecolor="#bbb",

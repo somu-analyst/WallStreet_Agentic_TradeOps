@@ -365,6 +365,10 @@ ROWS = [
  "User: all tables in streamlit, ticker+spot should be frozen; 1-2 extra key columns may also be pinned",
  "QUEUED","","Watchlist already done - Ticker/Company/Spot pinned via st.column_config pinned=True on Streamlit 1.54. Needs rolling out to the remaining st.dataframe call sites across the dashboard",
  "-","P1","Enumerate every st.dataframe; add a shared pinned-column helper rather than repeating column_config per page"),
+(98,"2026-08-03","User","Feature","Green/red bar chart of the last week/month in World Markets",
+ "User wants to see, at a glance, how the market has traded recently rather than just today",
+ "DONE","2026-08-03","_market_bars_png(): 4-panel daily percent-change bars, green up / red down, SPY/QQQ/IWM/DIA over 21 sessions, with an up-down tally and net return per panel. Reads stock_history only - no network call, works off-hours. Wired into /world under the map and regional table. Verified: 50 KB PNG. Immediately showed a breadth divergence the one-day snapshot hides - DIA had MORE up days (12/9) than QQQ (9/12) yet both finished negative, because QQQ net -3.5% came from a few violent red days",
+ "-","P2","-"),
 ]
 
 def build():

@@ -2540,6 +2540,15 @@ async def world_view(query):
         _tbl = _plan_markets_snapshot(_mrows)
         if _tbl:
             await _safe_reply(query.message, _tbl)
+        _c2 = get_conn()
+        try:
+            _bars = _market_bars_png(_c2)
+        finally:
+            _c2.close()
+        if _bars:
+            await query.message.reply_photo(
+                _bars, caption="📊 Daily moves — last 21 sessions (green up / red down)",
+                parse_mode=H)
     except Exception:
         log.debug("world map/table failed", exc_info=True)
     try: await _loading.delete()
@@ -25391,6 +25400,69 @@ def _plan_markets_snapshot(rows=None):
         out.append(_pipe_table(("ST", "Market", "Price", "Chg%"), trs, right_cols={2, 3},
                                title=f"{_lbl}  ({_up}/{len(grp)} up)"))
     return "\n".join(out)
+
+
+def _market_bars_png(conn, days=21, tickers=("SPY", "QQQ", "IWM", "DIA")):
+    """Daily % change bars — green up, red down — for the last `days` sessions.
+
+    Answers "how has the market actually been trading lately", which a single day's
+    snapshot cannot (user 2026-08-03). Reads stock_history only, so no network call and it
+    works off-hours. Also prints the up/down tally per index, since a run of small green
+    bars and a run of violent red ones look very different at the same net return.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as _plt
+        import matplotlib.dates as _mdates
+    except Exception:
+        return None
+    have = []
+    for tk in tickers:
+        try:
+            df = pd.read_sql(
+                "SELECT trade_date, close FROM stock_history WHERE ticker=? "
+                "ORDER BY trade_date DESC LIMIT ?", conn, params=(tk, days + 1))
+        except Exception:
+            continue
+        if df is None or len(df) < 5:
+            continue
+        df = df.iloc[::-1].reset_index(drop=True)          # back to chronological
+        df["pct"] = df["close"].astype(float).pct_change() * 100.0
+        df = df.dropna(subset=["pct"])
+        if not df.empty:
+            have.append((tk, df))
+    if not have:
+        return None
+
+    n = len(have)
+    fig, axes = _plt.subplots(n, 1, figsize=(9, 2.0 * n), sharex=True)
+    if n == 1:
+        axes = [axes]
+    for ax, (tk, df) in zip(axes, have):
+        x = pd.to_datetime(df["trade_date"])
+        colors = ["#1e8449" if v >= 0 else "#c0392b" for v in df["pct"]]
+        ax.bar(x, df["pct"], color=colors, width=0.75)
+        ax.axhline(0, color="#888", lw=0.8)
+        up = int((df["pct"] > 0).sum()); dn = int((df["pct"] < 0).sum())
+        tot = (df["close"].iloc[-1] / df["close"].iloc[0] - 1) * 100
+        ax.set_title(f"{tk}   {up} up / {dn} down   ·   net {tot:+.1f}% over {len(df)} sessions",
+                     fontsize=10, loc="left")
+        ax.set_ylabel("% day", fontsize=8)
+        ax.tick_params(labelsize=8)
+        ax.grid(axis="y", alpha=0.15)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+    axes[-1].xaxis.set_major_formatter(_mdates.DateFormatter("%m-%d"))
+    fig.autofmt_xdate(rotation=0, ha="center")
+    fig.suptitle(f"Daily moves — last {days} sessions", fontsize=12, y=0.995)
+    fig.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight",
+                facecolor="white")
+    _plt.close(fig)
+    buf.seek(0)
+    return buf
 
 
 def _world_market_map_png(rows=None):

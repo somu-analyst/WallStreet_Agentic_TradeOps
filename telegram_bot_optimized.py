@@ -17498,8 +17498,38 @@ def short_squeeze_signal(ticker, conn=None):
         dtc       = info.get("shortRatio")             # days to cover
         si_now    = info.get("sharesShort")
         si_prev   = info.get("sharesShortPriorMonth")
+        # yfinance often omits shortPercentOfFloat while still returning sharesShort and
+        # floatShares (GOOG on 2026-08-03: pct None, shares 58.5M, ratio 2.47). The panel
+        # keyed off pct alone and reported "no short-interest data" for a name we had
+        # plenty of data on. Derive it rather than discard everything else.
+        if short_pct in (None, 0) and si_now:
+            _fl = info.get("floatShares") or info.get("sharesOutstanding")
+            if _fl:
+                short_pct = float(si_now) / float(_fl)
     except Exception:
         log.debug("suppressed exception", exc_info=True)
+
+    # Fall back to OUR OWN capture. short_interest holds twice-monthly history that
+    # yfinance does not expose (1,590 rows / 64 tickers as of 2026-08-03), so a live miss
+    # is no reason to show nothing when the table already has the answer.
+    if (short_pct is None or si_now is None) and conn is not None:
+        try:
+            _r = conn.execute(
+                "SELECT shares_short, shares_short_prior, short_ratio, pct_float, float_shares "
+                "FROM short_interest WHERE UPPER(ticker)=? ORDER BY asof_date DESC LIMIT 1",
+                (tk,)).fetchone()
+            if _r:
+                si_now = si_now or (float(_r[0]) if _r[0] else None)
+                si_prev = si_prev or (float(_r[1]) if _r[1] else None)
+                dtc = dtc or (float(_r[2]) if _r[2] else None)
+                if short_pct in (None, 0):
+                    if _r[3]:
+                        short_pct = float(_r[3])
+                    elif _r[0] and _r[4]:
+                        short_pct = float(_r[0]) / float(_r[4])
+                out["reasons"].append("short interest from stored capture (yfinance incomplete)")
+        except Exception:
+            log.debug("short_interest DB fallback failed", exc_info=True)
 
     spct = (short_pct or 0) * 100.0
     if spct >= 25:
@@ -34618,8 +34648,12 @@ async def squeeze_view(query):
                 s = short_squeeze_signal(tk, conn)
                 sp = s.get("short_pct"); dtc = s.get("dtc")
                 if sp is not None:
+                    # {:.0f} printed "SI 0%" for anything under 0.5% of float, which reads
+                    # like missing data on exactly the mega-caps that are legitimately barely
+                    # shorted (GOOG 0.5%). One decimal below 10%.
+                    _sis = f"{sp:.1f}%" if sp < 10 else f"{sp:.0f}%"
                     rows.append(f"{s['emoji']} <b>{tk}</b> {s['score']}/5 {s['stage']} "
-                                f"| SI {sp:.0f}% DTC {dtc or 0:.1f}")
+                                f"| SI {_sis} DTC {dtc or 0:.1f}")
                 else:
                     rows.append(f"⚪ <b>{tk}</b> — no short-interest data")
             except Exception:

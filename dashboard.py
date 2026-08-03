@@ -5703,13 +5703,11 @@ with st.sidebar:
     # selector is defined HERE, before either page block runs, because the Gamma Wall
     # Advisor body sits ~10k lines above the GEX Profile body and both test this value.
     # GEX sections embedded in OTHER pages (Smart Money Hub, OI Analytics) are untouched.
+    # MERGE means everything on ONE page (user 2026-08-03). The first attempt split the
+    # three former pages behind a sidebar radio, which just moved the hiding place -- the
+    # user reported the wall charts as "missing" because only one sub-view rendered at a
+    # time. All three sections now render stacked on the single page.
     _gexsub = None
-    if page == "📐 GEX Command":
-        _gexsub = st.sidebar.radio(
-            "GEX view", ["🧭 Co-Pilot", "📊 GEX Profile", "🎯 Gamma Wall Advisor"],
-            key="gex_subview",
-            help="Co-Pilot = pre-market blueprint + live entry filter. Profile = signed "
-                 "gamma by strike. Advisor = wall-based trade construction.")
 
     # ── Global price source — applies to every page via _spot() ──
     _gms = _market_state()
@@ -12416,7 +12414,7 @@ elif page == "\U0001f9e0 Smart Money Hub":
 # ===================================================================
 # ──  GAMMA WALL ADVISOR — Professional advisor + position tracking
 # ===================================================================
-elif page == "\U0001f4d0 GEX Command" and _gexsub == "\U0001f3af Gamma Wall Advisor":
+if page == "\U0001f4d0 GEX Command":     # section 3 of 3 on the merged page
     import math as _gmath
     import plotly.graph_objects as _ggo
     from plotly.subplots import make_subplots as _gmsp
@@ -22599,7 +22597,7 @@ if page == "⚙️ Strategy Scanners":
                "Put-write is a Black-Scholes approximation, not real option marks.")
 
 
-if page == "📐 GEX Command" and _gexsub == "🧭 Co-Pilot":
+if page == "📐 GEX Command":              # section 1 of 3 on the merged page
     _page_header("🧭 GEX Co-Pilot — structural map & entry filter")
     st.caption("The Nick Ireland framework, driven by **our own captured chain** instead of "
                "hand-typed SpotGamma levels. Mode 1 maps the session; Mode 2 gates a "
@@ -22669,7 +22667,7 @@ if page == "📐 GEX Command" and _gexsub == "🧭 Co-Pilot":
         finally:
             _cpconn.close()
 
-elif page == "📐 GEX Command" and _gexsub == "📊 GEX Profile":
+if page == "📐 GEX Command":              # section 2 of 3 on the merged page
     _page_header("📊 GEX Profile — Dealer Gamma Exposure")
     st.caption("Signed dealer gamma by strike (calls **+**, puts **−**), the **zero-gamma flip** price, and "
                "call/put walls. Positive total GEX → dealers dampen moves (mean-reverting); negative → dealers "

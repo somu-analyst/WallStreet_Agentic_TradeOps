@@ -372,12 +372,12 @@ ROWS = [
 # ---- gaps found 2026-08-03 by extracting all 168 user turns from the raw session transcript
 (99,"2026-07-22","User","Bug","MU estimated open showing as 0",
  "Raised early in the session; outcome was never recorded",
- "NEEDS-CHECK","","Found by transcript audit, not by memory. No tracker row and no commit clearly ties to it, so it is NOT safe to assume fixed. Re-open MU in the Exit Planner and confirm the estimated-open figure is non-zero",
- "-","P2","Verify on MU, then close or fix"),
+ "REJECTED","2026-08-03","Not reproducible and probably not a bug. No MU position is open (3 historical). Checked the maths directly: Est Open is a Black-Scholes price at dte-1, and at iv=0 it returns discounted intrinsic when ITM and exactly 0 when OTM - both correct. A ~$0.00 Est Open on a deep-OTM leg is the right answer, and the display already writes ~$0.00 rather than a bare 0 to signal near-zero rather than missing. Re-open if it recurs on a live position",
+ "-","P2","-"),
 (100,"2026-07-25","User","Bug","Paper trading splits GOOGL +1sh and +100sh into two rows",
  "User: it should behave like Robinhood/Fidelity and aggregate the lot",
- "NEEDS-CHECK","","Transcript audit gap. User explicitly asked for broker-style position aggregation rather than one row per add. Needs verifying against the current Paper Trading page",
- "-","P2","Check whether lots aggregate; if not, group by ticker+type+expiry+strike"),
+ "DONE","2026-07-24","Already implemented - the audit flagged it only because no tracker row existed. Paper Trading groups STOCK lots by ticker with a weighted-average cost basis (Robinhood/Fidelity style), and the code comment cites this exact request. Options deliberately stay one row per contract: a 340C and a 345C are different instruments, not fungible the way shares are",
+ "-","P2","-"),
 (101,"2026-07-26","User","Research","Databento as a data source",
  "Asked alongside the OpenBB-vs-yfinance question",
  "NEEDS-CHECK","","Answered in conversation but never written down. Databento is paid, institutional-grade tick/OHLCV; the free lanes here are yfinance and OpenBB-cboe. Worth a proper written comparison only if the options-quote history gap becomes a blocker",
@@ -450,6 +450,14 @@ ROWS = [
  "User: why is EOD premium 7.28",
  "DONE","2026-08-03","Root cause: the label was wrong, not the arithmetic. When _fetch_option_mid returns None - which it does all session while yfinance serves bid=ask=0 - the code fell through to a BLACK-SCHOLES price computed at TODAYS live spot with historical vol, and displayed it as EOD Premium. It was neither EOD nor a market price. Fixed to prefer our own captured chain via _bb_quote first (GOOG 355P 2026-07-31: bid 11.00 / ask 12.00 -> mid 11.50, iv 0.323, delta -0.454), falling back to the model only when we have no capture. Entry 11.21 vs a true Friday mark of 11.50 means the leg was roughly FLAT, not -35%",
  "-","P0","DOM-verify the metric on the Portfolio page"),
+(119,"2026-08-03","User","Bug","OI Roll Detector shows EXPIRED expiries",
+ "User: why is it showing done ones, it should show live/intraday and the NEXT expiries",
+ "DONE","2026-08-03","The roll query pulls the latest CAPTURE date (usually the previous session) and had NO expiry filter at all, so on Monday it reported rolls into a Friday expiry that had already settled. Now filters expiry_date >= today (ISO dates sort lexically). GOOG went from expiries led by 2026-07-31 to 2026-08-07 / 08-21 / 09-04, zero expired",
+ "-","P1","-"),
+(120,"2026-08-03","Claude","Bug","'Right at the call wall' fires when price has CLEARED the wall",
+ "Same output: says price cleared both walls, then warns it is right at the call wall",
+ "DONE","2026-08-03","Fixed. The check was spot >= cw*0.99, true no matter how far above the wall price went, so a price that had cleared the call wall by 11% still printed right at the call wall directly beneath a sentence saying it had cleared both walls. Now a genuine proximity band on both sides: cw*0.99 <= spot <= cw*1.02 for the call wall, pw*0.98 <= spot <= pw*1.01 for the put wall",
+ "-","P1","-"),
 ]
 
 def build():

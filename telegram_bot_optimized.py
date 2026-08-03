@@ -7392,6 +7392,19 @@ def analyze_oi_rolls(ticker, conn):
     if df.empty:
         return []
 
+    # Drop EXPIRED expiries. The query takes the latest CAPTURE date, which is typically the
+    # previous session, so on Monday it happily reported rolls into a Friday expiry that had
+    # already settled (user 2026-08-03). ISO dates sort lexically, so a string compare is
+    # enough. Same stale-expiry class already fixed in the vanna path.
+    try:
+        _today_iso = _et_now().date().isoformat()
+        df["expiry_date"] = df["expiry_date"].astype(str).map(lambda e: _exp_iso(e))
+        df = df[df["expiry_date"] >= _today_iso]
+        if df.empty:
+            return []
+    except Exception:
+        log.debug("roll expiry filter failed", exc_info=True)
+
     df["expiry_sort"] = df["expiry_date"].apply(
         lambda d: (str(d)[6:10] + str(d)[0:2] + str(d)[3:5]) if len(str(d)) >= 10 else str(d))
     df = df.sort_values(["expiry_sort", "strike"]).reset_index(drop=True)
@@ -20569,9 +20582,13 @@ def _ticker_writeup(tk, conn, spot=0.0, call_chg=0.0, put_chg=0.0, pcr=1.0,
                 lines.append(f"Max-pain <b>${mp:,.0f}</b> ({dmp:+.1f}%) is where most options expire "
                              f"worthless — the pin, if it happens, pulls price <b>{_dir}</b> "
                              f"{abs(dmp):.1f}% into Friday's expiry.")
-            if spot >= cw * 0.99:
+            # "AT" the wall means NEAR it, not miles past it. This fired whenever spot was
+            # anywhere above cw*0.99, so a price that had cleared the wall by 11% still got
+            # "right at the call wall" printed directly under a sentence saying it had
+            # cleared both walls (user 2026-08-03).
+            if cw * 0.99 <= spot <= cw * 1.02:
                 lines.append("⚠️ Right at the <b>call wall</b>: heavy call OI = resistance. Needs a volume break to go higher; dealers sell strength.")
-            elif spot <= pw * 1.01:
+            elif pw * 0.98 <= spot <= pw * 1.01:
                 lines.append("🛟 Right at the <b>put wall</b>: heavy put OI = support shelf. Bounces are common unless it breaks down on volume.")
 
         # ── your open position + risk ──

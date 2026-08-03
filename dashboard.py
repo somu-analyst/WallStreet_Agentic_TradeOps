@@ -4185,7 +4185,7 @@ def _render_ahf_pretrade(ticker, key=""):
              + (f" · suggest **{res['size']}%** of book" if res["size"] else "")
              + (f" · stop ≈ {_rk['stop']*100:.0f}% " if _rk["stop"] else "")).replace("$", "\\$"))
         _pe = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "⚪"}
-        st.dataframe(pd.DataFrame([
+        _pinned_df(pd.DataFrame([
             {"Investor": p["agent"], "Call": f"{_pe[p['signal']]} {p['signal']}", "Why": p["reason"]}
             for p in res["personas"]]), hide_index=True, use_container_width=True)
         st.caption("Fundamental committee view — pair with the OI/flow read above. Full detail on the "
@@ -5868,10 +5868,10 @@ def _render_closed_positions_table(closed: pd.DataFrame):
         })
     _cl_df = pd.DataFrame(_cl_rows)
     try:
-        st.dataframe(_cl_df.drop(columns=["ID"]).style.applymap(_cp_color, subset=["P&L $", "P&L %"]),
+        _pinned_df(_cl_df.drop(columns=["ID"]).style.applymap(_cp_color, subset=["P&L $", "P&L %"]),
                      hide_index=True, use_container_width=True)
     except Exception:
-        st.dataframe(_cl_df.drop(columns=["ID"], errors="ignore"), hide_index=True, use_container_width=True)
+        _pinned_df(_cl_df.drop(columns=["ID"], errors="ignore"), hide_index=True, use_container_width=True)
 
 
 # ===================================================================
@@ -6065,6 +6065,54 @@ def _ab_ideas():
     return ideas, d0
 
 
+
+# ── Pinned identity columns on every table (ID 97, user 2026-08-03) ───────────────────
+# Scrolling a wide table sideways lost the ticker, so the numbers belonged to nobody.
+# Rather than edit 147 st.dataframe call sites, every call goes through this wrapper: it
+# pins the first identity-ish columns it finds and merges whatever column_config the call
+# site already passed (the call site wins on conflict). Streamlit >=1.42 for `pinned`.
+_PIN_PRIMARY = ("Ticker", "Tkr", "Symbol", "Sym", "Pair", "Market", "Name", "Company",
+                "Sector", "Strategy", "Signal", "Model", "Region", "Item", "Metric")
+_PIN_SECOND = ("Spot", "Spot $", "Px", "Price", "Close", "Last", "Score", "Value")
+
+
+def _pinned_df(data, *args, **kwargs):
+    """st.dataframe with identity columns pinned. Falls back silently on older Streamlit."""
+    try:
+        import pandas as _pd
+        cols = list(data.columns) if isinstance(data, _pd.DataFrame) else []
+    except Exception:
+        cols = []
+    if cols:
+        cfg = dict(kwargs.get("column_config") or {})
+        pinned = 0
+        for name in _PIN_PRIMARY:
+            if pinned >= 2:
+                break
+            if name in cols and name not in cfg:
+                try:
+                    cfg[name] = st.column_config.Column(name, pinned=True)
+                    pinned += 1
+                except Exception:
+                    pass
+        for name in _PIN_SECOND:                      # one more anchor: usually the price
+            if pinned >= 3:
+                break
+            if name in cols and name not in cfg:
+                try:
+                    cfg[name] = st.column_config.Column(name, pinned=True)
+                    pinned += 1
+                except Exception:
+                    pass
+        if cfg:
+            kwargs["column_config"] = cfg
+    try:
+        return st.dataframe(data, *args, **kwargs)
+    except TypeError:
+        kwargs.pop("column_config", None)             # very old Streamlit
+        return st.dataframe(data, *args, **kwargs)
+
+
 if page == "🌍 Market Overview":
     _page_header("🌍 Market Overview", _PAGE_HELP["🌍 Market Overview"])
 
@@ -6089,7 +6137,7 @@ if page == "🌍 Market Overview":
         if _nd:
             st.markdown(f"📅 **Next session — {_nd['lean']}**  \n{_nd['text']}")
         with st.expander("Context (not proven predictive)", expanded=False):
-            st.dataframe(pd.DataFrame([{"": p["emoji"], "Signal": p["label"],
+            _pinned_df(pd.DataFrame([{"": p["emoji"], "Signal": p["label"],
                                         "Reading": p["reading"], "Note": p["why"]} for p in _ro["pillars"]]),
                          hide_index=True, use_container_width=True)
             st.caption("Backtest (Jan–Jul 2026): index put-flow may predict move SIZE — but the "
@@ -6165,7 +6213,7 @@ if page == "🌍 Market Overview":
                             "Chg %": round(_r["pct"], 2)})
         if _wm_reg:
             _wm_df = pd.DataFrame(_wm_reg)
-            st.dataframe(_wm_df, hide_index=True, use_container_width=True,
+            _pinned_df(_wm_df, hide_index=True, use_container_width=True,
                          column_config={
                              "Region": st.column_config.TextColumn("Region", pinned=True),
                              "Market": st.column_config.TextColumn("Market", pinned=True),
@@ -7032,7 +7080,7 @@ if page == "🌍 Market Overview":
                                                             lambda x: f"{int(x):,}" if pd.notna(x) else "—")
                                                     _near_disp["C Notional"] = _near_disp["C Notional"].apply(_fmt_nt)
                                                     _near_disp["P Notional"] = _near_disp["P Notional"].apply(_fmt_nt)
-                                                    st.dataframe(_near_disp, hide_index=True, use_container_width=True)
+                                                    _pinned_df(_near_disp, hide_index=True, use_container_width=True)
 
                                             _spot_price = float(_inst_row["Price"])
                                             if _cur_exp_sort:
@@ -7076,7 +7124,7 @@ if page == "🌍 Market Overview":
                                                     "📈 Call-dominant" if _mc > abs(_mp)*1.5 else ("📉 Put-dominant" if _mp > abs(_mc)*1.5 else "⇔ Mixed"),
                                                 ],
                                             }
-                                            st.dataframe(pd.DataFrame(_trend_data), hide_index=True, use_container_width=True)
+                                            _pinned_df(pd.DataFrame(_trend_data), hide_index=True, use_container_width=True)
                                         else:
                                             st.info(f"No OI data found for {_oi_ticker}.")
                                     else:
@@ -7094,7 +7142,7 @@ if page == "🌍 Market Overview":
                                                       "Start": f"${float(_close.iloc[-_n - 1]):,.2f}",
                                                       "End": f"${float(_close.iloc[-1]):,.2f}"})
                             if _ret_rows:
-                                st.dataframe(pd.DataFrame(_ret_rows), hide_index=True)
+                                _pinned_df(pd.DataFrame(_ret_rows), hide_index=True)
 
                         # ── Short Interest & Float ──
                         with st.expander("📉 Short Interest & Float"):
@@ -7341,7 +7389,7 @@ if page == "🌍 Market Overview":
                 .map(_color_sig, subset=["Signal"])\
                 .map(_color_rsi, subset=["RSI(14)"])\
                 .format({"Price": "${:,.2f}", "Day%": "{:+.2f}%", "EMA20": "${:,.2f}"})
-            st.dataframe(styled, hide_index=True, use_container_width=True)
+            _pinned_df(styled, hide_index=True, use_container_width=True)
 
             # Volume Spike Detection (moondevonyt WhaleAgent concept)
             st.markdown("#### 🐋 Volume Spike Monitor")
@@ -7373,7 +7421,7 @@ if page == "🌍 Market Overview":
                     if val == "SPIKE": return "background-color: #ffcccc; color:#111; font-weight: bold"
                     if val == "HIGH": return "background-color: #fff3cd; color:#111"
                     return ""
-                st.dataframe(_vdf.style.map(_color_note, subset=["Note"]),
+                _pinned_df(_vdf.style.map(_color_note, subset=["Note"]),
                              hide_index=True, use_container_width=True)
             else:
                 st.info("No unusual volume detected right now.")
@@ -7483,7 +7531,7 @@ elif page == "🔥 OI Analytics & Prediction":
             display_df[c] = display_df[c].apply(lambda x: f"{x:+,.0f}")
     display_df["PCR"] = display_df["PCR"].apply(lambda x: f"{x:.2f}")
     display_df["Z-Score"] = display_df["Z-Score"].apply(lambda x: f"{x:.2f}")
-    st.dataframe(display_df, hide_index=True)
+    _pinned_df(display_df, hide_index=True)
 
     if not sel_ticker:
         st.stop()
@@ -7529,7 +7577,7 @@ elif page == "🔥 OI Analytics & Prediction":
     strike_display.columns = ["Strike", "Expiry", "Call OI Δ", "Put OI Δ",
                               "Call OI", "Put OI", "Call Vol", "Put Vol",
                               "Call Signal", "Put Signal", "Net View"]
-    st.dataframe(strike_display, hide_index=True)
+    _pinned_df(strike_display, hide_index=True)
 
     # ── OI Change Visualization ──
     st.markdown("<div>📊 OI Change by Strike</div>", unsafe_allow_html=True)
@@ -7607,7 +7655,7 @@ elif page == "🔥 OI Analytics & Prediction":
                                "Cum Net OI Δ", "Consistency", "Days"]
                 _dc["Cum Net OI Δ"] = _dc["Cum Net OI Δ"].apply(lambda x: f"{x:+,.0f}")
                 _dc["Consistency"] = _dc["Consistency"].apply(lambda x: f"{x:.0%}")
-                st.dataframe(_dc, hide_index=True)
+                _pinned_df(_dc, hide_index=True)
 
             with _cv2:
                 st.markdown("**📊 Market Bias Summary**")
@@ -7705,14 +7753,14 @@ elif page == "🔥 OI Analytics & Prediction":
     exp_past   = exp_agg[exp_agg["DTE"] < 0]
     st.markdown("**🟢 Future Expiries**")
     if not exp_future.empty:
-        st.dataframe(
+        _pinned_df(
             exp_future[["expiry_date","DTE","Call_OI_Chg","Put_OI_Chg","Call_OI","Put_OI","PCR"]].rename(
                 columns={"expiry_date":"Expiry","Call_OI_Chg":"Call OI Δ","Put_OI_Chg":"Put OI Δ",
                          "Call_OI":"Call OI","Put_OI":"Put OI"}),
             hide_index=True, use_container_width=True)
     if not exp_past.empty:
         with st.expander(f"🔴 Past / Expired ({len(exp_past)} expiries)"):
-            st.dataframe(
+            _pinned_df(
                 exp_past[["expiry_date","DTE","Call_OI_Chg","Put_OI_Chg","Call_OI","Put_OI","PCR"]].rename(
                     columns={"expiry_date":"Expiry","Call_OI_Chg":"Call OI Δ","Put_OI_Chg":"Put OI Δ",
                              "Call_OI":"Call OI","Put_OI":"Put OI"}),
@@ -7751,7 +7799,7 @@ elif page == "🔥 OI Analytics & Prediction":
         show_cols = ["trade_date", "prediction", "composite", "net_oi_bias", "pcr_oi"]
         if "actual_pct" in pred_df.columns:
             show_cols.append("actual_pct")
-        st.dataframe(pred_df[show_cols].head(10), hide_index=True)
+        _pinned_df(pred_df[show_cols].head(10), hide_index=True)
     else:
         st.info("Not enough data for prediction analysis.")
 
@@ -8227,7 +8275,7 @@ elif page == "🔥 OI Analytics & Prediction":
                     ).reset_index().sort_values("expiry_date")
                     _exp_summary.columns = ["Expiry", "Net Call OI Δ", "Net Put OI Δ"]
                     st.caption(f"📅 Expiry breakdown — trade dates: **{date_from}** → **{date_to}**")
-                    st.dataframe(_exp_summary, hide_index=True, use_container_width=True)
+                    _pinned_df(_exp_summary, hide_index=True, use_container_width=True)
 
                     disp = weekly_df[["strike", "expiry_date", "c_oi_chg", "p_oi_chg",
                                       "c_oi_pct", "p_oi_pct", "c_px_chg", "p_px_chg",
@@ -8248,7 +8296,7 @@ elif page == "🔥 OI Analytics & Prediction":
                             return ["background-color:#1a2a4a; color:#e8f0ff"] * len(row)
                         return [""] * len(row)
 
-                    st.dataframe(
+                    _pinned_df(
                         disp.style.apply(_wk_color, axis=1),
                         hide_index=True, use_container_width=True
                     )
@@ -8340,7 +8388,7 @@ elif page == "🎯 Prop Trading Screen":
         opps = opps[opps["Net_View"] == sel_view]
 
     # Color-code the table
-    st.dataframe(opps, hide_index=True)
+    _pinned_df(opps, hide_index=True)
 
     # ── INTERACTIVE DETAIL: click any setup to see full strategy ──
     st.markdown("<div>🔍 Setup Detail — Select a Row for Full Analysis</div>", unsafe_allow_html=True)
@@ -8599,7 +8647,7 @@ elif page == "🎯 Prop Trading Screen":
                             tf_df = scenarios[scenarios["timeframe"] == tf][["scenario", "stock_move", "new_price", "pnl", "pnl_pct"]]
                             tf_df.columns = ["Scenario", "Stock Move", "Option Price", "P&L ($)", "P&L (%)"]
                             st.markdown(f"*{tf}:*")
-                            st.dataframe(tf_df, hide_index=True)
+                            _pinned_df(tf_df, hide_index=True)
 
                         # ── Payoff chart at expiry ──
                         st.markdown("**📊 Payoff at Expiry:**")
@@ -8809,7 +8857,7 @@ elif page == "🎛️ Command Center":
             _k2.metric("Positions", _npos)
             _k3.metric("Expiring ≤5d", _exp5)
             _bdf = pd.DataFrame(_rows)
-            st.dataframe(_bdf.sort_values("DTE", na_position="last"), hide_index=True, use_container_width=True)
+            _pinned_df(_bdf.sort_values("DTE", na_position="last"), hide_index=True, use_container_width=True)
     except Exception as _e:
         st.caption(f"Book unavailable: {_e}")
 
@@ -8820,7 +8868,7 @@ elif page == "🎛️ Command Center":
         if _ideas:
             _star = [i for i in _ideas if i.get("⭐")]
             _show = (_star or _ideas)[:8]
-            st.dataframe(pd.DataFrame([{"⭐": i.get("⭐", ""), "Ticker": i["Ticker"], "Bias": i["Bias"],
+            _pinned_df(pd.DataFrame([{"⭐": i.get("⭐", ""), "Ticker": i["Ticker"], "Bias": i["Bias"],
                                         "Source": i["Source"], "Trade": i["Trade"]} for i in _show]),
                          hide_index=True, use_container_width=True)
             st.caption(f"{len(_star)} consensus (⭐) of {len(_ideas)} ideas · snapshot {_d0} · full list on 💡 Action Board")
@@ -8844,7 +8892,7 @@ elif page == "🎛️ Command Center":
             st.caption(f"**{_md}** — {len(_fr)} scanner fires · 🟢 {_bull} bull · 🔴 {_bear} bear")
             _top = (_fr[_fr.signal.isin(["BULL", "BEAR"])].groupby(["ticker", "signal"]).size()
                     .reset_index(name="fires").sort_values("fires", ascending=False).head(10))
-            st.dataframe(_top, hide_index=True, use_container_width=True)
+            _pinned_df(_top, hide_index=True, use_container_width=True)
         else:
             st.caption("No scanner fires logged yet.")
     except Exception as _e:
@@ -8931,7 +8979,7 @@ elif page == "🔄 Rotation Tracker":
             # Chart click is primary (user ask 2026-07-28: "from chart not the separate
             # section"); a table-row click works too as a fallback since it's free, but
             # nothing here is a standalone selectbox section anymore.
-            _sel_ev = st.dataframe(_tbl_df, hide_index=True, use_container_width=True,
+            _sel_ev = _pinned_df(_tbl_df, hide_index=True, use_container_width=True,
                                    on_select="rerun", selection_mode="single-row", key=f"{chart_key}_df")
             _sel_rows = _sel_ev.selection.rows if hasattr(_sel_ev, "selection") else []
             if _chart_clicked:
@@ -8939,7 +8987,7 @@ elif page == "🔄 Rotation Tracker":
             if _sel_rows:
                 return str(_tbl_df.iloc[_sel_rows[0]]["Name"])
             return None
-        st.dataframe(_tbl_df, hide_index=True, use_container_width=True)
+        _pinned_df(_tbl_df, hide_index=True, use_container_width=True)
         return None
 
     if not _rows:
@@ -9059,13 +9107,13 @@ elif page == "🫧 Anti-Bubble Radar":
         _cols = [c for c in ["tk","cls","sector","MktCap $B","px","ret1y","ext200","fpe","tpe",
                              "peg","roe","margin","de","rev","beta","up","Q","V","T"] if c in _show]
         st.caption(f"**{len(_fdf)}** of {len(_adf)} screened names match the filters")
-        st.dataframe(_show[_cols], hide_index=True, use_container_width=True)
+        _pinned_df(_show[_cols], hide_index=True, use_container_width=True)
     if _res:
         _ct1, _ct2 = st.columns(2)
         with _ct1:
             st.markdown("#### 🔴 Cyclical traps · avoid / trim")
             if _res["traps"]:
-                st.dataframe(pd.DataFrame([{"Ticker": r["tk"], "1yr %": round(r["ret1y"] * 100),
+                _pinned_df(pd.DataFrame([{"Ticker": r["tk"], "1yr %": round(r["ret1y"] * 100),
                     "vs 200d %": round(r["ext200"] * 100), "Trap": r["T"],
                     "fwd PE": (round(r["fpe"], 1) if r["fpe"] else None),
                     "beta": (round(r["beta"], 1) if r["beta"] else None), "Sector": r["sector"]}
@@ -9075,7 +9123,7 @@ elif page == "🫧 Anti-Bubble Radar":
         with _ct2:
             st.markdown("#### 🟢 Anti-bubble · accumulate")
             if _res["anti"]:
-                st.dataframe(pd.DataFrame([{"Ticker": r["tk"], "Quality": r["Q"], "Value": r["V"],
+                _pinned_df(pd.DataFrame([{"Ticker": r["tk"], "Quality": r["Q"], "Value": r["V"],
                     "Upside %": round((r["up"] or 0) * 100),
                     "fwd PE": (round(r["fpe"], 1) if r["fpe"] else None),
                     "beta": (round(r["beta"], 1) if r["beta"] else None), "Sector": r["sector"]}
@@ -9094,7 +9142,7 @@ elif page == "🫧 Anti-Bubble Radar":
             st.caption(f"Since {_sb['since']} · positive spread = thesis working (quality beating cyclicals). "
                        "Auto-logged once/day per ticker.")
             _det = _sb["detail"].copy(); _det["ret %"] = (_det["ret"] * 100).round(1)
-            st.dataframe(_det[["ticker", "cls", "add_date", "ret %"]], hide_index=True, use_container_width=True)
+            _pinned_df(_det[["ticker", "cls", "add_date", "ret %"]], hide_index=True, use_container_width=True)
     else:
         st.info("Enter tickers (or leave blank for the default universe) and click **Run screen**. "
                 "Works for any ticker — pulls live fundamentals, not limited to the options DB.")
@@ -9339,8 +9387,8 @@ elif page == "💼 Portfolio & Suggestions":
                 }
                 _gdf=pd.concat([_gdf,pd.DataFrame([_tot_row])],ignore_index=True)
             st.markdown("#### Ticker Group Summary")
-            try: st.dataframe(_gdf.style.applymap(_color_pnl,subset=["Group P&L $","Group P&L %"]),hide_index=True,use_container_width=True)
-            except: st.dataframe(_gdf,hide_index=True,use_container_width=True)
+            try: _pinned_df(_gdf.style.applymap(_color_pnl,subset=["Group P&L $","Group P&L %"]),hide_index=True,use_container_width=True)
+            except: _pinned_df(_gdf,hide_index=True,use_container_width=True)
 
             st.markdown("---")
             st.markdown("#### Details by Ticker")
@@ -9704,7 +9752,7 @@ elif page == "💼 Portfolio & Suggestions":
             _hold_stats=closed.groupby(closed["pnl_f"]>0).agg(avg_days=("days_held_n","mean"),count=("pnl_f","count")).reset_index()
             _hold_stats["Outcome"]=_hold_stats["pnl_f"].map({True:"Winners",False:"Losers"})
             if not _hold_stats.empty:
-                st.dataframe(_hold_stats[["Outcome","avg_days","count"]].rename(columns={"avg_days":"Avg Days Held","count":"Count"}),hide_index=True,use_container_width=True)
+                _pinned_df(_hold_stats[["Outcome","avg_days","count"]].rename(columns={"avg_days":"Avg Days Held","count":"Count"}),hide_index=True,use_container_width=True)
 
             st.markdown("#### By Ticker")
             _tkc=(closed.groupby("ticker").agg(trades=("pnl_f","count"),total_pnl=("pnl_f","sum"),avg_pnl=("pnl_f","mean"),
@@ -9716,21 +9764,21 @@ elif page == "💼 Portfolio & Suggestions":
                 "Win%":f"{(closed['pnl_f']>0).sum()/len(closed)*100:.0f}%",
             }])
             _tkc=pd.concat([_tkc,_tkc_tot],ignore_index=True)
-            try: st.dataframe(_tkc.style.applymap(_color_pnl,subset=["Total P&L","Avg P&L"]),hide_index=True,use_container_width=True)
-            except: st.dataframe(_tkc,hide_index=True,use_container_width=True)
+            try: _pinned_df(_tkc.style.applymap(_color_pnl,subset=["Total P&L","Avg P&L"]),hide_index=True,use_container_width=True)
+            except: _pinned_df(_tkc,hide_index=True,use_container_width=True)
 
             if "account_type" in closed.columns:
                 st.markdown("#### By Account")
                 _acd=(closed.groupby(closed["account_type"].fillna("Taxable")).agg(trades=("pnl_f","count"),total_pnl=("pnl_f","sum"),avg_pnl=("pnl_f","mean")).reset_index())
                 _acd.columns=["Account","Trades","Total P&L","Avg P&L"]
-                st.dataframe(_acd,hide_index=True)
+                _pinned_df(_acd,hide_index=True)
 
             if "strategy" in closed.columns:
                 st.markdown("#### By Strategy")
                 _scd=(closed.groupby(closed["strategy"].fillna("manual")).agg(trades=("pnl_f","count"),total_pnl=("pnl_f","sum"),avg_pnl=("pnl_f","mean"),
                       win_rate=("pnl_f",lambda x:f"{(x>0).sum()/len(x)*100:.0f}%")).reset_index())
                 _scd.columns=["Strategy","Trades","Total P&L","Avg P&L","Win%"]
-                st.dataframe(_scd,hide_index=True)
+                _pinned_df(_scd,hide_index=True)
 
             _ve=closed.dropna(subset=["exit_dt"]).sort_values("exit_dt").copy()
             if not _ve.empty:
@@ -9831,7 +9879,7 @@ elif page == "💼 Portfolio & Suggestions":
                 _txc.close()
             _strip = lambda s: re.sub("<[^>]+>", "", str(s))
             if _txr["lots"]:
-                st.dataframe(pd.DataFrame([{
+                _pinned_df(pd.DataFrame([{
                     "Ticker": l["tk"], "Shares": l["qty"], "Entry": l["entry"],
                     "Entry Date": l["entry_date"], "Held (d)": l["held"],
                     "Status": "🟢 LONG-TERM" if l["is_lt"] else f"🟡 short-term · LT on {l['lt_date']}",
@@ -9910,7 +9958,7 @@ elif page == "💼 Portfolio & Suggestions":
                     st.plotly_chart(fig_mo,use_container_width=True)
                 st.markdown("#### Realized vs Unrealized")
                 _rv=_bd.groupby("type")["pnl"].sum().reset_index(); _rv.columns=["Type","P&L $"]
-                st.dataframe(_rv,hide_index=True)
+                _pinned_df(_rv,hide_index=True)
 
 # ===================================================================
 # ──  PAGE 5: BACKTEST LAB
@@ -10039,7 +10087,7 @@ elif page == "📊 Backtest Lab":
                 if _scan_rows:
                     _scan_df = pd.DataFrame(_scan_rows).sort_values('Historical Win%', ascending=False)
                     st.success(f"Found {len(_scan_df)} gamma wall opportunities today")
-                    st.dataframe(_scan_df, hide_index=True, use_container_width=True)
+                    _pinned_df(_scan_df, hide_index=True, use_container_width=True)
 
                     st.markdown("#### 💡 How to Trade This")
                     st.markdown("""
@@ -10163,7 +10211,7 @@ This creates a self-reinforcing ceiling — the wall repels price.
                     st.caption("P&L simulation: +1 unit per win, -2 units per loss (conservative 1:2 R:R assuming tight spread)")
 
                     with st.expander("📋 Full Trade Log", expanded=False):
-                        st.dataframe(_bt_df.drop(columns=['Win','pnl_sim','cum_pnl']),
+                        _pinned_df(_bt_df.drop(columns=['Win','pnl_sim','cum_pnl']),
                                      hide_index=True, use_container_width=True)
 
     # ═══════════════════════════════════════════════════════════════════
@@ -10268,7 +10316,7 @@ This creates a self-reinforcing ceiling — the wall repels price.
                     _show = res_df.copy()
                     if "correct" in _show.columns:
                         _show["result"] = _show["correct"].map({True: "✅ Correct", False: "❌ Wrong", None: "—"})
-                    st.dataframe(_show, hide_index=True, use_container_width=True)
+                    _pinned_df(_show, hide_index=True, use_container_width=True)
 
                 # 5. Chart
                 if "next_day_move" in res_df.columns and "stock_close" in res_df.columns:
@@ -10305,7 +10353,7 @@ This creates a self-reinforcing ceiling — the wall repels price.
                     pass
             if accuracies:
                 acc_df = pd.DataFrame(accuracies).sort_values("Accuracy", ascending=False)
-                st.dataframe(acc_df, hide_index=True)
+                _pinned_df(acc_df, hide_index=True)
                 fig = px.bar(acc_df, x="Ticker", y="Accuracy", color="Accuracy",
                              color_continuous_scale="RdYlGn", title="OI Signal Accuracy by Ticker")
                 fig.add_hline(y=50, line_dash="dash", line_color="white", annotation_text="Random (50%)")
@@ -10704,7 +10752,7 @@ elif page == "🔮 Live Position Predictor":
             anom["sentiment"] = np.where(anom["net_bias"] > 0, "Bullish", np.where(anom["net_bias"] < 0, "Bearish", "Neutral"))
             anom_disp = anom[["ticker", "call_oi_chg", "put_oi_chg", "net_bias", "pcr", "max_z", "sentiment"]].head(20)
             anom_disp.columns = ["Ticker", "Call OI Δ", "Put OI Δ", "Net Bias", "PCR", "Z-Score", "Sentiment"]
-            st.dataframe(anom_disp.style.map(
+            _pinned_df(anom_disp.style.map(
                 lambda v: "color: #00c853" if v == "Bullish" else ("color: #ff1744" if v == "Bearish" else ""),
                 subset=["Sentiment"]
             ), hide_index=True)
@@ -10907,7 +10955,7 @@ elif page == "📈 Insider / Congress / Whales":
             _show = _cur[["issuer", "value", "% Port"] + (["QoQ%"] if _prev else []) + ["shares", "put_call"]].head(40).copy()
             _show["value"] = _show["value"].apply(lambda v: f"${v/1e9:.2f}B" if v >= 1e9 else f"${v/1e6:.0f}M")
             _show["shares"] = _show["shares"].apply(lambda v: f"{v/1e6:.1f}M" if v >= 1e6 else f"{v:,.0f}")
-            st.dataframe(_show, hide_index=True, use_container_width=True)
+            _pinned_df(_show, hide_index=True, use_container_width=True)
             # 3) per-holding 12Q trend
             _sel_h = st.selectbox("📈 12-quarter trend for holding",
                                   list(_cur["issuer"].head(40)), key="edgar_hold")
@@ -11009,7 +11057,7 @@ elif page == "📈 Insider / Congress / Whales":
                        .reset_index().sort_values("value", ascending=False).head(30))
                 _th["Issuer"] = _th["cusip"].map(_names)
                 _th["value"] = _th["value"].apply(_fmt_val)
-                st.dataframe(_th[["Issuer", "value", "funds"]].rename(
+                _pinned_df(_th[["Issuer", "value", "funds"]].rename(
                                  columns={"value": "Aggregate Value", "funds": "# Funds Holding"}),
                              hide_index=True, use_container_width=True)
 
@@ -11020,7 +11068,7 @@ elif page == "📈 Insider / Congress / Whales":
                        .reset_index().sort_values(["funds", "value"], ascending=False).head(30))
                 _mo["Issuer"] = _mo["cusip"].map(_names)
                 _mo["value"] = _mo["value"].apply(_fmt_val)
-                st.dataframe(_mo[["Issuer", "funds", "value"]].rename(
+                _pinned_df(_mo[["Issuer", "funds", "value"]].rename(
                                  columns={"funds": "# Funds Holding", "value": "Aggregate Value"}),
                              hide_index=True, use_container_width=True)
 
@@ -11031,7 +11079,7 @@ elif page == "📈 Insider / Congress / Whales":
                 else:
                     _buys = _chg.sort_values("Share Change", ascending=False).head(30).copy()
                     _buys["Share Change"] = _buys["Share Change"].apply(_fmt_shares)
-                    st.dataframe(_buys[["Issuer", "Share Change"]], hide_index=True, use_container_width=True)
+                    _pinned_df(_buys[["Issuer", "Share Change"]], hide_index=True, use_container_width=True)
 
             with _ovt4:
                 if _chg.empty:
@@ -11040,7 +11088,7 @@ elif page == "📈 Insider / Congress / Whales":
                 else:
                     _sells = _chg.sort_values("Share Change", ascending=True).head(30).copy()
                     _sells["Share Change"] = _sells["Share Change"].apply(_fmt_shares)
-                    st.dataframe(_sells[["Issuer", "Share Change"]], hide_index=True, use_container_width=True)
+                    _pinned_df(_sells[["Issuer", "Share Change"]], hide_index=True, use_container_width=True)
 
             with _ovt5:
                 st.caption("Aggregate $ value by sector across the top holdings (by value) of every "
@@ -11062,7 +11110,7 @@ elif page == "📈 Insider / Congress / Whales":
                     _sb_tot = _sb_agg["value"].sum() or 1
                     _sb_agg["% Portfolio"] = (_sb_agg["value"] / _sb_tot * 100).round(1)
                     _sb_agg["Mkt Value"] = _sb_agg["value"].apply(_fmt_val)
-                    st.dataframe(_sb_agg[["sector", "Mkt Value", "% Portfolio"]].rename(
+                    _pinned_df(_sb_agg[["sector", "Mkt Value", "% Portfolio"]].rename(
                                      columns={"sector": "Sector"}),
                                  hide_index=True, use_container_width=True)
                     _sb_fig = px.bar(_sb_agg[_sb_agg["sector"] != "Unmapped"], x="value", y="sector",
@@ -11093,7 +11141,7 @@ elif page == "📈 Insider / Congress / Whales":
             display_cols = [c for c in ["ticker", "insider_name", "position_title",
                            "transaction_type", "transaction_value_usd", "transaction_date",
                            "signal_strength"] if c in insiders.columns]
-            st.dataframe(insiders[display_cols], hide_index=True)
+            _pinned_df(insiders[display_cols], hide_index=True)
 
             # By ticker
             if "ticker" in insiders.columns and "transaction_value_usd" in insiders.columns:
@@ -11121,7 +11169,7 @@ elif page == "📈 Insider / Congress / Whales":
             display_cols = [c for c in ["politician_name", "ticker", "action",
                            "value_usd", "transaction_date", "trading_signal_strength"]
                            if c in congress.columns]
-            st.dataframe(congress[display_cols], hide_index=True)
+            _pinned_df(congress[display_cols], hide_index=True)
 
     with tab3:
         # Deduplicate by filer+ticker keeping max value_usd
@@ -11204,7 +11252,7 @@ elif page == "📈 Insider / Congress / Whales":
             if "shares_held" in _disp.columns:
                 _disp["shares_held"] = pd.to_numeric(_disp["shares_held"], errors="coerce").apply(
                     lambda v: f"{v/1e6:.1f}M" if pd.notna(v) and v >= 1e6 else (f"{v:,.0f}" if pd.notna(v) else "—"))
-            st.dataframe(_disp, hide_index=True, use_container_width=True)
+            _pinned_df(_disp, hide_index=True, use_container_width=True)
 
             # Chart 1 — top holdings by ticker
             by_tk = whales.groupby("ticker")["val_num"].sum().sort_values(ascending=False).head(12)
@@ -11474,7 +11522,7 @@ elif page == "📈 Insider / Congress / Whales":
             buys_data = _LEGENDS_BUYS.get(_sel_key, [])
             if buys_data:
                 _df_buys = pd.DataFrame(buys_data, columns=["Ticker","Action","Value","Cap","Note"])
-                st.dataframe(_df_buys, hide_index=True, use_container_width=True)
+                _pinned_df(_df_buys, hide_index=True, use_container_width=True)
             else:
                 st.info("No buy data.")
         with rcol:
@@ -11482,7 +11530,7 @@ elif page == "📈 Insider / Congress / Whales":
             sells_data = _LEGENDS_SELLS.get(_sel_key, [])
             if sells_data:
                 _df_sells = pd.DataFrame(sells_data, columns=["Ticker","Note"])
-                st.dataframe(_df_sells, hide_index=True, use_container_width=True)
+                _pinned_df(_df_sells, hide_index=True, use_container_width=True)
             else:
                 st.info("No sell data.")
 
@@ -11491,13 +11539,13 @@ elif page == "📈 Insider / Congress / Whales":
             st.markdown("#### ⚙️ Options Positions")
             _df_opts = pd.DataFrame(opts, columns=["Ticker","Type","Expiry","Note"])
             _df_opts["Signal"] = _df_opts["Type"].map({"PUT":"🔴 PUT","CALL":"🟢 CALL"})
-            st.dataframe(_df_opts, hide_index=True, use_container_width=True)
+            _pinned_df(_df_opts, hide_index=True, use_container_width=True)
 
         gems = _LEGENDS_GEMS.get(_sel_key, [])
         if gems:
             st.markdown("#### 💎 Small / Mid Cap Gems")
             _df_gems = pd.DataFrame(gems, columns=["Ticker","Market Cap","Insight"])
-            st.dataframe(_df_gems, hide_index=True, use_container_width=True)
+            _pinned_df(_df_gems, hide_index=True, use_container_width=True)
 
         tops = _LEGENDS_TOPS.get(_sel_key, [])
         if tops:
@@ -11513,7 +11561,7 @@ elif page == "📈 Insider / Congress / Whales":
                 _fig_h.update_traces(textposition="outside")
                 st.plotly_chart(_fig_h, use_container_width=True)
             except Exception:
-                st.dataframe(_df_tops[["Ticker","Weight"]], hide_index=True, use_container_width=True)
+                _pinned_df(_df_tops[["Ticker","Weight"]], hide_index=True, use_container_width=True)
 
         theme_txt, signal_txt = _LEGENDS_THEMES.get(_sel_key, ("—","—"))
         insight_txt = _LEGENDS_INSIGHTS.get(_sel_key, "—")
@@ -11581,7 +11629,7 @@ elif page == "📈 Insider / Congress / Whales":
             ("NVDA CALLS","Griffin","Q2 2026","AI chip upside","🟢 CALL"),
         ]
         _df_opts_all = pd.DataFrame(_opts_all, columns=["Position","Fund","Expiry","Note","Type"])
-        st.dataframe(_df_opts_all, hide_index=True, use_container_width=True)
+        _pinned_df(_df_opts_all, hide_index=True, use_container_width=True)
 
         # ── QoQ Tracker ──────────────────────────────────────────────
         st.markdown("---")
@@ -11653,7 +11701,7 @@ elif page == "📈 Insider / Congress / Whales":
         _sc, _sasc = _sort_map[_sel_qs]
         _dq = _dq.sort_values(_sc, ascending=_sasc)
 
-        st.dataframe(_dq[["Investor","Ticker","Signal","Q4_Val($M)","Q1_Val($M)",
+        _pinned_df(_dq[["Investor","Ticker","Signal","Q4_Val($M)","Q1_Val($M)",
                            "Net_$_Chg(M)","Share_Chg_%","AvgPx_Q4($)","AvgPx_Q1($)","Notes"]],
                      hide_index=True, use_container_width=True)
 
@@ -11676,7 +11724,7 @@ elif page == "📈 Insider / Congress / Whales":
 
         st.markdown("#### 🏆 Top 10 Biggest Single Position Moves")
         _top10 = _df_qoq.iloc[_df_qoq["Net_$_Chg(M)"].abs().nlargest(10).index]
-        st.dataframe(_top10[["Investor","Ticker","Q4_Val($M)","Q1_Val($M)","Net_$_Chg(M)",
+        _pinned_df(_top10[["Investor","Ticker","Q4_Val($M)","Q1_Val($M)","Net_$_Chg(M)",
                               "AvgPx_Q4($)","AvgPx_Q1($)","Action","Notes"]],
                      hide_index=True, use_container_width=True)
 
@@ -11718,7 +11766,7 @@ elif page == "📈 Insider / Congress / Whales":
         _dffc = _df_fc.copy()
         if _sel_fsec != "All": _dffc = _dffc[_dffc["Sector"] == _sel_fsec]
         if _sel_frsk != "All": _dffc = _dffc[_dffc["Risk"] == _sel_frsk]
-        st.dataframe(_dffc[["Ticker","Name","Market Cap","Sector","Who","Potential","Risk"]],
+        _pinned_df(_dffc[["Ticker","Name","Market Cap","Sector","Who","Potential","Risk"]],
                      hide_index=True, use_container_width=True)
         try:
             _dffc["_pot"] = pd.to_numeric(_dffc["Potential"].str.extract(r"(\d+)")[0])
@@ -11852,7 +11900,7 @@ elif page == "📈 Insider / Congress / Whales":
                     return [""]*len(row)
 
                 _disp_cols = ["Ticker","Name","Sector","Price","Mkt Cap","Short % Float","Short Ratio","Shares Short","MoM Chg %","Squeeze Score","Squeeze Risk"]
-                st.dataframe(
+                _pinned_df(
                     _sdf[_disp_cols].style.apply(_srow,axis=1).format({
                         "Short % Float": lambda v: f"{v:.1f}%" if v else "—",
                         "Short Ratio":   lambda v: f"{v:.1f}d"  if v else "—",
@@ -12052,7 +12100,7 @@ elif page == "\U0001f9e0 Smart Money Hub":
                     _hot_show = _hot[["ticker","expiry_date","surge","strikes"]].copy()
                     _hot_show.columns = ["Ticker","Expiry","Surge (×avg)","# Strikes"]
                     _hot_show["Expiry"] = _hot_show["Expiry"].astype(str).str[:10]
-                    st.dataframe(_hot_show, use_container_width=True, hide_index=True,
+                    _pinned_df(_hot_show, use_container_width=True, hide_index=True,
                                  column_config={"Surge (×avg)": st.column_config.ProgressColumn(format="%.1f×", min_value=0, max_value=5)})
             except Exception as _ex:
                 st.warning(f"UOA unavailable: {_ex}")
@@ -12086,7 +12134,7 @@ elif page == "\U0001f9e0 Smart Money Hub":
                         st.info("\U0001f7e1 No block concentrations found today.")
                     else:
                         st.success(f"\U0001f535 {len(_blocks)} institutional block positions detected")
-                        st.dataframe(
+                        _pinned_df(
                             _blocks[["ticker","strike","Expiry","oi","Direction"]].rename(
                                 columns={"ticker":"Ticker","strike":"Strike","oi":"Open Interest"}),
                             use_container_width=True, hide_index=True)
@@ -12125,14 +12173,14 @@ elif page == "\U0001f9e0 Smart Money Hub":
                     if _fear.empty:
                         st.info("None today \U0001f7e2")
                     else:
-                        st.dataframe(_fear[["ticker","pcr_oi","z"]].rename(columns={"pcr_oi":"PCR","z":"Z-Score"}),
+                        _pinned_df(_fear[["ticker","pcr_oi","z"]].rename(columns={"pcr_oi":"PCR","z":"Z-Score"}),
                                      use_container_width=True, hide_index=True)
                 with _c2:
                     st.markdown("**\U0001f60e GREED tickers** → Extreme call buying → Possible pullback")
                     if _greed.empty:
                         st.info("None today \U0001f7e2")
                     else:
-                        st.dataframe(_greed[["ticker","pcr_oi","z"]].rename(columns={"pcr_oi":"PCR","z":"Z-Score"}),
+                        _pinned_df(_greed[["ticker","pcr_oi","z"]].rename(columns={"pcr_oi":"PCR","z":"Z-Score"}),
                                      use_container_width=True, hide_index=True)
             except Exception as _ex:
                 st.warning(f"Mood unavailable: {_ex}")
@@ -12169,7 +12217,7 @@ elif page == "\U0001f9e0 Smart Money Hub":
                 else:
                     st.warning(f"\U0001f7e1 MIXED — {_pct:.0f}% positive GEX. No dominant stabilizer. Markets may be unpredictable.")
                     signals.append(("Dealer GEX", 1, 2))
-                st.dataframe(_gex_sum.sort_values("GEX", ascending=False).head(15),
+                _pinned_df(_gex_sum.sort_values("GEX", ascending=False).head(15),
                              use_container_width=True, hide_index=True)
             except Exception as _ex:
                 st.warning(f"GEX unavailable: {_ex}")
@@ -12330,7 +12378,7 @@ elif page == "\U0001f9e0 Smart Money Hub":
             [(l, s, m, f"{s/m*100:.0f}%") for l, s, m in signals],
             columns=["Signal", "Score", "Max Points", "Risk %"]
         )
-        st.dataframe(_sc_df, use_container_width=True, hide_index=True,
+        _pinned_df(_sc_df, use_container_width=True, hide_index=True,
                      column_config={"Score": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=3)})
         st.caption("⚠️ Not financial advice. For learning and research only.")
 
@@ -12662,7 +12710,7 @@ Professional options desk — dealer GEX analysis, expiry-level walls, position 
 
                         _disp_cols = ["Expiry","DTE","Zone","Call Wall $","CW Dist %","CW Strength",
                                       "Put Wall $","PW Dist %","PW Strength"]
-                        st.dataframe(
+                        _pinned_df(
                             _wdf[_disp_cols].style.apply(_wall_row_style, axis=1)
                                                    .format({
                                                        "Call Wall $": lambda v: f"${v:.0f}" if v else "—",
@@ -13418,7 +13466,7 @@ The far-dated deep OTM puts are bought by pension funds and institutions as cata
                                     "Close regardless at 21 days to expiry — no exceptions"
                                 ]
                             }
-                            st.dataframe(pd.DataFrame(_tbl), hide_index=True, use_container_width=True)
+                            _pinned_df(pd.DataFrame(_tbl), hide_index=True, use_container_width=True)
                             st.divider()
 
                         # ── Payoff diagram — all strategies overlaid ──
@@ -13761,7 +13809,7 @@ Real edge comes from discipline and filters — not a higher strike.
                 st.plotly_chart(_fig_exp, use_container_width=True)
 
             # ── Full table ─────────────────────────────────────────
-            st.dataframe(_sdf2, use_container_width=True, hide_index=True,
+            _pinned_df(_sdf2, use_container_width=True, hide_index=True,
                          column_config={
                              "Win%": st.column_config.ProgressColumn(
                                  "Win%", format="%.0f%%", min_value=0, max_value=100),
@@ -13925,7 +13973,7 @@ Real edge comes from discipline and filters — not a higher strike.
                     st.caption("Bright = high call OI = gamma wall zone. Look for bright columns above spot (gold line).")
 
                 # Expiry table
-                st.dataframe(_edf, use_container_width=True, hide_index=True,
+                _pinned_df(_edf, use_container_width=True, hide_index=True,
                              column_config={
                                  "CW Dist%": st.column_config.NumberColumn(format="%.1f%%"),
                                  "PW Dist%": st.column_config.NumberColumn(format="%.1f%%"),
@@ -13985,7 +14033,7 @@ Real edge comes from discipline and filters — not a higher strike.
                     "Strike vs Spot %": round(_dist, 1) if _dist is not None else "—",
                     "Strategy": _r["strategy"],
                 })
-            st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+            _pinned_df(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
             st.caption("Your live trades from the shared portfolio. The Advisor-spread ledger below "
                        "is only for credit spreads logged via Advisor Scan.")
         st.markdown("---")
@@ -14121,7 +14169,7 @@ Stop: buy back at <b>${_cred*2:.2f}</b>
                 yaxis2=dict(gridcolor="rgba(0,0,0,0.08)", zeroline=True, zerolinecolor="rgba(0,0,0,0.2)"),
                 margin=dict(t=50, b=40))
             st.plotly_chart(_ec_fig, use_container_width=True)
-            st.dataframe(_closed_p[["ticker","spread_type","trade_date","expiry",
+            _pinned_df(_closed_p[["ticker","spread_type","trade_date","expiry",
                                      "short_strike","long_strike","credit","exit_reason","pnl_dollar"]],
                          use_container_width=True, hide_index=True)
 
@@ -14288,7 +14336,7 @@ elif page == "📰 News & Calendar":
             try:
                 news = q("SELECT * FROM news_feed ORDER BY ROWID DESC LIMIT 20")
                 if not news.empty:
-                    st.dataframe(news, hide_index=True)
+                    _pinned_df(news, hide_index=True)
             except Exception:
                 pass
 
@@ -14451,7 +14499,7 @@ elif page == "⚡ Trade Risk Calculator":
                 tf_df = scenarios[scenarios["timeframe"] == tf][["scenario", "stock_move", "new_price", "pnl", "pnl_pct"]]
                 tf_df.columns = ["Scenario", "Stock Move", "Option Price", "P&L ($)", "P&L (%)"]
                 st.markdown(f"**{tf} Scenarios:**")
-                st.dataframe(tf_df, hide_index=True)
+                _pinned_df(tf_df, hide_index=True)
 
             # Visual heatmap
             pivot = scenarios.pivot(index="timeframe", columns="scenario", values="pnl")
@@ -15387,7 +15435,7 @@ elif page == "🎯 Next-Day Exit Planner":
             _sc1, _sc2 = st.columns([2, 3])
             with _sc1:
                 _disp = _scn[["Market move", "Portfolio P&L $"]].copy()
-                st.dataframe(_disp, hide_index=True, use_container_width=True,
+                _pinned_df(_disp, hide_index=True, use_container_width=True,
                              column_config={"Portfolio P&L $": st.column_config.NumberColumn(format="$%d")})
             with _sc2:
                 _sfig = go.Figure(go.Bar(
@@ -15608,7 +15656,7 @@ elif page == "🎯 Next-Day Exit Planner":
                     "Max L": "Unlimited" if _spdn else f"${_spmaxl:,.0f}", "POP": "—",
                     "EV": round(_spev), "Breakeven": "—"})
                 st.markdown("**📊 Summary — ticker & portfolio level** (max profit/loss to expiry, POP, EV)")
-                st.dataframe(pd.DataFrame(_sumrows), hide_index=True, use_container_width=True,
+                _pinned_df(pd.DataFrame(_sumrows), hide_index=True, use_container_width=True,
                              column_config={"Open P&L": st.column_config.NumberColumn(format="$%d"),
                                             "EV": st.column_config.NumberColumn(format="$%d")})
 
@@ -15678,7 +15726,7 @@ elif page == "🎯 Next-Day Exit Planner":
                 _fdf = pd.concat([_fdf, pd.DataFrame([_trow])], ignore_index=True)
                 # Full column set (user 2026-07-18: keep ALL columns); height sized to every
                 # row so there's no inner vertical scroll — the page scrolls naturally instead.
-                st.dataframe(_fdf, hide_index=True, use_container_width=True,
+                _pinned_df(_fdf, hide_index=True, use_container_width=True,
                              height=(len(_fdf) + 1) * 35 + 3,
                              column_config={
                                  "Spot": st.column_config.NumberColumn(format="$%.2f"),
@@ -15859,7 +15907,7 @@ elif page == "🎯 Next-Day Exit Planner":
                             pass
                     with _kc2:
                         st.markdown("**📉 Tomorrow's scenarios**")
-                        st.dataframe(pd.DataFrame(_sm), hide_index=True, use_container_width=True,
+                        _pinned_df(pd.DataFrame(_sm), hide_index=True, use_container_width=True,
                                      column_config={"P&L $": st.column_config.NumberColumn(format="$%d")})
 
                     # ── Breakeven · POP · EV + interactive payoff diagram ──
@@ -15949,7 +15997,7 @@ elif page == "🎯 Next-Day Exit Planner":
                         if _trdf is not None:
                             st.markdown("**🎯 Which signal to trust here** — track record on this ticker "
                                         "(5-day forward); prioritize the top row")
-                            st.dataframe(_trdf, hide_index=True, use_container_width=True,
+                            _pinned_df(_trdf, hide_index=True, use_container_width=True,
                                          column_config={
                                              "Hit-rate": st.column_config.NumberColumn(format="%.1f%%"),
                                              "Edge/call": st.column_config.NumberColumn(format="%+.2f%%"),
@@ -15993,7 +16041,7 @@ elif page == "🎯 Next-Day Exit Planner":
                         _inds = _gp_indicators(_tk)
                         if _inds:
                             st.markdown("**📊 Indicators — what each says & whether to weight it**")
-                            st.dataframe(pd.DataFrame([
+                            _pinned_df(pd.DataFrame([
                                 {"Indicator": i["name"], "Value": i["val"], "Signal": i["sig"],
                                  "What it means": i["why"], "How to use it": i["use"]} for i in _inds]),
                                 hide_index=True, use_container_width=True)
@@ -16007,7 +16055,7 @@ elif page == "🎯 Next-Day Exit Planner":
                             st.markdown("**🔺 Patterns & regime — EMA sequence · golden/death cross · "
                                         "bull/bear flag · gamma regime**")
                             _pe = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "⚪"}
-                            st.dataframe(pd.DataFrame([
+                            _pinned_df(pd.DataFrame([
                                 {"Pattern": f"{_pe.get(p['sig'],'⚪')} {p['name']}", "Reading": p["val"],
                                  "What it means": p["why"], "How to use it": p["use"]} for p in _pats]),
                                 hide_index=True, use_container_width=True)
@@ -16045,7 +16093,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                                       "low turnover → mostly existing positions, little new conviction."))
                                     st.markdown("**1) What is the flow doing — buying, selling or hedging?**")
                                     if _oa["buckets"]:
-                                        st.dataframe(pd.DataFrame(_oa["buckets"]), hide_index=True,
+                                        _pinned_df(pd.DataFrame(_oa["buckets"]), hide_index=True,
                                                      use_container_width=True,
                                                      column_config={"% of activity": st.column_config.NumberColumn(
                                                          format="%.1f%%")})
@@ -16055,14 +16103,14 @@ elif page == "🎯 Next-Day Exit Planner":
                                     st.markdown(f"**2) Across strikes** — biggest ΔOI in the front expiry "
                                                 f"(*{_oa['front']}*):")
                                     if _oa["strikes"]:
-                                        st.dataframe(pd.DataFrame(_oa["strikes"]), hide_index=True,
+                                        _pinned_df(pd.DataFrame(_oa["strikes"]), hide_index=True,
                                                      use_container_width=True,
                                                      column_config={
                                                          "Call ΔOI": st.column_config.NumberColumn(format="%+d"),
                                                          "Put ΔOI": st.column_config.NumberColumn(format="%+d")})
                                     st.markdown("**3) Across expiries (calendar)** — where new OI is going:")
                                     if _oa["calendar"]:
-                                        st.dataframe(pd.DataFrame(_oa["calendar"]), hide_index=True,
+                                        _pinned_df(pd.DataFrame(_oa["calendar"]), hide_index=True,
                                                      use_container_width=True,
                                                      column_config={
                                                          "Call ΔOI": st.column_config.NumberColumn(format="%+d"),
@@ -16114,7 +16162,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                         _mrows.sort(key=lambda r: (r["_o"], -r["Prob"]))
                                         for _r in _mrows:
                                             _r.pop("_o", None)
-                                        st.dataframe(pd.DataFrame(_mrows), hide_index=True,
+                                        _pinned_df(pd.DataFrame(_mrows), hide_index=True,
                                                      use_container_width=True,
                                                      column_config={
                                                          "Prob": st.column_config.NumberColumn(format="%d%%"),
@@ -16251,7 +16299,7 @@ elif page == "🎯 Next-Day Exit Planner":
                             "Close @": _climit, "Max P": _fmt_maxp(_lb), "Max L": _fmt_maxl(_lb), "Win %": _win,
                             "P&L %": round(pnl_pct), "P&L $": round(l["pnl"]), "Action": action,
                         })
-                    st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True,
+                    _pinned_df(pd.DataFrame(_rows), hide_index=True, use_container_width=True,
                                  column_config={"P&L %": st.column_config.NumberColumn(format="%d%%")})
                     st.caption("**Now** = live option mid (bid/ask) when the market's open, else the last "
                                "close. **Real$ / Time$** = what's intrinsic (locked in if exercised now) vs time "
@@ -16503,7 +16551,7 @@ elif page == "🎯 Next-Day Exit Planner":
                           "ER PRE-EXP / EX-DIV (event lands before expiry — decide ahead of it), HOLD otherwise\n"
                         "- **TOTAL row**: Last row shows sum of all P&L and win/loss count"
                     )
-                st.dataframe(_add_total_row(_ep_batch_df), hide_index=True, use_container_width=True)
+                _pinned_df(_add_total_row(_ep_batch_df), hide_index=True, use_container_width=True)
                 # Highlight alerts
                 _alerts = _ep_batch_df[_ep_batch_df["Signal"].str.contains("TAKE PROFIT|CUT LOSS|NEAR EXPIRY|CLOSE SOON|ER PRE-EXP|EX-DIV")]
                 if not _alerts.empty:
@@ -16592,7 +16640,7 @@ elif page == "🎯 Next-Day Exit Planner":
                       "ER PRE-EXP / EX-DIV (event before expiry)\n"
                     "- **TOTAL row**: Last row shows sum of all P&L and win/loss count"
                 )
-            st.dataframe(_add_total_row(_ep_tk_batch), hide_index=True, use_container_width=True)
+            _pinned_df(_add_total_row(_ep_tk_batch), hide_index=True, use_container_width=True)
 
         # ── Payoff chart (combined all legs) ──
         st.markdown("---")
@@ -17402,7 +17450,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                   "Probability": f"{_prob:.1f}%", "_sort": -_pct_threshold})
     _mc_prob_df = pd.DataFrame(_mc_prob_data).sort_values("_sort").drop(columns=["_sort"])
     with st.expander("📊 Probability Table — Detailed Outcome Odds", expanded=False):
-        st.dataframe(_mc_prob_df, hide_index=True)
+        _pinned_df(_mc_prob_df, hide_index=True)
         if _mc_use_hist:
             st.caption(f"Calibrated on {len(_ep_hist_returns)} daily returns · Hist. skew: {_mc_hist_skew:.2f} · "
                        f"Blended vol: {_mc_vol:.1%} (IV {_ep_iv:.1%} + HV {_mc_hist_vol:.1%})")
@@ -17525,7 +17573,7 @@ elif page == "🎯 Next-Day Exit Planner":
     # ── Scenario table ──
     _sdf = pd.DataFrame(_scenario_rows)
     _display_cols = ["Scenario", f"{ep_ticker} Price", "IV", "Option Value", "P&L / Contract", "Total P&L", "P&L %"]
-    st.dataframe(_sdf[_display_cols], hide_index=True)
+    _pinned_df(_sdf[_display_cols], hide_index=True)
 
     # ── Scenario P&L Chart ──
     _fig_sc = go.Figure()
@@ -17690,7 +17738,7 @@ ${_mc_expected_val:.2f}
         {"Order Type": "🔴 Stop Loss (Wide)", "Limit Price": f"${_stop_wide:.2f}",
          "P&L If Hit": f"${(_stop_wide - ep_entry) * ep_qty * 100:+,.0f}", "Note": "50% loss cap — last resort"},
     ]
-    st.dataframe(pd.DataFrame(_orders), hide_index=True)
+    _pinned_df(pd.DataFrame(_orders), hide_index=True)
 
     # ═══════════════════════════════════════════════════════════════
     # 6) GREEKS & RISK METRICS
@@ -17732,7 +17780,7 @@ ${_mc_expected_val:.2f}
             "P&L": f"${_iv_pnl:+,.0f}",
             "Change": f"${_iv_val - _ep_current_value:+.2f}",
         })
-    st.dataframe(pd.DataFrame(_iv_rows), hide_index=True)
+    _pinned_df(pd.DataFrame(_iv_rows), hide_index=True)
 
     # ═══════════════════════════════════════════════════════════════
     # 8) ALTERNATIVE STRATEGIES (hedging / rolling)
@@ -17773,7 +17821,7 @@ ${_mc_expected_val:.2f}
         "When": "Expecting big move but unsure of direction",
         "Benefit": "Profits from volatility regardless of direction",
     })
-    st.dataframe(pd.DataFrame(_strats), hide_index=True)
+    _pinned_df(pd.DataFrame(_strats), hide_index=True)
 
     # ═══════════════════════════════════════════════════════════════
     # 9) NEWS FEED
@@ -17979,7 +18027,7 @@ historical one) — its numbers come from predictions logged live and resolved o
                           "Bull/Bear": f"{s['n_bull']}/{s['n_bear']}",
                           "Verdict": _verdict, "What it is": s["desc"]})
         _sadf = pd.DataFrame(_rows)
-        st.dataframe(
+        _pinned_df(
             _sadf, hide_index=True, use_container_width=True,
             column_config={
                 "Hit-rate": st.column_config.NumberColumn("Hit-rate", format="%.1f%%"),
@@ -18021,7 +18069,7 @@ historical one) — its numbers come from predictions logged live and resolved o
     else:
         st.caption(f"Overall resolved accuracy: **{_sa24['overall_hit']}%** "
                    f"over **{_sa24['n_total']:,}** resolved predictions.")
-        st.dataframe(
+        _pinned_df(
             _sa24["per_model"].rename(columns={
                 "model_name": "Model", "n": "Resolved", "hit": "Hit-rate", "avg_ret": "Avg next-day"}),
             hide_index=True, use_container_width=True,
@@ -18046,7 +18094,7 @@ historical one) — its numbers come from predictions logged live and resolved o
                    + (f" · directional accuracy **{_slog['overall_hit']}%**" if _slog["overall_hit"] is not None else ""))
         if _slog["by_source"] is not None and not _slog["by_source"].empty:
             st.markdown("**Scorecard by source** (directional readings only):")
-            st.dataframe(
+            _pinned_df(
                 _slog["by_source"].rename(columns={"source": "Source", "n": "Calls",
                                                    "hit": "Hit-rate", "edge": "Edge/call"}),
                 hide_index=True, use_container_width=True,
@@ -18056,7 +18104,7 @@ historical one) — its numbers come from predictions logged live and resolved o
                     "Calls": st.column_config.NumberColumn(format="%d")})
         if _slog["by_label"] is not None and not _slog["by_label"].empty:
             st.markdown("**By reading** — hit-rate, edge, and average next-day move:")
-            st.dataframe(
+            _pinned_df(
                 _slog["by_label"].rename(columns={"label": "Sentiment", "n": "Times seen",
                                                   "hit": "Hit-rate", "edge": "Edge/call",
                                                   "avg_next": "Avg next-day"}),
@@ -18152,14 +18200,14 @@ OI/flow signals elsewhere read positioning. Strongest when both agree.
 
         st.markdown("#### 👤 Investor agents")
         _pe = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "⚪"}
-        st.dataframe(pd.DataFrame([
+        _pinned_df(pd.DataFrame([
             {"Investor": p["agent"], "Call": f"{_pe[p['signal']]} {p['signal']}",
              "Conf": p["conf"], "Reasoning": p["reason"]} for p in _res["personas"]]),
             hide_index=True, use_container_width=True,
             column_config={"Conf": st.column_config.NumberColumn(format="%d%%")})
 
         st.markdown("#### 🏦 Analyst desk")
-        st.dataframe(pd.DataFrame([
+        _pinned_df(pd.DataFrame([
             {"Desk": a["agent"], "Call": f"{_pe[a['signal']]} {a['signal']}",
              "Conf": a["conf"], "Reasoning": a["reason"]} for a in _res["analysts"]]),
             hide_index=True, use_container_width=True,
@@ -18179,7 +18227,7 @@ OI/flow signals elsewhere read positioning. Strongest when both agree.
                 ("6-mo momentum %", (F.get("mom6") or 0) * 100 if F.get("mom6") is not None else None),
                 ("Street rating", F.get("reckey")),
             ]
-            st.dataframe(pd.DataFrame([{"Metric": k, "Value": (round(v, 2) if isinstance(v, (int, float)) else v)}
+            _pinned_df(pd.DataFrame([{"Metric": k, "Value": (round(v, 2) if isinstance(v, (int, float)) else v)}
                                        for k, v in _fr if v is not None]),
                          hide_index=True, use_container_width=True)
         st.caption("Educational committee model from free fundamentals + technicals; not financial advice. "
@@ -18406,7 +18454,7 @@ if page == "🔬 OI Comparison Charts":
         if _conf_filter != "All":
             _filt = _filt[_filt["Confidence"] == _conf_filter]
         st.caption(f"Showing {len(_filt)} of {len(_scan_df)} tickers")
-        st.dataframe(_filt, hide_index=True)
+        _pinned_df(_filt, hide_index=True)
 
         _bull_n = len(_scan_df[_scan_df["Signal"] == "🟢 BULLISH"])
         _bear_n = len(_scan_df[_scan_df["Signal"] == "🔴 BEARISH"])
@@ -19122,7 +19170,7 @@ reveals where smart money is building or liquidating positions.
         tbl["Call Px"] = tbl["Call Px"].apply(compact_price)
         tbl["Put Px"] = tbl["Put Px"].apply(compact_price)
         with st.expander(f"📋 {expiry} — Strike Detail ({len(edf)} strikes)"):
-            st.dataframe(tbl, hide_index=True)
+            _pinned_df(tbl, hide_index=True)
 
     # ══════════════════════════════════════════════════════════════════
     # ──  BACKTESTING: OI signals vs actual next-day moves
@@ -19220,7 +19268,7 @@ reveals where smart money is building or liquidating positions.
         st.caption("**Score** = 5-factor composite (OI bias + PCR contrarian + Vol PCR + Flow pattern + GEX). "
                    "Range: -5 to +5. Signal fires only at ≥+2 (BULLISH) or ≤-2 (BEARISH). "
                    "**—** = NEUTRAL (low conviction). **❌ large counter-move** = likely news-driven.")
-        st.dataframe(bt_df, hide_index=True)
+        _pinned_df(bt_df, hide_index=True)
 
         # ── Visual: signal accuracy over time ──
         signal_rows = [r for r in bt_results if r["Correct?"] in ("✅", "❌")]
@@ -19328,7 +19376,7 @@ reveals where smart money is building or liquidating positions.
                 _dc2.columns = ["Strike", "Dir", "Score/10", "Streak", "Streak Dir", "Cum Net OI Δ", "Consistency", "Days"]
                 _dc2["Cum Net OI Δ"] = _dc2["Cum Net OI Δ"].apply(lambda x: f"{x:+,.0f}")
                 _dc2["Consistency"] = _dc2["Consistency"].apply(lambda x: f"{x:.0%}")
-                st.dataframe(_dc2, hide_index=True)
+                _pinned_df(_dc2, hide_index=True)
             with _cc2:
                 st.markdown("**📊 Market Bias**")
                 _bh = len(_conv_c[(_conv_c["direction"] == "BULL") & (_conv_c["conviction"] >= 7)])
@@ -19442,7 +19490,7 @@ reveals where smart money is building or liquidating positions.
                                     {"Conviction": k, "Trades": v["n"],
                                      "Win %": round(v["win"]), "Avg P&L %": round(v["avg"])}
                                     for k, v in _summ["buckets"].items()])
-                                st.dataframe(_bk, hide_index=True, use_container_width=True)
+                                _pinned_df(_bk, hide_index=True, use_container_width=True)
 
                             _eqd = _btdf.sort_values("signal_date").reset_index(drop=True)
                             _eqd["cum_fixed"] = _eqd["pnl_pct"].cumsum()
@@ -19465,7 +19513,7 @@ reveals where smart money is building or liquidating positions.
                                 "**Educational backtest on ~6 months of EOD snapshots — daily closes only "
                                 "(intraday TP/SL touches not captured); no commissions/slippage. Past "
                                 "results don't guarantee future returns.**")
-                            st.dataframe(
+                            _pinned_df(
                                 _btdf.drop(columns=["path"], errors="ignore").sort_values("signal_date"),
                                 hide_index=True, use_container_width=True)
 
@@ -19823,7 +19871,7 @@ if page == "🚀 Live Momentum Scanner":
                   .map(_color_ret, subset=["5d%", "10d%", "20d%"])
                   .format({"Price": "${:.2f}", "5d%": "{:+.1f}%", "10d%": "{:+.1f}%",
                            "20d%": "{:+.1f}%", "Vol×": "{:.1f}×", "Momentum": "{:.0f}"}))
-        st.dataframe(styled, use_container_width=True, height=600)
+        _pinned_df(styled, use_container_width=True, height=600)
 
         # Scatter plot: 5d% vs 20d% bubble chart
         st.subheader("📡 Momentum Map (5d vs 20d Return)")
@@ -20030,7 +20078,7 @@ if page == "📐 DMA & Mean Reversion":
         "ticker": "Ticker", "CapTier": "Cap Tier", "sector": "Sector", "beta": "Beta",
         "DaysSinceCross": "Days Since Cross", "RSI2": "RSI(2)", "VolRatio": "Vol Ratio (today/20d)",
         "PctFromHi": "% from 52w Hi", "PctFromLo": "% from 52w Lo", "Vol20d": "Avg Vol (20d)"})
-    st.dataframe(
+    _pinned_df(
         _disp, hide_index=True, use_container_width=True, height=560,
         column_config={
             "Price": st.column_config.NumberColumn(format="$%.2f"),
@@ -20401,7 +20449,7 @@ if page == "🧠 High-Prob Engine":
                     # Neutral: very subtle grey — visible in both light and dark themes
                     return ["background-color:#2d2d2d; color:#e0e0e0"]*len(row)
 
-                st.dataframe(
+                _pinned_df(
                     tdf.style.apply(_highlight, axis=1)
                               .bar(subset=["Prob%"], color=["#66bb6a", "#ef5350"],
                                    vmin=40, vmax=90, align="mid")
@@ -20490,23 +20538,23 @@ if page == "📰 Market Wrap":
         with _g1:
             if _F["movers_up"]:
                 st.markdown("**📈 Top gainers**")
-                st.dataframe(pd.DataFrame([{"Ticker": m["t"], "%": round(m["pct"], 1),
+                _pinned_df(pd.DataFrame([{"Ticker": m["t"], "%": round(m["pct"], 1),
                                             "Last": round(m["last"], 2)} for m in _F["movers_up"]]),
                              hide_index=True, use_container_width=True)
             if _F["movers_dn"]:
                 st.markdown("**📉 Top losers**")
-                st.dataframe(pd.DataFrame([{"Ticker": m["t"], "%": round(m["pct"], 1),
+                _pinned_df(pd.DataFrame([{"Ticker": m["t"], "%": round(m["pct"], 1),
                                             "Last": round(m["last"], 2)} for m in _F["movers_dn"]]),
                              hide_index=True, use_container_width=True)
         with _g2:
             if _F["cross"]:
                 st.markdown("**🌐 Cross-asset**")
-                st.dataframe(pd.DataFrame([{"Asset": c["name"], "%": round(c["pct"], 2),
+                _pinned_df(pd.DataFrame([{"Asset": c["name"], "%": round(c["pct"], 2),
                                             "Level": round(c["last"], 2)} for c in _F["cross"]]),
                              hide_index=True, use_container_width=True)
             if _F.get("book") and _F["book"]["tickers"]:
                 st.markdown("**💼 Your book today**")
-                st.dataframe(pd.DataFrame([
+                _pinned_df(pd.DataFrame([
                     {"Ticker": t["tk"], "Underlying %": round(t["pct"], 1),
                      "Effect": ("tailwind" if (t["pct"] > 0) == (t["dir"] >= 0) else "headwind")}
                     for t in _F["book"]["tickers"]]), hide_index=True, use_container_width=True)
@@ -21531,7 +21579,7 @@ if page == "🔎 Smart-Money Flow":
             _u["Spot"] = _u["ticker"].str.upper().map(_sk["spot"])
             _u["Where (top ΔOI call)"] = _u["ticker"].str.upper().map(_sk["doi"]).fillna("—")
             st.markdown("**Most bullish positioning — call OI building, low PCR, calls over puts**")
-            st.dataframe(_u[["ticker", "Spot", "Where (top ΔOI call)", "call_chg", "call_oi", "pcr_oi", "cpv"]].rename(columns={
+            _pinned_df(_u[["ticker", "Spot", "Where (top ΔOI call)", "call_chg", "call_oi", "pcr_oi", "cpv"]].rename(columns={
                 "call_chg": "Call ΔOI", "call_oi": "Call OI", "pcr_oi": "PCR", "cpv": "Call/Put vol"}),
                 hide_index=True, use_container_width=True,
                 column_config={"PCR": st.column_config.NumberColumn(format="%.2f"),
@@ -21552,7 +21600,7 @@ if page == "🔎 Smart-Money Flow":
             with st.spinner("Fetching long-dated option chains…"):
                 _ldf = _leaps_screen(tuple(_lt[:18]))
             if _ldf is not None and not _ldf.empty:
-                st.dataframe(_ldf, hide_index=True, use_container_width=True)
+                _pinned_df(_ldf, hide_index=True, use_container_width=True)
                 st.caption("**Top strike (where)** = the single strike holding the most call OI in the "
                            "longest-dated expiry — the LEAPS level big money is parked at, with its last premium.")
             else:
@@ -21562,7 +21610,7 @@ if page == "🔎 Smart-Money Flow":
             _s["Spot"] = _s["ticker"].str.upper().map(_sk["spot"])
             _s["Where (most-traded call)"] = _s["ticker"].str.upper().map(_sk["vol"]).fillna("—")
             st.markdown("**Hot speculation — highest call volume / open-interest turnover (fresh, aggressive)**")
-            st.dataframe(_s[["ticker", "Spot", "Where (most-traded call)", "call_turnover", "cpv", "call_vol"]].rename(columns={
+            _pinned_df(_s[["ticker", "Spot", "Where (most-traded call)", "call_turnover", "cpv", "call_vol"]].rename(columns={
                 "call_turnover": "Call turnover×", "cpv": "Call/Put vol", "call_vol": "Call vol"}),
                 hide_index=True, use_container_width=True,
                 column_config={"Call turnover×": st.column_config.NumberColumn(format="%.2f"),
@@ -21588,7 +21636,7 @@ if page == "🔎 Smart-Money Flow":
                     fr["Spot"] = fr["ticker"].str.upper().map(_sk["spot"])
                     fr[opt_col] = fr["ticker"].str.upper().map(opt_map).fillna("—")
                     fr["ticker"] = fr["ticker"] + np.where(fr["split"], " ⚡", "")
-                    st.dataframe(fr[["ticker", "Spot", opt_col, "vol_x", "r1", "r5", "r20"]].rename(
+                    _pinned_df(fr[["ticker", "Spot", opt_col, "vol_x", "r1", "r5", "r20"]].rename(
                         columns={"ticker": "Ticker", "vol_x": "Vol vs 20d×", "r1": "1d %",
                                  "r5": "5d %", "r20": "20d %"}),
                         hide_index=True, use_container_width=True,
@@ -21658,7 +21706,7 @@ if page == "💡 Action Board":
                        " — highest-conviction ideas on the board.")
         _adf = pd.DataFrame([{k: i[k] for k in ("⭐", "Source", "Ticker", "Bias", "Why", "Trade")}
                              for i in _abi])
-        st.dataframe(_adf, hide_index=True, use_container_width=True)
+        _pinned_df(_adf, hide_index=True, use_container_width=True)
         with st.expander("ℹ️ How to read this board"):
             st.markdown(
                 "- **Source**: which indicator produced the idea (same engines as the bot commands)\n"
@@ -21716,7 +21764,7 @@ if page == "💡 Action Board":
             else:
                 _opn["Src"] = _opn["Notes"].fillna("").map(
                     lambda s: "💡 idea" if str(s).startswith("ActionBoard") else "✋ mine")
-                st.dataframe(_opn.drop(columns=["Notes"]), hide_index=True, use_container_width=True)
+                _pinned_df(_opn.drop(columns=["Notes"]), hide_index=True, use_container_width=True)
                 st.caption("💡 idea = added from this board (paper) · ✋ mine = manually entered. "
                            "Live P&L, events and exit advice: **🎯 Next-Day Exit Planner**.")
         except Exception as _e:
@@ -21771,7 +21819,7 @@ if page == "🎯 High-Prob Options":
         else:
             _mp, _dw = st.session_state.get("_hiprob_meta", (_minpop, _dtew))
             _df = pd.DataFrame([{k: v for k, v in d.items() if not k.startswith("_")} for d in _res])
-            st.dataframe(_df, hide_index=True, use_container_width=True,
+            _pinned_df(_df, hide_index=True, use_container_width=True,
                          column_config={"POP %": st.column_config.NumberColumn(format="%.1f%%")})
             st.success(f"**{len(_res)} setups ≥{_mp}% POP.** Sells collect premium (high win-rate, defined/"
                        "cash-secured risk); the ITM debit spread is a directional buy with a built-in cushion.")
@@ -22030,7 +22078,7 @@ if page == "🎯 High-Prob Options":
                            f"{_evs/max(_dep,1)*100:+.1f}% on deployed",
                            help="Model EV from POP — NOT a forecast. POP itself is "
                                 "BS-derived and unvalidated on this book.")
-                st.dataframe(_bk.drop(columns=["rec_id"]), hide_index=True,
+                _pinned_df(_bk.drop(columns=["rec_id"]), hide_index=True,
                              use_container_width=True)
 
                 # basket-level read — the "so what" above the row detail
@@ -22102,7 +22150,7 @@ if page == "🎯 High-Prob Options":
                 })
             if _rows:
                 _bt = pd.DataFrame(_rows)
-                st.dataframe(_bt, hide_index=True, use_container_width=True)
+                _pinned_df(_bt, hide_index=True, use_container_width=True)
                 if (_bt["Settled"] > 0).any():
                     _eq = _bt[_bt["Settled"] > 0].sort_values("#")
                     _fig_eq = go.Figure(go.Bar(x=_eq["#"].astype(str), y=_eq["Realized P&L"],
@@ -22135,7 +22183,7 @@ if page == "🎯 High-Prob Options":
                                      (_tabM, _sp["_d"].dt.strftime("%Y-%m"), "month")):
                 with _tab:
                     _g = _sp.groupby(_key).apply(_agg, include_groups=False).reset_index(names=_fmt)
-                    st.dataframe(_g.sort_values(_fmt, ascending=False), hide_index=True,
+                    _pinned_df(_g.sort_values(_fmt, ascending=False), hide_index=True,
                                  use_container_width=True)
         else:
             for _tab in (_tabD, _tabW, _tabM):
@@ -22150,7 +22198,7 @@ if page == "🎯 High-Prob Options":
                     with _col:
                         st.markdown(f"**P&L by {_dim}**")
                         _g = _sp.groupby(_dim).apply(_agg, include_groups=False).reset_index()
-                        st.dataframe(_g.sort_values("P&L $", ascending=False), hide_index=True,
+                        _pinned_df(_g.sort_values("P&L $", ascending=False), hide_index=True,
                                      use_container_width=True)
 
         # ── the full ledger (filtered) ──
@@ -22162,7 +22210,7 @@ if page == "🎯 High-Prob Options":
             "spot0": "Spot @rec", "capital": "Capital $", "status": "Status",
             "settle_px": "Settle px", "pnl": "P&L $"})
         _disp["Status"] = _disp["Status"].map({"OPEN": "⏳ OPEN", "WIN": "🟢 WIN", "LOSS": "🔴 LOSS"}).fillna(_disp["Status"])
-        st.dataframe(_disp, hide_index=True, use_container_width=True,
+        _pinned_df(_disp, hide_index=True, use_container_width=True,
                      column_config={"POP %": st.column_config.NumberColumn(format="%.0f%%"),
                                     "Capital $": st.column_config.NumberColumn(format="$%.0f"),
                                     "P&L $": st.column_config.NumberColumn(format="$%.0f")})
@@ -22214,7 +22262,7 @@ if page == "📐 Spreads Scanner":
                 _kind = {"Bull Call": "debit · bullish", "Bear Call": "credit · bearish/neutral", "Bear Put": "debit · bearish"}[_s]
                 st.markdown(f"#### {_emoji} {_s} spreads  \n*{_kind}*")
                 _df = pd.DataFrame([{k: v for k, v in d.items() if not k.startswith("_")} for d in _sub])
-                st.dataframe(_df, hide_index=True, use_container_width=True,
+                _pinned_df(_df, hide_index=True, use_container_width=True,
                              column_config={"Score": st.column_config.ProgressColumn(format="%.0f", min_value=0, max_value=100),
                                             "POP %": st.column_config.NumberColumn(format="%.1f%%")})
             st.caption("⚠️ Score blends probability, payoff, cushion and liquidity — it is not a guarantee. "
@@ -22243,7 +22291,7 @@ if page == "🎡 Wheel / CSP":
         st.markdown("#### 💰 Cash-secured puts  \n*get paid to wait — assigned = buy the stock at a discount*")
         if _csp:
             _df = pd.DataFrame([{k: v for k, v in d.items() if not k.startswith("_")} for d in _csp])
-            st.dataframe(_df, hide_index=True, use_container_width=True,
+            _pinned_df(_df, hide_index=True, use_container_width=True,
                          column_config={"Score": st.column_config.ProgressColumn(format="%.0f", min_value=0, max_value=100),
                                         "POP %": st.column_config.NumberColumn(format="%.1f%%"),
                                         "P(assign) %": st.column_config.NumberColumn(format="%.1f%%")})
@@ -22254,7 +22302,7 @@ if page == "🎡 Wheel / CSP":
         st.markdown("#### 📞 Covered calls  \n*assumes 100 shares held — income + capped upside*")
         if _cc:
             _df2 = pd.DataFrame([{k: v for k, v in d.items() if not k.startswith("_")} for d in _cc])
-            st.dataframe(_df2, hide_index=True, use_container_width=True,
+            _pinned_df(_df2, hide_index=True, use_container_width=True,
                          column_config={"Score": st.column_config.ProgressColumn(format="%.0f", min_value=0, max_value=100),
                                         "P(keep shares) %": st.column_config.NumberColumn(format="%.1f%%")})
         else:
@@ -22490,7 +22538,7 @@ if page == "⚙️ Strategy Scanners":
     if _ss_df is not None:
         st.caption(f"Results — {st.session_state.get('_ss_for', '')}")
         if isinstance(_ss_df, pd.DataFrame) and not _ss_df.empty:
-            st.dataframe(_ss_df, hide_index=True, use_container_width=True)
+            _pinned_df(_ss_df, hide_index=True, use_container_width=True)
         else:
             st.warning("No results / data unavailable for this scanner right now.")
     else:
@@ -22633,7 +22681,7 @@ if page == "🏁 Spread Backtest":
             st.markdown(f"**{_bt['ticker']}** · {_bt['dte']}-day spreads · target {int(_bt['pt']*100)}% / "
                         f"stop {int(_bt['lt']*100)}% · {_bt['from']} → {_bt['to']}")
             _df = pd.DataFrame(_bt["rows"])
-            st.dataframe(_df, hide_index=True, use_container_width=True,
+            _pinned_df(_df, hide_index=True, use_container_width=True,
                          column_config={"TP hit %": st.column_config.NumberColumn(format="%.1f%%"),
                                         "SL hit %": st.column_config.NumberColumn(format="%.1f%%"),
                                         "Neither %": st.column_config.NumberColumn(format="%.1f%%")})
@@ -23117,17 +23165,17 @@ if page == "📡 Macro/Event Hub":
                     _mine = _disp[_disp["Ticker"].isin(_phl)]
                     if not _mine.empty:
                         st.markdown("##### ⭐ Your open positions, ranked")
-                        st.dataframe(_mine, hide_index=True, use_container_width=True,
+                        _pinned_df(_mine, hide_index=True, use_container_width=True,
                                      column_config=_mom_cc)
 
                 _lc, _rc = st.columns(2)
                 with _lc:
                     st.markdown("##### 🟢 Top momentum — long bias")
-                    st.dataframe(_disp.head(12), hide_index=True, use_container_width=True,
+                    _pinned_df(_disp.head(12), hide_index=True, use_container_width=True,
                                  column_config=_mom_cc)
                 with _rc:
                     st.markdown("##### 🔴 Bottom momentum — short / avoid")
-                    st.dataframe(_disp.tail(12).iloc[::-1], hide_index=True,
+                    _pinned_df(_disp.tail(12).iloc[::-1], hide_index=True,
                                  use_container_width=True, column_config=_mom_cc)
 
                 try:
@@ -23194,7 +23242,7 @@ if page == "📡 Macro/Event Hub":
                                     "MoM": f"{_lt[2]-_pv[2]:+,.0f}", "YoY": f"{_lt[2]-_ya[2]:+,.0f}",
                                     "As of": _asof})
                 if _rb:
-                    st.dataframe(pd.DataFrame(_rb), hide_index=True, use_container_width=True)
+                    _pinned_df(pd.DataFrame(_rb), hide_index=True, use_container_width=True)
                 _cpi = _bls.get("CPI", [])
                 if len(_cpi) > 13:
                     _ser = [{"Month": f"{_cpi[i][0]}-{_cpi[i][1]:02d}",
@@ -23212,7 +23260,7 @@ if page == "📡 Macro/Event Hub":
                     _yc1, _yc2 = st.columns([1, 1])
                     with _yc1:
                         st.markdown("**Treasury yields**")
-                        st.dataframe(pd.DataFrame([
+                        _pinned_df(pd.DataFrame([
                             {"Tenor": k, "Yield": f"{_y[k]['last']:.2f}%",
                              "1d": f"{(_y[k]['last']-_y[k]['prev'])*100:+.0f}bp"} for k in _order]),
                             hide_index=True, use_container_width=True)
@@ -23269,7 +23317,7 @@ if page == "📡 Macro/Event Hub":
                         _ra.append({"Indicator": _nm, "Latest": f"{_d['latest']:,.1f} {_d['unit']}",
                                     "Chg": _chg, "YoY": _yoy, "As of": _d["date"]})
                     st.markdown("**🏦 AlphaVantage indicators**")
-                    st.dataframe(pd.DataFrame(_ra), hide_index=True, use_container_width=True)
+                    _pinned_df(pd.DataFrame(_ra), hide_index=True, use_container_width=True)
             except Exception as e:
                 st.caption(f"AlphaVantage indicators unavailable: {e}")
             # ── JPMorgan collar (JHEQX) — quarterly SPX hedge, watched as support/resistance ──
@@ -23277,7 +23325,7 @@ if page == "📡 Macro/Event Hub":
                 _jc = _jpm_collar()
                 if _jc:
                     st.markdown("**🛡️ JPMorgan collar (JHEQX) — quarterly SPX hedge, watched as support/resistance**")
-                    st.dataframe(pd.DataFrame([
+                    _pinned_df(pd.DataFrame([
                         {"Quarter (period end)": q["period"],
                          "Put floor (short put)": q["short_put"],
                          "Protection (long put)": q["long_put"],
@@ -23366,7 +23414,7 @@ if page == "📡 Macro/Event Hub":
                     _los = "Highly leveraged / speculative names most sensitive to liquidity swings"
                     _idea = "Neutral liquidity → range strategies (iron condors), be selective on direction."
                 st.markdown("**📊 Stock-market impact — winners / losers / trade idea**")
-                st.dataframe(pd.DataFrame([
+                _pinned_df(pd.DataFrame([
                     {"Read": "🟢 Beneficiaries", "Detail": _win},
                     {"Read": "🔴 Pressured", "Detail": _los},
                     {"Read": "🎯 Trade idea", "Detail": _idea}]), hide_index=True, use_container_width=True)
@@ -23395,10 +23443,10 @@ if page == "📡 Macro/Event Hub":
                 if _regime:
                     st.success(f"**Current regime:** {_regime}.")
                 st.markdown("**📅 Key macro events to watch**")
-                st.dataframe(pd.DataFrame(_ev), hide_index=True, use_container_width=True)
+                _pinned_df(pd.DataFrame(_ev), hide_index=True, use_container_width=True)
                 if _ideas:
                     st.markdown("**🎯 Impacted assets & leans** _(educational — not investment advice)_")
-                    st.dataframe(pd.DataFrame(_ideas), hide_index=True, use_container_width=True)
+                    _pinned_df(pd.DataFrame(_ideas), hide_index=True, use_container_width=True)
                 # flag the user's open-position tickers that sit in impacted ETFs/sectors
                 try:
                     with get_conn() as _pc:
@@ -23454,7 +23502,7 @@ if page == "🌍 Global Opportunities":
             if rows:
                 _df = pd.DataFrame(rows).sort_values(["_score", "3m %"], ascending=False).drop(columns="_score")
                 st.markdown(f"**🏁 {title} — strongest inflows first**")
-                st.dataframe(_df, hide_index=True, use_container_width=True,
+                _pinned_df(_df, hide_index=True, use_container_width=True,
                              column_config={c: st.column_config.NumberColumn(format="%d%%")
                                             for c in ["3m %", "6m %", "vs SPY", "% 52w hi"]})
 
@@ -23485,7 +23533,7 @@ if page == "🌍 Global Opportunities":
             _earlies = sorted([x for x in _allf if x["Stage"] in ("🌱 Early", "🚀 Accelerating", "🟡 Building")],
                               key=lambda x: -x["_e"])
             if _earlies:
-                st.dataframe(pd.DataFrame([{k: v for k, v in x.items() if not k.startswith("_")}
+                _pinned_df(pd.DataFrame([{k: v for k, v in x.items() if not k.startswith("_")}
                                            for x in _earlies[:12]]), hide_index=True, use_container_width=True,
                              column_config={c: st.column_config.NumberColumn(format="%d%%")
                                             for c in ["1m %", "3m %", "vs SPY", "%52w hi"]})
@@ -23870,7 +23918,7 @@ if page == "👀 Watchlist":
                          "Signal", "Src", "Note", "Added"]
             _wl_disp = _cls_show.drop(columns=["id", "Class", "_52hi", "_52lo", "_hist"],
                                       errors="ignore")
-            st.dataframe(_wl_disp, use_container_width=True, hide_index=True,
+            _pinned_df(_wl_disp, use_container_width=True, hide_index=True,
                          column_config=_wl_cfg,
                          column_order=[c for c in _wl_order if c in _wl_disp.columns])
             st.caption("↔️ Ticker, Company and Spot stay pinned when you scroll right · "
@@ -24214,11 +24262,11 @@ if page == "📝 Paper Trading":
                 _pt_total[_c] = round(_pt_show[_c].sum())
         _pt_show = pd.concat([_pt_show, pd.DataFrame([_pt_total])], ignore_index=True)
         try:
-            st.dataframe(_pt_show.drop(columns=["id"]).style.set_properties(
+            _pinned_df(_pt_show.drop(columns=["id"]).style.set_properties(
                              subset=["Current Price"], **{"font-weight": "bold"}),
                          use_container_width=True, hide_index=True)
         except Exception:
-            st.dataframe(_pt_show.drop(columns=["id"]), use_container_width=True, hide_index=True)
+            _pinned_df(_pt_show.drop(columns=["id"]), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.markdown("**Close a demo position** (closing a multi-lot stock position closes ALL its lots)")

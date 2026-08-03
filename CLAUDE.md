@@ -15,10 +15,14 @@
 - Git: commit to `main` directly, only when asked. Console prints ASCII-only (Windows cp1252 crashes on ✔/σ/–).
 - "test" = validate signal vs DB history (hit-rate vs baseline), not "it runs". Recipe in `.claude/rules/bot-conventions.md`.
 - **HARD RULE (2026-07-24, after shipping the SAME broken UI fix twice unverified — see LOG.md):** any Streamlit UI/markdown/HTML change must be verified with a live **headless-browser DOM check** (Playwright: load the real URL, read `inner_text()`/query the DOM) before calling it done. `py_compile` only proves syntax; `curl` only proves the server responds (Streamlit is client-rendered — curl never sees the real page). Neither catches a rendering bug. This is mandatory, not optional, for any change where the RESULT is something a user looks at on screen.
-- **The tracker is the ONLY source of pending work** (user 2026-08-03). Never type a status
-  table from memory — always READ `docs/IDEA_TRACKER.xlsx` (sheet `Ideas & Questions`) and print
-  what it says. A memory-written summary already went out stale once, omitting a P1 the sheet
-  did contain. Every ask goes in the sheet; every "what's pending" answer comes out of it.
+- **LOG TO THE SHEET FIRST — every question and every idea, before answering** (user 2026-08-03).
+  The order is: (1) write the row into `docs/IDEA_TRACKER.xlsx`, (2) then answer or build.
+  Not after, not "if it turns into work" — a question IS an item, because the answer is what
+  gets lost. This applies to throwaway-sounding questions too ("why is X zero", "what is this
+  column"): those are precisely the ones that vanished.
+- **The tracker is the ONLY source of pending work.** Never type a status table from memory —
+  READ the sheet (`python tools/show_pending.py`) and print what it says. A memory-written
+  summary already went out stale once, omitting a P1 the sheet did contain.
 - **Mid-turn messages: log first, finish current task, then work in order** (user 2026-08-03).
   When the user sends a message while a change is in flight: (1) finish the in-flight edit and
   verify it, (2) add EVERY new ask as a row in `docs/IDEA_TRACKER.xlsx` immediately — before

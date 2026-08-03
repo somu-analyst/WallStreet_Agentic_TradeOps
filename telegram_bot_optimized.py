@@ -26371,7 +26371,7 @@ async def digest_command(update, ctx):
     _ed = (ctx.args[0].lower() if ctx.args else None)
     if _ed not in ("morning", "midday", "evening"):
         # default to whatever edition suits the current NY session
-        _h = datetime.now(ZoneInfo("America/New_York")).hour
+        _h = _et_now().hour
         _ed = "morning" if _h < 11 else ("midday" if _h < 15 else "evening")
     conn = get_conn()
     try:
@@ -34434,6 +34434,18 @@ def _bs_vanna_charm(S, K, T, sigma, r=0.045):
     except Exception:
         return (0.0, 0.0)
 
+def _is_opex_date(d):
+    """True if `d` is a monthly OpEx: the third Friday of its month.
+
+    Monthly OpEx carries far more open interest than a weekly, so charm/gamma effects
+    concentrate there. Worth flagging separately from "the next expiry" (user 2026-08-03).
+    """
+    try:
+        return d.weekday() == 4 and 15 <= d.day <= 21
+    except Exception:
+        return False
+
+
 def _compute_vanna_charm(ticker, conn, spot, want_exp=None):
     """Net dealer vanna/charm exposure for the nearest liquid expiry."""
     out = {"vex": 0.0, "charm": 0.0, "note": "", "expiry": None}
@@ -34457,11 +34469,17 @@ def _compute_vanna_charm(ticker, conn, spot, want_exp=None):
             conn, params=(ticker, date_str))
     except Exception:
         return out
+    # DTE from TODAY, not from the capture date. The chain is captured at EOD and read for
+    # days afterwards, so measuring against `ref` kept offering an expiry that had ALREADY
+    # EXPIRED (07-31 shown as "0d" on 08-03) and computing greeks for it (2026-08-03).
+    # NOTE: _hiprob_scan_asof deliberately does NOT do this -- it replays history as-of a
+    # past date, where DTE relative to that date is the correct quantity.
+    _today_live = _et_now().date()
     cand = []
     for _, e in edf.iterrows():
         ed = _opex_parse_date(e["expiry_date"])
         if ed:
-            dte = (ed - ref).days
+            dte = (ed - _today_live).days
             if dte >= 0:
                 cand.append((dte, float(e["oi"] or 0), str(e["expiry_date"])))
     if not cand:
@@ -34982,7 +35000,7 @@ def _fmt_vanna_report(ticker, conn, spot):
     if _ref is not None and _ex is not None and not _ex.empty:
         # DTE must be measured from TODAY, not from the capture date. Off by even two days
         # this showed an already-EXPIRED contract as "0d / strong pull" (2026-08-03).
-        _today = datetime.now(ZoneInfo("America/New_York")).date()
+        _today = _et_now().date()
         _cands = []
         for _, e in _ex.iterrows():
             ed = _opex_parse_date(e["expiry_date"])
@@ -34992,7 +35010,14 @@ def _fmt_vanna_report(ticker, conn, spot):
             if 0 <= d <= 90:
                 _cands.append((d, float(e["oi"] or 0), str(e["expiry_date"])))
         _cands.sort(key=lambda c: c[0])
-        for d, _oi, exp in _cands[:5]:
+        _pick = _cands[:5]
+        # always include the next monthly OpEx, even when five weeklies come first --
+        # it is where the open interest and therefore the hedging pressure actually sits
+        _opx = next((c for c in _cands
+                     if _opex_parse_date(c[2]) and _is_opex_date(_opex_parse_date(c[2]))), None)
+        if _opx and _opx not in _pick:
+            _pick = _pick[:4] + [_opx]
+        for d, _oi, exp in _pick:
             v = _compute_vanna_charm(ticker, conn, spot, want_exp=exp)
             if not v:
                 continue
@@ -35000,8 +35025,10 @@ def _fmt_vanna_report(ticker, conn, spot):
             # Charm is a decay effect: it barely matters at 60 DTE and dominates in the
             # last week, so weight the READ by how close expiry is.
             _bite = "strong" if d <= 7 else ("building" if d <= 21 else "weak")
+            _ed = _opex_parse_date(exp)
+            _tag = " OPEX" if (_ed and _is_opex_date(_ed)) else ""
             _rows.append(("🟢" if _chm > 0 else ("🔴" if _chm < 0 else "🟡"),
-                          _exp_iso(exp)[5:10], f"{d}d",
+                          _exp_iso(exp)[5:10] + _tag, f"{d}d",
                           f"{_vex/1e6:+.1f}", f"{_chm/1e6:+.1f}", _bite))
     if _rows:
         lines.append(_pipe_table(("ST", "Expiry", "DTE", "Vanna", "Charm", "Pull"), _rows,

@@ -299,12 +299,26 @@ def compute_walls(df, spot=None):
         p = d["openInt_Put_now"].fillna(0.0) if "openInt_Put_now" in d.columns else pd.Series(0.0, index=d.index)
         mean_c = float(c[c > 0].mean()) if (c > 0).any() else 0.0
         mean_p = float(p[p > 0].mean()) if (p > 0).any() else 0.0
-        if (c > 0).any():
-            ci = c.idxmax()
+        # A wall only MEANS anything relative to spot: the call wall is resistance ABOVE
+        # price, the put wall is support BELOW it. Taking the global max-OI strike per side
+        # ignored that and produced structurally impossible output -- GOOG printed a call
+        # wall of 375 with a PUT wall of 380, i.e. the "floor" sitting above the "ceiling",
+        # both above a spot of 356 (user 2026-08-03). Restrict each side to its own half of
+        # the chain, and only fall back to the unconstrained max if that half is empty.
+        _above = d["strike"] >= (spot if spot and spot > 0 else -1e18)
+        _below = d["strike"] <= (spot if spot and spot > 0 else 1e18)
+        _c_side = c.where(_above, 0.0) if (spot and spot > 0) else c
+        _p_side = p.where(_below, 0.0) if (spot and spot > 0) else p
+        if not (_c_side > 0).any():
+            _c_side = c                       # nothing quoted above spot — use what we have
+        if not (_p_side > 0).any():
+            _p_side = p
+        if (_c_side > 0).any():
+            ci = _c_side.idxmax()
             out["call_wall"] = float(d.loc[ci, "strike"]); out["call_wall_oi"] = float(c.loc[ci])
             out["call_wall_strength"] = (out["call_wall_oi"] / mean_c) if mean_c > 0 else 0.0
-        if (p > 0).any():
-            pi = p.idxmax()
+        if (_p_side > 0).any():
+            pi = _p_side.idxmax()
             out["put_wall"] = float(d.loc[pi, "strike"]); out["put_wall_oi"] = float(p.loc[pi])
             out["put_wall_strength"] = (out["put_wall_oi"] / mean_p) if mean_p > 0 else 0.0
     except Exception:

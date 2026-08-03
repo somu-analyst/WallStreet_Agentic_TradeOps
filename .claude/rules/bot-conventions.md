@@ -78,3 +78,32 @@ POSITIVES); positive results from it must be re-tested.
 - `@st.cache_data(ttl=60)` on yfinance readers (`_cached_history/_cached_price/load_oi_for_date/load_stock_daily`); `ttl=30` `_cached_trades`. Never `st.cache_data.clear()` app-wide — clear per function.
 - Nested `st.expander` is forbidden → use `st.toggle` for inner reveals.
 - STOCK legs: guard every Black-Scholes call site (`typ=="stock"` / K>0) — shares are linear.
+
+### ⛔ Never tune a parameter on the data you then judge it on (2026-08-02)
+The pooled t-stat was one way this project manufactured edge; **in-sample fitting is the
+other**. Picking a lookback / threshold / weight over all history and then reporting its
+score on that same history is not a backtest, it is a description of the past.
+
+**Anything that CHOOSES a parameter must go through `tools/walkforward.py`.**
+Anything that only scores a FIXED signal may call `daily_ic` directly.
+
+```python
+from walkforward import walk_forward, daily_ic, sanity_gate
+walk_forward(px, fit, signal, horizon=5, n_folds=5)   # fit() sees TRAIN ONLY
+```
+
+Rules the harness enforces:
+- **Expanding window.** Fold k trains up to d_k, tests on (d_k, d_k+h]. Never trains on
+  anything after its own test window.
+- **Refit inside every fold.** Choosing one parameter over all history and then "walking
+  it forward" is still in-sample.
+- The train window stops `horizon` short, or its last labels peek into the test window.
+- Test ICs are de-overlapped by the horizon before any t-test (same reason as the ban above).
+- **Judge on the pooled TEST folds only.** Train IC is printed alongside on purpose: a large
+  positive **train−test gap is the overfitting signal**.
+
+**Self-test on the real DB (120 tickers x 1400 days, 2026-08-02):** cross-sectional momentum
+with the lookback refit per fold scored train IC +0.0179 vs test IC +0.0113 — pooled test
+t=+0.75, p=0.49, **does not survive**. Note fold 5 alone reads +0.066 (t=+1.89); a single
+flattering fold is exactly what an ad-hoc backtest would have reported. Sanity gate on the
+same panel: 2.5% of random signals passed (expect ~5%).

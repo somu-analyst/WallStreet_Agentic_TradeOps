@@ -49,7 +49,8 @@ ROWS = [
  "Re-run each with daily cross-sectional IC"),
 (8,"2026-07-31","Claude","Methodology","Walk-forward convention (enforced train/test)",
  "Backtests are done ad-hoc; no enforced standard",
- "QUEUED","","Prerequisite for any alpha-search work","-","P1","-"),
+ "DONE","2026-08-02",
+ "Built tools/walkforward.py as the standard: expanding-window folds, parameter REFIT inside each fold on train only, train window stopped `horizon` short so its labels cannot peek into test, test ICs de-overlapped before any t-test, judgement on pooled TEST folds only. Convention written into .claude/rules/bot-conventions.md. Self-test on 120 tickers x 1400 days: momentum with a per-fold refit scores train IC +0.0179 vs test +0.0113, pooled t=+0.75 p=0.49 - does NOT survive; fold 5 alone reads +0.066 (t=+1.89), which is what an ad-hoc backtest would have reported. Sanity gate 2.5% (expect 5%)","-","P1","-"),
 # ---------------------------------------------------------------- rec engine
 (9,"2026-07-31","User","Strategy","Backtest all settled recommendations",
  "311 settled recs (236 LIVE, 75 BACKFILL)",

@@ -321,6 +321,18 @@ ROWS = [
  "User: what is this, give a trade-oriented message",
  "DONE","2026-08-03","Added _pairs_plan(): converts a z-score into an actual trade - share counts per leg sized off the beta hedge ratio on $10k gross, target (z->0) with expected $, stop (z widens 1 sd) with expected loss, reward:risk, and a TIME STOP at 2x half-life on the reasoning that if it has not reverted in the time the model implies, the relationship has changed rather than the trade being early. Kept the uncapped-loss / needs-borrow warning explicit",
  "-","P2","-"),
+(87,"2026-08-03","User","Bug","/vrp took ~44 minutes",
+ "User reported /vrp is very slow",
+ "DONE","2026-08-03","Profiled rather than guessed: _iv_rank measured 5.6 SECONDS per ticker x 471 in SCAN_UNIVERSE = ~2,637s. Same anti-pattern already fixed in _uoa_scan - read a ticker whole options history then walk it with groupby+iterrows calling strptime on every row against 4 candidate formats. DB dates are ISO so one vectorised to_datetime replaces all of it, and one bulk query replaces 471. Result: cold 55.7s, warm 4.4s (47x). Regression-tested against the retained legacy implementation on 8 tickers: iv and rank identical to 5 decimal places, 8/8",
+ "-","P1","Cold path is still 55.7s; the remaining cost is _daily_ohlc per ticker if it needs further work"),
+(88,"2026-08-03","Claude","Bug","Two functions named _iv_rank; the yfinance one is dead",
+ "Found while profiling /vrp",
+ "DONE","2026-08-03","_iv_rank(sym) at line ~1344 (yfinance HV-based) is shadowed by _iv_rank(conn, tk) at ~24750 defined later. The first is unreachable dead code. Left in place for now and documented rather than deleted mid-perf-work",
+ "-","P3","Delete the shadowed yfinance _iv_rank after confirming zero call sites"),
+(89,"2026-08-03","User","Docs","Runbook: run each surface standalone + clone/bootstrap",
+ "User asked for git commands to run streamlit/telegram independently and to clone/organize",
+ "QUEUED","","Established the components are ALREADY independent - ensure_streamlit_running() is only called on the terminal tap, not at startup, so CLAUDE.md claim that the bot auto-launches the dashboard is misleading. A fresh clone will NOT run: token.txt / api_keys.enc / *.db / openbb_chains are all gitignored, and api_keys.enc is machine-bound so it cannot simply be copied",
+ "-","P2","Write docs/RUNBOOK.md: standalone commands + clone -> venv -> requirements -> restore DB from G:/My Drive/NYSE_backup -> recreate api_keys.env -> first run"),
 ]
 
 def build():

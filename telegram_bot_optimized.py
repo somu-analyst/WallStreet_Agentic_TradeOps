@@ -24747,13 +24747,90 @@ def _finnhub_sentiment(tk):
 
 _IVR_CACHE = {}
 
+def _iv_rank_frame(conn, tickers):
+    """ATM IV history for MANY tickers in one pass. Returns {TICKER: [iv, iv, ...]}.
+
+    PERF (2026-08-03): the per-ticker version measured 5.6 SECONDS each, so /vrp over the
+    471-name SCAN_UNIVERSE needed ~44 minutes and was effectively unusable. Cause was the
+    same anti-pattern already fixed in _uoa_scan: read a ticker's whole options history,
+    then walk it with groupby + iterrows and call strptime on every row against four
+    candidate formats. DB dates are ISO (see CLAUDE.md), so one vectorised to_datetime
+    replaces all of it, and one query replaces 471.
+    """
+    tks = sorted({str(t).upper() for t in tickers})
+    if not tks:
+        return {}
+    _ph = ",".join("?" * len(tks))
+    df = pd.read_sql(
+        f"SELECT UPPER(ticker) AS tk, trade_date_now AS d, strike, expiry_date, "
+        f"lastPrice_Call_now AS prem FROM options_change "
+        f"WHERE UPPER(ticker) IN ({_ph}) AND lastPrice_Call_now > 0", conn, params=tks)
+    sd = pd.read_sql(
+        f"SELECT UPPER(ticker) AS tk, trade_date AS d, close FROM stock_daily "
+        f"WHERE UPPER(ticker) IN ({_ph})", conn, params=tks)
+    if df.empty or sd.empty:
+        return {}
+    df = df.merge(sd, on=["tk", "d"], how="inner")
+    df["_d"] = pd.to_datetime(df["d"], errors="coerce")
+    df["_e"] = pd.to_datetime(df["expiry_date"], errors="coerce")
+    df = df.dropna(subset=["_d", "_e", "close"])
+    df["dte"] = (df["_e"] - df["_d"]).dt.days
+    df = df[(df.dte >= 10) & (df.dte <= 70) & (df.close > 0) & (df.prem > 0)]
+    if df.empty:
+        return {}
+    # nearest-the-money contract per (ticker, date) -- was an inner loop over every row
+    df["dist"] = (df["strike"].astype(float) - df["close"].astype(float)).abs()
+    idx = df.groupby(["tk", "d"])["dist"].idxmin()
+    atm = df.loc[idx]
+    out = {}
+    for tk, g in atm.sort_values("d").groupby("tk"):
+        ivs = []
+        for prem, spot, K, dte in zip(g["prem"], g["close"], g["strike"], g["dte"]):
+            iv = _implied_vol_hp(float(prem), float(spot), float(K), float(dte) / 365.0)
+            if iv and 0.01 < iv < 5:
+                ivs.append(iv)
+        if ivs:
+            out[tk] = ivs
+    return out
+
+
+def _iv_rank_bulk(conn, tickers):
+    """{TICKER: {"iv","rank"}} for many tickers at once, warming the shared 30-min cache."""
+    import time as _t
+    now = _t.time()
+    todo = [t for t in {str(x).upper() for x in tickers}
+            if not (_IVR_CACHE.get(t) and now - _IVR_CACHE[t][0] < 1800)]
+    if todo:
+        frames = _iv_rank_frame(conn, todo)
+        for tk in todo:
+            ivs = frames.get(tk) or []
+            res = None
+            if len(ivs) >= 10:
+                cur, lo, hi = ivs[-1], min(ivs), max(ivs)
+                res = {"iv": cur, "rank": (cur - lo) / (hi - lo) * 100 if hi > lo else 50.0}
+            _IVR_CACHE[tk] = (now, res)
+    return {t: (_IVR_CACHE.get(t) or (0, None))[1] for t in
+            {str(x).upper() for x in tickers}}
+
+
 def _iv_rank(conn, tk):
-    """ATM IV rank over stored ~6mo premium history. Cached 30 min."""
+    """ATM IV rank over stored ~6mo premium history. Cached 30 min.
+
+    Single-ticker entry point; delegates to the vectorised bulk path so both routes share
+    one implementation and one cache.
+    """
     import time as _t
     now = _t.time()
     c = _IVR_CACHE.get(tk)
     if c and now - c[0] < 1800:
         return c[1]
+    return _iv_rank_bulk(conn, [tk]).get(str(tk).upper())
+
+
+def _iv_rank_legacy(conn, tk):
+    """Row-by-row original, kept only as documentation of what was replaced. Unused."""
+    import time as _t
+    now = _t.time()
     res = None
     try:
         df = pd.read_sql("SELECT trade_date_now, strike, expiry_date, lastPrice_Call_now "
@@ -31095,6 +31172,12 @@ def _vrp_scan(conn, tickers=None, rv_window=30, sell_thr=0.03, buy_thr=-0.02,
     """
     import numpy as _np
     tickers = tickers or SCAN_UNIVERSE
+    # ONE bulk pass warms the IV cache for the whole universe. Previously each ticker did
+    # its own full-history read plus a row-by-row loop: 5.6s x 471 = ~44 minutes.
+    try:
+        _iv_rank_bulk(conn, tickers)
+    except Exception:
+        log.debug("iv_rank bulk warm failed; falling back per-ticker", exc_info=True)
     rows = []
     for tk in tickers:
         tk = str(tk).upper()

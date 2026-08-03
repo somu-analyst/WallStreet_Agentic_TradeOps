@@ -15814,6 +15814,15 @@ async def morning_alert(ctx: ContextTypes.DEFAULT_TYPE):
             log.debug("suppressed exception", exc_info=True)
     if _mrows:
         parts.append(_pipe_table(tuple(_mhdr), _mrows, right_cols={2, 3}))
+    # World + FX. The brief previously covered only ES/NQ/VIX/Gold/Oil, so an overnight
+    # story like the yen or a Nikkei slide could not appear in it at all — the user asked
+    # why Japan was missing and the honest answer was that nothing was looking (ID 92).
+    try:
+        _wm = _plan_markets_snapshot()
+        if _wm:
+            parts.append(_wm)
+    except Exception:
+        log.debug("morning brief world block failed", exc_info=True)
 
     # Open positions check
     conn = get_conn()
@@ -25414,13 +25423,17 @@ _MKT_SPECS = [
     ("000001.SS", "Shanghai", 0, "Asia",     "CHN", "🇨🇳"),
     ("^NSEI",     "Nifty",    0, "Asia",     "IND", "🇮🇳"),
     ("^AXJO",     "ASX200",   0, "Asia",     "AUS", "🇦🇺"),
+    ("JPY=X",     "USD/JPY",  0, "FX",       None,  "🇯🇵"),
+    ("EURUSD=X",  "EUR/USD",  0, "FX",       None,  "🇪🇺"),
+    ("DX-Y.NYB",  "DXY",      0, "FX",       None,  "💵"),
+    ("^TNX",      "US 10Y",   0, "FX",       None,  "🏦"),
     ("GC=F",      "Gold",     1, "Commodity", None, "🥇"),
     ("SI=F",      "Silver",   1, "Commodity", None, "🥈"),
     ("CL=F",      "Oil",      1, "Commodity", None, "🛢️"),
     ("NG=F",      "NatGas",   1, "Commodity", None, "🔥"),
     ("HG=F",      "Copper",   1, "Commodity", None, "🟠"),
 ]
-_MKT_REGIONS = ("Americas", "Europe", "Asia", "Commodity")
+_MKT_REGIONS = ("Americas", "Europe", "Asia", "FX", "Commodity")
 
 
 def _plan_markets_rows():
@@ -25455,13 +25468,19 @@ def _plan_markets_snapshot(rows=None):
             em = "🟢" if r["pct"] > 0.3 else ("🔴" if r["pct"] < -0.3 else "🟡")
             if r["money"]:
                 px_s = f"${r['last']:,.0f}" if r["last"] >= 100 else f"${r['last']:.2f}"
+            elif r["region"] == "FX":
+                # Whole-number formatting made FX meaningless: EUR/USD printed as "1" and
+                # the 10Y as "5". Precision has to match the instrument (2026-08-03).
+                px_s = (f"{r['last']:.2f}%" if "10Y" in r["name"]
+                        else (f"{r['last']:.4f}" if r["last"] < 10 else f"{r['last']:.2f}"))
             else:
                 px_s = f"{r['last']:,.0f}"
             trs.append((em, f"{r['flag']}{r['name']}", px_s, f"{r['pct']:+.1f}%"))
         # a regional breadth read: what share of the region is green
         _up = sum(1 for r in grp if r["pct"] > 0)
         _lbl = {"Americas": "🌎 AMERICAS", "Europe": "🌍 EUROPE",
-                "Asia": "🌏 ASIA-PACIFIC", "Commodity": "⛏️ COMMODITIES"}[reg]
+                "Asia": "🌏 ASIA-PACIFIC", "FX": "💱 FX & RATES",
+                "Commodity": "⛏️ COMMODITIES"}[reg]
         out.append(_pipe_table(("ST", "Market", "Price", "Chg%"), trs, right_cols={2, 3},
                                title=f"{_lbl}  ({_up}/{len(grp)} up)"))
     return "\n".join(out)

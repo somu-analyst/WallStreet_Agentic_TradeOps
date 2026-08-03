@@ -6118,6 +6118,59 @@ if page == "🌍 Market Overview":
 
     _pulled_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # World map — same choropleth the bot renders, but interactive here so hovering works
+    # and every labelled country shows its index and % move (user 2026-08-03: "I want it
+    # here too, with country names and +/- percentages").
+    try:
+        _wm_rows = _TB_ENGINE._plan_markets_rows() if _TB_ENGINE is not None else []
+    except Exception:
+        _wm_rows = []
+    _wm_geo = [r for r in (_wm_rows or []) if r.get("iso")]
+    if _wm_geo:
+        _WM_LATLON = {"USA": (39.0, -98.0), "CAN": (58.0, -100.0), "BRA": (-10.0, -52.0),
+                      "GBR": (58.5, -12.0), "DEU": (54.5, 14.0), "FRA": (44.5, -2.0),
+                      "JPN": (39.0, 143.0), "HKG": (17.0, 118.0), "CHN": (38.0, 100.0),
+                      "IND": (21.0, 77.0), "AUS": (-27.0, 134.0)}
+        _wmf = go.Figure(go.Choropleth(
+            locations=[r["iso"] for r in _wm_geo], z=[r["pct"] for r in _wm_geo],
+            text=[f"{r['name']} {r['pct']:+.2f}%" for r in _wm_geo],
+            hovertemplate="%{text}<extra></extra>", zmid=0,
+            colorscale=[[0, "#c0392b"], [0.5, "#f4f4f4"], [1, "#1e8449"]],
+            marker_line_color="#888", marker_line_width=0.4,
+            colorbar=dict(title="% chg", thickness=12, len=0.7)))
+        _wm_lab = [r for r in _wm_geo if r["iso"] in _WM_LATLON]
+        if _wm_lab:
+            _wmf.add_trace(go.Scattergeo(
+                lat=[_WM_LATLON[r["iso"]][0] for r in _wm_lab],
+                lon=[_WM_LATLON[r["iso"]][1] for r in _wm_lab],
+                text=[f"{r['name']}<br>{r['pct']:+.1f}%" for r in _wm_lab],
+                mode="text", textfont=dict(size=11), showlegend=False, hoverinfo="skip"))
+        _wmf.update_layout(height=430, margin=dict(l=0, r=0, t=8, b=0),
+                           geo=dict(showframe=False, showcoastlines=True,
+                                    coastlinecolor="#bbb", projection_type="natural earth",
+                                    bgcolor="rgba(0,0,0,0)"),
+                           paper_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(_wmf, use_container_width=True, key="mo_world_map")
+        _wm_up = sum(1 for r in _wm_geo if r["pct"] > 0)
+        st.caption(f"🗺️ Today's move by country · {_wm_up}/{len(_wm_geo)} markets green · "
+                   "green = up, red = down. Commodities have no country so they are in the "
+                   "table below, not the map.")
+        # regional table with flags + commodity symbols, same engine as Telegram
+        _wm_reg = []
+        for _r in (_wm_rows or []):
+            _wm_reg.append({"Region": _r["region"], "": _r["flag"], "Market": _r["name"],
+                            "Price": (f"${_r['last']:,.2f}" if _r["money"] and _r["last"] < 100
+                                      else (f"${_r['last']:,.0f}" if _r["money"]
+                                            else f"{_r['last']:,.0f}")),
+                            "Chg %": round(_r["pct"], 2)})
+        if _wm_reg:
+            _wm_df = pd.DataFrame(_wm_reg)
+            st.dataframe(_wm_df, hide_index=True, use_container_width=True,
+                         column_config={
+                             "Region": st.column_config.TextColumn("Region", pinned=True),
+                             "Market": st.column_config.TextColumn("Market", pinned=True),
+                             "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%")})
+
     if snap.empty:
         st.warning("⚠️ Could not load market data — check network / yfinance.")
     else:

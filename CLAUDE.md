@@ -15,6 +15,13 @@
 - Git: commit to `main` directly, only when asked. Console prints ASCII-only (Windows cp1252 crashes on ✔/σ/–).
 - "test" = validate signal vs DB history (hit-rate vs baseline), not "it runs". Recipe in `.claude/rules/bot-conventions.md`.
 - **HARD RULE (2026-07-24, after shipping the SAME broken UI fix twice unverified — see LOG.md):** any Streamlit UI/markdown/HTML change must be verified with a live **headless-browser DOM check** (Playwright: load the real URL, read `inner_text()`/query the DOM) before calling it done. `py_compile` only proves syntax; `curl` only proves the server responds (Streamlit is client-rendered — curl never sees the real page). Neither catches a rendering bug. This is mandatory, not optional, for any change where the RESULT is something a user looks at on screen.
+- **Mid-turn messages: log first, finish current task, then work in order** (user 2026-08-03).
+  When the user sends a message while a change is in flight: (1) finish the in-flight edit and
+  verify it, (2) add EVERY new ask as a row in `docs/IDEA_TRACKER.xlsx` immediately — before
+  answering, (3) then work them in the order given. Answering opportunistically caused real
+  losses: several asks were half-answered, and `_world_market_map_png` was fully BUILT but never
+  wired to a command because attention moved on before it was finished. The tracker is the queue;
+  a message that is not in it will be dropped.
 - **Every task should be optimized** (user 2026-07-24): prefer the fewest steps/tool calls that actually verify the outcome — don't re-run expensive checks (full app boot, network calls) more than once per change, don't repeat a failed verification method a second time once it's shown it can't catch the bug class in question, and batch independent checks instead of serializing them.
 
 ## 🧭 Working method

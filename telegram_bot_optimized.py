@@ -25232,28 +25232,112 @@ _PLAN_INTL_IDX = [("^N225", "Nikkei"), ("^FTSE", "FTSE"), ("^GDAXI", "DAX"), ("^
 _PLAN_COMMOD = [("GC=F", "Gold", "$"), ("CL=F", "Oil", "$"), ("HG=F", "Copper", "$")]
 
 
-def _plan_markets_snapshot():
-    """US + international indices + commodities as ONE table (user 2026-07-19: tables).
-    Reuses _wrap_quote (already defined for /wrap) — no duplicate fetch logic. Never
-    invents a figure: a symbol that fails to fetch is silently dropped."""
-    specs = [("^GSPC", "SPX", 0), ("^NDX", "NDX", 0), ("^DJI", "DOW", 0), ("^RUT", "RUT", 0),
-             ("^N225", "Nikkei", 0), ("^FTSE", "FTSE", 0), ("^GDAXI", "DAX", 0), ("^HSI", "HSI", 0),
-             ("GC=F", "Gold", 1), ("CL=F", "Oil", 1), ("HG=F", "Copper", 1)]
-    rows = []
-    for sym, name, money in specs:
+# (symbol, label, is_money, region, ISO-3 for the map, flag/emoji)
+# ISO code is what colours the choropleth; several US indices share USA on purpose and the
+# map uses the broadest one (SPX) so one country is not painted four different values.
+_MKT_SPECS = [
+    ("^GSPC",     "SPX",      0, "Americas", "USA", "🇺🇸"),
+    ("^NDX",      "NDX",      0, "Americas", None,  "🇺🇸"),
+    ("^DJI",      "DOW",      0, "Americas", None,  "🇺🇸"),
+    ("^RUT",      "RUT",      0, "Americas", None,  "🇺🇸"),
+    ("^GSPTSE",   "TSX",      0, "Americas", "CAN", "🇨🇦"),
+    ("^BVSP",     "Bovespa",  0, "Americas", "BRA", "🇧🇷"),
+    ("^FTSE",     "FTSE",     0, "Europe",   "GBR", "🇬🇧"),
+    ("^GDAXI",    "DAX",      0, "Europe",   "DEU", "🇩🇪"),
+    ("^FCHI",     "CAC",      0, "Europe",   "FRA", "🇫🇷"),
+    ("^N225",     "Nikkei",   0, "Asia",     "JPN", "🇯🇵"),
+    ("^HSI",      "HSI",      0, "Asia",     "HKG", "🇭🇰"),
+    ("000001.SS", "Shanghai", 0, "Asia",     "CHN", "🇨🇳"),
+    ("^NSEI",     "Nifty",    0, "Asia",     "IND", "🇮🇳"),
+    ("^AXJO",     "ASX200",   0, "Asia",     "AUS", "🇦🇺"),
+    ("GC=F",      "Gold",     1, "Commodity", None, "🥇"),
+    ("SI=F",      "Silver",   1, "Commodity", None, "🥈"),
+    ("CL=F",      "Oil",      1, "Commodity", None, "🛢️"),
+    ("NG=F",      "NatGas",   1, "Commodity", None, "🔥"),
+    ("HG=F",      "Copper",   1, "Commodity", None, "🟠"),
+]
+_MKT_REGIONS = ("Americas", "Europe", "Asia", "Commodity")
+
+
+def _plan_markets_rows():
+    """Fetch every market once. Returns list of dicts; a symbol that fails is dropped."""
+    out = []
+    for sym, name, money, region, iso, flag in _MKT_SPECS:
         q = _wrap_quote(sym)
         if not q:
             continue
-        em = "🟢" if q["pct"] > 0.3 else ("🔴" if q["pct"] < -0.3 else "🟡")
-        if money:
-            px_s = f"${q['last']:,.0f}" if q["last"] >= 100 else f"${q['last']:.2f}"
-        else:
-            px_s = f"{q['last']:,.0f}"
-        rows.append((em, name, px_s, f"{q['pct']:+.1f}%"))
+        out.append({"sym": sym, "name": name, "money": money, "region": region,
+                    "iso": iso, "flag": flag, "last": q["last"], "pct": q["pct"]})
+    return out
+
+
+def _plan_markets_snapshot(rows=None):
+    """Indices + commodities grouped BY REGION, with flags and commodity symbols.
+
+    Was one flat 11-row table; grouping by region makes the read instantly geographic
+    ("Asia is red, Europe is green") which a flat list never gave (user 2026-08-03).
+    Never invents a figure: a symbol that fails to fetch is silently dropped.
+    """
+    rows = rows if rows is not None else _plan_markets_rows()
     if not rows:
         return None
-    return "🌍 <b>Markets</b>\n" + _pipe_table(("ST", "Market", "Price", "Chg%"),
-                                               rows, right_cols={2, 3})
+    out = ["🌍 <b>World Markets</b>"]
+    for reg in _MKT_REGIONS:
+        grp = [r for r in rows if r["region"] == reg]
+        if not grp:
+            continue
+        trs = []
+        for r in grp:
+            em = "🟢" if r["pct"] > 0.3 else ("🔴" if r["pct"] < -0.3 else "🟡")
+            if r["money"]:
+                px_s = f"${r['last']:,.0f}" if r["last"] >= 100 else f"${r['last']:.2f}"
+            else:
+                px_s = f"{r['last']:,.0f}"
+            trs.append((em, f"{r['flag']}{r['name']}", px_s, f"{r['pct']:+.1f}%"))
+        # a regional breadth read: what share of the region is green
+        _up = sum(1 for r in grp if r["pct"] > 0)
+        _lbl = {"Americas": "🌎 AMERICAS", "Europe": "🌍 EUROPE",
+                "Asia": "🌏 ASIA-PACIFIC", "Commodity": "⛏️ COMMODITIES"}[reg]
+        out.append(_pipe_table(("ST", "Market", "Price", "Chg%"), trs, right_cols={2, 3},
+                               title=f"{_lbl}  ({_up}/{len(grp)} up)"))
+    return "\n".join(out)
+
+
+def _world_market_map_png(rows=None):
+    """Choropleth of index performance by country -> PNG for Telegram. None if unavailable.
+
+    plotly + kaleido are already installed, so this is a real map rather than a table
+    pretending to be one. Commodities have no country and are excluded from the map; they
+    stay in the table underneath it.
+    """
+    rows = rows if rows is not None else _plan_markets_rows()
+    geo = [r for r in rows if r.get("iso")]
+    if len(geo) < 3:
+        return None
+    try:
+        import plotly.graph_objects as _go
+        fig = _go.Figure(_go.Choropleth(
+            locations=[r["iso"] for r in geo],
+            z=[r["pct"] for r in geo],
+            text=[f"{r['name']}  {r['pct']:+.2f}%" for r in geo],
+            hovertemplate="%{text}<extra></extra>",
+            colorscale=[[0, "#c0392b"], [0.5, "#f4f4f4"], [1, "#1e8449"]],
+            zmid=0, marker_line_color="#888", marker_line_width=0.4,
+            colorbar=dict(title="% chg", thickness=12, len=0.7),
+        ))
+        fig.update_layout(
+            title=dict(text="World markets — today's move by country", font=dict(size=15)),
+            geo=dict(showframe=False, showcoastlines=True, coastlinecolor="#bbb",
+                     projection_type="natural earth", bgcolor="rgba(0,0,0,0)"),
+            margin=dict(l=4, r=4, t=42, b=4), height=420, width=820,
+            paper_bgcolor="white",
+        )
+        buf = BytesIO(fig.to_image(format="png", scale=2))
+        buf.seek(0)
+        return buf
+    except Exception:
+        log.debug("world map render failed", exc_info=True)
+        return None
 
 
 def _next_day_plan(conn):
@@ -29864,13 +29948,25 @@ def _fmt_action_board(rows, top=8):
                 _tk = _r["tk"]
                 if _tk in _px:
                     continue
+                # TWO closes, not one. _cur_price() falls back to the EOD close when there
+                # is no live quote, so `live/eod - 1` was exactly 0.00 by construction for
+                # every row whenever the market was shut — which is most of the time this
+                # board is read (reported 2026-08-03). Off-hours the meaningful change is
+                # the LAST SESSION's: close vs the close before it.
                 _h = pd.read_sql("SELECT close FROM stock_history WHERE ticker=? "
-                                 "ORDER BY trade_date DESC LIMIT 1", _c, params=(_tk,))
+                                 "ORDER BY trade_date DESC LIMIT 2", _c, params=(_tk,))
                 _eod = float(_h["close"].iloc[0]) if not _h.empty else 0.0
+                _prev = float(_h["close"].iloc[1]) if len(_h) > 1 else 0.0
                 _lv, _islive, _ = _cur_price(_tk, _eod)
                 _lv = float(_lv or _eod)
                 _any_live = _any_live or bool(_islive)
-                _px[_tk] = (_lv, ((_lv / _eod - 1) * 100 if _eod else 0.0))
+                if _islive and _eod:
+                    _chg = (_lv / _eod - 1) * 100          # intraday vs today's open basis
+                elif _prev:
+                    _chg = (_eod / _prev - 1) * 100        # last completed session
+                else:
+                    _chg = 0.0
+                _px[_tk] = (_lv, _chg)
         finally:
             _c.close()
     except Exception as e:
@@ -29881,7 +29977,7 @@ def _fmt_action_board(rows, top=8):
                  f"{_px.get(r['tk'], (0.0, 0.0))[0]:,.0f}",
                  f"{_px.get(r['tk'], (0.0, 0.0))[1]:+.1f}",
                  f"{r['conf']:.0f}") for r in rs]
-        tbl = _pipe_table(("ST", "Tkr", "Px", "Chg", "Cf"), data, right_cols={2, 3, 4})
+        tbl = _pipe_table(("ST", "Tkr", "Px", "Chg%", "Conf"), data, right_cols={2, 3, 4})
         src = " · ".join(f"{r['tk']}:{'+'.join(_BOARD_LABELS.get(s, s) for s in r['srcs'])}"
                          for r in rs[:5])
         return f"<b>{title}</b>\n{tbl}\n<i>{src}</i>"
@@ -29893,8 +29989,10 @@ def _fmt_action_board(rows, top=8):
         parts.append(_block(shorts, "🔴", "🔴 CONSENSUS SHORTS"))
     if parts:
         _stamp = (f"🟢 LIVE {_et_now().strftime('%H:%M ET')}" if _any_live else "EOD")
-        parts.append(f"<i>Px = {_stamp} · Chg = % vs prior close · Cf = consensus confidence. "
-                     f"Signals themselves are EOD (open interest publishes once daily).</i>")
+        parts.append(f"<i>Px = {_stamp} · Chg% = live vs today's close when trading, else the "
+                     f"last completed session · <b>Conf = 0-100 agreement score, NOT a percent "
+                     f"return and NOT a probability</b> — it is the average fire strength of the "
+                     f"scanners that agreed. Signals are EOD (open interest publishes once daily).</i>")
     return "\n\n".join(parts) if parts else None
 
 
@@ -34859,14 +34957,103 @@ def _fmt_vanna_report(ticker, conn, spot):
     vc = _compute_vanna_charm(ticker, conn, spot)
     if not vc or not vc.get("vex"):
         return f"🌀 <b>{ticker} VANNA/CHARM</b>: no options data in DB."
-    lines = [f"🌀 <b>{ticker} VANNA / CHARM</b>  spot ${spot:.2f}",
-             f"<i>nearest expiry {vc.get('expiry','?')}</i>", "",
-             f"Vanna exposure: <b>{vc['vex']/1e6:+.1f}M</b>",
-             f"Charm exposure: <b>{vc['charm']/1e6:+.1f}M</b>", ""]
+    lines = [f"🌀 <b>{ticker} VANNA / CHARM</b>  spot ${spot:.2f}", ""]
+
+    # ── plain English first. These two greeks describe what DEALERS are forced to do,
+    # which is why they read as a background current rather than a signal.
+    lines.append("<i>Vanna = what dealers must do when VOLATILITY moves. "
+                 "Charm = what they must do as TIME passes. Neither predicts direction; "
+                 "they describe a hedging current you are trading with or against.</i>")
+    lines.append("")
+
+    # ── per-expiry table: the single-expiry view hid where the pressure actually sits ──
+    try:
+        _ld = pd.read_sql("SELECT trade_date_now FROM options_change WHERE ticker=? "
+                          "ORDER BY trade_date_now DESC LIMIT 1", conn, params=(ticker,))
+        _ds = _ld["trade_date_now"].iloc[0] if not _ld.empty else None
+        _ref = datetime.strptime(_ds, "%Y-%m-%d").date() if _ds else None
+        _ex = pd.read_sql("SELECT expiry_date, SUM(openInt_Call_now)+SUM(openInt_Put_now) oi "
+                          "FROM options_change WHERE ticker=? AND trade_date_now=? "
+                          "GROUP BY expiry_date", conn, params=(ticker, _ds)) if _ds else None
+    except Exception:
+        _ref = None; _ex = None
+
+    _rows = []
+    if _ref is not None and _ex is not None and not _ex.empty:
+        # DTE must be measured from TODAY, not from the capture date. Off by even two days
+        # this showed an already-EXPIRED contract as "0d / strong pull" (2026-08-03).
+        _today = datetime.now(ZoneInfo("America/New_York")).date()
+        _cands = []
+        for _, e in _ex.iterrows():
+            ed = _opex_parse_date(e["expiry_date"])
+            if not ed:
+                continue
+            d = (ed - _today).days
+            if 0 <= d <= 90:
+                _cands.append((d, float(e["oi"] or 0), str(e["expiry_date"])))
+        _cands.sort(key=lambda c: c[0])
+        for d, _oi, exp in _cands[:5]:
+            v = _compute_vanna_charm(ticker, conn, spot, want_exp=exp)
+            if not v:
+                continue
+            _vex, _chm = v.get("vex", 0.0) or 0.0, v.get("charm", 0.0) or 0.0
+            # Charm is a decay effect: it barely matters at 60 DTE and dominates in the
+            # last week, so weight the READ by how close expiry is.
+            _bite = "strong" if d <= 7 else ("building" if d <= 21 else "weak")
+            _rows.append(("🟢" if _chm > 0 else ("🔴" if _chm < 0 else "🟡"),
+                          _exp_iso(exp)[5:10], f"{d}d",
+                          f"{_vex/1e6:+.1f}", f"{_chm/1e6:+.1f}", _bite))
+    if _rows:
+        lines.append(_pipe_table(("ST", "Expiry", "DTE", "Vanna", "Charm", "Pull"), _rows,
+                                 right_cols={2, 3, 4},
+                                 legend="M$ per 1pt vol / per day · Pull = how hard charm "
+                                        "bites at that DTE (it accelerates into expiry)"))
+        lines.append("")
+    else:
+        lines.append(f"<i>nearest expiry {vc.get('expiry','?')}</i>")
+        lines.append(f"Vanna <b>{vc['vex']/1e6:+.1f}M</b> · Charm <b>{vc['charm']/1e6:+.1f}M</b>")
+        lines.append("")
+
+    _v, _c = vc["vex"], vc["charm"]
     lines.append("🌀 <b>Vanna:</b> " + vc["note"])
-    lines.append("⏳ <b>Charm:</b> " + ("positive — dealer hedging adds upward drift into expiry (OpEx melt-up)."
-                                        if vc["charm"] > 0 else
-                                        "negative — charm flow pressures the downside into expiry."))
+    lines.append("⏳ <b>Charm:</b> " + ("positive — dealer hedging adds upward drift into expiry "
+                                        "(the OpEx melt-up)."
+                                        if _c > 0 else
+                                        "negative — charm flow leans on the downside into expiry."))
+    lines.append("")
+
+    # ── what to actually do with it, split by how far out you are trading ──
+    _near = [r for r in _rows if r[2].rstrip("d").isdigit() and int(r[2].rstrip("d")) <= 7]
+    _ideas = ["<b>▶ HOW TO TRADE IT</b>"]
+    if _c > 0:
+        _ideas.append("• <b>Charm +</b> → the drift into expiry is UP. Short puts / put credit "
+                      "spreads expiring on that date trade WITH the current. Fading the rally "
+                      "with short calls trades against it.")
+    else:
+        _ideas.append("• <b>Charm −</b> → the drift into expiry is DOWN. Be wary of short puts "
+                      "at that expiry; put debit spreads or call credit spreads sit with the "
+                      "current instead.")
+    if _v > 0:
+        _ideas.append("• <b>Vanna +</b> → if VOL FALLS, dealers must BUY. A calm tape is a "
+                      "tailwind, so long calls / call spreads get a second engine when VIX "
+                      "drops. A vol SPIKE reverses it into selling.")
+    else:
+        _ideas.append("• <b>Vanna −</b> → a vol drop makes dealers SELL. Rallies into falling "
+                      "vol lack that support; do not lean on a melt-up here.")
+    if _near:
+        _ideas.append("• <b>0–7 DTE</b> is where charm bites hardest — that expiry's pin is the "
+                      "dominant force this week. Weeklies at that strike are a pin play, not a "
+                      "direction play.")
+    else:
+        _ideas.append("• <b>Nothing inside 7 DTE</b> — charm is weak right now, so this is "
+                      "background, not a reason to trade today. Revisit in OpEx week.")
+    _ideas.append("• <b>Size for the current, not on it</b>: these flows explain WHY a tape "
+                  "grinds or slips, they do not tell you it will.")
+    lines.append("\n".join(_ideas))
+    lines.append("")
+    lines.append("<i>⚠️ Structural read, NOT a validated signal. Computed from EOD open "
+                 "interest with a modelled IV — dealer positioning is inferred, not observed. "
+                 "No backtest supports trading these numbers on their own.</i>")
     return "\n".join(lines)
 
 def _vanna_reports(conn, tickers=None):

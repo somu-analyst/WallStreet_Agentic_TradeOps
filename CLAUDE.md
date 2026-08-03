@@ -39,7 +39,7 @@
 - **Limit lockouts (automated):** Stop/PostToolUse hook → `limit_guard.ps1` (threshold `.claude/limit_threshold_tokens.txt`) writes `[RESUME AFTER]` to NEXT.md + schedules `ClaudeResume` (`claude --continue /standup`). Manual: `.\resume_after_limit.ps1 -At "HH:mm"`. If throttling appears mid-session: recap to LOG/NEXT + tick PLAN before stopping.
 
 ## ▶️ Run
-- Bot: `python telegram_bot_optimized.py` (token from `token.txt`). Dashboard: `streamlit run dashboard.py` (bot auto-launches it, port 8502).
+- Bot: `python telegram_bot_optimized.py` (token from `token.txt`). Dashboard: `streamlit run dashboard.py` (port 8502). The two are INDEPENDENT — the bot does not auto-launch the dashboard at startup; `ensure_streamlit_running()` only fires on the terminal tap and no-ops if the port is up. Full run/rebuild/recovery steps: `docs/RUNBOOK.md`.
 - EOD: `run_all_offhours.py` NY-gated scheduler — **BB PRIMARY first** (`NYSE_OpenBB.py`→derive→`skew_snapshot.py`); Yahoo lane (`NYSE_YFin.py`→`US_data.db` + `NYSE_Telegram.py` legacy report) runs ONLY as fallback when `bb_capture_ok()` fails (<300 tickers for target day). Changed from always-both 2026-07-16.
 - Intraday: `NYSE_intraday.py` (1m bars + 30-min CBOE chains → `US_intraday.db`) — AUTO-spawned by the bot's `intraday_lane_supervisor` (heartbeat-gated, separate process on purpose). Feeds `/live` `/heat`.
 - Old tests/`core/`/migrations + retired builders live in `archive/` (not wired in).

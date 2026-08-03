@@ -8843,6 +8843,55 @@ elif page == "🎛️ Command Center":
     except Exception as _e:
         st.caption(f"Weather unavailable: {_e}")
 
+    # ── 1b. NEEDS ACTION ───────────────────────────────────────────
+    # The page answered "what is the state of things" but never the question that matters at
+    # 9am: what do I have to DO today (user 2026-08-03, tracker 105). Every rule below is
+    # defensible from work already done on this book, and each row carries its WHY so it can
+    # be argued with rather than obeyed.
+    st.markdown("#### ⚡ Needs Action Today")
+    try:
+        _act = []
+        _arows, _atot, _aexp5, _anpos = _cc_book()
+        for _r in (_arows or []):
+            _tk = str(_r.get("Ticker") or "")
+            try:
+                _dte = int(_r.get("DTE")) if _r.get("DTE") not in (None, "") else None
+            except Exception:
+                _dte = None
+            _entry, _now = _r.get("Entry"), _r.get("Now")
+            _pp = None
+            try:
+                if _entry and _now and float(_entry) != 0:
+                    _pp = (float(_now) / float(_entry) - 1) * 100.0
+            except Exception:
+                _pp = None
+            if _pp is not None and _pp >= 50:
+                _act.append(("🟢 TAKE PROFIT", _tk,
+                             f"+{_pp:.0f}% vs entry — the 50%-exit test on this book's own "
+                             f"settled trades favoured closing here over holding to expiry"))
+            if _dte is not None and 0 <= _dte <= 5:
+                _act.append(("🔴 DECIDE NOW", _tk,
+                             f"{_dte}d to expiry — roll, close, or accept assignment. Gamma "
+                             f"and pin risk dominate the last week"))
+            elif _dte is not None and 6 <= _dte <= 21 and (_pp is not None and _pp < 0):
+                _act.append(("🟡 TIME DECAY", _tk,
+                             f"{_dte}d left and underwater — charm leans against long premium "
+                             f"into expiry; decide before theta decides for you"))
+            if _pp is not None and _pp <= -50:
+                _act.append(("🟠 REVIEW", _tk,
+                             f"{_pp:.0f}% vs entry — half the premium is gone. Re-argue the "
+                             f"thesis or cut it"))
+        if _act:
+            _pinned_df(pd.DataFrame([{"Action": a, "Ticker": t, "Why": w} for a, t, w in _act]),
+                       hide_index=True, use_container_width=True)
+        elif _anpos:
+            st.success(f"✅ Nothing needs a decision today — {_anpos} position(s) open, none "
+                       f"inside 5 DTE, past +50%, or worse than −50%.")
+        else:
+            st.caption("No open positions.")
+    except Exception as _e:
+        st.caption(f"Action list unavailable: {_e}")
+
     # ── 2. MY BOOK ─────────────────────────────────────────────────
     st.markdown("#### 💼 My Book")
     try:
@@ -8887,7 +8936,13 @@ elif page == "🎛️ Command Center":
             _fc.close()
         if _fr is not None and not _fr.empty:
             _bull = int((_fr.signal == "BULL").sum()); _bear = int((_fr.signal == "BEAR").sum())
-            st.caption(f"**{_md}** — {len(_fr)} scanner fires · 🟢 {_bull} bull · 🔴 {_bear} bear")
+            _n_tk = _fr["ticker"].nunique() if "ticker" in _fr.columns else 0
+            st.caption(f"**{_md}** — {len(_fr)} fires across {_n_tk} tickers · 🟢 {_bull} bull · "
+                       f"🔴 {_bear} bear. **Activity, not opportunity**: fires cluster hard — one "
+                       f"scanner routinely produces half of them, in both directions, on the same "
+                       f"day — and none of the directional scanners beat a coin flip once "
+                       f"same-day fires stop double-counting. Read it as how busy the tape was; "
+                       f"the filtered ideas are above.")
             _top = (_fr[_fr.signal.isin(["BULL", "BEAR"])].groupby(["ticker", "signal"]).size()
                     .reset_index(name="fires").sort_values("fires", ascending=False).head(10))
             _pinned_df(_top, hide_index=True, use_container_width=True)

@@ -12575,6 +12575,15 @@ Professional options desk — dealer GEX analysis, expiry-level walls, position 
         with _r1c:
             st.markdown("<br>", unsafe_allow_html=True)
             _ga_run = st.button("🎯 Analyze", type="primary", use_container_width=True, key="ga_run_adv")
+        # Auto-run on first load so the page SHOWS something. As a standalone page a button
+        # made sense; merged onto GEX Command it meant the section rendered a header and
+        # nothing else -- the user reported "gamma wall charts are missing" and the page
+        # genuinely drew 0 charts until clicked (2026-08-03). Runs once per ticker+expiry,
+        # then the button is only needed to force a refresh.
+        _ga_auto_key = f"{_ga_sel}|{_sel_ga_exp_lbl}"
+        if not _ga_run and st.session_state.get("_ga_last_auto") != _ga_auto_key:
+            st.session_state["_ga_last_auto"] = _ga_auto_key
+            _ga_run = True
 
         # Parse selected expiry
         _sel_ga_expiry = None
@@ -23713,8 +23722,23 @@ if page == "👀 Watchlist":
         """True if `tk` resolves to a real, currently-quoted symbol (user 2026-07-23:
         a typo'd ticker got added and just showed dashes everywhere)."""
         try:
+        # FastInfo keys are camelCase ("lastPrice"); .get("last_price") therefore returned
+        # None for EVERY ticker, including GOOG, and validation only ever passed via the
+        # DB fallback. Anything not already in our DB -- an ADR like KSPI, quoted at $92 --
+        # was rejected as "not a valid ticker" (user 2026-08-03). Attribute access works.
             fi = yf.Ticker(tk).fast_info
-            px = float(fi.get("last_price") or fi.get("regular_market_price") or 0)
+            px = 0.0
+            for _a in ("last_price", "previous_close"):
+                try:
+                    _v = getattr(fi, _a, None)
+                    if _v:
+                        px = float(_v); break
+                except Exception:
+                    pass
+            if px <= 0:                       # last resort: a real price series
+                _h = yf.Ticker(tk).history(period="5d")
+                if _h is not None and len(_h):
+                    px = float(_h["Close"].iloc[-1])
             if px > 0:
                 return True
         except Exception:

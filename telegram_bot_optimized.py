@@ -32948,8 +32948,22 @@ def _wl_valid_ticker(tk, conn):
     """True if `tk` resolves to a real, currently-quoted symbol. Checked before insert
     (user 2026-07-23: AAOK — a typo — got added and just showed dashes everywhere)."""
     try:
+        # FastInfo keys are camelCase ("lastPrice"), so .get("last_price") returned None for
+        # EVERY ticker and this check only ever passed through the history fallback below.
+        # An ADR like KSPI -- quoted at $92 -- was rejected outright (user 2026-08-03).
         fi = _yf_ticker(tk).fast_info
-        px = float(fi.get("last_price") or fi.get("regular_market_price") or 0)
+        px = 0.0
+        for _a in ("last_price", "previous_close"):
+            try:
+                _v = getattr(fi, _a, None)
+                if _v:
+                    px = float(_v); break
+            except Exception:
+                pass
+        if px <= 0:
+            _h = _yf_ticker(tk).history(period="5d")
+            if _h is not None and len(_h):
+                px = float(_h["Close"].iloc[-1])
         if px > 0:
             return True
     except Exception:

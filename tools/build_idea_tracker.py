@@ -301,6 +301,14 @@ ROWS = [
  "Asked after being told the GEX levels have no measured edge",
  "DONE","2026-08-02","Found we had been testing the WRONG CLAIM: every prior test scored GEX on DIRECTION (40.2% hit, p=0.21), but dealer-hedging theory makes no directional claim - it predicts realised VOL. Tested properly. First harness gave IC +0.146 t=+3.85 p=0.0008 but FAILED its sanity gate (15% of random signals passed) - discarded, not reported. Causes: cross-ticker level effect + vol persistence. Framed as the theory actually states it (time-series, per-underlying): SPY high-GEX days -> 10.2% fwd vol vs 14.0% after low-GEX; QQQ 16.6% vs 23.6%. Correctly signed and economically large (~27-30% lower) but n=12/bucket, p=0.06-0.09, NOT significant. Conclusion: keep GEX as a volatility-REGIME read for sizing/strategy choice, never for direction; do not build a directional GEX scanner. Re-test at >=40 obs per bucket. ADOPTED.md Part 10",
  "-","P2","Re-test when ~8 more months accrue, or sooner using options_openbb real gamma"),
+(82,"2026-08-03","User","Feature","Master-investor screeners (Graham / Fisher / Munger + more)",
+ "User asked for stock screeners based on the classic investing models",
+ "DONE","2026-08-03","Built /screen with 8 models: graham, fisher, munger, buffett, lynch, greenblatt, schloss, oneil. Fundamentals from yfinance cached 7 days in yf_info_cache (quarterly data - faster refresh just re-downloads the same numbers). Checked whether OpenBB could source these instead: fundamental.ratios is fmp/intrinio only (both paid) and fundamental.metrics free path IS yfinance, so OpenBB adds a wrapper, not data - and it currently fails with the antivirus SSL-interception error that bd11d4f fixed for yfinance. Verified on 30 large caps: Lynch picks MU 7/7, GOOGL 6/7; Munger picks GOOGL/MU/META/PG/NFLX 7/7",
+ "-","P2","Point-in-time fundamentals needed before any backtest is possible"),
+(83,"2026-08-03","Claude","Methodology","Fundamental screens cannot be backtested here",
+ "Raised while building the master screeners",
+ "DONE","2026-08-03","We store only the CURRENT fundamentals snapshot. Scoring past prices against todays numbers is look-ahead bias and would manufacture a fake edge - the same failure class as ADOPTED.md Parts 4 and 9. Screens therefore ship labelled NOT BACKTESTED / research filter, not validated signal. Noted that O Neil CANSLIM is the one model whose PRICE half (52wk-high proximity, move off the low) is genuinely testable, because we own price history back to 1990",
+ "-","P2","Option: capture a fundamentals snapshot weekly to build point-in-time history going forward"),
 ]
 
 def build():

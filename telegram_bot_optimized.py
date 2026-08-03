@@ -33063,6 +33063,321 @@ async def gexcheck_command(update, ctx):
     await update.message.reply_text(txt[:4096], parse_mode=H)
 
 
+
+# ============================ MASTER-INVESTOR SCREENERS ============================
+# Graham / Fisher / Munger, scored off yfinance fundamentals cached in yf_info_cache.
+#
+# HONEST SCOPE (read before trusting any output):
+#  * These are the QUANTIFIABLE parts of each philosophy. Fisher's 15 points are mostly
+#    qualitative -- management depth, sales organisation, labour relations, R&D
+#    productivity -- and cannot be screened from a data feed. Munger's "moat" is a
+#    judgement, approximated here by durable margins + high returns on capital.
+#  * NOT BACKTESTED, and not backtestable with what we hold. A real test needs
+#    POINT-IN-TIME fundamentals (what was known on the day). We store only the current
+#    snapshot, so scoring past prices with today's fundamentals would be look-ahead bias
+#    and would manufacture a fake edge -- exactly the failure documented in ADOPTED.md
+#    Parts 4 and 9. Treat this as a research filter, not a validated signal.
+#  * Fundamentals are quarterly. Refreshing more often than weekly just re-downloads the
+#    same numbers, so the cache TTL is 7 days.
+
+_SCREEN_FIELDS = ("trailingPE", "forwardPE", "priceToBook", "returnOnEquity", "returnOnAssets",
+                  "debtToEquity", "currentRatio", "quickRatio", "grossMargins",
+                  "operatingMargins", "profitMargins", "freeCashflow", "revenueGrowth",
+                  "earningsGrowth", "dividendYield", "payoutRatio", "marketCap",
+                  "totalDebt", "totalCash", "ebitda", "sector", "shortName",
+                  "pegRatio", "trailingPegRatio", "enterpriseValue", "enterpriseToEbitda",
+                  "enterpriseToRevenue", "bookValue", "fiftyTwoWeekHigh", "fiftyTwoWeekLow",
+                  "totalRevenue", "netIncomeToCommon", "priceToSalesTrailing12Months",
+                  "ebitdaMargins", "currentPrice")
+
+
+def _screen_fundamentals(conn, tickers, max_age_days=7, workers=8):
+    """Fundamentals for a list of tickers, cached in yf_info_cache. Returns {tk: dict}.
+
+    yfinance .info is ~1-2s per ticker, so a 700-name sweep is a coffee break. The cache
+    makes the second run instant, and quarterly data does not need daily refreshing.
+    """
+    import json as _json, datetime as _dt
+    from concurrent.futures import ThreadPoolExecutor
+    conn.execute("CREATE TABLE IF NOT EXISTS yf_info_cache "
+                 "(ticker TEXT PRIMARY KEY, asof TEXT, info_json TEXT)")
+    cutoff = (_dt.date.today() - _dt.timedelta(days=max_age_days)).isoformat()
+    out, stale = {}, []
+    for tk in tickers:
+        r = conn.execute("SELECT asof, info_json FROM yf_info_cache WHERE ticker=?",
+                         (tk,)).fetchone()
+        if r and r[0] >= cutoff:
+            try:
+                out[tk] = _json.loads(r[1]); continue
+            except Exception:
+                pass
+        stale.append(tk)
+
+    def _one(tk):
+        try:
+            i = yf.Ticker(tk).info or {}
+            return tk, {k: i.get(k) for k in _SCREEN_FIELDS}
+        except Exception:
+            return tk, None
+
+    if stale:
+        today = _dt.date.today().isoformat()
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for tk, info in ex.map(_one, stale):
+                if not info:
+                    continue
+                out[tk] = info
+                try:
+                    conn.execute("INSERT OR REPLACE INTO yf_info_cache VALUES (?,?,?)",
+                                 (tk, today, _json.dumps(info)))
+                except Exception:
+                    pass
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    return out
+
+
+def _sc_num(v):
+    try:
+        f = float(v)
+        return f if f == f else None
+    except Exception:
+        return None
+
+
+_SCREEN_MODELS = {
+    "graham": {
+        "label": "Benjamin Graham — defensive value",
+        "note": ("Margin of safety: cheap against assets and earnings, financially "
+                 "unbreakable. Graham wanted to be paid for being wrong."),
+        "tests": [
+            ("P/E < 15",            lambda f: (_sc_num(f.get("trailingPE")) or 999) < 15),
+            ("P/B < 1.5",           lambda f: (_sc_num(f.get("priceToBook")) or 999) < 1.5),
+            ("Graham no. <22.5",    lambda f: ((_sc_num(f.get("trailingPE")) or 999)
+                                               * (_sc_num(f.get("priceToBook")) or 999)) < 22.5),
+            ("Current ratio > 2",   lambda f: (_sc_num(f.get("currentRatio")) or 0) > 2),
+            ("Debt/Equity < 100%",  lambda f: (_sc_num(f.get("debtToEquity")) or 999) < 100),
+            ("Profitable",          lambda f: (_sc_num(f.get("profitMargins")) or -1) > 0),
+            ("Pays a dividend",     lambda f: (_sc_num(f.get("dividendYield")) or 0) > 0),
+        ],
+    },
+    "fisher": {
+        "label": "Philip Fisher — quality growth",
+        "note": ("Scuttlebutt: durable growth with fat, defended margins. Only the "
+                 "measurable subset — his points on management and sales culture cannot "
+                 "be screened."),
+        "tests": [
+            ("Revenue growth >10%", lambda f: (_sc_num(f.get("revenueGrowth")) or -1) > 0.10),
+            ("Earnings growth >10%", lambda f: (_sc_num(f.get("earningsGrowth")) or -1) > 0.10),
+            ("Gross margin >40%",   lambda f: (_sc_num(f.get("grossMargins")) or 0) > 0.40),
+            ("Op margin >15%",      lambda f: (_sc_num(f.get("operatingMargins")) or 0) > 0.15),
+            ("ROE > 15%",           lambda f: (_sc_num(f.get("returnOnEquity")) or 0) > 0.15),
+            ("Positive FCF",        lambda f: (_sc_num(f.get("freeCashflow")) or 0) > 0),
+            ("Debt/Equity < 150%",  lambda f: (_sc_num(f.get("debtToEquity")) or 999) < 150),
+        ],
+    },
+    "munger": {
+        "label": "Charlie Munger — a great business at a fair price",
+        "note": ("'A great business at a fair price over a fair business at a great "
+                 "price.' High returns on capital, low debt, durable margins — and NOT "
+                 "priced for perfection."),
+        "tests": [
+            ("ROE > 18%",           lambda f: (_sc_num(f.get("returnOnEquity")) or 0) > 0.18),
+            ("ROA > 8%",            lambda f: (_sc_num(f.get("returnOnAssets")) or 0) > 0.08),
+            ("Gross margin >40%",   lambda f: (_sc_num(f.get("grossMargins")) or 0) > 0.40),
+            ("Op margin >18%",      lambda f: (_sc_num(f.get("operatingMargins")) or 0) > 0.18),
+            ("Debt/Equity < 80%",   lambda f: (_sc_num(f.get("debtToEquity")) or 999) < 80),
+            ("Positive FCF",        lambda f: (_sc_num(f.get("freeCashflow")) or 0) > 0),
+            ("P/E < 30 (fair)",     lambda f: 0 < (_sc_num(f.get("trailingPE")) or 999) < 30),
+        ],
+    },
+    "buffett": {
+        "label": "Warren Buffett — the durable compounder",
+        "note": ("A wonderful business, run conservatively, that can reinvest at high "
+                 "returns for years. Consistency matters more than any single year."),
+        "tests": [
+            ("ROE > 15%",           lambda f: (_sc_num(f.get("returnOnEquity")) or 0) > 0.15),
+            ("Net margin > 10%",    lambda f: (_sc_num(f.get("profitMargins")) or 0) > 0.10),
+            ("Gross margin >40%",   lambda f: (_sc_num(f.get("grossMargins")) or 0) > 0.40),
+            ("Debt/Equity < 50%",   lambda f: (_sc_num(f.get("debtToEquity")) or 999) < 50),
+            ("Positive FCF",        lambda f: (_sc_num(f.get("freeCashflow")) or 0) > 0),
+            ("Cash > debt",         lambda f: (_sc_num(f.get("totalCash")) or 0)
+                                              > (_sc_num(f.get("totalDebt")) or 9e18)),
+            ("P/E < 25",            lambda f: 0 < (_sc_num(f.get("trailingPE")) or 999) < 25),
+        ],
+    },
+    "lynch": {
+        "label": "Peter Lynch — growth at a reasonable price",
+        "note": ("PEG is the whole idea: pay less for growth than the growth is worth. "
+                 "Lynch wanted a boring balance sheet behind an exciting business."),
+        "tests": [
+            ("PEG < 1",             lambda f: 0 < (_sc_num(f.get("trailingPegRatio"))
+                                                   or _sc_num(f.get("pegRatio")) or 999) < 1.0),
+            ("Earnings growth>15%", lambda f: (_sc_num(f.get("earningsGrowth")) or -1) > 0.15),
+            ("Rev growth > 10%",    lambda f: (_sc_num(f.get("revenueGrowth")) or -1) > 0.10),
+            ("P/E < 25",            lambda f: 0 < (_sc_num(f.get("trailingPE")) or 999) < 25),
+            ("Debt/Equity < 80%",   lambda f: (_sc_num(f.get("debtToEquity")) or 999) < 80),
+            ("Profitable",          lambda f: (_sc_num(f.get("profitMargins")) or -1) > 0),
+            ("Not a mega-cap",      lambda f: (_sc_num(f.get("marketCap")) or 0) < 2e11),
+        ],
+    },
+    "greenblatt": {
+        "label": "Joel Greenblatt — the Magic Formula",
+        "note": ("Two numbers only: a high earnings yield (cheap) and a high return on "
+                 "capital (good). Greenblatt RANKS on both and buys the best combined."),
+        "tests": [
+            ("Earnings yield >8%",  lambda f: ((_sc_num(f.get("ebitda")) or 0)
+                                               / (_sc_num(f.get("enterpriseValue")) or 9e18)) > 0.08),
+            ("EV/EBITDA < 12",      lambda f: 0 < (_sc_num(f.get("enterpriseToEbitda")) or 999) < 12),
+            ("ROA > 10%",           lambda f: (_sc_num(f.get("returnOnAssets")) or 0) > 0.10),
+            ("Op margin > 12%",     lambda f: (_sc_num(f.get("operatingMargins")) or 0) > 0.12),
+            ("Profitable",          lambda f: (_sc_num(f.get("profitMargins")) or -1) > 0),
+            ("Not a financial",     lambda f: "financ" not in str(f.get("sector") or "").lower()
+                                              and "utilit" not in str(f.get("sector") or "").lower()),
+        ],
+    },
+    "schloss": {
+        "label": "Walter Schloss — deep asset value",
+        "note": ("Buy below book, spread the risk, ignore the story. Schloss barely met "
+                 "management: he bought cheap assets and waited."),
+        "tests": [
+            ("P/B < 1.2",           lambda f: 0 < (_sc_num(f.get("priceToBook")) or 999) < 1.2),
+            ("P/S < 1.5",           lambda f: 0 < (_sc_num(f.get("priceToSalesTrailing12Months"))
+                                                   or 999) < 1.5),
+            ("Debt/Equity < 60%",   lambda f: (_sc_num(f.get("debtToEquity")) or 999) < 60),
+            ("Current ratio > 1.5", lambda f: (_sc_num(f.get("currentRatio")) or 0) > 1.5),
+            ("Near 52wk low",       lambda f: (_sc_num(f.get("currentPrice")) or 9e18)
+                                              < 1.35 * (_sc_num(f.get("fiftyTwoWeekLow")) or 0.0001)),
+            ("Not loss-making",     lambda f: (_sc_num(f.get("profitMargins")) or -1) > 0),
+        ],
+    },
+    "oneil": {
+        "label": "William O'Neil — CANSLIM momentum growth",
+        "note": ("Buy strength, not weakness: accelerating earnings in a leader already "
+                 "near its highs. The only model here whose price half we can actually "
+                 "backtest, because we own the price history."),
+        "tests": [
+            ("EPS growth > 25%",    lambda f: (_sc_num(f.get("earningsGrowth")) or -1) > 0.25),
+            ("Rev growth > 20%",    lambda f: (_sc_num(f.get("revenueGrowth")) or -1) > 0.20),
+            ("ROE > 17%",           lambda f: (_sc_num(f.get("returnOnEquity")) or 0) > 0.17),
+            ("Within 15% of high",  lambda f: (_sc_num(f.get("currentPrice")) or 0)
+                                              > 0.85 * (_sc_num(f.get("fiftyTwoWeekHigh")) or 9e18)),
+            ("Up >30% off the low", lambda f: (_sc_num(f.get("currentPrice")) or 0)
+                                              > 1.30 * (_sc_num(f.get("fiftyTwoWeekLow")) or 9e18)),
+            ("Op margin > 10%",     lambda f: (_sc_num(f.get("operatingMargins")) or 0) > 0.10),
+        ],
+    },
+}
+
+
+def _screen_masters(conn, model="graham", tickers=None, top=15, min_pass=None):
+    """Score a universe against one master's checklist. Returns list of dicts, best first.
+
+    Ranked by tests passed, then by cheapness (P/E) so ties break toward margin of safety.
+    """
+    m = _SCREEN_MODELS.get(str(model).lower())
+    if not m:
+        return []
+    tks = [str(t).upper() for t in (tickers or _screen_universe(conn))]
+    fund = _screen_fundamentals(conn, tks)
+    n_tests = len(m["tests"])
+    if min_pass is None:
+        min_pass = max(3, n_tests - 3)          # allow a few misses; perfection is rare
+    rows = []
+    for tk, f in fund.items():
+        if not f:
+            continue
+        passed = []
+        for name, fn in m["tests"]:
+            try:
+                if fn(f):
+                    passed.append(name)
+            except Exception:
+                pass
+        if len(passed) < min_pass:
+            continue
+        rows.append({
+            "ticker": tk, "name": str(f.get("shortName") or "")[:22],
+            "sector": str(f.get("sector") or "")[:14],
+            "score": len(passed), "of": n_tests, "passed": passed,
+            "failed": [n for n, _ in m["tests"] if n not in passed],
+            "pe": _sc_num(f.get("trailingPE")), "pb": _sc_num(f.get("priceToBook")),
+            "roe": _sc_num(f.get("returnOnEquity")), "de": _sc_num(f.get("debtToEquity")),
+            "gm": _sc_num(f.get("grossMargins")), "mcap": _sc_num(f.get("marketCap")),
+        })
+    rows.sort(key=lambda r: (-r["score"], r["pe"] if r["pe"] else 9e9))
+    return rows[:top]
+
+
+def _screen_universe(conn, limit=300):
+    """Liquid, optionable names we already track — biggest by market cap first."""
+    try:
+        rows = [r[0] for r in conn.execute(
+            "SELECT ticker FROM daily_fundamentals WHERE market_cap IS NOT NULL "
+            "ORDER BY market_cap DESC LIMIT ?", (limit,))]
+        if rows:
+            return rows
+    except Exception:
+        pass
+    return list(_hiprob_default_tickers())
+
+
+def _fmt_screen(rows, model):
+    m = _SCREEN_MODELS.get(str(model).lower(), {})
+    if not rows:
+        return (f"{hdr('MASTER SCREEN')}\nNo names cleared the {model} bar. "
+                "That is a normal outcome — these are demanding checklists.")
+    parts = [hdr(f"🎓 {m.get('label', model).upper()}"), f"<i>{m.get('note','')}</i>", ""]
+    tbl = [(r["ticker"][:6], f"{r['score']}/{r['of']}",
+            f"{r['pe']:.0f}" if r["pe"] else "-",
+            f"{r['roe']*100:.0f}%" if r["roe"] is not None else "-",
+            f"{r['de']:.0f}" if r["de"] is not None else "-") for r in rows]
+    parts.append(_pipe_table(("Ticker", "Score", "P/E", "ROE", "D/E"), tbl,
+                             right_cols={1, 2, 3, 4}))
+    for r in rows[:6]:
+        miss = ("misses: " + ", ".join(r["failed"][:2])) if r["failed"] else "clears every test"
+        parts.append(f"<b>{r['ticker']}</b> {r['name']} · {r['sector']} — "
+                     f"{r['score']}/{r['of']} · {miss}")
+    parts.append("")
+    parts.append("<i>⚠️ NOT BACKTESTED and not backtestable here: a real test needs "
+                 "point-in-time fundamentals, and scoring past prices with today's numbers "
+                 "is look-ahead bias. This is a research filter for further reading, not a "
+                 "validated signal. Fundamentals are quarterly and cached 7 days.</i>")
+    return "\n".join(parts)
+
+
+async def screen_command(update, ctx):
+    """/screen graham|fisher|munger [N] — master-investor fundamental screens."""
+    arg = (ctx.args[0].lower() if ctx.args else "graham")
+    if arg not in _SCREEN_MODELS:
+        await update.message.reply_text(
+            "Usage: <code>/screen graham</code> · <code>/screen fisher</code> · "
+            "<code>/screen munger</code>\n\n"
+            + "\n".join(f"<b>{k}</b> — {v['label']}" for k, v in _SCREEN_MODELS.items()),
+            parse_mode=H)
+        return
+    top = 15
+    if len(ctx.args) > 1 and str(ctx.args[1]).isdigit():
+        top = max(3, min(30, int(ctx.args[1])))
+    msg = await update.message.reply_text(
+        f"🎓 Screening for <b>{_SCREEN_MODELS[arg]['label']}</b>… "
+        "(first run downloads fundamentals, then it is cached)", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _screen_masters(conn, arg, top=top)
+        txt = _fmt_screen(rows, arg)
+    finally:
+        conn.close()
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    for i in range(0, len(txt), 3900):
+        await update.message.reply_text(txt[i:i + 3900], parse_mode=H)
+
+
 def _fmt_gex_report(g, tk, spot, pos=None):
     if not g or not g.get("total_gex"):
         return f"📐 <b>{tk} GEX</b>: no options data in DB for this ticker."
@@ -34928,6 +35243,7 @@ def main():
     app.add_handler(CommandHandler("watchlist", watchlist_command))
     app.add_handler(CommandHandler("paper", paper_command))
     app.add_handler(CommandHandler("gex", gex_command))
+    app.add_handler(CommandHandler("screen", screen_command))     # master-investor screens
     app.add_handler(CommandHandler("gexplan", gexplan_command))    # GEX co-pilot Mode 1
     app.add_handler(CommandHandler("gexcheck", gexcheck_command))  # GEX co-pilot Mode 2
     app.add_handler(CommandHandler("macro", macro_command))

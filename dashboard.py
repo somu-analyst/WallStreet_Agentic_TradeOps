@@ -15661,6 +15661,35 @@ elif page == "🎯 Next-Day Exit Planner":
                                             "EV": st.column_config.NumberColumn(format="$%d")})
 
                 st.markdown("**🧾 Per-leg detail**")
+                # WHEN was this priced? The Now column can be a stale mark: yfinance was still
+                # serving Friday's option chain 13 minutes into Monday's session, with bid=ask=0
+                # on nearly every contract, so the code falls back to the last known value. A
+                # number with no timestamp hides that (user 2026-08-03, tracker 110 + 112).
+                try:
+                    _pl_state = _market_state()
+                    _pl_now = datetime.now().strftime("%H:%M:%S")
+                    _pl_age = None
+                    try:
+                        _pl_oc = _cached_option_chain(
+                            str(_flat[0]["Ticker"]).upper(),
+                            str(_flat[0].get("Expiry") or "")[:10]) if _flat else None
+                        if _pl_oc is not None:
+                            _pl_all = pd.concat([_pl_oc.calls, _pl_oc.puts])
+                            if "lastTradeDate" in _pl_all.columns and not _pl_all.empty:
+                                _pl_age = pd.to_datetime(_pl_all["lastTradeDate"]).max()
+                    except Exception:
+                        pass
+                    _pl_msg = (f"🕐 Refreshed **{_pl_now}** · market **{_pl_state}**")
+                    if _pl_age is not None and _pl_age == _pl_age:
+                        _pl_local = _pl_age.tz_convert("America/New_York") if _pl_age.tzinfo else _pl_age
+                        _stale_d = (pd.Timestamp.now(tz="America/New_York") - _pl_local).days                             if _pl_age.tzinfo else None
+                        _pl_msg += f" · last option trade in chain **{_pl_local:%a %d %b %H:%M ET}**"
+                        if _stale_d is not None and _stale_d >= 1:
+                            _pl_msg += ("  ⚠️ **quotes are from a previous session** — the *Now* "
+                                        "column is a stale mark, not a live price")
+                    st.caption(_pl_msg)
+                except Exception:
+                    st.caption(f"🕐 Refreshed {datetime.now().strftime('%H:%M:%S')}")
                 _fdf = pd.DataFrame(_flat)
                 # Column order (user 2026-07-22): move the Ex-Div..Shorts block to sit AFTER
                 # Est Open, so the price columns (Entry/Now/Prev Cls/Est Open) stay adjacent and

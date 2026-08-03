@@ -422,6 +422,10 @@ ROWS = [
  "User: day l-h in this create as line graph, I said earlier - a repeat ask",
  "QUEUED","","REPEAT ASK - was raised before and not actioned, which is exactly the loss the log-first rule exists to stop. Wants the day range rendered as a visual range indicator rather than a text string",
  "-","P1","Watchlist already has a Day position bar; extend to an intraday line/range chart per row"),
+(112,"2026-08-03","User","Feature","Show a refresh timestamp under Per-leg detail",
+ "User: can you refresh time after this",
+ "DONE","2026-08-03","Per-leg detail now shows: refresh clock, market state (OPEN/PRE/AFTER/CLOSED), and the newest lastTradeDate found in the option chain itself. If that trade date is a previous session it prints an explicit warning that the Now column is a stale mark, not a live price - which is exactly the condition seen at 09:43 ET Monday when yfinance was still serving Fridays chain. Verified live: Refreshed 09:47:28 - market OPEN",
+ "-","P1","-"),
 ]
 
 def build():

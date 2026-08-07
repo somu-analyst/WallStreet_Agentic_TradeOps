@@ -25969,10 +25969,160 @@ async def whymoved_command(update, ctx):
                                         disable_web_page_preview=True)
 
 
+
+# ── Breaking news on names you actually hold (user 2026-08-07) ───────────────────────
+# The news sections were market-wide. A headline about a company you have money in is a
+# different category of information, so it gets its own section and its own severity.
+# Deliberately NOT market-wide: if everything is breaking, nothing is.
+
+_BREAKING_WEIGHTS = {
+    # phrase -> (severity, why it matters to a position)
+    "halted":            (3, "trading halt — you cannot exit until it reopens"),
+    "investigation":     (3, "regulatory/legal overhang, usually multi-day"),
+    "sec charges":       (3, "regulatory action"),
+    "fraud":             (3, "the most durable kind of repricing"),
+    "bankruptcy":        (3, "existential"),
+    "guidance cut":      (3, "the single most reliable gap-down trigger"),
+    "cuts guidance":     (3, "guidance cut"),
+    "profit warning":    (3, "guidance cut by another name"),
+    "recall":            (2, "product/liability risk"),
+    "lawsuit":           (2, "legal overhang"),
+    "downgrade":         (2, "sell-side rating cut — often a same-day gap"),
+    "upgrade":           (2, "sell-side rating raise"),
+    "acquisition":       (3, "M&A — repricing is immediate and usually permanent"),
+    "merger":            (3, "M&A"),
+    "takeover":          (3, "M&A"),
+    "buyout":            (3, "M&A"),
+    "ceo":               (2, "leadership change — a governance repricing"),
+    "resigns":           (2, "leadership change"),
+    "steps down":        (2, "leadership change"),
+    "layoffs":           (2, "cost action — can cut either way"),
+    "beats":             (2, "earnings surprise"),
+    "misses":            (2, "earnings surprise"),
+    "earnings":          (1, "results — check whether it is before or after your expiry"),
+    "fda":               (3, "binary regulatory outcome"),
+    "approval":          (2, "regulatory outcome"),
+    "buyback":           (1, "capital return"),
+    "dividend":          (1, "capital return — watch the ex-date against short calls"),
+    "stake":             (2, "an activist or large holder moving"),
+    "short seller":      (3, "a short report can gap a name double digits"),
+}
+
+
+def _breaking_for_book(conn, limit=6, timeout=10):
+    """Breaking headlines on tickers you HOLD or WATCH. [(sev, tk, title, url, why)]."""
+    try:
+        tks = {r[0] for r in conn.execute(
+            "SELECT DISTINCT UPPER(ticker) FROM trades WHERE status='OPEN'")}
+        try:
+            tks |= {r[0] for r in conn.execute("SELECT DISTINCT UPPER(ticker) FROM watchlist")}
+        except Exception:
+            pass
+    except Exception:
+        return []
+    tks = {t for t in tks if t and len(t) <= 5}
+    if not tks:
+        return []
+    import urllib.request as _u, re as _re, html as _html
+    hits = []
+    for tk in sorted(tks)[:12]:                    # bound the fetch; these are per-ticker calls
+        url = (f"https://news.google.com/rss/search?q={tk}+stock+when:2d"
+               f"&hl=en-US&gl=US&ceid=US:en")
+        try:
+            xml = _u.urlopen(_u.Request(url, headers={"User-Agent": "Mozilla/5.0"}),
+                             timeout=timeout).read().decode("utf-8", "ignore")
+        except Exception:
+            continue
+        for blk in _re.findall(r"<item[^>]*>(.*?)</item>", xml, _re.S)[:6]:
+            m = _re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", blk, _re.S)
+            l = _re.search(r"<link>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>", blk, _re.S)
+            if not m:
+                continue
+            title = _html.unescape(_re.sub(r"<[^>]+>", "", m.group(1))).strip()
+            low = title.lower()
+            # SUBJECT CHECK. Without it, "Wells Fargo downgrades Allstate" fired under WFC --
+            # the bank is the ANALYST, not the subject. Require the ticker itself to appear,
+            # or the headline to lead with the company, so the story is ABOUT the holding.
+            _sym = _re.search(rf"(?:^|[^A-Za-z]){tk}(?:[^A-Za-z]|$)", title)
+            if not _sym:
+                continue
+            # "X downgrades Y" / "X upgrades Y": the ticker is acting ON someone else
+            if _re.search(rf"{tk}[^.]{{0,40}}(?:downgrades|upgrades|initiates|cuts)",
+                          title, _re.I) and not _re.search(rf"(?:downgrades|upgrades)[^.]{{0,30}}{tk}",
+                                                           title, _re.I):
+                continue
+            best = None
+            for phrase, (sev, why) in _BREAKING_WEIGHTS.items():
+                if phrase not in low:
+                    continue
+                # "upgrade cycle" is a product cycle, not a rating change
+                if phrase in ("upgrade", "downgrade") and _re.search(
+                        rf"{phrase}\s+cycle", low):
+                    continue
+                if best is None or sev > best[0]:
+                    best = (sev, why)
+            if not best:
+                continue
+            hits.append((best[0], tk, title[:130],
+                         l.group(1).strip() if l else "", best[1]))
+    hits.sort(key=lambda x: -x[0])
+    out, seen = [], set()
+    for h in hits:
+        k = h[2][:50].lower()
+        if k in seen:
+            continue
+        seen.add(k); out.append(h)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _fmt_breaking(rows):
+    """The BREAKING section. None when nothing on your names is moving."""
+    if not rows:
+        return None
+    _EM = {3: "🚨", 2: "⚠️", 1: "📄"}
+    out = ["<b>🚨 BREAKING — on YOUR positions</b>"]
+    for sev, tk, title, url, why in rows:
+        out.append(f"{_EM.get(sev, '📄')} <b>{tk}</b> — "
+                   + (f'<a href="{url}">{title}</a>' if url else title))
+        out.append(f"    <i>{why}</i>")
+    out.append("<i>Filtered to names you hold or watch, and to headline types that "
+               "historically move a stock — not general coverage. If everything is "
+               "breaking, nothing is.</i>")
+    return "\n".join(out)
+
+
+async def breaking_command(update, ctx):
+    """/breaking — headlines that touch your open positions and watchlist."""
+    msg = await update.message.reply_text("🚨 Scanning news on your book…", parse_mode=H)
+    conn = get_conn()
+    try:
+        rows = _breaking_for_book(conn)
+    finally:
+        conn.close()
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    txt = _fmt_breaking(rows) or ("Nothing breaking on your positions or watchlist in the "
+                                  "last 2 days — no halts, guidance cuts, M&A, downgrades "
+                                  "or legal news matched.")
+    for i in range(0, len(txt), 3900):
+        await update.message.reply_text(txt[i:i + 3900], parse_mode=H,
+                                        disable_web_page_preview=True)
+
+
 def _next_day_plan(conn):
     """Condensed whole-portfolio next-day plan: regime + Greeks + per-stock levels,
     expected move, StockTwits sentiment, per-leg actions, and a morning checklist."""
     L = ["🌅 <b>NEXT-DAY GAME PLAN</b>"]
+    try:
+        _brk = _fmt_breaking(_breaking_for_book(conn))
+        if _brk:                      # a halt on a name you own outranks any market colour
+            L.append(_brk); L.append("")
+    except Exception:
+        log.debug("breaking block failed", exc_info=True)
     try:
         _mkt_rows = _plan_markets_rows()
         _mkt = _plan_markets_snapshot(_mkt_rows)
@@ -36781,6 +36931,7 @@ def main():
     app.add_handler(CommandHandler("watchlist", watchlist_command))
     app.add_handler(CommandHandler("paper", paper_command))
     app.add_handler(CommandHandler("gex", gex_command))
+    app.add_handler(CommandHandler("breaking", breaking_command))  # news on your book
     app.add_handler(CommandHandler("catchup", catchup_command))   # resend today's briefings
     app.add_handler(CommandHandler("whymoved", whymoved_command))  # why did it move
     app.add_handler(CommandHandler("screen", screen_command))     # master-investor screens

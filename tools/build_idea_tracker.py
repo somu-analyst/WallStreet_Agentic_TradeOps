@@ -528,7 +528,7 @@ ROWS = [
  "-","P1","-"),
 (138,"2026-08-07","User","Feature","Breaking-news section tied to positions and relevant alerts",
  "User: add a breaking news section in our positions or relevant alerts",
- "IN-PROGRESS","2026-08-07","Logged before building",
+ "DONE","2026-08-07","Added /breaking plus a BREAKING block at the TOP of the next-day game plan - a halt on a name you own outranks any market colour. Scans Google News per held/watchlisted ticker and keeps only headline TYPES that historically move a stock (halt, guidance cut, M&A, downgrade, short report, FDA, investigation), each carrying WHY it matters to a position. Two precision fixes during testing: a SUBJECT check, because Wells Fargo downgrades Allstate was firing under WFC when the bank is the ANALYST not the subject; and an upgrade-cycle guard, because a product cycle is not a rating change. Verified live: surfaced DDOG plunging 19% despite an earnings beat, and an AAPL downgrade",
  "-","P1","-"),
 (139,"2026-08-07","User","Feature","WHAT JUST HAPPENED: tabulate it and attach the event numbers",
  "User: keep it all in tabular format and more insightful. The timeline says 08:30 Jobs Report release but gives no numbers, even though the release time has already passed - tabulate previous / expected / actual",

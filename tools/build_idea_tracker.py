@@ -538,6 +538,10 @@ ROWS = [
  "User wants to see how greed has evolved, not just todays reading",
  "IN-PROGRESS","2026-08-07","Logged. CNN graphdata API carries history but failed on first call with DNS getaddrinfo - the same intermittent wake-from-sleep failure seen this morning. Retry, and store our own daily snapshots so history accrues locally regardless",
  "-","P2","-"),
+(141,"2026-08-07","Claude","Bug","12 commands had handlers but were missing from the Telegram menu",
+ "Found while confirming today's work went live: the bot logged 61 registered commands but the file defines 73 handlers",
+ "DONE","2026-08-07","Every new command shipped today (/breaking /catchup /whymoved) plus 9 older ones (/debate /flow /capflow /world /recperf /status /freq /reopen /menu) existed ONLY if you already knew to type them - they never appeared in Telegram autocomplete. Diffed add_handler(CommandHandler(...)) against BotCommand(...) to find them rather than eyeballing. All 12 added; menu now 73/73. Telegram allows 100, so there was never a capacity reason for the gap",
+ "-","P1","Add a startup assertion so a handler without a menu entry is logged, not silently invisible"),
 ]
 
 def build():

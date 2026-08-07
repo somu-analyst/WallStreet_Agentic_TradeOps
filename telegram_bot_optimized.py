@@ -36788,6 +36788,21 @@ async def _post_init(app):
         from telegram import BotCommand
         cmds = [
             BotCommand("start", "Menu & command list"),
+            # 12 commands had handlers but were absent from the menu, so they existed only
+            # if you already knew to type them (found 2026-08-07: 73 handlers vs 61 menu
+            # entries). Telegram caps the menu at 100, so there is room for all of them.
+            BotCommand("breaking", "Breaking news on YOUR positions"),
+            BotCommand("catchup", "Resend today's scheduled briefings"),
+            BotCommand("whymoved", "Why each big move happened + knock-on"),
+            BotCommand("debate", "Bull vs bear multi-agent verdict"),
+            BotCommand("flow", "Smart-money / institutional flow"),
+            BotCommand("capflow", "Cross-border capital flow"),
+            BotCommand("world", "World markets by region + map"),
+            BotCommand("recperf", "Recommendation track record"),
+            BotCommand("status", "Bot + data health"),
+            BotCommand("freq", "Alert frequency settings"),
+            BotCommand("reopen", "Reopen a closed position"),
+            BotCommand("menu", "Main menu"),
             BotCommand("data", "EOD data-download status (VALIDATED/PARTIAL/FAILED)"),
             BotCommand("wan", "Live 24-model ensemble signals"),
             BotCommand("building", "Positioning: new long/short OI building"),

@@ -25964,8 +25964,9 @@ async def whymoved_command(update, ctx):
         await msg.delete()
     except Exception:
         pass
-    for i in range(0, len(txt), 3900):
-        await update.message.reply_text(txt[i:i + 3900], parse_mode=H,
+    # section-aware, never mid-tag (see _chunk_on_sections)
+    for _part in _chunk_on_sections(txt):
+        await update.message.reply_text(_part, parse_mode=H,
                                         disable_web_page_preview=True)
 
 
@@ -26147,8 +26148,9 @@ async def breaking_command(update, ctx):
     txt = _fmt_breaking(rows) or ("Nothing breaking on your positions or watchlist in the "
                                   "last 2 days — no halts, guidance cuts, M&A, downgrades "
                                   "or legal news matched.")
-    for i in range(0, len(txt), 3900):
-        await update.message.reply_text(txt[i:i + 3900], parse_mode=H,
+    # section-aware, never mid-tag (see _chunk_on_sections)
+    for _part in _chunk_on_sections(txt):
+        await update.message.reply_text(_part, parse_mode=H,
                                         disable_web_page_preview=True)
 
 
@@ -27150,9 +27152,9 @@ async def _digest_push(ctx, txt):
         _, chat_id = load_creds()
     except Exception:
         log.warning("digest push: no creds"); return
-    for i in range(0, len(txt), 3900):
+    for _part in _chunk_on_sections(txt):
         try:
-            await ctx.bot.send_message(chat_id=int(chat_id), text=txt[i:i + 3900],
+            await ctx.bot.send_message(chat_id=int(chat_id), text=_part,
                                        parse_mode=H, disable_web_page_preview=True)
         except Exception:
             log.warning("digest push failed", exc_info=True); return
@@ -27329,8 +27331,9 @@ async def digest_command(update, ctx):
         txt = _eod_digest(conn, edition=_ed)
     finally:
         conn.close()
-    for i in range(0, len(txt), 3900):
-        await update.message.reply_text(txt[i:i + 3900], parse_mode=H,
+    # section-aware, never mid-tag (see _chunk_on_sections)
+    for _part in _chunk_on_sections(txt):
+        await update.message.reply_text(_part, parse_mode=H,
                                         disable_web_page_preview=True)
 
 
@@ -34974,8 +34977,8 @@ async def screen_command(update, ctx):
         await msg.delete()
     except Exception:
         pass
-    for i in range(0, len(txt), 3900):
-        await update.message.reply_text(txt[i:i + 3900], parse_mode=H)
+    for _part in _chunk_on_sections(txt):
+        await update.message.reply_text(_part, parse_mode=H)
 
 
 def _fmt_gex_report(g, tk, spot, pos=None):

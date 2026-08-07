@@ -556,7 +556,7 @@ ROWS = [
  "-","P0","-"),
 (145,"2026-08-07","User","Bug","Digest rendering raw HTML entities (&lt;/pre&gt;, &lt;i&gt;)",
  "User pasted digest output showing escaped tags as literal text instead of formatting",
- "QUEUED","","Not yet investigated. Suspect double-escaping somewhere in the digest path - the opposite of the S&P &amp; bug fixed earlier, where escaping happened without a parse mode",
+ "DONE","2026-08-07","ROOT CAUSE, and it is the same class as the /plan truncation. Five senders chunked with a blind txt[i:i+3900], which cuts straight through an HTML tag. PROVEN on the real digest: chunk 0 ended with an unbalanced <b>, its closing tag falling into chunk 1. Telegram rejects a message with unbalanced entities, the sanitize wrapper catches the error and falls back to escaping EVERY < to &lt; - so the whole message arrives as literal tag text. That is exactly the &lt;/pre&gt; the user saw. Routed all 5 chunkers through _chunk_on_sections, which splits on blank lines. Verified: digest 4,987 chars -> 2 chunks, every pre/i/b tag balanced in both",
  "-","P0","-"),
 (146,"2026-08-07","User","Feature","Payoff + beta-weighted P&L charts on the Portfolio page",
  "User: add this kind of chart and writeup to the portfolio one - the per-position payoff-at-expiry chart and the P&L vs SPY move panel that Telegram already sends",

@@ -5875,6 +5875,48 @@ def _render_closed_positions_table(closed: pd.DataFrame):
 # ===================================================================
 # ──  PAGE 1: MARKET OVERVIEW
 # ===================================================================
+def _heatmap_panel(live=None):
+    """Sector treemap on the dashboard — same engine as the Telegram /heatmap.
+
+    Interactive here rather than a PNG: Streamlit renders plotly natively, so hovering a
+    tile gives the exact move. Reuses _heatmap_frame from the bot engine so there is one
+    implementation, not two (user 2026-08-07).
+    """
+    if _TB_ENGINE is None:
+        return
+    try:
+        _lv = _market_state() == "OPEN" if live is None else bool(live)
+        _c = get_conn()
+        try:
+            m = _TB_ENGINE._heatmap_frame(_c, live=_lv)
+        finally:
+            _c.close()
+        if m is None or len(m) < 10:
+            st.caption("Heatmap unavailable — no market-cap/sector data.")
+            return
+        _lab = [f"{r.ticker}<br>{r.pct:+.1f}%" for r in m.itertuples()]
+        _secs = sorted(set(m["sector"]))
+        fig = go.Figure(go.Treemap(
+            labels=_lab + _secs,
+            parents=list(m["sector"]) + [""] * len(_secs),
+            values=list(m["market_cap"]) + [0] * len(_secs),
+            marker=dict(colors=list(m["pct"]) + [0] * len(_secs),
+                        colorscale=[[0, "#8b1a1a"], [0.5, "#3a3a3a"], [1, "#0f7b2f"]],
+                        cmid=0, cmin=-4, cmax=4, line=dict(width=1, color="#111")),
+            textposition="middle center", textfont=dict(size=12),
+            hovertemplate="%{label}<extra></extra>",
+        ))
+        fig.update_layout(height=640, margin=dict(l=2, r=2, t=8, b=2),
+                          paper_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True, key="mkt_heatmap")
+        st.caption(f"Tile size = market cap · colour = "
+                   f"{'LIVE move' if _lv else 'last completed session'} · "
+                   f"{len(m)} names across {m.sector.nunique()} sectors. "
+                   f"Hover any tile for the exact figure.")
+    except Exception as _e:
+        st.caption(f"Heatmap unavailable: {_e}")
+
+
 def _catchup_panel(where=""):
     """Today's scheduled briefings, and whether each has actually gone out.
 
@@ -6161,6 +6203,8 @@ def _pinned_df(data, *args, **kwargs):
 if page == "🌍 Market Overview":
     _page_header("🌍 Market Overview", _PAGE_HELP["🌍 Market Overview"])
     _catchup_panel()
+    with st.expander("🗺️ Market heatmap — size = market cap, colour = move", expanded=True):
+        _heatmap_panel()
 
     # ── 🛡️ Risk-Off Radar banner (top of page) ──
     @st.cache_data(ttl=300, show_spinner=False)

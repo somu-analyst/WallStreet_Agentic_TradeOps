@@ -26154,6 +26154,150 @@ async def breaking_command(update, ctx):
                                         disable_web_page_preview=True)
 
 
+
+# ── Market heatmap (user 2026-08-07) ─────────────────────────────────────────────────
+# Tiles sized by market cap, coloured by % move, grouped by sector — the TradingView-style
+# read. Built entirely from the DB: daily_fundamentals carries market_cap + sector for 453
+# tickers and stock_daily carries the moves, so no new data source and no API key.
+#
+# LIVE vs EOD: when the market is open the move is measured against the last close using
+# live quotes for the largest names; off-hours it is the completed session. Which one you
+# are looking at is stated on the chart, because a heatmap with no as-of is misleading.
+
+def _heatmap_frame(conn, live=False, max_names=180):
+    """DataFrame: ticker, sector, mcap, pct — for the treemap. Empty frame on failure."""
+    try:
+        f = pd.read_sql(
+            "SELECT UPPER(ticker) AS ticker, market_cap, sector FROM daily_fundamentals "
+            "WHERE market_cap > 0 AND sector IS NOT NULL AND sector <> ''", conn)
+        d = pd.read_sql(
+            "SELECT UPPER(ticker) AS ticker, trade_date, close FROM stock_daily "
+            "WHERE trade_date >= (SELECT MAX(trade_date) FROM stock_daily) "
+            "   OR trade_date >= (SELECT MAX(trade_date) FROM stock_daily WHERE trade_date "
+            "                     < (SELECT MAX(trade_date) FROM stock_daily))", conn)
+    except Exception:
+        return pd.DataFrame()
+    if f.empty or d.empty:
+        return pd.DataFrame()
+    d = d.sort_values("trade_date")
+    last = d.groupby("ticker").tail(1).set_index("ticker")["close"]
+    prev = d.groupby("ticker").head(1).set_index("ticker")["close"]
+    m = f.set_index("ticker").join(last.rename("px")).join(prev.rename("prev")).dropna()
+    m = m[(m.px > 0) & (m.prev > 0)]
+    if m.empty:
+        return pd.DataFrame()
+    m["pct"] = (m.px / m.prev - 1) * 100
+    m = m.sort_values("market_cap", ascending=False).head(max_names).reset_index()
+    if live:
+        # refresh only the biggest names — a live quote per ticker is far too slow for 180
+        for tk in m.head(40)["ticker"]:
+            try:
+                lp = _last_price(tk)
+                if lp and lp > 0:
+                    _pv = float(m.loc[m.ticker == tk, "prev"].iloc[0])
+                    m.loc[m.ticker == tk, "pct"] = (lp / _pv - 1) * 100
+            except Exception:
+                pass
+    return m
+
+
+def _heatmap_png(conn, live=False, title=None):
+    """Sector treemap -> PNG BytesIO for Telegram. None when unavailable."""
+    m = _heatmap_frame(conn, live=live)
+    if m.empty or len(m) < 10:
+        return None
+    try:
+        import plotly.graph_objects as _go
+        _lab = [f"{r.ticker}<br>{r.pct:+.1f}%" for r in m.itertuples()]
+        fig = _go.Figure(_go.Treemap(
+            labels=_lab,
+            parents=list(m["sector"]),
+            values=list(m["market_cap"]),
+            marker=dict(colors=list(m["pct"]), colorscale=[[0, "#8b1a1a"], [0.5, "#3a3a3a"],
+                                                           [1, "#0f7b2f"]],
+                        cmid=0, cmin=-4, cmax=4, line=dict(width=1, color="#111")),
+            textposition="middle center", textfont=dict(size=11, color="white"),
+            hovertemplate="%{label}<extra></extra>",
+            # NOT branchvalues="total": that requires each parent's value to EQUAL the sum
+            # of its children, and appending sector rows with value 0 made every parent
+            # smaller than its children, so Plotly silently dropped the whole tree and
+            # rendered a blank chart (caught by looking at the PNG, 2026-08-07). The default
+            # sums children into the parent, which is what a market-cap treemap wants.
+        ))
+        # sector rows must exist as parents, or the children have nothing to attach to
+        _secs = sorted(set(m["sector"]))
+        fig.data[0].labels = tuple(list(fig.data[0].labels) + _secs)
+        fig.data[0].parents = tuple(list(fig.data[0].parents) + [""] * len(_secs))
+        fig.data[0].values = tuple(list(fig.data[0].values) + [0] * len(_secs))
+        fig.data[0].marker.colors = tuple(list(fig.data[0].marker.colors) + [0] * len(_secs))
+        _asof = ("LIVE " + _et_now().strftime("%H:%M ET")) if live else "last completed session"
+        fig.update_layout(
+            title=dict(text=title or f"Market heatmap — {_asof} · tile size = market cap",
+                       font=dict(size=15, color="white")),
+            margin=dict(l=4, r=4, t=44, b=4), height=620, width=1000,
+            paper_bgcolor="#0d0d0d", plot_bgcolor="#0d0d0d",
+        )
+        buf = BytesIO(fig.to_image(format="png", scale=2))
+        buf.seek(0)
+        return buf
+    except Exception:
+        log.debug("heatmap render failed", exc_info=True)
+        return None
+
+
+def _fmt_heatmap_text(conn, live=False, top=6):
+    """The numbers behind the picture — a chart alone cannot be read back or quoted."""
+    m = _heatmap_frame(conn, live=live)
+    if m.empty:
+        return None
+    _sec = (m.assign(w=m.market_cap)
+              .groupby("sector")
+              .apply(lambda g: pd.Series({
+                  "pct": float((g.pct * g.w).sum() / g.w.sum()),
+                  "n": len(g)}), include_groups=False)
+              .sort_values("pct", ascending=False))
+    rows = [(("🟢" if r.pct > 0.3 else "🔴" if r.pct < -0.3 else "🟡"),
+             str(i)[:14], f"{r.pct:+.2f}%", str(int(r.n))) for i, r in _sec.iterrows()]
+    out = [_pipe_table(("ST", "Sector", "Cap-wtd", "N"), rows, right_cols={2, 3},
+                       title="🗺️ SECTOR HEATMAP")]
+    _up = m.nlargest(top, "pct"); _dn = m.nsmallest(top, "pct")
+    out.append(_pipe_table(("Tkr", "Move"),
+                           [(r.ticker[:6], f"{r.pct:+.1f}%") for r in _up.itertuples()],
+                           right_cols={1}, title="🏆 Biggest gainers"))
+    out.append(_pipe_table(("Tkr", "Move"),
+                           [(r.ticker[:6], f"{r.pct:+.1f}%") for r in _dn.itertuples()],
+                           right_cols={1}, title="⬇️ Biggest losers"))
+    out.append("<i>Sector move is MARKET-CAP WEIGHTED, so it reflects index impact rather "
+               "than an average of tickers — a mega-cap moving 1% outweighs ten small caps "
+               "moving 3%.</i>")
+    return "\n".join(out)
+
+
+async def heatmap_command(update, ctx):
+    """/heatmap — sector treemap: tile size = market cap, colour = today's move."""
+    _live = _market_is_open() if callable(globals().get("_market_is_open")) else False
+    msg = await update.message.reply_text("🗺️ Building the heatmap…", parse_mode=H)
+    conn = get_conn()
+    try:
+        png = _heatmap_png(conn, live=_live)
+        txt = _fmt_heatmap_text(conn, live=_live)
+    finally:
+        conn.close()
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if png:
+        await update.message.reply_photo(png, caption="🗺️ Market heatmap — size = market cap, "
+                                                      "colour = move")
+    if txt:
+        for _p in _chunk_on_sections(txt):
+            await update.message.reply_text(_p, parse_mode=H)
+    if not png and not txt:
+        await update.message.reply_text("Heatmap unavailable — no market-cap/sector data.",
+                                        parse_mode=H)
+
+
 def _next_day_plan(conn):
     """Condensed whole-portfolio next-day plan: regime + Greeks + per-stock levels,
     expected move, StockTwits sentiment, per-leg actions, and a morning checklist."""
@@ -36907,6 +37051,7 @@ async def _post_init(app):
             # 12 commands had handlers but were absent from the menu, so they existed only
             # if you already knew to type them (found 2026-08-07: 73 handlers vs 61 menu
             # entries). Telegram caps the menu at 100, so there is room for all of them.
+            BotCommand("heatmap", "Sector heatmap: size=cap, colour=move"),
             BotCommand("breaking", "Breaking news on YOUR positions"),
             BotCommand("catchup", "Resend today's scheduled briefings"),
             BotCommand("whymoved", "Why each big move happened + knock-on"),
@@ -37062,6 +37207,7 @@ def main():
     app.add_handler(CommandHandler("watchlist", watchlist_command))
     app.add_handler(CommandHandler("paper", paper_command))
     app.add_handler(CommandHandler("gex", gex_command))
+    app.add_handler(CommandHandler("heatmap", heatmap_command))   # sector treemap
     app.add_handler(CommandHandler("breaking", breaking_command))  # news on your book
     app.add_handler(CommandHandler("catchup", catchup_command))   # resend today's briefings
     app.add_handler(CommandHandler("whymoved", whymoved_command))  # why did it move

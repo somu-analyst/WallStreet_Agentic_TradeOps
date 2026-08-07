@@ -564,7 +564,7 @@ ROWS = [
  "-","P1","-"),
 (147,"2026-08-07","User","Feature","Market heatmap treemap, Telegram + Streamlit, live and EOD",
  "User shared a TradingView-style sector treemap: tiles sized by market cap, coloured by percent change, grouped by sector",
- "QUEUED","","daily_fundamentals already holds market_cap and sector for 541 tickers, and stock_daily has the moves - so this is buildable from the DB with no new source. Plotly treemap renders in Streamlit natively and exports PNG via kaleido for Telegram, same path as the world map",
+ "DONE","2026-08-07","/heatmap in Telegram (PNG via kaleido) and an interactive panel on Market Overview, sharing ONE engine function _heatmap_frame so there is no duplicate implementation. Built entirely from the DB - daily_fundamentals market_cap+sector, stock_daily moves - so no new source and no API key. Live during market hours (top 40 names refreshed with live quotes; a per-ticker quote for all 180 would be far too slow) and last-completed-session off-hours, with the as-of stated on the chart. Telegram also gets the numbers as tables, because a picture cannot be quoted or read back. A REAL BUG was caught only by opening the PNG: branchvalues=total requires each parent to EQUAL the sum of its children, and appending sector rows with value 0 made every parent smaller than its children, so Plotly silently dropped the entire tree and rendered a blank chart - 65KB of nothing. Verified visually after the fix (373KB, NVDA +2.3%, PLTR +10.3%, GOOGL -1.0% correctly placed) and in the live DOM: 180 names across 11 sectors",
  "-","P1","-"),
 ]
 

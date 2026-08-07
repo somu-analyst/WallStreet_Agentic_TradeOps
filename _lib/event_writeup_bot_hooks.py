@@ -151,13 +151,53 @@ async def event_anomaly_scan(ctx):
     if not severe:
         return
 
+    # RELEVANCE GATE (user 2026-08-07: "SNDK +9.3% keeps coming, trim it").
+    # A 5% intraday move is common across a 700-name universe, so alerting on all of them
+    # is noise that trains you to ignore the channel. Alert on names you actually hold or
+    # watch, plus the index/vol complex which is market-wide context. Anything else has to
+    # clear a much higher bar to interrupt.
+    _RELEVANT_ALWAYS = {"SPY", "QQQ", "IWM", "DIA", "^VIX", "VIX"}
+    _OTHER_MIN_MOVE = 12.0          # unheld name: only a genuinely exceptional move
+    try:
+        _c0 = get_conn()
+        try:
+            _mine = {r[0] for r in _c0.execute(
+                "SELECT DISTINCT UPPER(ticker) FROM trades WHERE status='OPEN'")}
+            try:
+                _mine |= {r[0] for r in _c0.execute(
+                    "SELECT DISTINCT UPPER(ticker) FROM watchlist")}
+            except Exception:
+                pass
+        finally:
+            _c0.close()
+    except Exception:
+        _mine = set()
+    _keep = []
+    for _a in severe:
+        _t = str(((_a.get("data") or {}).get("ticker") or "")).upper()
+        if not _t:
+            _keep.append(_a); continue                     # market-wide alert, always keep
+        if _t in _mine or _t in _RELEVANT_ALWAYS:
+            _keep.append(_a); continue
+        if abs(float((_a.get("data") or {}).get("chg_pct") or 0)) >= _OTHER_MIN_MOVE:
+            _keep.append(_a)
+    if not _keep:
+        log.info("anomaly: %d severe, none relevant (held/watched/index or >=%.0f%%)",
+                 len(severe), _OTHER_MIN_MOVE)
+        return
+    severe = _keep
+
     conn = get_conn()
     try:
         _ensure_dedup(conn)
         _, chat_id = load_creds()
         from telegram_bot_optimized import _pipe_table, make_line_chart
         for a in severe:
-            key = a["type"] + "_" + (a.get("description") or "")[:30]
+            # Dedup on type+TICKER, never the description: it reads "SNDK +9.3% from open",
+            # so the percentage was IN the key and every tick minted a fresh one -- the same
+            # name re-alerted all day (user 2026-08-07). One alert per name per day.
+            _dk = str(((a.get("data") or {}).get("ticker") or "")).upper()
+            key = a["type"] + "_" + (_dk or (a.get("description") or "")[:30])
             if _already_sent(conn, today_str, key, "anomaly"):
                 continue
             msg = f"⚠️ <b>MARKET ANOMALY</b>\n\n{a['description']}"

@@ -474,6 +474,18 @@ ROWS = [
  "User: why is cmd popping and closing frequently, its irritating",
  "DONE","2026-08-07","MY FAULT, from enabling TelegramBotWatchdog an hour earlier: it fired every 5 MINUTES running powershell.exe under an Interactive logon with Hidden=False, so a console flashed 288 times a day. PowerShells own -WindowStyle Hidden does not help - the console is allocated before PowerShell can act on the flag. Fixed with a WScript.Shell.Run launcher (intWindowStyle=0 never allocates a console) and relaxed 5min -> 10min, which is fine because the DNS guard stops it thrashing and <=10 min of bot downtime is acceptable. Also audited every child-process spawn in the bot: all had CREATE_NO_WINDOW except the manual data-refresh at line 10745, which popped a console for up to 10 minutes - now consistent. Verified: task rc=0, bot pid unchanged, no stray consoles",
  "00f61e0","P1","-"),
+(125,"2026-08-07","User","Feature","Catalyst Radar: explain each event, keep it 2-3 days AFTER, add consensus vs actual",
+ "User: I do not know what NFP is. Whatever you show needs a writeup - what it is, frequency, market expectation, actual value - keep showing the event 2-3 days after it happens, what the possible outcomes are based on the real actual value, and trade advice",
+ "DONE","2026-08-07","Added _MACRO_EVENT_INFO: every catalyst now carries full name, what it measures in plain English, frequency, why it moves markets, and a how-to-read table of outcome -> implication. Window extended to show events 3 days AFTER they print, because the reaction is the tradeable part. For events with a BLS series the ACTUAL is fetched and shown. Deliberately reports actual vs PRIOR, not vs consensus: no free feed carries market expectations, and inventing a consensus would be fabrication. NFP specifically reports the CHANGE (-23k jobs, jobs LOST, weak) rather than the payroll LEVEL (158,858k) - the level is technically true and useless",
+ "-","P1","-"),
+(126,"2026-08-07","User","Feature","Catch-up alerts: fire on laptop open, then hourly",
+ "User: if I am not opening before market but open mid-session, I lose the time-based scheduled alerts",
+ "DONE","2026-08-07","run_daily fires once; a sleeping laptop loses that push for the day. All 7 morning alerts now route through _run_alert_once, which records the send in alert_dedup, and catchup_alert sweeps 90s after startup then hourly, firing anything whose time has passed that has not gone out. The dedup INSERT is what makes double-calling safe. Weekday-gated, and it prefixes a Catch-up notice so a 11am briefing is not mistaken for an 8:15 one",
+ "-","P1","-"),
+(127,"2026-08-07","User","Bug","MARKET ANOMALY alert fires far too often",
+ "User: SNDK +9.3% keeps coming, can we trim it to positions or a smaller set",
+ "DONE","2026-08-07","TWO causes. (1) The dedup key was type + DESCRIPTION, and the description reads SNDK +9.3% from open - the percentage was IN the key, so every tick minted a new one. Confirmed in alert_dedup: TICKER_SHOCK_SNDK +9.3% and +10.4% logged as separate alerts the same day. Key is now type + TICKER = one alert per name per day. (2) No relevance filter: a 5% intraday move is ordinary across 700 names. Now alerts only on tickers held or watchlisted, plus the index/vol complex; anything else must clear 12% to interrupt",
+ "-","P1","-"),
 ]
 
 def build():

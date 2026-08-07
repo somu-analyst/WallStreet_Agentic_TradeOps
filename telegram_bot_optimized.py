@@ -26665,6 +26665,84 @@ async def digest_evening_alert(ctx):
     await _digest_push(ctx, txt)
 
 
+
+# ── Catch-up for missed time-based alerts (user 2026-08-07) ───────────────────────────
+# run_daily fires ONCE at its clock time. If the laptop is asleep then, that push is gone
+# for the day -- open the lid at 11am and the 8:15/8:30/8:45 briefings simply never arrive.
+# Every alert now goes through _run_alert_once, which records that it fired; a catch-up job
+# runs at startup and hourly, and sends anything whose time has passed and which has not
+# fired today. The dedup row is what makes it safe to call twice.
+
+_CATCHUP_JOBS = []          # (key, utc_minute, coro_fn, label) — filled at registration
+
+
+async def _run_alert_once(ctx, key, fn, label=""):
+    """Run an alert unless it already went out today. Returns True if it was sent."""
+    conn = get_conn()
+    try:
+        _ensure_alert_dedup_table(conn)
+        today = _et_now().strftime("%Y-%m-%d")
+        # _alert_already_sent INSERTS the key and reports whether it existed, so this is
+        # atomic: two overlapping callers cannot both send.
+        if _alert_already_sent(conn, today, key, "sched"):
+            return False
+    finally:
+        conn.close()
+    try:
+        await fn(ctx)
+        return True
+    except Exception:
+        log.warning("alert %s failed", label or key, exc_info=True)
+        # leave the dedup row in place: a failing alert should not retry every hour all day
+        return False
+
+
+def _sched_once(job_queue, fn, hhmm_utc, key, label):
+    """Register a daily alert AND record it for catch-up."""
+    from functools import partial
+    h, m = hhmm_utc
+    job_queue.run_daily(partial(_run_alert_once_job, key=key, fn=fn, label=label),
+                        time=dt_time(h, m, 0))
+    _CATCHUP_JOBS.append((key, h * 60 + m, fn, label))
+
+
+async def _run_alert_once_job(ctx, key=None, fn=None, label=""):
+    await _run_alert_once(ctx, key, fn, label)
+
+
+async def catchup_alert(ctx):
+    """Send any of today's scheduled alerts that were missed (machine asleep / late start).
+
+    Only fires alerts whose scheduled time has ALREADY passed, and only on a weekday --
+    catching up Monday's briefings on Saturday would be noise, not service.
+    """
+    now = _et_now()
+    if now.weekday() >= 5:
+        return
+    now_utc = datetime.now(timezone.utc)
+    now_min = now_utc.hour * 60 + now_utc.minute
+    sent = []
+    for key, mins, fn, label in _CATCHUP_JOBS:
+        if mins > now_min:
+            continue                      # not due yet today
+        try:
+            if await _run_alert_once(ctx, key, fn, label):
+                sent.append(label or key)
+        except Exception:
+            log.debug("catchup %s failed", key, exc_info=True)
+    if sent:
+        log.info("catchup: sent %d missed alert(s): %s", len(sent), ", ".join(sent))
+        try:
+            _, chat_id = load_creds()
+            await ctx.bot.send_message(
+                chat_id=int(chat_id), parse_mode=H,
+                text=("🔄 <b>Catch-up</b> — you were offline when these were scheduled, so "
+                      "they are arriving now:\n" + "\n".join(f"• {x}" for x in sent) +
+                      "\n\n<i>Times are as-of now, not as-of the original slot.</i>"))
+        except Exception:
+            log.debug("catchup notice failed", exc_info=True)
+
+
 async def digest_command(update, ctx):
     """/digest [morning|midday|evening] — newsletter, emphasis by time of day."""
     _ed = (ctx.args[0].lower() if ctx.args else None)
@@ -29629,8 +29707,163 @@ def _first_friday(year, month):
     return d + _dt.timedelta(days=(4 - d.weekday()) % 7)   # Friday = weekday 4
 
 
-def _macro_events(days=7):
-    """Upcoming major macro catalysts within `days`: (n_days, date, label), soonest first."""
+
+# ── What each macro catalyst actually IS (user 2026-08-07: "I don't know what NFP is") ──
+# The radar printed bare tickers like "Jobs - NFP" and assumed the reader knew. Each entry
+# carries: full name, what it measures, how often, why the market cares, and how to read
+# the number when it lands. Kept as data rather than prose so /catalysts, the dashboard and
+# the digest can all render the same explanation.
+_MACRO_EVENT_INFO = {
+    "Jobs · NFP": {
+        "full": "Non-Farm Payrolls",
+        "what": ("How many jobs the US economy added last month, excluding farms, and the "
+                 "unemployment rate alongside it."),
+        "freq": "Monthly — first Friday, 8:30am ET",
+        "why": ("The single biggest scheduled mover of rates and the dollar. The Fed's "
+                "mandate is jobs + inflation, so this directly shapes rate expectations."),
+        "read": [("Much stronger than expected",
+                  "Economy hot → Fed can stay tight → yields UP, growth/tech typically DOWN"),
+                 ("Much weaker than expected",
+                  "Rate-cut odds rise → yields DOWN, but a very weak print reads as "
+                  "recession and equities can fall anyway"),
+                 ("Near expectations", "Usually a non-event; IV crushes after 8:30")],
+        "series": "CES0000000001",       # BLS total nonfarm employment LEVEL, thousands
+        "unit": "k jobs",
+        # The headline "NFP +150k" is the CHANGE, not the level. Reporting 158,858k would
+        # be technically true and completely useless (2026-08-07).
+        "headline": "change",
+    },
+    "CPI · inflation": {
+        "full": "Consumer Price Index",
+        "what": "The headline measure of what consumers pay — inflation as most people mean it.",
+        "freq": "Monthly, ~mid-month, 8:30am ET",
+        "why": ("Inflation decides how long the Fed stays restrictive. CPI days are among "
+                "the widest ranges of the month for index options."),
+        "read": [("Hotter than expected",
+                  "Cuts pushed back → yields UP, long-duration/tech hit hardest"),
+                 ("Cooler than expected", "Cuts pulled forward → risk assets rally, yields DOWN"),
+                 ("In line", "IV crush is the trade, not direction")],
+        "series": "CUUR0000SA0",
+        "unit": "index",
+    },
+    "PCE · Fed gauge": {
+        "full": "Personal Consumption Expenditures price index",
+        "what": "The Fed's PREFERRED inflation measure — different basket and weights from CPI.",
+        "freq": "Monthly, ~end of month, 8:30am ET",
+        "why": ("When the Fed says '2% target' this is the number they mean, so it can "
+                "matter more than CPI even though CPI gets the headlines."),
+        "read": [("Above expectations", "Restrictive for longer → yields UP"),
+                 ("Below expectations", "Supports the cutting case → risk-on"),
+                 ("In line", "Muted; the core month-over-month figure is what desks read")],
+        "series": None,
+        "unit": "",
+    },
+    "FOMC decision": {
+        "full": "Federal Open Market Committee rate decision",
+        "what": "The Fed sets the policy rate, publishes projections, and the Chair takes questions.",
+        "freq": "8 times a year — 2pm ET decision, 2:30pm press conference",
+        "why": ("The rate itself is usually priced in. The move comes from the STATEMENT "
+                "wording, the dot plot, and the press conference — which is why the 2:30 "
+                "reaction often reverses the 2:00 one."),
+        "read": [("Hawkish (fewer cuts signalled)", "Yields UP, equities DOWN, dollar UP"),
+                 ("Dovish (more cuts signalled)", "Yields DOWN, equities UP, dollar DOWN"),
+                 ("As expected",
+                  "Big IV crush across the curve; the press conference still moves it")],
+        "series": None,
+        "unit": "",
+    },
+}
+
+
+def _macro_event_actual(label):
+    """Latest printed value + prior for an event, from BLS. None when unavailable.
+
+    Consensus/expectation numbers are NOT freely available without a paid calendar feed, so
+    this deliberately reports ACTUAL vs PRIOR rather than inventing a 'vs expected' the data
+    cannot support. Prior-comparison is real information; a fabricated consensus is not.
+    """
+    info = _MACRO_EVENT_INFO.get(label) or {}
+    sid = info.get("series")
+    if not sid:
+        return None
+    try:
+        import urllib.request as _u, json as _j
+        yr = datetime.now().year
+        body = _j.dumps({"seriesid": [sid], "startyear": str(yr - 1),
+                         "endyear": str(yr)}).encode()
+        req = _u.Request("https://api.bls.gov/publicAPI/v1/timeseries/data/", data=body,
+                         headers={"Content-Type": "application/json",
+                                  "User-Agent": "nyse-data/1.0"})
+        j = _j.load(_u.urlopen(req, timeout=12))
+        pts = []
+        for ser in j.get("Results", {}).get("series", []):
+            for d in ser.get("data", []):
+                if str(d.get("period", "")).startswith("M"):
+                    try:
+                        pts.append((int(d["year"]), int(d["period"][1:]), float(d["value"])))
+                    except Exception:
+                        pass
+        pts.sort(reverse=True)
+        if len(pts) < 2:
+            return None
+        (y1, m1, v1), (_, _, v2) = pts[0], pts[1]
+        return {"period": f"{y1}-{m1:02d}", "actual": v1, "prior": v2,
+                "chg": v1 - v2, "unit": info.get("unit", "")}
+    except Exception:
+        log.debug("macro actual fetch failed for %s", label, exc_info=True)
+        return None
+
+
+def _fmt_macro_event_block(n, ds, label):
+    """One catalyst, explained: what it is, when, the actual if it has printed, how to read it."""
+    info = _MACRO_EVENT_INFO.get(label)
+    try:
+        _dt = datetime.strptime(ds, "%Y-%m-%d").strftime("%a %b %d")
+    except Exception:
+        _dt = ds
+    when = ("TODAY" if n == 0 else (f"in {n}d" if n > 0 else
+            f"{abs(n)}d ago" if abs(n) > 1 else "yesterday"))
+    if not info:
+        return f"📅 <b>{label}</b> — {_dt} ({when})"
+    out = [f"📅 <b>{info['full']} ({label.split('·')[-1].strip()})</b> — {_dt} ({when})",
+           f"    <i>{info['what']}</i>",
+           f"    <b>Frequency:</b> {info['freq']}",
+           f"    <b>Why it moves markets:</b> {info['why']}"]
+    if n <= 0:                                   # already printed — show what landed
+        act = _macro_event_actual(label)
+        if act:
+            if info.get("headline") == "change":
+                # jobs ADDED is the number everyone quotes; the level is context
+                _verdict = ("jobs LOST — weak" if act["chg"] < 0 else
+                            ("weak" if act["chg"] < 100 else
+                             ("solid" if act["chg"] < 250 else "hot")))
+                out.append(f"    <b>Latest print ({act['period']}):</b> "
+                           f"<b>{act['chg']:+,.0f}k jobs</b> — {_verdict} "
+                           f"(total payrolls {act['actual']:,.0f}k)")
+            else:
+                _arrow = "higher" if act["chg"] > 0 else ("lower" if act["chg"] < 0 else "flat")
+                out.append(f"    <b>Latest print ({act['period']}):</b> {act['actual']:,.1f}"
+                           f"{(' ' + act['unit']) if act['unit'] else ''} vs prior "
+                           f"{act['prior']:,.1f} — {_arrow} ({act['chg']:+,.1f})")
+            out.append("    <i>No consensus figure: a free calendar with market expectations "
+                       "is not available here, so this compares to the PRIOR print rather "
+                       "than inventing a 'vs expected'.</i>")
+        else:
+            out.append("    <i>Actual not retrievable from the free BLS feed yet — releases "
+                       "can lag the scheduled time.</i>")
+    out.append("    <b>How to read it:</b>")
+    for cond, imp in info["read"]:
+        out.append(f"      • <b>{cond}</b> → {imp}")
+    return "\n".join(out)
+
+
+def _macro_events(days=7, back=3):
+    """Major macro catalysts from `back` days ago to `days` ahead: (n, date, label).
+
+    `back` exists because an event does not stop mattering the moment it prints — the
+    reaction, and whether it held, is the tradeable part (user 2026-08-07). n is negative
+    for events that have already happened.
+    """
     today = datetime.now().date()
     evs = [(d, "FOMC decision") for d in _FOMC_DATES]
     evs += [(d, "CPI · inflation") for d in _CPI_DATES]
@@ -29646,7 +29879,7 @@ def _macro_events(days=7):
             n = (datetime.strptime(ds, "%Y-%m-%d").date() - today).days
         except Exception:
             continue
-        if 0 <= n <= days:
+        if -abs(back) <= n <= days:
             out.add((n, ds, label))
     return sorted(out)
 
@@ -29740,9 +29973,14 @@ def _fmt_catalysts(macro, earn, days=7, geo=None):
     parts = [f"⚡ <b>Catalyst Radar — next {days}d</b>",
              "<i>IV inflates into these; expect gaps — size down / don't fade blindly · not advice</i>"]
     if macro:
-        lines = [f"📅 <b>{lbl}</b> — {datetime.strptime(ds,'%Y-%m-%d').strftime('%a %b %d')} "
-                 f"({'today' if n==0 else str(n)+'d'})" for n, ds, lbl in macro]
-        parts.append("<b>🌍 MACRO</b>\n" + "\n".join(lines))
+        _past = [m for m in macro if m[0] < 0]
+        _fwd = [m for m in macro if m[0] >= 0]
+        if _fwd:
+            parts.append("<b>🌍 MACRO — AHEAD</b>\n"
+                         + "\n\n".join(_fmt_macro_event_block(*m) for m in _fwd))
+        if _past:
+            parts.append("<b>🌍 MACRO — JUST HAPPENED</b>\n"
+                         + "\n\n".join(_fmt_macro_event_block(*m) for m in _past))
     if earn:
         lines = [f"📊 <b>{tk}</b> earnings — {('today' if n==0 else str(n)+'d')}"
                  f"{(' · '+str(dt)) if dt else ''}" for n, tk, dt in earn]
@@ -36080,16 +36318,21 @@ def main():
     job_queue = app.job_queue
     if job_queue:
         from datetime import time as dt_time
-        job_queue.run_daily(morning_alert, time=dt_time(14, 0, 0))  # 9 AM ET = 14:00 UTC
-        job_queue.run_daily(briefing_alert, time=dt_time(14, 5, 0))  # daily brief 9:05 AM ET
-        job_queue.run_daily(plan_alert, time=dt_time(13, 30, 0))     # next-day game plan ~8:30 AM ET pre-market
-        job_queue.run_daily(digest_morning_alert, time=dt_time(12, 15, 0))  # ~8:15 AM ET pre-open
+        _sched_once(job_queue, morning_alert, (14, 0), "morning_alert", "Morning alert")
+        # Catch-up (user 2026-08-07): run_daily fires once, so a sleeping laptop loses
+        # that push for the day. Sweep 90s after startup and then hourly; each alert is
+        # dedup-guarded, so a normal day sends nothing extra.
+        job_queue.run_once(catchup_alert, when=90)
+        job_queue.run_repeating(catchup_alert, interval=3600, first=3600)  # 9 AM ET = 14:00 UTC
+        _sched_once(job_queue, briefing_alert, (14, 5), "briefing_alert", "Daily briefing")  # daily brief 9:05 AM ET
+        _sched_once(job_queue, plan_alert, (13, 30), "plan_alert", "Next-day game plan")     # next-day game plan ~8:30 AM ET pre-market
+        _sched_once(job_queue, digest_morning_alert, (12, 15), "digest_morning", "Morning digest")  # ~8:15 AM ET pre-open
         job_queue.run_daily(digest_midday_alert, time=dt_time(16, 30, 0))   # ~12:30 PM ET, gated on a >=1% move
         job_queue.run_daily(digest_evening_alert, time=dt_time(21, 15, 0))  # ~5:15 PM ET post-close
         job_queue.run_daily(wrap_alert, time=dt_time(21, 15, 0))     # daily market wrap ~4:15 PM ET post-close
-        job_queue.run_daily(catalyst_alert, time=dt_time(13, 20, 0))  # Catalyst Radar ~8:20 AM ET pre-market
-        job_queue.run_daily(action_board_alert, time=dt_time(13, 35, 0)) # Action Board ~8:35 AM ET pre-market
-        job_queue.run_daily(earnings_alert, time=dt_time(13, 45, 0)) # Earnings Radar ~8:45 AM ET pre-market
+        _sched_once(job_queue, catalyst_alert, (13, 20), "catalyst_alert", "Catalyst Radar")  # Catalyst Radar ~8:20 AM ET pre-market
+        _sched_once(job_queue, action_board_alert, (13, 35), "action_board", "Action Board") # Action Board ~8:35 AM ET pre-market
+        _sched_once(job_queue, earnings_alert, (13, 45), "earnings_alert", "Earnings Radar") # Earnings Radar ~8:45 AM ET pre-market
         job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # weekly sector rotation, Mondays
         job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
         job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs ~4:30pm ET

@@ -10747,7 +10747,10 @@ async def generate_nyse_report(query, max_symbols=10):
             env=env,
             capture_output=True,
             text=True,
-            timeout=600  # 10 minute timeout
+            timeout=600,  # 10 minute timeout
+            # every other spawn in this file passes CREATE_NO_WINDOW; this one did not, so a
+            # console window popped for up to 10 minutes on a manual refresh (2026-08-07)
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         
         if result.returncode != 0:

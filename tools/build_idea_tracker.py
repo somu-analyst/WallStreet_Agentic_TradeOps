@@ -470,6 +470,10 @@ ROWS = [
  "Found while diagnosing why Telegram commands were dead: the watchdog that exists to restart the bot has not been working",
  "DONE","2026-08-07","ROOT CAUSE: bot_watchdog.ps1 DID NOT EXIST. The task had pointed at that path since registration, so every run failed to open the -File target - 115 missed runs, rc=0xFFFD0000. Wrote it: matches on COMMAND LINE not image name (several python.exe run here, so a bare name check always looks healthy), and refuses to restart when DNS for api.telegram.org fails, because a wake-from-sleep blip is not a dead bot and restarting into a dead network just loses the job queue. Testing caught a second real bug: two overlapping runs both calling Add-Content threw file-in-use, and with ErrorActionPreference=Stop that killed the whole watchdog - logging now retries then gives up silently. Verified: no-op when healthy (bot pid unchanged, nothing logged), correct branch when down, 3 concurrent runs all exit 0",
  "-","P1","-"),
+(124,"2026-08-07","User","Bug","CMD windows popping up and closing every few minutes",
+ "User: why is cmd popping and closing frequently, its irritating",
+ "DONE","2026-08-07","MY FAULT, from enabling TelegramBotWatchdog an hour earlier: it fired every 5 MINUTES running powershell.exe under an Interactive logon with Hidden=False, so a console flashed 288 times a day. PowerShells own -WindowStyle Hidden does not help - the console is allocated before PowerShell can act on the flag. Fixed with a WScript.Shell.Run launcher (intWindowStyle=0 never allocates a console) and relaxed 5min -> 10min, which is fine because the DNS guard stops it thrashing and <=10 min of bot downtime is acceptable. Also audited every child-process spawn in the bot: all had CREATE_NO_WINDOW except the manual data-refresh at line 10745, which popped a console for up to 10 minutes - now consistent. Verified: task rc=0, bot pid unchanged, no stray consoles",
+ "-","P1","-"),
 ]
 
 def build():

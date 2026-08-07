@@ -522,6 +522,14 @@ ROWS = [
  "User saw the catch-up push working and asked for it on demand: a Telegram command, plus a top section on Market Overview and Command Center",
  "DONE","2026-08-07","/catchup sends every briefing DUE so far today, deliberately bypassing the dedup - the scheduled sweep only fires what was missed, but asking explicitly should deliver regardless of whether it already went. Streamlit gained a _catchup_panel at the top of Market Overview and Command Center reading the same alert_dedup rows: green when everything due has gone, an amber warning naming the missing ones and pointing at /catchup when not. Verified live: All briefings due so far today have been sent",
  "-","P1","-"),
+(137,"2026-08-07","User","Bug","NFP block missing consensus, unemployment rate, revisions and historical context",
+ "User pasted the real release: -23k vs +85k expected, unemployment 4.1% vs 4.2% expected, June revised DOWN -37k, 3rd biggest monthly job loss since 2020. Ours showed only -23k weak",
+ "DONE","2026-08-07","Three of the four gaps closed from data we already had. UNEMPLOYMENT RATE: LNS14000000 lands in the same 8:30 release and is now shown - 4.1% vs prior 4.2%, matching the real release exactly, with the note that a falling rate alongside job losses usually means people LEFT the workforce. HISTORICAL CONTEXT: the print is now ranked against the trailing series (4th weakest of the last 18 months) - the same calculation behind the 3rd-biggest-since-2020 line. CONSENSUS: no free calendar carries it, but the COVERAGE does, so the block now quotes the release stories - live output pulled Reuters -unexpectedly decline, unemployment eases to 4.1- and Detroit News -June report is revised downward-, which supplies both the vs-expected and the revision. REVISIONS from our own series still need vintage storage (ID 93)",
+ "-","P1","-"),
+(138,"2026-08-07","User","Feature","Breaking-news section tied to positions and relevant alerts",
+ "User: add a breaking news section in our positions or relevant alerts",
+ "IN-PROGRESS","2026-08-07","Logged before building",
+ "-","P1","-"),
 ]
 
 def build():

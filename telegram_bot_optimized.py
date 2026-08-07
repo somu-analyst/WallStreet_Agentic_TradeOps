@@ -24512,6 +24512,109 @@ def _position_news(tickers, per_tk=2, max_age=1800, days=3):
     return out
 
 
+
+# ── World / geopolitical news lane (user 2026-08-07) ─────────────────────────────────
+# ROOT CAUSE of "why no Japan/yen or Ukraine/Russia": _world_news_block wires
+# market_news_enhanced.get_aggregated_news, which pulls FOUR US-EQUITY feeds only --
+# Yahoo Finance, Google Finance, MarketWatch, Benzinga -- capped at 2-3 items each. A BoJ
+# yen intervention or a strike on Ukrainian infrastructure is simply not in that feed. It
+# was never a filtering bug; the stories were never fetched.
+#
+# These are keyless RSS. Reuters was tested and is dead from here (DNS fails), so it is not
+# in the list rather than sitting there failing silently every morning.
+_GEO_FEEDS = [
+    ("BBC World",    "http://feeds.bbci.co.uk/news/world/rss.xml"),
+    ("BBC Business", "http://feeds.bbci.co.uk/news/business/rss.xml"),
+    ("Al Jazeera",   "https://www.aljazeera.com/xml/rss/all.xml"),
+    # Google News topic searches: keyless, and the only reliable way to force coverage of a
+    # theme the general feeds may bury on a given day.
+    ("Japan/BoJ",  "https://news.google.com/rss/search?q=yen+OR+%22bank+of+japan%22+when:2d&hl=en-US&gl=US&ceid=US:en"),
+    ("Ukraine",    "https://news.google.com/rss/search?q=ukraine+russia+when:2d&hl=en-US&gl=US&ceid=US:en"),
+    ("Trade/China","https://news.google.com/rss/search?q=tariffs+OR+sanctions+OR+china+trade+when:2d&hl=en-US&gl=US&ceid=US:en"),
+    ("Energy",     "https://news.google.com/rss/search?q=opec+OR+%22oil+prices%22+when:2d&hl=en-US&gl=US&ceid=US:en"),
+]
+
+# what makes a world story MARKET news rather than general news
+_GEO_KEYWORDS = {
+    "🇯🇵 Japan / yen": ("yen", "bank of japan", "boj", "nikkei", "japanese"),
+    "⚔️ Russia / Ukraine": ("ukraine", "russia", "russian", "kyiv", "moscow", "drone strike"),
+    # "china" alone let in "First school for robots opens in China" — a country name is not
+    # a market story. Requires an economic/trade word (2026-08-07).
+    "🇨🇳 China / trade": ("tariff", "sanction", "trade war", "export control", "chip curb",
+                          "yuan", "china trade", "beijing stimulus"),
+    "🛢️ Energy / OPEC": ("opec", "oil price", "crude", "refinery", "pipeline", "lng"),
+    "🏦 Central banks": ("federal reserve", "ecb", "rate cut", "rate hike", "inflation",
+                         "central bank", "boe"),
+    "⚠️ Conflict / risk": ("missile", "attack", "strike", "war", "ceasefire", "invasion",
+                           "military"),
+}
+
+
+def _geo_news(limit_per_theme=2, timeout=10):
+    """Market-relevant WORLD headlines, grouped by theme. [] on failure — never blocks the brief."""
+    import urllib.request as _u, re as _re, html as _html
+    items = []
+    for src, url in _GEO_FEEDS:
+        try:
+            req = _u.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            xml = _u.urlopen(req, timeout=timeout).read().decode("utf-8", "ignore")
+        except Exception:
+            log.debug("geo feed failed: %s", src)
+            continue
+        # parse <item> blocks — grabbing every <title> also picks up the CHANNEL title
+        for blk in _re.findall(r"<item[^>]*>(.*?)</item>", xml, _re.S)[:12]:
+            m = _re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", blk, _re.S)
+            l = _re.search(r"<link>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>", blk, _re.S)
+            if not m:
+                continue
+            t = _html.unescape(_re.sub(r"<[^>]+>", "", m.group(1))).strip()
+            if len(t) < 20:
+                continue
+            items.append((t, (l.group(1).strip() if l else ""), src))
+    if not items:
+        return {}
+    out, seen = {}, set()
+    for title, url, src in items:
+        low = title.lower()
+        for theme, kws in _GEO_KEYWORDS.items():
+            if not any(k in low for k in kws):
+                continue
+            key = title[:55].lower()
+            if key in seen:
+                break
+            bucket = out.setdefault(theme, [])
+            if len(bucket) >= limit_per_theme:
+                break
+            seen.add(key)
+            bucket.append((title[:130], url, src))
+            break
+    return out
+
+
+def _fmt_geo_news(themes=None, max_themes=4):
+    """The WORLD section for the morning brief. None when nothing market-relevant landed."""
+    themes = themes if themes is not None else _geo_news()
+    if not themes:
+        return None
+    order = ["⚔️ Russia / Ukraine", "🇯🇵 Japan / yen", "🇨🇳 China / trade",
+             "🛢️ Energy / OPEC", "🏦 Central banks", "⚠️ Conflict / risk"]
+    out = ["<b>🌏 WORLD — what moved overnight</b>"]
+    n = 0
+    for th in order:
+        if th not in themes or n >= max_themes:
+            continue
+        n += 1
+        out.append(f"<b>{th}</b>")
+        for title, url, src in themes[th]:
+            out.append(f"  • " + (f'<a href="{url}">{title}</a>' if url else title)
+                       + f" <i>({src})</i>")
+    if n == 0:
+        return None
+    out.append("<i>World feeds are BBC/Al Jazeera plus themed Google News searches — "
+               "kept separate from the US equity wires, which do not carry these stories.</i>")
+    return "\n".join(out)
+
+
 def _world_news_block(limit=6):
     """Top world/market headlines for the morning brief — wires the previously-orphaned
     `_lib/market_news_enhanced.get_aggregated_news` (Google/Yahoo/MarketWatch/Benzinga RSS,
@@ -26737,6 +26840,15 @@ def _eod_digest(conn, max_news=5, max_uoa=8, max_plays=6, edition="evening"):
     news = [n for n in news
             if not any(w in str(n[0] if isinstance(n, (tuple, list)) else n).lower()
                        for w in _PF)]
+    # WORLD section first: the US equity wires do not carry BoJ/yen intervention or strikes
+    # on Ukraine, which is why the brief never mentioned them (user 2026-08-07, ID 92).
+    try:
+        _geo = _fmt_geo_news()
+        if _geo:
+            parts.append(_geo)
+            parts.append("")
+    except Exception:
+        log.debug("geo news block failed", exc_info=True)
     parts.append(shdr("1 · What moved the tape"))
     if news:
         for n in news[:max_news]:
@@ -29994,6 +30106,7 @@ _MACRO_EVENT_INFO = {
                   "recession and equities can fall anyway"),
                  ("Near expectations", "Usually a non-event; IV crushes after 8:30")],
         "series": "CES0000000001",       # BLS total nonfarm employment LEVEL, thousands
+        "series2": ("LNS14000000", "Unemployment rate", "%"),   # published in the same release
         "unit": "k jobs",
         # The headline "NFP +150k" is the CHANGE, not the level. Reporting 158,858k would
         # be technically true and completely useless (2026-08-07).
@@ -30073,11 +30186,94 @@ def _macro_event_actual(label):
         if len(pts) < 2:
             return None
         (y1, m1, v1), (_, _, v2) = pts[0], pts[1]
-        return {"period": f"{y1}-{m1:02d}", "actual": v1, "prior": v2,
-                "chg": v1 - v2, "unit": info.get("unit", "")}
+        res = {"period": f"{y1}-{m1:02d}", "actual": v1, "prior": v2,
+               "chg": v1 - v2, "unit": info.get("unit", "")}
+        # HISTORICAL CONTEXT: "-23k" means nothing without knowing where it sits. Rank the
+        # month-over-month change against the last 5 years (user 2026-08-07 quoted
+        # "3rd biggest monthly job loss since the pandemic" -- that is this calculation).
+        try:
+            chgs = [(pts[i][2] - pts[i + 1][2], pts[i][0], pts[i][1])
+                    for i in range(len(pts) - 1)]
+            if len(chgs) >= 12:
+                worse = sum(1 for c, _, _ in chgs if c < res["chg"])
+                res["rank_worse"] = worse
+                res["rank_n"] = len(chgs)
+        except Exception:
+            pass
+        # COMPANION SERIES: NFP and the unemployment rate land in the same 8:30 release, so
+        # showing one without the other tells half the story.
+        s2 = info.get("series2")
+        if s2:
+            try:
+                sid2, lbl2, unit2 = s2
+                body2 = _j.dumps({"seriesid": [sid2], "startyear": str(yr - 1),
+                                  "endyear": str(yr)}).encode()
+                req2 = _u.Request("https://api.bls.gov/publicAPI/v1/timeseries/data/",
+                                  data=body2,
+                                  headers={"Content-Type": "application/json",
+                                           "User-Agent": "nyse-data/1.0"})
+                j2 = _j.load(_u.urlopen(req2, timeout=12))
+                p2 = []
+                for ser in j2.get("Results", {}).get("series", []):
+                    for d in ser.get("data", []):
+                        if str(d.get("period", "")).startswith("M"):
+                            try:
+                                p2.append((int(d["year"]), int(d["period"][1:]), float(d["value"])))
+                            except Exception:
+                                pass
+                p2.sort(reverse=True)
+                if len(p2) >= 2:
+                    res["c_label"], res["c_val"] = lbl2, p2[0][2]
+                    res["c_prior"], res["c_unit"] = p2[1][2], unit2
+            except Exception:
+                log.debug("companion series failed", exc_info=True)
+        return res
     except Exception:
         log.debug("macro actual fetch failed for %s", label, exc_info=True)
         return None
+
+
+
+_EVENT_NEWS_Q = {
+    "Jobs · NFP": "nonfarm+payrolls+OR+jobs+report",
+    "CPI · inflation": "cpi+inflation+report",
+    "PCE · Fed gauge": "pce+inflation",
+    "FOMC decision": "federal+reserve+fomc+decision",
+}
+
+
+def _event_breaking_news(label, limit=3):
+    """Headlines about a specific macro release. Returns [(title, url)].
+
+    This is also where CONSENSUS comes from. The BLS API publishes what the number WAS, not
+    what the street expected, and no free calendar carries expectations -- but the coverage
+    does ("-23,000 vs +85,000 expected"). Rather than claim consensus is unavailable, quote
+    the reporting and let it supply the comparison (user 2026-08-07).
+    """
+    q = _EVENT_NEWS_Q.get(label)
+    if not q:
+        return []
+    import urllib.request as _u, re as _re, html as _html
+    url = (f"https://news.google.com/rss/search?q={q}+when:2d"
+           f"&hl=en-US&gl=US&ceid=US:en")
+    try:
+        xml = _u.urlopen(_u.Request(url, headers={"User-Agent": "Mozilla/5.0"}),
+                         timeout=10).read().decode("utf-8", "ignore")
+    except Exception:
+        return []
+    out = []
+    for blk in _re.findall(r"<item[^>]*>(.*?)</item>", xml, _re.S)[:10]:
+        m = _re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", blk, _re.S)
+        l = _re.search(r"<link>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>", blk, _re.S)
+        if not m:
+            continue
+        t = _html.unescape(_re.sub(r"<[^>]+>", "", m.group(1))).strip()
+        if len(t) < 20:
+            continue
+        out.append((t[:140], l.group(1).strip() if l else ""))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _fmt_macro_event_block(n, ds, label):
@@ -30106,14 +30302,38 @@ def _fmt_macro_event_block(n, ds, label):
                 out.append(f"    <b>Latest print ({act['period']}):</b> "
                            f"<b>{act['chg']:+,.0f}k jobs</b> — {_verdict} "
                            f"(total payrolls {act['actual']:,.0f}k)")
+                if act.get("c_label"):
+                    _cd = act["c_val"] - act["c_prior"]
+                    out.append(f"    <b>{act['c_label']}:</b> {act['c_val']:.1f}{act['c_unit']} "
+                               f"(prior {act['c_prior']:.1f}{act['c_unit']}, "
+                               f"{'up' if _cd > 0 else 'down' if _cd < 0 else 'flat'} "
+                               f"{abs(_cd):.1f}pp) — a FALLING rate alongside job losses "
+                               f"usually means people left the workforce, not that hiring improved")
+                if act.get("rank_n"):
+                    _w, _n = act["rank_worse"], act["rank_n"]
+                    out.append(f"    <b>Historical context:</b> only {_w} of the last {_n} "
+                               f"months were worse — this is the "
+                               f"<b>{_w + 1}{'st' if _w == 0 else 'nd' if _w == 1 else 'rd' if _w == 2 else 'th'} "
+                               f"weakest</b> print in that window")
             else:
                 _arrow = "higher" if act["chg"] > 0 else ("lower" if act["chg"] < 0 else "flat")
                 out.append(f"    <b>Latest print ({act['period']}):</b> {act['actual']:,.1f}"
                            f"{(' ' + act['unit']) if act['unit'] else ''} vs prior "
                            f"{act['prior']:,.1f} — {_arrow} ({act['chg']:+,.1f})")
-            out.append("    <i>No consensus figure: a free calendar with market expectations "
-                       "is not available here, so this compares to the PRIOR print rather "
-                       "than inventing a 'vs expected'.</i>")
+            _bn = _event_breaking_news(label)
+            if _bn:
+                out.append("    <b>📰 Coverage — this is where the CONSENSUS is:</b>")
+                for _t, _u2 in _bn:
+                    out.append(f"      • " + (f'<a href="{_u2}">{_t}</a>' if _u2 else _t))
+                out.append("    <i>The BLS feed publishes what the number WAS, not what was "
+                           "expected — no free calendar carries consensus, so the reporting "
+                           "above supplies the 'vs expected' and any REVISION to prior "
+                           "months, which our own series cannot show until we store print "
+                           "vintages (tracker ID 93).</i>")
+            else:
+                out.append("    <i>No consensus figure: no free calendar carries market "
+                           "expectations, so this compares to the PRIOR print rather than "
+                           "inventing a 'vs expected'.</i>")
         else:
             out.append("    <i>Actual not retrievable from the free BLS feed yet — releases "
                        "can lag the scheduled time.</i>")

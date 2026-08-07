@@ -818,3 +818,83 @@ What it does justify:
 **Re-test gate:** revisit when there are ≥40 independent observations per bucket (roughly
 8 more months at 5-day sampling), or sooner using `options_openbb`'s real gamma once that
 table has more history.
+
+
+---
+
+# Part 11 - Scenario tools & decision flowcharts (2026-08-07)
+
+Asked to find well-proven, time-tested scenario tools and flow charts worth adopting.
+Verified every repo through the GitHub API rather than trusting stars - that check has
+twice caught something that looked credible and wasn't (QuantMuse 2,824 stars / 9 commits;
+the 24.95%-CAGR repo with 0 commits).
+
+## 11.1 - What's actually out there
+
+| Repo | Stars | Contributors | Last push | Verdict |
+|---|---|---|---|---|
+| **fortitudo.tech** | 303 | **4** | 2026-07-09 | **The real find** - Entropy Pooling |
+| Riskfolio-Lib | 4,431 | 6 | 2026-06-22 | Real, but overlaps `/allocate` |
+| quantstats | 7,528 | 30 | 2026-07-20 | Reporting, not scenarios |
+| pyfolio | 6,390 | 39 | **2023-12-23** | **Dead 2.5 years** - Quantopian is defunct |
+| risk-lab | 0 | 1 | 2026-03-07 | Solo hobby project |
+| qrisklab | 10 | 1 | 2026-03-11 | Solo |
+| financial-risk-analyzer | 8 | 1 | 2025-10-14 | Solo, stale |
+
+**Four of seven fail on inspection.** pyfolio is the trap: 6,390 stars is 20x what
+fortitudo.tech has, and it has been unmaintained since 2023.
+
+## 11.2 - Entropy Pooling: the one worth having
+
+Meucci's framework (2008), productionised by fortitudo.tech. It answers exactly the
+question this system cannot currently answer:
+
+> *"If gold rallies 5%, what happens to MY book?"*
+
+The naive approach shocks gold and leaves everything else alone, which is wrong - gold does
+not move in isolation. Entropy Pooling takes the **joint** distribution of all assets,
+applies your view as a constraint, and finds the minimum-relative-entropy re-weighting
+consistent with it. Every other asset then moves as the historical joint distribution says
+it should.
+
+**Why it fits here:** it needs a panel of joint scenarios, and we have one - `stock_history`
+back to 1990, already including 2000, 2008, 2020 and 2022. The scenarios are *real
+historical days*, so correlations are whatever they actually were rather than whatever a
+copula assumes.
+
+**What it would replace:** the current crash analysis picks historical windows by hand.
+Entropy Pooling generalises that to any view, with the correlation structure handled
+properly.
+
+## 11.3 - Decision flowcharts: what is genuinely time-tested
+
+| Framework | Vintage | Testable here? | Value |
+|---|---|---|---|
+| **Merrill Lynch Investment Clock** | 2004 | Yes - needs growth + inflation, both in the macro lane | **Highest** |
+| CBOE BXM / PUT indices | 1986/2007 | Already the evidence base for premium selling | Already used |
+| Sector rotation cycle | 1990s | Already built (RRG) | Have it |
+| Fed real-rates -> gold | - | Now encoded in `/whymoved` | Just shipped |
+| Dalio All Weather quadrants | 1996 | Partly - needs an inflation proxy | Overlaps the Clock |
+| Elliott Wave / Gann | 1930s | **No - not falsifiable** | Reject |
+
+**The Investment Clock is the one to build.** Two axes (growth rising/falling, inflation
+rising/falling) give four quadrants, each with an expected asset leadership order -
+Reflation -> bonds, Recovery -> stocks, Overheat -> commodities, Stagflation -> cash. It is
+simple, 20+ years old, and **makes a falsifiable claim testable against 1990-2026 history**
+with the walk-forward harness.
+
+That last point is what separates it from the rest. Most "flowcharts" in finance are
+unfalsifiable; the Clock is not.
+
+## 11.4 - Recommendation
+
+1. **Build the Investment Clock and TEST it** before wiring it to anything. If quadrant
+   leadership does not hold out-of-sample on our own history, say so and stop - exactly the
+   trap Parts 4 and 9 documented.
+2. **Trial Entropy Pooling** for book scenarios. Feed it `stock_history`, ask "gold +5%",
+   and check the implied book move against what actually happened on real gold-rally days.
+   If the two disagree badly, the panel is wrong.
+3. **Adopt nothing else.** Riskfolio-Lib duplicates `/allocate`; quantstats duplicates
+   `/recperf`; the three solo repos are the QuantMuse pattern again.
+
+**Not started - logged as tracker items 131/132, not shipped.**

@@ -5875,6 +5875,53 @@ def _render_closed_positions_table(closed: pd.DataFrame):
 # ===================================================================
 # ──  PAGE 1: MARKET OVERVIEW
 # ===================================================================
+def _catchup_panel(where=""):
+    """Today's scheduled briefings, and whether each has actually gone out.
+
+    The bot pushes these on a clock and catches up what was missed. Streamlit had no view
+    of any of it, so there was no way to tell "quiet morning" from "the bot was asleep"
+    (user 2026-08-07). Reads the same alert_dedup rows the bot writes.
+    """
+    _SCHED = [("digest_morning", "08:15", "Morning digest"),
+              ("catalyst_alert", "08:20", "Catalyst Radar"),
+              ("plan_alert",     "08:30", "Next-day game plan"),
+              ("action_board",   "08:35", "Action Board"),
+              ("earnings_alert", "08:45", "Earnings Radar"),
+              ("morning_alert",  "09:00", "Morning alert"),
+              ("briefing_alert", "09:05", "Daily briefing")]
+    try:
+        _c = get_conn()
+        try:
+            _today = datetime.now().strftime("%Y-%m-%d")
+            _sent = {r[0] for r in _c.execute(
+                "SELECT grp_key FROM alert_dedup WHERE alert_date=? AND atype='sched'",
+                (_today,))}
+        finally:
+            _c.close()
+    except Exception as _e:
+        st.caption(f"Catch-up status unavailable: {_e}")
+        return
+    _now = datetime.now().strftime("%H:%M")
+    _rows, _missing = [], []
+    for _k, _t, _lbl in _SCHED:
+        _done = _k in _sent
+        _due = _t <= _now
+        _rows.append({"Briefing": _lbl, "Scheduled": _t,
+                      "Status": "✅ sent" if _done else ("⏳ due — not sent" if _due
+                                                         else "🕐 later today")})
+        if _due and not _done:
+            _missing.append(_lbl)
+    if _missing:
+        st.warning(f"📭 **{len(_missing)} briefing(s) due but not sent** — "
+                   + ", ".join(_missing)
+                   + ". The bot sends these on a clock, so if the laptop was asleep they "
+                     "were skipped. Run **/catchup** in Telegram to get them now.")
+    else:
+        st.success("📬 All briefings due so far today have been sent.")
+    with st.expander("Today's briefing schedule", expanded=False):
+        st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+
+
 # ---------------------------------------------------------------------------
 # Hoisted 2026-08-02: these three are called from the Command Center page body,
 # ~13k lines BEFORE their original definitions next to the Action Board. This
@@ -6113,6 +6160,7 @@ def _pinned_df(data, *args, **kwargs):
 
 if page == "🌍 Market Overview":
     _page_header("🌍 Market Overview", _PAGE_HELP["🌍 Market Overview"])
+    _catchup_panel()
 
     # ── 🛡️ Risk-Off Radar banner (top of page) ──
     @st.cache_data(ttl=300, show_spinner=False)
@@ -8709,6 +8757,7 @@ elif page == "🎯 Prop Trading Screen":
 # ===================================================================
 elif page == "🎛️ Command Center":
     _page_header("🎛️ Command Center", _PAGE_HELP["🎛️ Command Center"])
+    _catchup_panel()
     import telegram_bot_optimized as _cc_tbo
     _cc_refresh = st.button("↻ Refresh", key="cc_refresh")
 

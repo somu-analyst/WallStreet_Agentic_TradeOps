@@ -500,7 +500,7 @@ ROWS = [
  "-","P2","Neither adopted - see IDs 131/132"),
 (133,"2026-08-07","User","Feature","Ticker view: explain the jargon, organise it better",
  "User on the GOOG panel: needs rephrasing and more description, keep the table, I do not know what MOM or golden-cross mean",
- "IN-PROGRESS","2026-08-07","Logged before building",
+ "DONE","2026-08-07","Signal codes replaced with plain names (Mom -> Momentum, OI -> Open interest, 24M -> All signals) and a What these mean glossary printed under the table, which is kept as a table as asked. Hit% now carries a legend saying 50% is a coin flip. golden-cross replaced with: the 50-day average is ABOVE the 200-day, the conventional long-term uptrend marker - and death-cross likewise. The inference line uses the friendly name too",
  "-","P1","-"),
 (134,"2026-08-07","User","Feature","Catalyst Radar: show the 3 days BEFORE an event, split into two tables",
  "User: add what happens 3 days before an event like this, tabulate in two different tables, organise more readably",
@@ -514,6 +514,14 @@ ROWS = [
  "The one genuinely additive library from the Part 11 survey",
  "QUEUED","","Feed stock_history as the joint scenario panel, ask a view like gold +5%, compare the implied book move against what actually happened on real gold-rally days. If they disagree badly the panel is wrong, not the method. Would replace hand-picked crash windows with a general what-if answer",
  "-","P2","-"),
+(135,"2026-08-07","User","Feature","Spell out sector abbreviations and use relevant emoji",
+ "User on the VIX/leaders line: add something simple for CALM, Tech, Hlth, Engy, Finl and anything else in that section - the emoji should be relevant to the thing",
+ "DONE","2026-08-07","Sector abbreviations expanded with a depicting emoji: Tech -> 💻 Technology, Finl -> 🏦 Financials, Engy -> 🛢️ Energy, Hlth -> 🏥 Health Care, plus Industrials/Discretionary/Staples/Utilities/Materials/Real Estate/Communications. VIX line rewritten from a bare CALM label to a mood emoji scaled across five bands PLUS the translation that actually matters - the implied daily S&P move (VIX/15.87) - and whether premium is cheap to buy or good to sell at that level",
+ "-","P2","-"),
+(136,"2026-08-07","User","Feature","/catchup command + a catch-up panel in Streamlit",
+ "User saw the catch-up push working and asked for it on demand: a Telegram command, plus a top section on Market Overview and Command Center",
+ "DONE","2026-08-07","/catchup sends every briefing DUE so far today, deliberately bypassing the dedup - the scheduled sweep only fires what was missed, but asking explicitly should deliver regardless of whether it already went. Streamlit gained a _catchup_panel at the top of Market Overview and Command Center reading the same alert_dedup rows: green when everything due has gone, an amber warning naming the missing ones and pointing at /catchup when not. Verified live: All briefings due so far today have been sent",
+ "-","P1","-"),
 ]
 
 def build():

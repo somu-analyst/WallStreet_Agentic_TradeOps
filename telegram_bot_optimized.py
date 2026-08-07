@@ -15908,11 +15908,27 @@ async def morning_alert(ctx: ContextTypes.DEFAULT_TYPE):
         _ma_bar = "█" * (_ma_fg // 10) + "░" * (10 - _ma_fg // 10)
         _fg_ico = "🤑" if _ma_fg >= 75 else ("😀" if _ma_fg >= 55 else ("😐" if _ma_fg >= 45 else ("😨" if _ma_fg >= 25 else "😱")))
         parts.append(f"\n{_fg_ico} <b>Fear/Greed:</b> {_ma_fg}/100 — {_ma_fg_lb}\n   <code>{_ma_bar}</code>")
-        parts.append(f"🌡 <b>VIX:</b> {_ma_vix:.1f}  {'EXTREME FEAR' if _ma_vix > 30 else 'HIGH FEAR' if _ma_vix > 25 else 'ELEVATED' if _ma_vix > 20 else 'CALM'}")
+        # VIX is an annualised expected-move number, not a mood ring. Show the mood AND
+        # translate it into the daily move it implies, which is the part you can act on.
+        if _ma_vix > 30:   _vlbl, _vem = "EXTREME FEAR", "😱"
+        elif _ma_vix > 25: _vlbl, _vem = "HIGH FEAR", "😨"
+        elif _ma_vix > 20: _vlbl, _vem = "ELEVATED", "😐"
+        elif _ma_vix > 15: _vlbl, _vem = "CALM", "🙂"
+        else:              _vlbl, _vem = "VERY CALM", "😌"
+        _vday = _ma_vix / 15.87                      # annual vol -> ~1 trading day (sqrt 252)
+        parts.append(f"🌡 <b>VIX:</b> {_ma_vix:.1f}  {_vem} <b>{_vlbl}</b> — options are pricing "
+                     f"a ±{_vday:.1f}% daily move in the S&amp;P "
+                     f"({'cheap protection, but calm can end fast' if _ma_vix <= 15 else 'expensive premium — good to SELL, dangerous to buy' if _ma_vix > 25 else 'middling'})")
     except Exception: pass
 
     try:
-        _ma_secs = [("XLK","Tech"),("XLF","Finl"),("XLE","Engy"),("XLV","Hlth"),("XLI","Inds")]
+        # Full names + a RELEVANT emoji. "Engy -1.5%" assumed the reader expands the
+        # abbreviation and knows XLE is the energy ETF (user 2026-08-07).
+        _ma_secs = [("XLK", "💻 Technology"), ("XLF", "🏦 Financials"), ("XLE", "🛢️ Energy"),
+                    ("XLV", "🏥 Health Care"), ("XLI", "🏭 Industrials"),
+                    ("XLY", "🛍️ Consumer Disc."), ("XLP", "🧺 Staples"),
+                    ("XLU", "💡 Utilities"), ("XLB", "⛏️ Materials"),
+                    ("XLRE", "🏘️ Real Estate"), ("XLC", "📡 Communications")]
         _ma_sp = []
         for _ms, _ml in _ma_secs:
             _msh = _yf_ticker(_ms).history(period="5d")
@@ -25184,7 +25200,12 @@ def _plan_patterns(tk, spot, pw=None, cw=None):
             parts.append("EMA 8<21<50 🔴")
         if len(c) >= 200:
             a50 = c.rolling(50).mean().iloc[-1]; a200 = c.rolling(200).mean().iloc[-1]
-            parts.append("golden-cross 🟢" if a50 > a200 else "death-cross 🔴")
+            # "golden-cross" is jargon; say what it is (user 2026-08-07)
+            parts.append("🟢 <b>Golden cross</b> — the 50-day average is ABOVE the 200-day, "
+                         "the conventional long-term uptrend marker"
+                         if a50 > a200 else
+                         "🔴 <b>Death cross</b> — the 50-day average is BELOW the 200-day, "
+                         "the conventional long-term downtrend marker")
         pole = px / float(c.iloc[-21]) - 1
         last5 = c.iloc[-5:]; drift = float(last5.iloc[-1] / last5.iloc[0] - 1)
         rng = float((last5.max() - last5.min()) / last5.mean())
@@ -25283,10 +25304,34 @@ def _plan_trust_render(trust):
     if not trust:
         return None, None
     rows = trust["rows"]; best = trust["best"]
-    _tbl_rows = [(("🟢" if h >= 60 else "🟡" if h >= 50 else "🔴"), nm, f"{h:.0f}%",
+    # The table said "Mom 47%" and expected the reader to know what Mom is (user 2026-08-07).
+    # Longer, plain names + a glossary underneath. Kept as a table, as asked.
+    _SIG_NAME = {"OI": "Open interest", "Mom": "Momentum", "RSI14": "RSI (14d)",
+                 "RSI2": "RSI (2d)", "24M": "All signals"}
+    _SIG_HELP = {
+        "OI": "how many option contracts are live. Rising OI means new positions are "
+              "being opened, not just traded back and forth.",
+        "Mom": "is price trending up or down over the recent window — the idea that a "
+               "mover keeps moving.",
+        "RSI14": "an overbought/oversold gauge from 0-100 over 14 days. Below 35 is "
+                 "oversold (bounce lean), above 65 overbought (fade lean).",
+        "RSI2": "the same gauge but very short-term, counted only when price is above "
+                "its 200-day average — i.e. a dip inside an uptrend.",
+        "24M": "the blended hit-rate of every scanner that has "
+               "fired on this ticker.",
+    }
+    _tbl_rows = [(("🟢" if h >= 60 else "🟡" if h >= 50 else "🔴"),
+                  _SIG_NAME.get(nm, nm)[:13], f"{h:.0f}%",
                   {"UP": "🟢 UP", "DOWN": "🔴 DOWN", "-": "—"}[cd]) for nm, h, cd in rows]
-    tbl = _pipe_table(("ST", "Signal", "Hit%", "Now"), _tbl_rows, right_cols={2})
+    tbl = _pipe_table(("ST", "Signal", "Hit%", "Now"), _tbl_rows, right_cols={2},
+                      legend="Hit% = how often this signal was RIGHT on this ticker "
+                             "historically. 50% = a coin flip.")
+    _gloss = [f"    • <b>{_SIG_NAME.get(nm, nm)}</b> — {_SIG_HELP[nm]}"
+              for nm, _, _ in rows if nm in _SIG_HELP]
+    if _gloss:
+        tbl = tbl + "\n<i>What these mean:</i>\n" + "\n".join(_gloss)
     nm, h, cd = best
+    nm = _SIG_NAME.get(nm, nm)          # say "Momentum", not "Mom"
     if cd == "-":
         infer = f"→ {nm} has the best track record ({h:.0f}%) but isn't firing right now — no active lean."
     elif h >= 60:
@@ -26898,6 +26943,37 @@ def _sched_once(job_queue, fn, hhmm_utc, key, label):
 
 async def _run_alert_once_job(ctx, key=None, fn=None, label=""):
     await _run_alert_once(ctx, key, fn, label)
+
+
+async def catchup_command(update, ctx):
+    """/catchup — send today's scheduled briefings on demand, whether or not they already went.
+
+    The scheduled sweep only fires what was MISSED. Asking explicitly should give you the
+    briefings regardless, so this bypasses the dedup rather than reporting "nothing missed"
+    (user 2026-08-07).
+    """
+    if not _CATCHUP_JOBS:
+        await update.message.reply_text("No scheduled briefings are registered yet — the bot "
+                                        "may still be starting up.", parse_mode=H)
+        return
+    _now_utc = datetime.now(timezone.utc)
+    _now_min = _now_utc.hour * 60 + _now_utc.minute
+    _due = [(k, m, fn, lbl) for k, m, fn, lbl in _CATCHUP_JOBS if m <= _now_min]
+    if not _due:
+        _nxt = min(_CATCHUP_JOBS, key=lambda x: x[1])
+        await update.message.reply_text(
+            f"Nothing is due yet today — the first briefing (<b>{_nxt[3]}</b>) is scheduled "
+            f"for {_nxt[1]//60:02d}:{_nxt[1]%60:02d} UTC.", parse_mode=H)
+        return
+    await update.message.reply_text(
+        f"🔄 Sending <b>{len(_due)}</b> briefing(s) due so far today: "
+        + ", ".join(lbl for _, _, _, lbl in _due) + "…", parse_mode=H)
+    for _k, _m, _fn, _lbl in _due:
+        try:
+            await _fn(ctx)                      # deliberate: on demand ignores the dedup
+        except Exception:
+            log.warning("catchup_command %s failed", _lbl, exc_info=True)
+            await update.message.reply_text(f"⚠️ {_lbl} failed — see the log.", parse_mode=H)
 
 
 async def catchup_alert(ctx):
@@ -36485,6 +36561,7 @@ def main():
     app.add_handler(CommandHandler("watchlist", watchlist_command))
     app.add_handler(CommandHandler("paper", paper_command))
     app.add_handler(CommandHandler("gex", gex_command))
+    app.add_handler(CommandHandler("catchup", catchup_command))   # resend today's briefings
     app.add_handler(CommandHandler("whymoved", whymoved_command))  # why did it move
     app.add_handler(CommandHandler("screen", screen_command))     # master-investor screens
     app.add_handler(CommandHandler("gexplan", gexplan_command))    # GEX co-pilot Mode 1

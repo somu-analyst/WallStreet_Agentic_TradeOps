@@ -566,6 +566,10 @@ ROWS = [
  "User shared a TradingView-style sector treemap: tiles sized by market cap, coloured by percent change, grouped by sector",
  "DONE","2026-08-07","/heatmap in Telegram (PNG via kaleido) and an interactive panel on Market Overview, sharing ONE engine function _heatmap_frame so there is no duplicate implementation. Built entirely from the DB - daily_fundamentals market_cap+sector, stock_daily moves - so no new source and no API key. Live during market hours (top 40 names refreshed with live quotes; a per-ticker quote for all 180 would be far too slow) and last-completed-session off-hours, with the as-of stated on the chart. Telegram also gets the numbers as tables, because a picture cannot be quoted or read back. A REAL BUG was caught only by opening the PNG: branchvalues=total requires each parent to EQUAL the sum of its children, and appending sector rows with value 0 made every parent smaller than its children, so Plotly silently dropped the entire tree and rendered a blank chart - 65KB of nothing. Verified visually after the fix (373KB, NVDA +2.3%, PLTR +10.3%, GOOGL -1.0% correctly placed) and in the live DOM: 180 names across 11 sectors",
  "-","P1","-"),
+(148,"2026-08-07","User","Process","Regression pass over every change made today",
+ "User: test all changes properly",
+ "DONE","2026-08-07","Wrote tools/test_regression_20260807.py - 12 checks, each asserting the SPECIFIC defect cannot recur rather than that code merely runs. Examples: the heatmap check fails if the PNG is under 200KB because the blank-tree bug produced 65KB of black background that still counted as a successful write; the chunker checks assert tag BALANCE per chunk, which is what Telegram actually rejects; the menu check diffs handlers against BotCommand entries. Result 12/12 pass. Live confirmation too: getMe OK, 74 commands live on Telegram including heatmap/breaking/catchup/whymoved/screen, and 33 scheduled jobs registered by name",
+ "-","P1","Re-run this file after any change to the send/chunk path"),
 ]
 
 def build():

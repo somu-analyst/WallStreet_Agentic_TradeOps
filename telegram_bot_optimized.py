@@ -25639,15 +25639,204 @@ def _world_market_map_png(rows=None):
         return None
 
 
+
+# ── Why did it move, and what does it drag with it? (user 2026-08-07) ─────────────────
+# The markets table printed "Gold +3.9%" and stopped there. This turns each significant
+# move into a short brief: what the asset is, what typically drives it, what the move
+# mechanically implies for other assets, and a trade angle.
+#
+# The honesty split matters and is deliberate:
+#   KNOCK-ON  is mechanical and reliable — gold up lifts miners with leverage, a stronger
+#             dollar pressures EM. These are structural relationships, not predictions.
+#   DRIVER    is INFERRED. Unless a headline names the cause, attributing a move to a
+#             narrative is storytelling. Where news is available it is quoted; where it is
+#             not, the brief says the driver is unconfirmed rather than inventing one.
+
+_ASSET_BRIEF = {
+    "Gold": {
+        "what": "The classic haven and real-rates trade.",
+        "drivers": ("Falls when real yields rise (gold pays no coupon, so higher real rates "
+                    "raise the cost of holding it) and when the dollar strengthens. Rises on "
+                    "haven demand, rate-cut expectations, and central-bank buying."),
+        "up": [("GDX / NEM / gold miners", "RISE, with leverage — miner earnings are geared "
+                                           "to the gold price, so they typically move 2-3x"),
+               ("Real yields / DXY", "often FALLING — that is usually the mechanism"),
+               ("Silver", "RISES, higher beta than gold and part-industrial")],
+        "down": [("GDX / miners", "FALL harder than gold itself"),
+                 ("DXY", "often RISING")],
+        "trade": ("A 3%+ day in gold is a large move for a haven. Chasing it after the fact "
+                  "is the classic mistake — IV is already inflated. If you want exposure, "
+                  "miners give the leverage; if you already hold them, this is where the "
+                  "gain is, not an entry."),
+    },
+    "Silver": {
+        "what": "Half precious metal, half industrial input — solar, electronics, brazing.",
+        "drivers": ("Follows gold on the monetary side but adds industrial demand, which is "
+                    "why it moves further in BOTH directions. A silver rally larger than "
+                    "gold's usually means the monetary trade is being levered, not that "
+                    "industrial demand suddenly changed."),
+        "up": [("Gold", "usually rising too — check whether silver is simply the leveraged version"),
+               ("SLV / SIL miners", "RISE with more leverage again"),
+               ("Gold/silver ratio", "FALLING — the standard risk-appetite read within metals")],
+        "down": [("SIL / silver miners", "FALL sharply"), ("Gold/silver ratio", "RISING")],
+        "trade": ("Silver outrunning gold is a positioning signal, not a fundamentals one. "
+                  "It tends to overshoot in both directions, so size smaller than you would "
+                  "in gold for the same conviction."),
+    },
+    "Oil": {
+        "what": "WTI crude — the growth-and-supply barometer.",
+        "drivers": ("Supply: OPEC+ decisions, sanctions, inventories. Demand: global growth. "
+                    "Geopolitics in producing regions moves it fastest."),
+        "up": [("XLE / XOM / CVX / OXY", "RISE — revenue is the oil price"),
+               ("Airlines DAL / UAL / AAL", "FALL — jet fuel is a top-3 cost line"),
+               ("Headline inflation / breakevens", "RISE, which complicates the rate-cut path"),
+               ("XRT / retail", "PRESSURED — fuel eats discretionary spend")],
+        "down": [("Airlines", "RISE"), ("XLE / energy", "FALL"),
+                 ("Headline inflation", "EASES — supportive for cuts")],
+        "trade": ("Oil moves are usually supply-headline driven and mean-revert unless the "
+                  "supply change is structural. The cleaner expression is the SPREAD trade "
+                  "(airlines vs energy) rather than a directional bet on crude."),
+    },
+    "NatGas": {
+        "what": "US natural gas — the most weather-driven contract on the board.",
+        "drivers": ("Weather forecasts, storage reports, LNG export flows. Notoriously "
+                    "volatile; double-digit days are routine and often mean nothing durable."),
+        "up": [("Utilities XLU", "MIXED — input cost up, but often passed through"),
+               ("Chemicals / fertiliser", "PRESSURED — gas is feedstock")],
+        "down": [("Industrial gas users", "RELIEVED")],
+        "trade": ("Treat natgas moves as noise unless a storage report or a durable weather "
+                  "shift is behind them. It is the least mean-reverting-on-schedule commodity here."),
+    },
+    "Copper": {
+        "what": "'Dr Copper' — the growth bellwether, because it goes into everything built.",
+        "drivers": ("China construction and grid spend, global manufacturing PMIs, mine "
+                    "supply disruptions, and increasingly electrification demand."),
+        "up": [("FCX / global miners", "RISE"), ("EEM / China proxies", "usually RISING with it"),
+               ("Cyclicals vs defensives", "FAVOURS cyclicals — copper leading is a growth vote")],
+        "down": [("Cyclicals", "PRESSURED — copper falling while equities rally is a divergence "
+                               "worth respecting; copper is usually the honest one")],
+        "trade": ("Copper is most useful as CONFIRMATION, not as a trade. If equities are "
+                  "rallying and copper is falling, the growth story is weaker than the index says."),
+    },
+    "SPX": {"what": "S&P 500 — the broad US market.",
+            "drivers": "Rates, earnings, and positioning. Most single-day moves are rate-driven.",
+            "up": [("VIX", "typically FALLING"), ("Put/call ratios", "falling — complacency builds")],
+            "down": [("VIX", "RISING"), ("Haven bid in gold/Treasuries", "usually appearing")],
+            "trade": "Index moves matter mainly for the regime read: is vol expanding or dampening."},
+    "NDX": {"what": "Nasdaq 100 — long-duration growth.",
+            "drivers": "The most rate-sensitive index here; falls hardest when real yields rise.",
+            "up": [("Semis SMH", "usually leading — check whether they confirm")],
+            "down": [("Semis SMH", "usually leading the fall")],
+            "trade": "NDX vs SPX spread is the cleanest read on whether it is a rate move or a broad one."},
+    "RUT": {"what": "Russell 2000 — small caps, domestically exposed and debt-heavy.",
+            "drivers": "Rate cuts and credit conditions matter more here than for mega-cap.",
+            "up": [("Regional banks KRE", "usually rising with it — same credit sensitivity")],
+            "down": [("KRE", "usually falling with it")],
+            "trade": "Small caps leading a rally is a genuine breadth signal; mega-cap-only rallies are not."},
+}
+# how big a move has to be, per class, before it is worth explaining
+_MOVE_THRESH = {"Commodity": 2.0, "Americas": 1.0, "Europe": 1.2, "Asia": 1.2}
+
+
+def _move_driver_news(name, tk_hint=None, limit=2):
+    """Headlines that plausibly explain a move. Empty when nothing matches - never guesses."""
+    terms = {"Gold": ("gold", "bullion"), "Silver": ("silver",),
+             "Oil": ("oil", "crude", "opec", "wti"), "NatGas": ("natural gas", "lng"),
+             "Copper": ("copper",), "SPX": ("s&p", "stocks", "wall street"),
+             "NDX": ("nasdaq", "tech stocks"), "RUT": ("small cap", "russell")}.get(name, ())
+    if not terms:
+        return []
+    try:
+        items = _world_news_block(limit=40) or []
+    except Exception:
+        return []
+    out = []
+    for it in items:
+        t = (it.get("title") if isinstance(it, dict) else str(it)) or ""
+        if any(x in t.lower() for x in terms):
+            u = it.get("url") if isinstance(it, dict) else None
+            out.append((t[:110], u))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _fmt_move_writeups(rows=None, max_items=5):
+    """A brief per significant move: what it is, why (if knowable), knock-on, trade angle."""
+    rows = rows if rows is not None else _plan_markets_rows()
+    if not rows:
+        return None
+    sig = [r for r in rows
+           if abs(float(r.get("pct") or 0)) >= _MOVE_THRESH.get(r.get("region"), 1.5)]
+    if not sig:
+        return None
+    sig.sort(key=lambda r: -abs(float(r.get("pct") or 0)))
+    parts = [hdr("🔍 WHY IT MOVED"),
+             "<i>Knock-on effects are mechanical. Drivers are inferred from news where a "
+             "headline exists, and flagged as unconfirmed where none does — a move without "
+             "an explanation is better than an invented one.</i>", ""]
+    for r in sig[:max_items]:
+        nm, pct = r["name"], float(r["pct"])
+        b = _ASSET_BRIEF.get(nm)
+        up = pct > 0
+        parts.append(f"{'🟢' if up else '🔴'} <b>{r['flag']} {nm} {pct:+.1f}%</b>"
+                     + (f"  ${r['last']:,.2f}" if r.get("money") else f"  {r['last']:,.0f}"))
+        if not b:
+            parts.append("<i>No brief for this instrument yet.</i>"); parts.append(""); continue
+        parts.append(f"<b>What it is:</b> {b['what']}")
+        parts.append(f"<b>What drives it:</b> {b['drivers']}")
+        news = _move_driver_news(nm)
+        if news:
+            parts.append("<b>Possible driver (from today's headlines):</b>")
+            for t, u in news:
+                parts.append(f"  • " + (f'<a href="{u}">{t}</a>' if u else t))
+        else:
+            parts.append("<b>Driver:</b> <i>no headline in our feed names a cause — "
+                         "treat the reason as UNCONFIRMED.</i>")
+        chain = b["up"] if up else b["down"]
+        if chain:
+            parts.append(f"<b>What this drags with it (mechanical):</b>")
+            for a, eff in chain:
+                parts.append(f"  • {a} — {eff}")
+        parts.append(f"<b>Trade angle:</b> {b['trade']}")
+        parts.append("")
+    parts.append("<i>Not advice. Sizing and entry are yours; this explains the tape, it does "
+                 "not forecast it.</i>")
+    return "\n".join(parts)
+
+
+async def whymoved_command(update, ctx):
+    """/whymoved — explain today's significant index and commodity moves."""
+    msg = await update.message.reply_text("🔍 Analysing today's moves…", parse_mode=H)
+    try:
+        txt = _fmt_move_writeups() or "No move large enough to be worth explaining today."
+    except Exception as e:
+        txt = f"Move analysis failed: {e}"
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    for i in range(0, len(txt), 3900):
+        await update.message.reply_text(txt[i:i + 3900], parse_mode=H,
+                                        disable_web_page_preview=True)
+
+
 def _next_day_plan(conn):
     """Condensed whole-portfolio next-day plan: regime + Greeks + per-stock levels,
     expected move, StockTwits sentiment, per-leg actions, and a morning checklist."""
     L = ["🌅 <b>NEXT-DAY GAME PLAN</b>"]
     try:
-        _mkt = _plan_markets_snapshot()
+        _mkt_rows = _plan_markets_rows()
+        _mkt = _plan_markets_snapshot(_mkt_rows)
         if _mkt:
             L.append(_mkt)
             L.append("")
+        try:
+            _why = _fmt_move_writeups(_mkt_rows)
+            if _why:
+                L.append(_why); L.append("")
+        except Exception:
+            log.debug("move writeups failed", exc_info=True)
     except Exception:
         log.debug("plan markets snapshot failed", exc_info=True)
     try:
@@ -26700,6 +26889,7 @@ async def _run_alert_once(ctx, key, fn, label=""):
 def _sched_once(job_queue, fn, hhmm_utc, key, label):
     """Register a daily alert AND record it for catch-up."""
     from functools import partial
+    from datetime import time as dt_time      # main() imports this locally; we are outside it
     h, m = hhmm_utc
     job_queue.run_daily(partial(_run_alert_once_job, key=key, fn=fn, label=label),
                         time=dt_time(h, m, 0))
@@ -36295,6 +36485,7 @@ def main():
     app.add_handler(CommandHandler("watchlist", watchlist_command))
     app.add_handler(CommandHandler("paper", paper_command))
     app.add_handler(CommandHandler("gex", gex_command))
+    app.add_handler(CommandHandler("whymoved", whymoved_command))  # why did it move
     app.add_handler(CommandHandler("screen", screen_command))     # master-investor screens
     app.add_handler(CommandHandler("gexplan", gexplan_command))    # GEX co-pilot Mode 1
     app.add_handler(CommandHandler("gexcheck", gexcheck_command))  # GEX co-pilot Mode 2

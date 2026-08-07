@@ -486,6 +486,18 @@ ROWS = [
  "User: SNDK +9.3% keeps coming, can we trim it to positions or a smaller set",
  "DONE","2026-08-07","TWO causes. (1) The dedup key was type + DESCRIPTION, and the description reads SNDK +9.3% from open - the percentage was IN the key, so every tick minted a new one. Confirmed in alert_dedup: TICKER_SHOCK_SNDK +9.3% and +10.4% logged as separate alerts the same day. Key is now type + TICKER = one alert per name per day. (2) No relevance filter: a 5% intraday move is ordinary across 700 names. Now alerts only on tickers held or watchlisted, plus the index/vol complex; anything else must clear 12% to interrupt",
  "-","P1","-"),
+(128,"2026-08-07","User","Feature","Writeup for every significant market move - cause, knock-on, trade advice",
+ "User: gold +3.9% and silver +4.7% - why. Wants a section explaining every significant move: what happened, what led to it, likely repercussions and future moves, trade advice per asset, across indices/commodities, using news + macro + micro + events, plus the flow of what rises or falls as a consequence",
+ "DONE","2026-08-07","Added /whymoved plus a WHY IT MOVED section inside the next-day game plan. Per significant move (thresholds by class: 2% commodities, 1% US, 1.2% intl) it gives what the asset is, what drives it, the likely driver from todays headlines, the mechanical knock-on chain, and a trade angle. The honesty split is deliberate and load-bearing: KNOCK-ON is mechanical and stated as fact (gold up lifts miners with 2-3x leverage), DRIVER is inferred and says UNCONFIRMED when no headline names a cause - inventing a narrative is the easy failure here. Verified live on gold +4.2% / silver +5.0%; both correctly reported driver UNCONFIRMED because the news feed carries no commodity headline",
+ "-","P1","GAP FOUND: the RSS mix is equity-heavy, so commodity moves rarely match a headline. A commodity news source would make the driver line useful rather than honest-but-empty"),
+(129,"2026-08-07","Claude","Bug","Bot failed to start: dt_time NameError in _sched_once",
+ "Introduced by the catch-up alert work an hour earlier",
+ "DONE","2026-08-07","main() does `from datetime import time as dt_time` LOCALLY, so the module-level helper could not see it. The bot died on startup and only the redirected stderr showed it - telegram_bot.log stopped at Opened dashboard with no traceback, which is why it looked like a hang. Fixed by importing dt_time inside _sched_once, then audited the other three new helpers for the same class of error. Bot verified back up: pid 34080, getUpdates 200 OK, riskoff_alert executed",
+ "-","P0","Lesson: a helper hoisted out of main() cannot rely on main()-local imports"),
+(130,"2026-08-07","User","Research","Scenario tools and flow charts - what is proven and worth adopting",
+ "User: check git and finance sites for well-proven, time-tested scenario tools and flow charts; tabulate what could add value",
+ "IN-PROGRESS","2026-08-07","Logged before researching",
+ "-","P2","-"),
 ]
 
 def build():

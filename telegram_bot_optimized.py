@@ -26157,12 +26157,6 @@ def _next_day_plan(conn):
     expected move, StockTwits sentiment, per-leg actions, and a morning checklist."""
     L = ["🌅 <b>NEXT-DAY GAME PLAN</b>"]
     try:
-        _brk = _fmt_breaking(_breaking_for_book(conn))
-        if _brk:                      # a halt on a name you own outranks any market colour
-            L.append(_brk); L.append("")
-    except Exception:
-        log.debug("breaking block failed", exc_info=True)
-    try:
         _mkt_rows = _plan_markets_rows()
         _mkt = _plan_markets_snapshot(_mkt_rows)
         if _mkt:
@@ -26428,6 +26422,16 @@ def _next_day_plan(conn):
         L.append("✅ <b>Tomorrow:</b>")
         for c in checklist[:8]:
             L.append("• " + c)
+    # NEWS LAST (user 2026-08-07). At the top it pushed the market tables past Telegram's
+    # 4096-char cap, so the COMMODITIES table fell off the end and read as deleted.
+    # Market structure first, headlines after.
+    try:
+        _brk = _fmt_breaking(_breaking_for_book(conn))
+        if _brk:
+            L.append("")
+            L.append(_brk)
+    except Exception:
+        log.debug("breaking block failed", exc_info=True)
     L.append("")
     L.append("<i>Educational, not advice.</i>")
     return "\n".join(L)
@@ -33120,13 +33124,48 @@ async def inline_query_handler(update, ctx):
         log.debug("inline answer failed", exc_info=True)
 
 
+def _chunk_on_sections(txt, limit=3800):
+    """Split a long report at SECTION boundaries, never mid-table.
+
+    Telegram hard-caps a message at 4096 characters. /plan is ~9,400, so a single
+    reply_text silently lost everything past the cap -- the COMMODITIES table sat at
+    character 4,056 and simply never arrived, which read as "you removed it" (user
+    2026-08-07). Splitting on blank lines keeps each <pre> table intact; a table cut in
+    half is worse than no table.
+    """
+    if len(txt) <= limit:
+        return [txt]
+    out, cur = [], ""
+    for block in txt.split("\n\n"):
+        add = (block if not cur else cur + "\n\n" + block)
+        if len(add) <= limit:
+            cur = add
+            continue
+        if cur:
+            out.append(cur)
+        # a single block over the limit (very long table) — hard-split as a last resort
+        while len(block) > limit:
+            out.append(block[:limit])
+            block = block[limit:]
+        cur = block
+    if cur:
+        out.append(cur)
+    return out
+
+
 async def _send_plan(msg, txt, kb):
-    """Send /plan; if the client/API rejects expandable blockquotes, strip and resend."""
-    try:
-        await msg.reply_text(txt, parse_mode=H, reply_markup=kb)
-    except Exception:
-        plain = txt.replace("<blockquote expandable>", "").replace("</blockquote>", "")
-        await msg.reply_text(plain, parse_mode=H, reply_markup=kb)
+    """Send /plan in section-sized chunks; keyboard rides on the LAST message only."""
+    parts = _chunk_on_sections(txt)
+    for i, part in enumerate(parts):
+        _kb = kb if i == len(parts) - 1 else None
+        try:
+            await msg.reply_text(part, parse_mode=H, reply_markup=_kb)
+        except Exception:
+            plain = part.replace("<blockquote expandable>", "").replace("</blockquote>", "")
+            try:
+                await msg.reply_text(plain, parse_mode=H, reply_markup=_kb)
+            except Exception:
+                log.warning("plan chunk %d/%d failed", i + 1, len(parts), exc_info=True)
 
 
 async def plan_command(update, ctx):

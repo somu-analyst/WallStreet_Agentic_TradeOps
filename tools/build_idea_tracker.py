@@ -550,6 +550,22 @@ ROWS = [
  "Spotted reading the startup log after wiring the catch-up jobs",
  "DONE","2026-08-07","_sched_once wraps each alert in functools.partial, and without an explicit name= the scheduler logs every one of them as job partial. Eight different briefings were indistinguishable in the log, so a failure could not be traced back to which alert broke. Passing name=key fixes it; the log now shows morning_alert, catalyst_alert, plan_alert, whymoved_alert and the rest by name",
  "-","P2","-"),
+(144,"2026-08-07","User","Bug","Game plan truncated - commodities lost, and news should be at the END",
+ "User: why are commodities not coming, I asked to ADD detail not remove what was there. Also news should go to the end not the start",
+ "DONE","2026-08-07","CONFIRMED one cause for both complaints. _send_plan sent the whole report in ONE reply_text, and the plan is 9,381 chars against Telegrams 4,096 cap - so everything past the cap was silently lost. COMMODITIES sat at char 4,056, right at the boundary, which is exactly why it looked deleted when nothing had been removed. Added _chunk_on_sections, which splits on blank lines so a <pre> table is never cut in half (a half-table is worse than none) and keeps the keyboard on the last message only. Moved BREAKING from the top to the END as asked. Verified: 9,338 chars -> 3 chunks of 3623/2716/2995, every chunk has balanced pre tags, COMMODITIES now at char 1,049 and BREAKING at 6,348, both surviving",
+ "-","P0","-"),
+(145,"2026-08-07","User","Bug","Digest rendering raw HTML entities (&lt;/pre&gt;, &lt;i&gt;)",
+ "User pasted digest output showing escaped tags as literal text instead of formatting",
+ "QUEUED","","Not yet investigated. Suspect double-escaping somewhere in the digest path - the opposite of the S&P &amp; bug fixed earlier, where escaping happened without a parse mode",
+ "-","P0","-"),
+(146,"2026-08-07","User","Feature","Payoff + beta-weighted P&L charts on the Portfolio page",
+ "User: add this kind of chart and writeup to the portfolio one - the per-position payoff-at-expiry chart and the P&L vs SPY move panel that Telegram already sends",
+ "QUEUED","","Telegram already builds both; Streamlit Portfolio does not have them",
+ "-","P1","-"),
+(147,"2026-08-07","User","Feature","Market heatmap treemap, Telegram + Streamlit, live and EOD",
+ "User shared a TradingView-style sector treemap: tiles sized by market cap, coloured by percent change, grouped by sector",
+ "QUEUED","","daily_fundamentals already holds market_cap and sector for 541 tickers, and stock_daily has the moves - so this is buildable from the DB with no new source. Plotly treemap renders in Streamlit natively and exports PNG via kaleido for Telegram, same path as the world map",
+ "-","P1","-"),
 ]
 
 def build():

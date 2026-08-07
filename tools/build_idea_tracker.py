@@ -546,6 +546,10 @@ ROWS = [
  "User: can you send auto triggers for every sometime - for /breaking, /whymoved, /digest",
  "DONE","2026-08-07","breaking_alert every 2h during the day, CONTENT-GATED not just timed: it pushes only severity-3 news (halt, guidance cut, M&A, short report, FDA) on a name you hold, and only if that exact headline has not already gone out - dedup keyed on ticker+headline. Lower-severity items stay on demand via /breaking. whymoved_alert at ~4:45pm ET explains the days significant moves post-close, registered through _sched_once so it also gets caught up if the laptop was asleep. Deliberately NOT a plain timer: a push that fires regardless of content is exactly how the SNDK anomaly spam trained the channel to be ignored earlier today",
  "-","P1","-"),
+(143,"2026-08-07","Claude","Bug","Eight scheduled alerts logged as partial, untraceable",
+ "Spotted reading the startup log after wiring the catch-up jobs",
+ "DONE","2026-08-07","_sched_once wraps each alert in functools.partial, and without an explicit name= the scheduler logs every one of them as job partial. Eight different briefings were indistinguishable in the log, so a failure could not be traced back to which alert broke. Passing name=key fixes it; the log now shows morning_alert, catalyst_alert, plan_alert, whymoved_alert and the rest by name",
+ "-","P2","-"),
 ]
 
 def build():

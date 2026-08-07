@@ -27237,8 +27237,11 @@ def _sched_once(job_queue, fn, hhmm_utc, key, label):
     from functools import partial
     from datetime import time as dt_time      # main() imports this locally; we are outside it
     h, m = hhmm_utc
+    # name= matters operationally: without it every _sched_once job logs as "partial", so
+    # eight different briefings are indistinguishable in the scheduler log and a failure
+    # cannot be traced to an alert (found 2026-08-07 reading the startup log).
     job_queue.run_daily(partial(_run_alert_once_job, key=key, fn=fn, label=label),
-                        time=dt_time(h, m, 0))
+                        time=dt_time(h, m, 0), name=key)
     _CATCHUP_JOBS.append((key, h * 60 + m, fn, label))
 
 

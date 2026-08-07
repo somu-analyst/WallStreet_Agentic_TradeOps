@@ -530,6 +530,14 @@ ROWS = [
  "User: add a breaking news section in our positions or relevant alerts",
  "IN-PROGRESS","2026-08-07","Logged before building",
  "-","P1","-"),
+(139,"2026-08-07","User","Feature","WHAT JUST HAPPENED: tabulate it and attach the event numbers",
+ "User: keep it all in tabular format and more insightful. The timeline says 08:30 Jobs Report release but gives no numbers, even though the release time has already passed - tabulate previous / expected / actual",
+ "DONE","2026-08-07","ROOT CAUSE of the empty timeline line: the engine ALREADY had code to print actual/estimate/prior, but ev[actual] was never populated - the calendar supplies name and time only, nothing attached the print. So a release whose time had passed still read 08:30 ET Jobs Report release with no numbers. Now enriched from the bot BLS reader built for ID 137, lazily imported to avoid a circular import, with fuzzy name mapping (Jobs Report / Nonfarm Payrolls -> NFP, CPI, PCE, FOMC). THE DATA section converted to a table carrying the print, expected, the companion series and the historical rank. Verified: Jobs Report resolves to -23k jobs, unemployment 4.1% prior 4.2%, 4th weakest of the last 18 months",
+ "-","P1","-"),
+(140,"2026-08-07","User","Feature","Fear and Greed history chart: 1d/1w/1m/3m/1y/5y",
+ "User wants to see how greed has evolved, not just todays reading",
+ "IN-PROGRESS","2026-08-07","Logged. CNN graphdata API carries history but failed on first call with DNS getaddrinfo - the same intermittent wake-from-sleep failure seen this morning. Retry, and store our own daily snapshots so history accrues locally regardless",
+ "-","P2","-"),
 ]
 
 def build():

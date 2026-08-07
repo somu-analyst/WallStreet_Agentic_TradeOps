@@ -838,6 +838,40 @@ class EventWriteupEngine:
         lines.append("")
 
         # ── Timeline ──
+        # ev['actual'] was NEVER populated: the calendar supplies name/time, nothing attaches
+        # the print. So a release whose time had passed still read "08:30 ET - Jobs Report
+        # release" with no numbers (user 2026-08-07). Enrich from the bot's BLS reader, which
+        # already exists; imported lazily to avoid a circular import at module load.
+        if ev.get("actual") is None:
+            try:
+                import sys as _s2, os as _o2
+                _root = _o2.path.dirname(_o2.path.dirname(_o2.path.abspath(__file__)))
+                if _root not in _s2.path:
+                    _s2.path.insert(0, _root)
+                from telegram_bot_optimized import _macro_event_actual as _mea
+                _lbl = {"Jobs Report": "Jobs · NFP", "Nonfarm Payrolls": "Jobs · NFP",
+                        "CPI": "CPI · inflation", "PCE": "PCE · Fed gauge",
+                        "FOMC": "FOMC decision"}.get(str(ev.get("name", "")).strip())
+                if not _lbl:
+                    _n = str(ev.get("name", "")).lower()
+                    _lbl = ("Jobs · NFP" if ("job" in _n or "payroll" in _n) else
+                            "CPI · inflation" if "cpi" in _n else
+                            "PCE · Fed gauge" if "pce" in _n else
+                            "FOMC decision" if "fomc" in _n or "fed" in _n else None)
+                if _lbl:
+                    _a = _mea(_lbl)
+                    if _a:
+                        ev = dict(ev)
+                        ev["actual"] = round(_a["chg"], 1) if _lbl == "Jobs · NFP" else _a["actual"]
+                        ev["prior"] = None if _lbl == "Jobs · NFP" else _a["prior"]
+                        ev["unit"] = "k jobs" if _lbl == "Jobs · NFP" else _a.get("unit", "")
+                        ev["_period"] = _a.get("period")
+                        ev["_c_label"], ev["_c_val"] = _a.get("c_label"), _a.get("c_val")
+                        ev["_c_prior"], ev["_c_unit"] = _a.get("c_prior"), _a.get("c_unit")
+                        ev["_rank_worse"], ev["_rank_n"] = _a.get("rank_worse"), _a.get("rank_n")
+            except Exception:
+                pass
+
         lines.append("TIMELINE")
         if ev.get("release_time"):
             lines.append(f"  {ev['release_time']} ET — {ev['name']} release")
@@ -873,9 +907,31 @@ class EventWriteupEngine:
         if ev.get("actual") is not None or infl.get("series"):
             lines.append("THE DATA")
             if ev.get("actual") is not None:
-                lines.append(f"  {ev['name']}: {ev['actual']}{ev.get('unit','')}", )
+                # a table, as asked (user 2026-08-07) - one row per number that landed
+                _dr = [("Metric", "Value")]
+                _u = ev.get("unit", "")
+                _dr.append((f"{ev['name']}" + (f" ({ev['_period']})" if ev.get("_period") else ""),
+                            f"{ev['actual']:+,.0f}{_u}" if _u == "k jobs"
+                            else f"{ev['actual']}{_u}"))
                 if ev.get("prior") is not None:
-                    lines.append(f"  Prior: {ev['prior']}{ev.get('unit','')}")
+                    _dr.append(("Prior", f"{ev['prior']}{_u}"))
+                if ev.get("estimate") is not None:
+                    _dr.append(("Expected", f"{ev['estimate']}{_u}"))
+                else:
+                    _dr.append(("Expected", "not in any free feed — see coverage"))
+                if ev.get("_c_label"):
+                    _dr.append((ev["_c_label"], f"{ev['_c_val']:.1f}{ev['_c_unit']} "
+                                                f"(prior {ev['_c_prior']:.1f}{ev['_c_unit']})"))
+                if ev.get("_rank_n"):
+                    _w, _n2 = ev["_rank_worse"], ev["_rank_n"]
+                    _dr.append(("Rank vs history",
+                                f"{_w + 1} weakest of last {_n2} months"))
+                _w1 = max(len(a) for a, _ in _dr); _w2 = max(len(b) for _, b in _dr)
+                lines.append("  " + "-" * (_w1 + _w2 + 5))
+                for _i, (_a, _b) in enumerate(_dr):
+                    lines.append(f"  {_a:<{_w1}} | {_b:<{_w2}}")
+                    if _i == 0:
+                        lines.append("  " + "-" * (_w1 + _w2 + 5))
             if infl.get("vs_fed_target") is not None:
                 lines.append(
                     f"  Inflation is {infl['vs_fed_target']:+.1f}pp vs the Fed's 2.0% target — "

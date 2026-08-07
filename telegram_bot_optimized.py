@@ -25607,6 +25607,7 @@ _MKT_SPECS = [
     ("^AXJO",     "ASX200",   0, "Asia",     "AUS", "🇦🇺"),
     ("JPY=X",     "USD/JPY",  0, "FX",       None,  "🇯🇵"),
     ("EURUSD=X",  "EUR/USD",  0, "FX",       None,  "🇪🇺"),
+    ("INR=X",     "USD/INR",  0, "FX",       None,  "🇮🇳"),
     ("DX-Y.NYB",  "DXY",      0, "FX",       None,  "💵"),
     ("^TNX",      "US 10Y",   0, "FX",       None,  "🏦"),
     ("GC=F",      "Gold",     1, "Commodity", None, "🥇"),

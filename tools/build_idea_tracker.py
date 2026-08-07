@@ -570,6 +570,10 @@ ROWS = [
  "User: test all changes properly",
  "DONE","2026-08-07","Wrote tools/test_regression_20260807.py - 12 checks, each asserting the SPECIFIC defect cannot recur rather than that code merely runs. Examples: the heatmap check fails if the PNG is under 200KB because the blank-tree bug produced 65KB of black background that still counted as a successful write; the chunker checks assert tag BALANCE per chunk, which is what Telegram actually rejects; the menu check diffs handlers against BotCommand entries. Result 12/12 pass. Live confirmation too: getMe OK, 74 commands live on Telegram including heatmap/breaking/catchup/whymoved/screen, and 33 scheduled jobs registered by name",
  "-","P1","Re-run this file after any change to the send/chunk path"),
+(149,"2026-08-07","User","Feature","Add USD/INR to the FX & RATES section",
+ "User: FX & RATES (2/4 up) - add usd inr pair also",
+ "DONE","2026-08-07","Added INR=X as USD/INR with the India flag. The existing precision rule handled it correctly with no change needed - above 10 formats to 2dp, so 95.20 rather than the 4dp used for EUR/USD. Verified live: FX & RATES now reads 5 instruments, USD/JPY 157.74, EUR/USD 1.1562, USD/INR 95.20, DXY 99.60, US 10Y 4.66%",
+ "-","P2","-"),
 ]
 
 def build():

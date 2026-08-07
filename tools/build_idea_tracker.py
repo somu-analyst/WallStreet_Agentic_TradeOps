@@ -504,7 +504,7 @@ ROWS = [
  "-","P1","-"),
 (134,"2026-08-07","User","Feature","Catalyst Radar: show the 3 days BEFORE an event, split into two tables",
  "User: add what happens 3 days before an event like this, tabulate in two different tables, organise more readably",
- "IN-PROGRESS","2026-08-07","Logged before building. Pre-event drift and IV behaviour is the tradeable part - the event itself is usually priced",
+ "DONE","2026-08-07","Split into two scannable tables (COMING UP / JUST HAPPENED) with the full explainer underneath, so nothing is lost. Then MEASURED the pre-event premise instead of asserting it: across 113 NFP releases since 2015, SPY returns -0.04% over the three sessions into the print vs a +0.19% baseline (t=-1.35, p=0.18), the print day +0.09% vs +0.06% (p=0.80), the day after -0.04% (p=0.45). NONE significant. So the section now states plainly that the 3 days into an event carry no measurable directional edge, and that the reliable part is IV inflating then collapsing - the event trade is about VOLATILITY, not direction. Building a pre-event drift feature would have shipped an edge that does not exist",
  "-","P1","-"),
 (131,"2026-08-07","Claude","Research","Build + TEST the Merrill Lynch Investment Clock",
  "From the Part 11 survey: the only finance flowchart making a falsifiable claim",
@@ -542,6 +542,10 @@ ROWS = [
  "Found while confirming today's work went live: the bot logged 61 registered commands but the file defines 73 handlers",
  "DONE","2026-08-07","Every new command shipped today (/breaking /catchup /whymoved) plus 9 older ones (/debate /flow /capflow /world /recperf /status /freq /reopen /menu) existed ONLY if you already knew to type them - they never appeared in Telegram autocomplete. Diffed add_handler(CommandHandler(...)) against BotCommand(...) to find them rather than eyeballing. All 12 added; menu now 73/73. Telegram allows 100, so there was never a capacity reason for the gap",
  "-","P1","Add a startup assertion so a handler without a menu entry is logged, not silently invisible"),
+(142,"2026-08-07","User","Feature","Auto-trigger the new commands on a schedule",
+ "User: can you send auto triggers for every sometime - for /breaking, /whymoved, /digest",
+ "DONE","2026-08-07","breaking_alert every 2h during the day, CONTENT-GATED not just timed: it pushes only severity-3 news (halt, guidance cut, M&A, short report, FDA) on a name you hold, and only if that exact headline has not already gone out - dedup keyed on ticker+headline. Lower-severity items stay on demand via /breaking. whymoved_alert at ~4:45pm ET explains the days significant moves post-close, registered through _sched_once so it also gets caught up if the laptop was asleep. Deliberately NOT a plain timer: a push that fires regardless of content is exactly how the SNDK anomaly spam trained the channel to be ignored earlier today",
+ "-","P1","-"),
 ]
 
 def build():

@@ -458,6 +458,18 @@ ROWS = [
  "Same output: says price cleared both walls, then warns it is right at the call wall",
  "DONE","2026-08-03","Fixed. The check was spot >= cw*0.99, true no matter how far above the wall price went, so a price that had cleared the call wall by 11% still printed right at the call wall directly beneath a sentence saying it had cleared both walls. Now a genuine proximity band on both sides: cw*0.99 <= spot <= cw*1.02 for the call wall, pw*0.98 <= spot <= pw*1.01 for the put wall",
  "-","P1","-"),
+(121,"2026-08-03","User","Bug","Data download does not start on its own when the laptop is opened",
+ "User: why is data download not working on its own when i open laptop",
+ "DONE","2026-08-07","NOT BROKEN - verified against the DB rather than the log: options_openbb has 2026-08-06 (191,434 rows), 08-05, 08-04; stock_daily 732 tickers; parquet backups present for all three days. Yesterdays run captured 734 tickers rc=0 in 103 min. The task fired on logon today at 07:29 and correctly reported Already ran for 2026-08-06. The Disabled state is misleading: its logon/boot triggers fire anyway, 0 missed runs. It cannot be enabled from a normal shell because its ACL grants this account Read only while the other tasks grant FullControl - it was registered from an elevated prompt. Fix needs an admin PowerShell: Enable-ScheduledTask -TaskName NYSE_OffHours_Chain",
+ "-","P0","User: run an elevated PowerShell once to clear the Disabled flag (cosmetic - it runs regardless)"),
+(122,"2026-08-03","User","Bug","Telegram commands not responding",
+ "User: why telegram commands not working",
+ "DONE","2026-08-07","DNS failure at wake, not a code fault: httpx.ConnectError [Errno 11001] getaddrinfo failed at 07:38 - the bot tried api.telegram.org before wifi reconnected. Recovered on its own; verified live DNS resolves 149.154.166.110 and getMe returns @Analyst_Somu_AI_bot, with 61 slash commands registered at the 07:32 restart. The durable fix is the watchdog (ID 123), which was itself dead",
+ "-","P0","-"),
+(123,"2026-08-07","Claude","Bug","TelegramBotWatchdog has 115 missed runs and a failing exit code",
+ "Found while diagnosing why Telegram commands were dead: the watchdog that exists to restart the bot has not been working",
+ "DONE","2026-08-07","ROOT CAUSE: bot_watchdog.ps1 DID NOT EXIST. The task had pointed at that path since registration, so every run failed to open the -File target - 115 missed runs, rc=0xFFFD0000. Wrote it: matches on COMMAND LINE not image name (several python.exe run here, so a bare name check always looks healthy), and refuses to restart when DNS for api.telegram.org fails, because a wake-from-sleep blip is not a dead bot and restarting into a dead network just loses the job queue. Testing caught a second real bug: two overlapping runs both calling Add-Content threw file-in-use, and with ErrorActionPreference=Stop that killed the whole watchdog - logging now retries then gives up silently. Verified: no-op when healthy (bot pid unchanged, nothing logged), correct branch when down, 3 concurrent runs all exit 0",
+ "-","P1","-"),
 ]
 
 def build():

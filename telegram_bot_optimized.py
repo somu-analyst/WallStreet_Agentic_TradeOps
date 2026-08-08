@@ -30796,10 +30796,115 @@ def _bls_series(sid, years_back=1, ttl=None):
                         pass
         pts.sort(reverse=True)
         _BLS_CACHE[sid] = (now, pts)
+        try:
+            _record_macro_vintage(sid, pts)      # accrues revision history from today on
+        except Exception:
+            log.debug("vintage record failed", exc_info=True)
         return pts
     except Exception:
         log.debug("BLS fetch failed for %s", sid, exc_info=True)
         return c[1] if c else []
+
+
+
+# ── Macro print vintages, for detecting REVISIONS (tracker ID 93) ────────────────────
+# BLS returns CURRENT values, so a prior month already reflects whatever it was revised to.
+# "June payrolls revised down 37k" is therefore invisible to us from a single call: we only
+# ever see the latest figure. Detecting it requires storing what each period said ON EACH
+# DAY we asked -- a vintage. That is only accruable going forward and cannot be backfilled,
+# same property as the option chains.
+
+def _ensure_macro_vintage(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS macro_vintages (
+            series_id    TEXT NOT NULL,
+            period       TEXT NOT NULL,     -- YYYY-MM
+            value        REAL NOT NULL,
+            vintage_date TEXT NOT NULL,     -- the day we observed it
+            PRIMARY KEY (series_id, period, vintage_date)
+        )""")
+    conn.commit()
+
+
+def _record_macro_vintage(sid, pts, conn=None):
+    """Store today's observation of a BLS series. Only writes when the value CHANGED.
+
+    Writing an identical row every day would bloat the table for no information: a vintage
+    only matters when it differs from what we last saw.
+    """
+    if not pts:
+        return 0
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        _ensure_macro_vintage(conn)
+        today = _et_now().strftime("%Y-%m-%d")
+        n = 0
+        for y, m, v in pts[:24]:                      # 2y of periods is plenty
+            per = f"{y}-{m:02d}"
+            last = conn.execute(
+                "SELECT value FROM macro_vintages WHERE series_id=? AND period=? "
+                "ORDER BY vintage_date DESC LIMIT 1", (sid, per)).fetchone()
+            if last is not None and abs(float(last[0]) - float(v)) < 1e-9:
+                continue                              # unchanged — nothing to record
+            try:
+                conn.execute("INSERT OR REPLACE INTO macro_vintages VALUES (?,?,?,?)",
+                             (sid, per, float(v), today))
+                n += 1
+            except Exception:
+                pass
+        conn.commit()
+        return n
+    except Exception:
+        log.debug("vintage store failed for %s", sid, exc_info=True)
+        return 0
+    finally:
+        if own:
+            conn.close()
+
+
+def _macro_revisions(sid, conn=None, limit=3):
+    """Periods whose value CHANGED between vintages. [(period, old, new, when)]."""
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        _ensure_macro_vintage(conn)
+        rows = conn.execute(
+            "SELECT period, value, vintage_date FROM macro_vintages WHERE series_id=? "
+            "ORDER BY period DESC, vintage_date ASC", (sid,)).fetchall()
+    except Exception:
+        return []
+    finally:
+        if own:
+            conn.close()
+    by = {}
+    for per, val, vd in rows:
+        by.setdefault(per, []).append((vd, float(val)))
+    out = []
+    for per in sorted(by, reverse=True):
+        vs = by[per]
+        if len(vs) < 2:
+            continue
+        out.append((per, vs[0][1], vs[-1][1], vs[-1][0]))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _fmt_macro_revisions(sid, unit="k", conn=None):
+    """One line per revised period, or None. This is the answer to 'was June revised?'."""
+    revs = _macro_revisions(sid, conn)
+    if not revs:
+        return None
+    out = []
+    for per, first, latest, when in revs:
+        d = latest - first
+        out.append(f"  • <b>{per}</b> revised {'DOWN' if d < 0 else 'UP'} "
+                   f"{abs(d):,.0f}{unit} — first reported {first:,.0f}, now {latest:,.0f} "
+                   f"(seen {when})")
+    return "<b>📝 Revisions to prior prints:</b>\n" + "\n".join(out)
 
 
 def _macro_event_actual(label):
@@ -30937,6 +31042,15 @@ def _fmt_macro_event_block(n, ds, label):
                 out.append(f"    <b>Latest print ({act['period']}):</b> {act['actual']:,.1f}"
                            f"{(' ' + act['unit']) if act['unit'] else ''} vs prior "
                            f"{act['prior']:,.1f} — {_arrow} ({act['chg']:+,.1f})")
+            # revisions from OUR stored vintages, once any have accrued (ID 93)
+            try:
+                _sid = (_MACRO_EVENT_INFO.get(label) or {}).get("series")
+                _rev = _fmt_macro_revisions(_sid, "k" if info.get("headline") == "change"
+                                            else "") if _sid else None
+                if _rev:
+                    out.append("    " + _rev.replace("\n", "\n    "))
+            except Exception:
+                pass
             _bn = _event_breaking_news(label)
             if _bn:
                 out.append("    <b>📰 Coverage — this is where the CONSENSUS is:</b>")

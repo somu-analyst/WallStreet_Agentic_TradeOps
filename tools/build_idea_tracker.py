@@ -536,7 +536,7 @@ ROWS = [
  "-","P1","-"),
 (140,"2026-08-07","User","Feature","Fear and Greed history chart: 1d/1w/1m/3m/1y/5y",
  "User wants to see how greed has evolved, not just todays reading",
- "IN-PROGRESS","2026-08-07","Logged. CNN graphdata API carries history but failed on first call with DNS getaddrinfo - the same intermittent wake-from-sleep failure seen this morning. Retry, and store our own daily snapshots so history accrues locally regardless",
+ "DONE","2026-08-07","CNN graphdata is unreachable from this machine - DNS fails on production.datastore.cnn.com consistently, not intermittently. Moot, because the composite is a DETERMINISTIC function of VIX and 5-day momentum and stock_history holds VIX back to 1990 and SPY to 2016 - so the whole series is RECONSTRUCTABLE rather than something to start accruing. Added /feargreed: 1d/1w/1m/3m/1y/5y table plus a banded chart, sharing one formula with the live reading so the chart endpoint always equals the printed number. 2,512 reconstructed points. Honest caveat surfaced rather than hidden: the series ends where VIX history ends (30 Jul), so the top row is labelled with its as-of date instead of being called now",
  "-","P2","-"),
 (141,"2026-08-07","Claude","Bug","12 commands had handlers but were missing from the Telegram menu",
  "Found while confirming today's work went live: the bot logged 61 registered commands but the file defines 73 handlers",

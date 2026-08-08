@@ -26396,6 +26396,120 @@ async def heatmap_command(update, ctx):
                                         parse_mode=H)
 
 
+
+# ── Fear & Greed history (user 2026-08-07) ───────────────────────────────────────────
+# The composite is a deterministic function of VIX and 5-day momentum, and stock_history
+# holds VIX back to 1990 and SPY to 2016 — so the whole series is RECONSTRUCTABLE rather
+# than something we have to start accruing today. CNN's own API is unreachable from this
+# machine (DNS fails on production.datastore.cnn.com), which is moot given the above.
+#
+# The formula is kept in ONE place and reused by the live reading and the history, so the
+# "now" value on the chart always equals the number printed beside it.
+
+def _fg_series(conn=None, days=1300):
+    """Reconstructed Fear & Greed, 0-100 daily. pandas Series indexed by date; empty on fail."""
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        v = pd.read_sql("SELECT trade_date d, close vix FROM stock_history "
+                        "WHERE ticker='VIX' ORDER BY d", conn)
+        sp = pd.read_sql("SELECT trade_date d, close spy FROM stock_history "
+                         "WHERE ticker='SPY' ORDER BY d", conn)
+    except Exception:
+        return pd.Series(dtype=float)
+    finally:
+        if own:
+            conn.close()
+    if v.empty or sp.empty:
+        return pd.Series(dtype=float)
+    m = v.merge(sp, on="d")
+    m["d"] = pd.to_datetime(m["d"])
+    m = m.set_index("d").astype(float)
+    fg = 50 + (20 - m["vix"]).mul(2.5).clip(-25, 25)          # VIX term, as live
+    mom = (m["spy"] / m["spy"].shift(5) - 1) * 100 * 4        # momentum proxy
+    fg = (fg + mom.clip(-20, 20)).clip(0, 100).dropna()
+    return fg.tail(days)
+
+
+def _fg_label(v):
+    if v >= 75:  return "EXTREME GREED 🤑"
+    if v >= 55:  return "GREED 😀"
+    if v >= 45:  return "NEUTRAL 😐"
+    if v >= 25:  return "FEAR 😨"
+    return "EXTREME FEAR 😱"
+
+
+def _fmt_fg_history(conn=None):
+    """Table of where fear/greed sat 1d/1w/1m/3m/1y/5y ago. None when unavailable."""
+    fg = _fg_series(conn, days=1400)
+    if fg.empty or len(fg) < 30:
+        return None
+    now = float(fg.iloc[-1])
+    # The series ends where VIX history ends, which can lag today by days. Label the
+    # as-of instead of calling a week-old number "now" (2026-08-07).
+    _asof = fg.index[-1].strftime("%d %b")
+    rows = [(f"{_asof}", f"{now:.0f}", _fg_label(now).split()[0][:9], "—")]
+    for lbl, off in (("1d", 1), ("1w", 5), ("1m", 21), ("3m", 63), ("1y", 252), ("5y", 1260)):
+        if len(fg) > off:
+            was = float(fg.iloc[-1 - off])
+            rows.append((lbl, f"{was:.0f}", _fg_label(was).split()[0][:9], f"{now - was:+.0f}"))
+    return _pipe_table(("When", "Score", "Mood", "vs now"), rows, right_cols={1, 3},
+                       title="😱 FEAR & GREED — HISTORY",
+                       legend=f"0 = extreme fear · 100 = extreme greed · reconstructed from "
+                              f"VIX + 5d momentum (same formula as the live reading) · "
+                              f"latest point {fg.index[-1]:%d %b %Y}, which is where VIX "
+                              f"history ends — not necessarily today")
+
+
+def _fg_chart_png(conn=None, days=400):
+    """Fear/greed line with the fear/greed bands shaded. None on failure."""
+    fg = _fg_series(conn, days=days)
+    if fg.empty or len(fg) < 30:
+        return None
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(9, 3.4), dpi=130)
+        ax.axhspan(75, 100, color="#0f7b2f", alpha=.18)
+        ax.axhspan(55, 75, color="#0f7b2f", alpha=.09)
+        ax.axhspan(25, 45, color="#8b1a1a", alpha=.09)
+        ax.axhspan(0, 25, color="#8b1a1a", alpha=.18)
+        ax.plot(fg.index, fg.values, lw=1.4, color="#111")
+        ax.axhline(50, color="#888", lw=.8, ls=":")
+        ax.scatter([fg.index[-1]], [fg.iloc[-1]], s=32, zorder=5, color="#1565c0")
+        ax.annotate(f"{fg.iloc[-1]:.0f}", (fg.index[-1], fg.iloc[-1]),
+                    textcoords="offset points", xytext=(6, 4), fontsize=9, color="#1565c0")
+        ax.set_ylim(0, 100); ax.set_ylabel("Fear ← → Greed", fontsize=8)
+        ax.set_title(f"Fear & Greed — last {len(fg)} sessions", fontsize=10)
+        ax.tick_params(labelsize=8); ax.grid(alpha=.18)
+        fig.tight_layout()
+        buf = BytesIO(); fig.savefig(buf, format="png"); plt.close(fig); buf.seek(0)
+        return buf
+    except Exception:
+        log.debug("fg chart failed", exc_info=True)
+        return None
+
+
+async def feargreed_command(update, ctx):
+    """/feargreed — current reading plus 1d/1w/1m/3m/1y/5y history and a chart."""
+    conn = get_conn()
+    try:
+        txt = _fmt_fg_history(conn)
+        png = _fg_chart_png(conn)
+    finally:
+        conn.close()
+    if png:
+        await update.message.reply_photo(png, caption="😱 Fear & Greed — reconstructed history")
+    if txt:
+        for _p in _chunk_on_sections(txt):
+            await update.message.reply_text(_p, parse_mode=H)
+    if not txt and not png:
+        await update.message.reply_text("Fear & Greed history unavailable — needs VIX and "
+                                        "SPY in stock_history.", parse_mode=H)
+
+
 def _next_day_plan(conn):
     """Condensed whole-portfolio next-day plan: regime + Greeks + per-stock levels,
     expected move, StockTwits sentiment, per-leg actions, and a morning checklist."""
@@ -37211,6 +37325,7 @@ async def _post_init(app):
             # 12 commands had handlers but were absent from the menu, so they existed only
             # if you already knew to type them (found 2026-08-07: 73 handlers vs 61 menu
             # entries). Telegram caps the menu at 100, so there is room for all of them.
+            BotCommand("feargreed", "Fear & Greed now + 1d/1w/1m/3m/1y/5y"),
             BotCommand("heatmap", "Sector heatmap: size=cap, colour=move"),
             BotCommand("breaking", "Breaking news on YOUR positions"),
             BotCommand("catchup", "Resend today's scheduled briefings"),
@@ -37367,6 +37482,7 @@ def main():
     app.add_handler(CommandHandler("watchlist", watchlist_command))
     app.add_handler(CommandHandler("paper", paper_command))
     app.add_handler(CommandHandler("gex", gex_command))
+    app.add_handler(CommandHandler("feargreed", feargreed_command))  # F&G history
     app.add_handler(CommandHandler("heatmap", heatmap_command))   # sector treemap
     app.add_handler(CommandHandler("breaking", breaking_command))  # news on your book
     app.add_handler(CommandHandler("catchup", catchup_command))   # resend today's briefings

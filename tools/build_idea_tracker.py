@@ -574,6 +574,14 @@ ROWS = [
  "User: FX & RATES (2/4 up) - add usd inr pair also",
  "DONE","2026-08-07","Added INR=X as USD/INR with the India flag. The existing precision rule handled it correctly with no change needed - above 10 formats to 2dp, so 95.20 rather than the 4dp used for EUR/USD. Verified live: FX & RATES now reads 5 instruments, USD/JPY 157.74, EUR/USD 1.1562, USD/INR 95.20, DXY 99.60, US 10Y 4.66%",
  "-","P2","-"),
+(150,"2026-08-07","User","Feature","/breaking should cover ALL market-important events, with my trades as a separate section",
+ "User: this should be on all market imp events, a separate section for my trades",
+ "DONE","2026-08-07","/breaking now has TWO sections: MARKET-WIDE first (policy, inflation, tariffs, broad risk moves, circuit breakers) then YOUR POSITIONS. Kept separate on purpose - the Fed moving and a stock you own halting are different kinds of news, and interleaving them buries the one needing action. Two precision fixes found by reading the output: CEO Sells $36M was labelled leadership change because ceo matched first, now correctly insider SELLING - the filing is fact, the motive is not; and MDB Capital Holdings (MDBH) was firing under MDB, now excluded because a longer all-caps symbol in parentheses means a different company",
+ "-","P1","-"),
+(151,"2026-08-07","Claude","Bug","BLS daily API quota exhausted - unemployment line vanished silently",
+ "Caught by the regression pass: the NFP check went from PASS to unemp=None between runs",
+ "DONE","2026-08-07","The public BLS API allows ~25 requests/day per IP with no key, and _macro_event_actual fetched TWO uncached series on EVERY render - a morning brief plus a couple of digests would exhaust it, after which the unemployment line simply disappeared with no error. My own testing hit the ceiling, which is how it surfaced. Added _bls_series with a 6h cache (the data is MONTHLY - per-render fetching was never justified), which serves stale data rather than blank on a quota response, and logs the BLS message instead of swallowing it. Regression test updated to report quota exhaustion as SKIPPED-environment rather than a code failure, so the check is not trained to be ignored",
+ "-","P1","Optional: a free BLS registration key raises the limit to 500/day on API v2"),
 ]
 
 def build():

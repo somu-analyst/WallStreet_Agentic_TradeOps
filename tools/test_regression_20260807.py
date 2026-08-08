@@ -95,7 +95,12 @@ check("anomaly: stable dedup key + relevance gate", t_dedup)
 def t_nfp():
     a = tb._macro_event_actual("Jobs \u00b7 NFP")
     if not a:
-        return False, "no BLS actual"
+        # BLS allows ~25 requests/day per IP without a key. Quota exhaustion is an
+        # ENVIRONMENT condition, not a code regression, and reporting it as a failure
+        # would train us to ignore this check (2026-08-07).
+        if not tb._bls_series("CES0000000001"):
+            return True, "SKIPPED - BLS daily quota exhausted (environment, not code)"
+        return False, "BLS has data but _macro_event_actual returned None - REAL regression"
     return (a.get("c_val") is not None and a.get("rank_n"),
             f"chg={a['chg']:+.0f}k unemp={a.get('c_val')} rank={a.get('rank_worse')}/{a.get('rank_n')}")
 check("NFP: unemployment rate + historical rank", t_nfp)

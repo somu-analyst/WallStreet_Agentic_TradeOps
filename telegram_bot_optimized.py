@@ -25995,6 +25995,11 @@ _BREAKING_WEIGHTS = {
     "merger":            (3, "M&A"),
     "takeover":          (3, "M&A"),
     "buyout":            (3, "M&A"),
+    # ordered before "ceo": "CEO Sells $36M in Stock" is insider selling, not a
+    # leadership change, and mislabelling it is worse than not flagging it (2026-08-07)
+    "insider selling":   (2, "insider SELLING — the filing is fact, the motive is not"),
+    "sells $":           (2, "insider sale"),
+    "sold $":            (2, "insider sale"),
     "ceo":               (2, "leadership change — a governance repricing"),
     "resigns":           (2, "leadership change"),
     "steps down":        (2, "leadership change"),
@@ -26009,6 +26014,79 @@ _BREAKING_WEIGHTS = {
     "stake":             (2, "an activist or large holder moving"),
     "short seller":      (3, "a short report can gap a name double digits"),
 }
+
+
+
+# Market-wide breaking events (user 2026-08-07). Distinct from the book lane on purpose:
+# "the Fed moved" and "a stock you own halted" are different kinds of news and should not
+# be interleaved. Market events come first because they set the context the position news
+# is read against.
+_MARKET_BREAKING_Q = (
+    "https://news.google.com/rss/search?q="
+    "%22federal+reserve%22+OR+%22rate+cut%22+OR+%22rate+hike%22+OR+inflation+OR+recession+"
+    "OR+tariffs+OR+%22jobs+report%22+OR+%22market+selloff%22+OR+%22circuit+breaker%22+"
+    "when:1d&hl=en-US&gl=US&ceid=US:en"
+)
+
+_MARKET_BREAKING_WEIGHTS = {
+    "circuit breaker":  (3, "trading curbs — the whole market is halted, not one name"),
+    "emergency":        (3, "an unscheduled policy move; repricing is immediate"),
+    "rate cut":         (3, "policy shift — repricing across every asset class"),
+    "rate hike":        (3, "policy shift"),
+    "fed cuts":         (3, "policy shift"),
+    "fed raises":       (3, "policy shift"),
+    "default":          (3, "credit event"),
+    "downgrade of":     (3, "sovereign/credit downgrade"),
+    "selloff":          (2, "broad risk-off — check your beta, not just your names"),
+    "plunge":           (2, "broad move"),
+    "rally":            (2, "broad move"),
+    "record high":      (2, "positioning stretched; premium sellers get paid, buyers do not"),
+    "jobs report":      (2, "the biggest scheduled rates mover"),
+    "inflation":        (2, "shapes the rate path"),
+    "tariff":           (2, "trade policy — sector-specific, usually durable"),
+    "sanctions":        (2, "geopolitical, usually energy or financials"),
+    "opec":             (2, "oil supply"),
+    "recession":        (2, "growth narrative"),
+    "yields":           (1, "rates context"),
+    "dollar":           (1, "FX context"),
+}
+
+
+def _breaking_market(limit=5, timeout=10):
+    """Market-WIDE breaking events. [(sev, 'MARKET', title, url, why)]."""
+    import urllib.request as _u, re as _re, html as _html
+    try:
+        xml = _u.urlopen(_u.Request(_MARKET_BREAKING_Q, headers={"User-Agent": "Mozilla/5.0"}),
+                         timeout=timeout).read().decode("utf-8", "ignore")
+    except Exception:
+        return []
+    hits = []
+    for blk in _re.findall(r"<item[^>]*>(.*?)</item>", xml, _re.S)[:20]:
+        m = _re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", blk, _re.S)
+        l = _re.search(r"<link>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>", blk, _re.S)
+        if not m:
+            continue
+        title = _html.unescape(_re.sub(r"<[^>]+>", "", m.group(1))).strip()
+        if len(title) < 25:
+            continue
+        low = title.lower()
+        best = None
+        for phrase, (sev, why) in _MARKET_BREAKING_WEIGHTS.items():
+            if phrase in low and (best is None or sev > best[0]):
+                best = (sev, why)
+        if not best:
+            continue
+        hits.append((best[0], "MARKET", title[:130], l.group(1).strip() if l else "", best[1]))
+    hits.sort(key=lambda x: -x[0])
+    out, seen = [], set()
+    for h in hits:
+        k = h[2][:50].lower()
+        if k in seen:
+            continue
+        seen.add(k); out.append(h)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _breaking_for_book(conn, limit=6, timeout=10):
@@ -26048,6 +26126,11 @@ def _breaking_for_book(conn, limit=6, timeout=10):
             _sym = _re.search(rf"(?:^|[^A-Za-z]){tk}(?:[^A-Za-z]|$)", title)
             if not _sym:
                 continue
+            # a DIFFERENT company whose name starts with the ticker: "MDB Capital Holdings
+            # (MDBH)" is not MongoDB. If a longer all-caps symbol containing ours appears
+            # in parentheses, the story is about that company (2026-08-07).
+            if _re.search(rf"\({tk}[A-Z]+\)", title):
+                continue
             # "X downgrades Y" / "X upgrades Y": the ticker is acting ON someone else
             if _re.search(rf"{tk}[^.]{{0,40}}(?:downgrades|upgrades|initiates|cuts)",
                           title, _re.I) and not _re.search(rf"(?:downgrades|upgrades)[^.]{{0,30}}{tk}",
@@ -26079,19 +26162,32 @@ def _breaking_for_book(conn, limit=6, timeout=10):
     return out
 
 
-def _fmt_breaking(rows):
-    """The BREAKING section. None when nothing on your names is moving."""
-    if not rows:
+def _fmt_breaking(rows, market=None):
+    """BREAKING in two sections: market-wide first, then your book (user 2026-08-07).
+
+    Kept separate deliberately. "The Fed moved" and "a stock you own halted" are different
+    kinds of news; interleaving them buries the one that needs action.
+    """
+    if not rows and not market:
         return None
     _EM = {3: "🚨", 2: "⚠️", 1: "📄"}
-    out = ["<b>🚨 BREAKING — on YOUR positions</b>"]
-    for sev, tk, title, url, why in rows:
-        out.append(f"{_EM.get(sev, '📄')} <b>{tk}</b> — "
-                   + (f'<a href="{url}">{title}</a>' if url else title))
-        out.append(f"    <i>{why}</i>")
-    out.append("<i>Filtered to names you hold or watch, and to headline types that "
-               "historically move a stock — not general coverage. If everything is "
-               "breaking, nothing is.</i>")
+    out = []
+    if market:
+        out.append("<b>🌐 BREAKING — MARKET-WIDE</b>")
+        for sev, _tag, title, url, why in market:
+            out.append(f"{_EM.get(sev, '📄')} " + (f'<a href="{url}">{title}</a>' if url else title))
+            out.append(f"    <i>{why}</i>")
+        out.append("")
+    if rows:
+        out.append("<b>🎯 BREAKING — YOUR POSITIONS</b>")
+        for sev, tk, title, url, why in rows:
+            out.append(f"{_EM.get(sev, '📄')} <b>{tk}</b> — "
+                       + (f'<a href="{url}">{title}</a>' if url else title))
+            out.append(f"    <i>{why}</i>")
+    out.append("<i>Market section = events that reprice everything (policy, inflation, "
+               "trade, broad risk moves). Position section = names you hold or watch, "
+               "filtered to headline types that historically move a stock. Neither is "
+               "general coverage: if everything is breaking, nothing is.</i>")
     return "\n".join(out)
 
 
@@ -26142,11 +26238,12 @@ async def breaking_command(update, ctx):
         rows = _breaking_for_book(conn)
     finally:
         conn.close()
+    mkt = _breaking_market()
     try:
         await msg.delete()
     except Exception:
         pass
-    txt = _fmt_breaking(rows) or ("Nothing breaking on your positions or watchlist in the "
+    txt = _fmt_breaking(rows, market=mkt) or ("Nothing breaking market-wide or on your "
                                   "last 2 days — no halts, guidance cuts, M&A, downgrades "
                                   "or legal news matched.")
     # section-aware, never mid-tag (see _chunk_on_sections)
@@ -30498,6 +30595,52 @@ _MACRO_EVENT_INFO = {
 }
 
 
+_BLS_CACHE = {}          # sid -> (fetched_ts, points)  — monthly data, cache for hours
+
+
+def _bls_series(sid, years_back=1, ttl=21600):
+    """BLS monthly series with a 6h cache. [] on failure. Returns [(y, m, value)] desc.
+
+    The public BLS API allows only ~25 requests/day per IP without a key, and
+    _macro_event_actual was fetching TWO uncached series on every render. A morning brief,
+    a /catalysts and a couple of digests exhausted the quota, after which the unemployment
+    line silently vanished -- which is exactly how the regression pass caught it
+    (2026-08-07). The data is MONTHLY: re-fetching it per render was never justified.
+    """
+    import time as _t, urllib.request as _u, json as _j
+    now = _t.time()
+    c = _BLS_CACHE.get(sid)
+    if c and now - c[0] < ttl:
+        return c[1]
+    yr = datetime.now().year
+    try:
+        body = _j.dumps({"seriesid": [sid], "startyear": str(yr - years_back),
+                         "endyear": str(yr)}).encode()
+        req = _u.Request("https://api.bls.gov/publicAPI/v1/timeseries/data/", data=body,
+                         headers={"Content-Type": "application/json",
+                                  "User-Agent": "nyse-data/1.0"})
+        j = _j.load(_u.urlopen(req, timeout=15))
+        if str(j.get("status")) != "REQUEST_SUCCEEDED":
+            # quota exhaustion is the common case and must not look like "no data"
+            log.warning("BLS %s not serviced: %s", sid, str(j.get("message"))[:120])
+            _BLS_CACHE[sid] = (now, c[1] if c else [])     # keep stale rather than blank
+            return c[1] if c else []
+        pts = []
+        for ser in j.get("Results", {}).get("series", []):
+            for d in ser.get("data", []):
+                if str(d.get("period", "")).startswith("M"):
+                    try:
+                        pts.append((int(d["year"]), int(d["period"][1:]), float(d["value"])))
+                    except Exception:
+                        pass
+        pts.sort(reverse=True)
+        _BLS_CACHE[sid] = (now, pts)
+        return pts
+    except Exception:
+        log.debug("BLS fetch failed for %s", sid, exc_info=True)
+        return c[1] if c else []
+
+
 def _macro_event_actual(label):
     """Latest printed value + prior for an event, from BLS. None when unavailable.
 
@@ -30510,23 +30653,7 @@ def _macro_event_actual(label):
     if not sid:
         return None
     try:
-        import urllib.request as _u, json as _j
-        yr = datetime.now().year
-        body = _j.dumps({"seriesid": [sid], "startyear": str(yr - 1),
-                         "endyear": str(yr)}).encode()
-        req = _u.Request("https://api.bls.gov/publicAPI/v1/timeseries/data/", data=body,
-                         headers={"Content-Type": "application/json",
-                                  "User-Agent": "nyse-data/1.0"})
-        j = _j.load(_u.urlopen(req, timeout=12))
-        pts = []
-        for ser in j.get("Results", {}).get("series", []):
-            for d in ser.get("data", []):
-                if str(d.get("period", "")).startswith("M"):
-                    try:
-                        pts.append((int(d["year"]), int(d["period"][1:]), float(d["value"])))
-                    except Exception:
-                        pass
-        pts.sort(reverse=True)
+        pts = _bls_series(sid)          # cached: BLS allows ~25 requests/day without a key
         if len(pts) < 2:
             return None
         (y1, m1, v1), (_, _, v2) = pts[0], pts[1]
@@ -30550,22 +30677,7 @@ def _macro_event_actual(label):
         if s2:
             try:
                 sid2, lbl2, unit2 = s2
-                body2 = _j.dumps({"seriesid": [sid2], "startyear": str(yr - 1),
-                                  "endyear": str(yr)}).encode()
-                req2 = _u.Request("https://api.bls.gov/publicAPI/v1/timeseries/data/",
-                                  data=body2,
-                                  headers={"Content-Type": "application/json",
-                                           "User-Agent": "nyse-data/1.0"})
-                j2 = _j.load(_u.urlopen(req2, timeout=12))
-                p2 = []
-                for ser in j2.get("Results", {}).get("series", []):
-                    for d in ser.get("data", []):
-                        if str(d.get("period", "")).startswith("M"):
-                            try:
-                                p2.append((int(d["year"]), int(d["period"][1:]), float(d["value"])))
-                            except Exception:
-                                pass
-                p2.sort(reverse=True)
+                p2 = _bls_series(sid2)
                 if len(p2) >= 2:
                     res["c_label"], res["c_val"] = lbl2, p2[0][2]
                     res["c_prior"], res["c_unit"] = p2[1][2], unit2

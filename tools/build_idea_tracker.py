@@ -586,6 +586,10 @@ ROWS = [
  "User: can you change ip and try it",
  "REJECTED","2026-08-07","Declined - rotating IPs to evade a providers published rate limit is circumventing their usage policy, and it would break again unpredictably. Did the sanctioned equivalent instead: BLS issues a FREE registration key that moves you from the ~25/day unregistered v1 endpoint to 500/day on v2. Wired support in - set BLS_API_KEY in api_keys.env and _bls_series switches to v2 automatically; with no key it stays on v1 and leans on the new 6h cache. Register at https://data.bls.gov/registrationEngine/ (free, instant). Combined with the cache this is 1 request per 6h per series instead of 2 per render, so even the unregistered limit is comfortable",
  "-","P2","USER: register for a free BLS key and add BLS_API_KEY=... to api_keys.env"),
+(153,"2026-08-07","User","Feature","Source macro from a key we already hold, and fetch on a smart cadence",
+ "User: can we get this from another site where we already have keys; and we do not need to check all the time - once early morning for revisions, then every 30min on a scheduled release day",
+ "DONE","2026-08-07","ALTERNATIVE SOURCE TESTED AND REJECTED: AlphaVantage (key already held) does serve NONFARM_PAYROLL, but its July level is 158,649 against BLS 158,858 - a different vintage or seasonal adjustment, so the headline month-over-month change would not match the number everyone quotes. Its free tier is also 25/day, the same constraint, and UNEMPLOYMENT and CPI rate-limited after three calls. Swapping would trade a quota problem for a WRONG NUMBER problem. The cadence idea was the right fix and is now implemented: _bls_refresh_ttl returns 30 min only during 08:00-10:30 ET on an actual release day (NFP first Friday, or a scheduled CPI/PCE/FOMC date) and otherwise holds until the next early morning, so one refresh a day picks up revisions. Verified across four scenarios: NFP day 08:45 -> 1800s, NFP day 11:00 -> 19h, normal Tuesday -> 21h, CPI date 08:30 -> 1800s",
+ "-","P1","-"),
 ]
 
 def build():

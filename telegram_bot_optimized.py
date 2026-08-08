@@ -30598,7 +30598,40 @@ _MACRO_EVENT_INFO = {
 _BLS_CACHE = {}          # sid -> (fetched_ts, points)  — monthly data, cache for hours
 
 
-def _bls_series(sid, years_back=1, ttl=21600):
+def _bls_refresh_ttl():
+    """How long BLS data stays fresh, by what day it is (user 2026-08-07).
+
+    Government statistics change on a published schedule, not continuously, so polling at a
+    fixed interval is wasted quota. Two regimes:
+
+      RELEASE DAY, 08:00-10:30 ET   -> 30 min. The print lands at 08:30 and the API can lag
+                                       it by minutes, so this is the only window where
+                                       re-checking earns anything.
+      EVERY OTHER TIME              -> until tomorrow. One early-morning refresh catches any
+                                       REVISION to prior months, which is the only thing that
+                                       changes off-schedule.
+    """
+    now = _et_now()
+    today = now.strftime("%Y-%m-%d")
+    is_release = False
+    try:
+        # NFP = first Friday; plus the CPI/PCE/FOMC calendars already in the file
+        if now.weekday() == 4 and now.day <= 7:
+            is_release = True
+        elif today in set(_CPI_DATES) | set(_PCE_DATES) | set(_FOMC_DATES):
+            is_release = True
+    except Exception:
+        pass
+    if is_release:
+        _mins = now.hour * 60 + now.minute
+        if 8 * 60 <= _mins <= 10 * 60 + 30:
+            return 1800                      # 30 min through the release window
+    # otherwise: hold until early tomorrow, so the morning brief triggers one refresh
+    _secs_to_6am = ((24 - now.hour + 6) % 24) * 3600 - now.minute * 60
+    return max(3600, _secs_to_6am)
+
+
+def _bls_series(sid, years_back=1, ttl=None):
     """BLS monthly series with a 6h cache. [] on failure. Returns [(y, m, value)] desc.
 
     The public BLS API allows only ~25 requests/day per IP without a key, and
@@ -30609,6 +30642,8 @@ def _bls_series(sid, years_back=1, ttl=21600):
     """
     import time as _t, urllib.request as _u, json as _j
     now = _t.time()
+    if ttl is None:
+        ttl = _bls_refresh_ttl()
     c = _BLS_CACHE.get(sid)
     if c and now - c[0] < ttl:
         return c[1]

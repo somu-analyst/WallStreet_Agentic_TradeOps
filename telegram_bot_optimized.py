@@ -30614,9 +30614,21 @@ def _bls_series(sid, years_back=1, ttl=21600):
         return c[1]
     yr = datetime.now().year
     try:
-        body = _j.dumps({"seriesid": [sid], "startyear": str(yr - years_back),
-                         "endyear": str(yr)}).encode()
-        req = _u.Request("https://api.bls.gov/publicAPI/v1/timeseries/data/", data=body,
+        # A free BLS registration key moves us to API v2: 500 requests/day instead of the
+        # ~25/day the unregistered v1 endpoint allows per IP. Drop BLS_API_KEY into
+        # api_keys.env next to the bot and _load_api_keys picks it up automatically; with
+        # no key this stays on v1 and simply relies on the cache.
+        # (Register: https://data.bls.gov/registrationEngine/ — free, instant.)
+        _bkey = os.environ.get("BLS_API_KEY") or os.environ.get("BLS_KEY") or ""
+        _payload = {"seriesid": [sid], "startyear": str(yr - years_back),
+                    "endyear": str(yr)}
+        if _bkey:
+            _payload["registrationkey"] = _bkey
+            _url = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+        else:
+            _url = "https://api.bls.gov/publicAPI/v1/timeseries/data/"
+        body = _j.dumps(_payload).encode()
+        req = _u.Request(_url, data=body,
                          headers={"Content-Type": "application/json",
                                   "User-Agent": "nyse-data/1.0"})
         j = _j.load(_u.urlopen(req, timeout=15))

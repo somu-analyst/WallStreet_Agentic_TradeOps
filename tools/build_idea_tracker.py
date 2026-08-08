@@ -582,6 +582,10 @@ ROWS = [
  "Caught by the regression pass: the NFP check went from PASS to unemp=None between runs",
  "DONE","2026-08-07","The public BLS API allows ~25 requests/day per IP with no key, and _macro_event_actual fetched TWO uncached series on EVERY render - a morning brief plus a couple of digests would exhaust it, after which the unemployment line simply disappeared with no error. My own testing hit the ceiling, which is how it surfaced. Added _bls_series with a 6h cache (the data is MONTHLY - per-render fetching was never justified), which serves stale data rather than blank on a quota response, and logs the BLS message instead of swallowing it. Regression test updated to report quota exhaustion as SKIPPED-environment rather than a code failure, so the check is not trained to be ignored",
  "-","P1","Optional: a free BLS registration key raises the limit to 500/day on API v2"),
+(152,"2026-08-07","User","Question","Change IP to get past the BLS rate limit?",
+ "User: can you change ip and try it",
+ "REJECTED","2026-08-07","Declined - rotating IPs to evade a providers published rate limit is circumventing their usage policy, and it would break again unpredictably. Did the sanctioned equivalent instead: BLS issues a FREE registration key that moves you from the ~25/day unregistered v1 endpoint to 500/day on v2. Wired support in - set BLS_API_KEY in api_keys.env and _bls_series switches to v2 automatically; with no key it stays on v1 and leans on the new 6h cache. Register at https://data.bls.gov/registrationEngine/ (free, instant). Combined with the cache this is 1 request per 6h per series instead of 2 per render, so even the unregistered limit is comfortable",
+ "-","P2","USER: register for a free BLS key and add BLS_API_KEY=... to api_keys.env"),
 ]
 
 def build():

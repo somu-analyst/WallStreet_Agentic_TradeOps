@@ -560,7 +560,7 @@ ROWS = [
  "-","P0","-"),
 (146,"2026-08-07","User","Feature","Payoff + beta-weighted P&L charts on the Portfolio page",
  "User: add this kind of chart and writeup to the portfolio one - the per-position payoff-at-expiry chart and the P&L vs SPY move panel that Telegram already sends",
- "QUEUED","","Telegram already builds both; Streamlit Portfolio does not have them",
+ "DONE","2026-08-07","Added a Risk & payoff charts panel to the Streamlit Portfolio page, calling the SAME engine functions Telegram uses (_plan_portfolio_png, _plan_payoff_png, _pl_bounds, _pl_analytics) rather than reimplementing the maths, so the two surfaces cannot drift. Beta-weighted book sensitivity with per-1%-SPY and +/-2% scenarios, plus a per-ticker payoff-at-expiry chart with max profit/loss, POP and EV. Values verified IDENTICAL to the Telegram output the user pasted: -224 per 1% SPY, 407/-488 at -/+2%, GOOG max P 34,378 max L -1,121, POP 35%, EV -80, B/E 344. VERIFICATION NOTE: my first DOM check reported the metrics MISSING - that was wrong, Streamlit uppercases metric labels and my match was case-sensitive",
  "-","P1","-"),
 (147,"2026-08-07","User","Feature","Market heatmap treemap, Telegram + Streamlit, live and EOD",
  "User shared a TradingView-style sector treemap: tiles sized by market cap, coloured by percent change, grouped by sector",

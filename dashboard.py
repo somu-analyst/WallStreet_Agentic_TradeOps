@@ -9297,6 +9297,66 @@ elif page == "🫧 Anti-Bubble Radar":
 elif page == "💼 Portfolio & Suggestions":
     _page_header("💼 Portfolio & Suggestions", _PAGE_HELP["💼 Portfolio & Suggestions"])
 
+    # Payoff + beta-weighted risk charts (user 2026-08-07). Telegram already builds both;
+    # the dashboard had neither, so the question "what does my book do if SPY moves 1%"
+    # could only be answered on a phone. Reuses the SAME engine functions rather than
+    # reimplementing the maths, so the two surfaces cannot disagree.
+    if _TB_ENGINE is not None:
+        with st.expander("📊 Risk & payoff charts", expanded=True):
+            try:
+                _pc = get_conn()
+                try:
+                    _pbuf, _pstats = _TB_ENGINE._plan_portfolio_png(_pc)
+                    _ptks = [r[0] for r in _pc.execute(
+                        "SELECT DISTINCT UPPER(ticker) FROM trades WHERE status='OPEN'")]
+                finally:
+                    _pc.close()
+                if _pbuf and _pstats:
+                    _a, _b = st.columns([3, 2])
+                    with _a:
+                        st.image(_pbuf, use_container_width=True)
+                    with _b:
+                        st.metric("P&L per +1% SPY", f"${_pstats['per1']:,.0f}",
+                                  help="Beta-weighted: each position's sensitivity to SPY, "
+                                       "summed. This is directional exposure in dollars — "
+                                       "the number a delta-neutral book would drive to zero.")
+                        st.metric("If SPY −2%", f"${_pstats['d2']:,.0f}")
+                        st.metric("If SPY +2%", f"${_pstats['u2']:,.0f}")
+                        st.caption(f"{_pstats['n']} legs · {_pstats['tks']} tickers")
+                else:
+                    st.caption("No open positions to chart.")
+                # per-ticker payoff at expiry
+                if _ptks:
+                    _sel = st.selectbox("Payoff at expiry for", _ptks, key="pf_payoff_tk")
+                    _pc2 = get_conn()
+                    try:
+                        _legs, _spot, _cw, _pw = _TB_ENGINE._plan_legs_for(_pc2, _sel)
+                    finally:
+                        _pc2.close()
+                    if _legs and _spot:
+                        _img = _TB_ENGINE._plan_payoff_png(_sel, _legs, _spot, _cw, _pw)
+                        _bd = _TB_ENGINE._pl_bounds(_legs, _spot)
+                        _an = _TB_ENGINE._pl_analytics(_legs, _spot)
+                        _c1, _c2 = st.columns([3, 2])
+                        with _c1:
+                            st.image(_img, use_container_width=True)
+                        with _c2:
+                            if _bd:
+                                st.metric("Max profit", _TB_ENGINE._pl_mp(_bd))
+                                st.metric("Max loss", _TB_ENGINE._pl_ml(_bd))
+                            if _an:
+                                st.metric("POP (model)", f"{_an['pop']:.0f}%",
+                                          help="Black-Scholes output, NOT a validated "
+                                               "probability. A high POP is not an edge "
+                                               "unless credit/width exceeds (1-POP).")
+                                st.metric("Expected value", f"${_an['ev']:,.0f}")
+                                st.caption("Breakeven: "
+                                           + (", ".join(f"${x:.0f}" for x in _an["be"]) or "—"))
+                    else:
+                        st.caption(f"No open {_sel} legs to chart.")
+            except Exception as _pe:
+                st.caption(f"Charts unavailable: {_pe}")
+
     try:
         _conn = get_conn()
         trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN'", _conn)

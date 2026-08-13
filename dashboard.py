@@ -339,13 +339,21 @@ def _updown_img(closes, n=5):
 
 
 def _updown_pair(hist, close_col="Close"):
-    """(1W, 1M) strips from one daily-history frame. 5 and 21 sessions = a trading week
-    and a trading month, not 7/30 calendar days that would silently include weekends."""
+    """(1W boxes, 1M line, 3M line) from one daily-history frame.
+
+    Boxes answer "which days were up?" and stop being readable somewhere past a couple of
+    weeks — at 21 they are 4px slivers (user 2026-08-12: "1w 1m is not good"). So the box
+    strip is kept for the trading WEEK, where each day is still a distinct thing you can
+    point at, and the longer spans switch to a line, which is the right mark for shape over
+    time. 5 / 21 / 63 sessions = a trading week, month and quarter — not 7/30/90 calendar
+    days, which would silently count weekends the market was shut.
+    """
     try:
         ser = hist[close_col].dropna().tolist() if hist is not None and len(hist) else []
     except Exception:
-        return None, None
-    return (_updown_img(ser[-6:], 5), _updown_img(ser[-22:], 21))
+        return None, None, None
+    line = lambda n: ([float(x) for x in ser[-n:]] if len(ser) >= 3 else None)
+    return (_updown_img(ser[-6:], 5), line(21), line(63))
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -24803,7 +24811,7 @@ if page == "👀 Watchlist":
                 _r0["Day line"] = _wl_paths.get(str(_r0.get("Ticker") or "").upper())
                 # One box per session, green up / red down (user 2026-08-12). Built from
                 # the 90d daily history already fetched for this row — no extra request.
-                _r0["1W"], _r0["1M"] = _updown_pair(_r0.get("_hist"))
+                _r0["1W"], _r0["1M"], _r0["3M"] = _updown_pair(_r0.get("_hist"))
             _cls_show = _with_flag(pd.DataFrame(_cls_rows), at=1)   # 🌍 sits next to Ticker
             # Ticker / Name / Spot stay put when the table is scrolled right (pinned=True,
             # Streamlit >=1.42) and every header carries a hover explanation, so the
@@ -24836,10 +24844,14 @@ if page == "👀 Watchlist":
                          "red closed down. Shade carries size: pale under 1%, mid 1-3%, "
                          "deep 3%+. Drawn as a picture so it scales to the row height and "
                          "never makes the row taller."),
-                "1M": st.column_config.ImageColumn(
+                "1M": st.column_config.LineChartColumn(
                     "1M", width="small",
-                    help="Same, for the last 21 sessions (a trading month). Boxes get "
-                         "thinner, not taller — the strip stays the same size as 1W."),
+                    help="Closing price over the last 21 sessions (a trading month). A line, "
+                         "not boxes — past a couple of weeks the per-day boxes are too thin "
+                         "to read and shape is the thing worth seeing."),
+                "3M": st.column_config.LineChartColumn(
+                    "3M", width="small",
+                    help="Closing price over the last 63 sessions (a trading quarter)."),
                 "Day Pos": st.column_config.ProgressColumn("Day position", min_value=0.0,
                     max_value=1.0, format="%.0f%%",
                     help="Where the current price sits inside TODAY's low-high range. "
@@ -24888,7 +24900,7 @@ if page == "👀 Watchlist":
                 "Added": st.column_config.TextColumn("Added on",
                     help="Date this ticker was added to the watchlist."),
             }
-            _wl_order = ["Ticker", "🌍", "Name", "Spot", "Day%", "1W", "1M",
+            _wl_order = ["Ticker", "🌍", "Name", "Spot", "Day%", "1W", "1M", "3M",
                          "Day line", "Day Pos", "52w Pos",
                          "52w L-H", "Day L-H",
                          "Call Wall", "Put Wall", "Target", "Dist to Target", "RSI(14)",
@@ -25284,10 +25296,10 @@ if page == "📝 Paper Trading":
             _anchor = next((c for c in ("Spot", "Current Price", "Entry")
                             if c in _pt_show.columns), None)
             _at = (_pt_show.columns.get_loc(_anchor) + 1) if _anchor else len(_pt_show.columns)
-            _pt_show.insert(_at, "1W", _pt_show["Ticker"].map(
-                lambda t: _pt_strip.get(str(t).upper(), (None, None))[0]))
-            _pt_show.insert(_at + 1, "1M", _pt_show["Ticker"].map(
-                lambda t: _pt_strip.get(str(t).upper(), (None, None))[1]))
+            for _off, _col in enumerate(("1W", "1M", "3M")):
+                _pt_show.insert(_at + _off, _col, _pt_show["Ticker"].map(
+                    lambda t, _k=_off: _pt_strip.get(str(t).upper(),
+                                                     (None, None, None))[_k]))
         except Exception as _spe:
             st.caption(f"trend strips unavailable: {_spe}")
         # One headline PER CURRENCY. There is no FX rate anywhere in this project, so adding
@@ -25384,6 +25396,14 @@ if page == "📝 Paper Trading":
                     for c in _grpdf.columns}
             _tot["Ticker"] = "TOTAL"
             _tot["Ccy"] = _cy
+            # A TOTAL row has no trend to draw. The two column types disagree about how to
+            # say "nothing": LineChartColumn wants None (an empty string is not a series),
+            # while ImageColumn renders None as the literal text "None" and wants "".
+            for _tc in ("1M", "3M", "Day line"):
+                if _tc in _tot:
+                    _tot[_tc] = None
+            if "1W" in _tot:
+                _tot["1W"] = ""
             _tot["P&L"] = round(_grpdf["P&L"].sum())
             # Blended return on the capital actually deployed — P&L over cost, NOT the mean
             # of the per-row percentages (that would give a 1-share lot the same weight as a
@@ -25434,13 +25454,17 @@ if page == "📝 Paper Trading":
                     _pcfg["P&L"] = st.column_config.NumberColumn("P&L", format="localized")
                 except Exception:
                     _pcfg["P&L"] = st.column_config.NumberColumn("P&L", format="%d")
-                for _sp, _lbl in (("1W", "last 5 sessions"), ("1M", "last 21 sessions")):
+                if "1W" in _grpdf.columns:
+                    _pcfg["1W"] = st.column_config.ImageColumn(
+                        "1W", width="small",
+                        help="One box per session for the last trading week of the "
+                             "UNDERLYING — green closed up, red down, shade by size. "
+                             "Scales to the row height, so it never makes the row taller.")
+                for _sp, _n in (("1M", 21), ("3M", 63)):
                     if _sp in _grpdf.columns:
-                        _pcfg[_sp] = st.column_config.ImageColumn(
+                        _pcfg[_sp] = st.column_config.LineChartColumn(
                             _sp, width="small",
-                            help=f"One box per session, {_lbl} of the UNDERLYING — green "
-                                 "closed up, red down, shade by size. Scales to the row "
-                                 "height, so it never makes the row taller.")
+                            help=f"Underlying close over the last {_n} sessions.")
             except Exception:
                 _pcfg = {}
             try:

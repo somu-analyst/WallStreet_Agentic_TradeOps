@@ -612,15 +612,96 @@ async def terminal_command(update, ctx):
         parse_mode=H, reply_markup=kb)
 
 
+_DASH_TITLE = "RUDRARJUN Analytics"      # dashboard.py st.set_page_config(page_title=...)
+
+
+def _find_dashboard_window():
+    """HWND of a browser window already showing the dashboard, or None.
+
+    Matches on the TAB TITLE, which Windows exposes as the browser window title for the
+    ACTIVE tab. That is the honest limit of this approach and it is why the caller falls
+    back rather than treating a miss as "not open": if the dashboard is open but sitting on
+    a background tab, the window title shows the other tab and this returns None.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return None
+    u = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def _cb(hwnd, _):
+        if not u.IsWindowVisible(hwnd):
+            return True
+        n = u.GetWindowTextLengthW(hwnd)
+        if n <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        u.GetWindowTextW(hwnd, buf, n + 1)
+        if _DASH_TITLE.lower() in buf.value.lower():
+            found.append(hwnd)
+            return False
+        return True
+
+    try:
+        u.EnumWindows(_cb, 0)
+    except Exception:
+        return None
+    return found[0] if found else None
+
+
+def _refresh_dashboard_window(hwnd) -> bool:
+    """Bring the existing tab forward and send F5. False if the OS refuses.
+
+    SetForegroundWindow is allowed to fail -- Windows only grants it to a process that
+    already owns the foreground or is otherwise entitled. A failure is reported honestly
+    instead of blind-sending F5, because keystrokes go to whatever IS in front, and firing
+    F5 into an unrelated window would be worse than doing nothing.
+    """
+    if not hwnd:
+        return False
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        u.ShowWindow(hwnd, 9)                      # SW_RESTORE (un-minimise)
+        if not u.SetForegroundWindow(hwnd):
+            return False
+        time.sleep(0.25)
+        if u.GetForegroundWindow() != hwnd:
+            return False                            # never type into someone else's window
+        u.keybd_event(0x74, 0, 0, 0)                # VK_F5 down
+        u.keybd_event(0x74, 0, 2, 0)                # VK_F5 up
+        return True
+    except Exception:
+        return False
+
+
 def open_dashboard_on_startup() -> None:
-    """Open Streamlit dashboard URL in default browser when bot starts."""
+    """Show the dashboard -- REUSING the existing tab if one is already open.
+
+    User 2026-08-08: "when streamlit page is already there in chrome, dont open again, just
+    refresh". The old call passed new=2, which means "new tab" explicitly, so every bot start
+    stacked another copy of the same page.
+    """
     local_url = "http://localhost:8502"
     if not ensure_streamlit_running(8502):
         log.warning("Dashboard did not become ready on port 8502")
         return
+    hwnd = _find_dashboard_window()
+    if hwnd:
+        if _refresh_dashboard_window(hwnd):
+            log.info("Dashboard already open - focused the existing tab and refreshed it")
+        else:
+            # Found it but could not drive it. Still NOT opening a duplicate: the page is
+            # there, and Streamlit reconnects on its own.
+            log.info("Dashboard already open - left it alone (could not take foreground)")
+        return
     try:
-        opened = webbrowser.open(local_url, new=2)
-        if opened:
+        if webbrowser.open(local_url, new=2):
             log.info(f"Opened dashboard in browser: {local_url}")
         else:
             log.warning(f"Could not auto-open browser for: {local_url}")
@@ -936,6 +1017,27 @@ try:
         _pm = kwargs.get("parse_mode")
         text2 = (_tg_balance(sanitize_for_telegram(text))
                  if isinstance(text, str) and _pm else text)
+        # SPLIT a long message instead of letting the failure path cut it (user 2026-08-10:
+        # "why are messages truncated, fix all of them"). Telegram rejects anything over
+        # 4096, and the heal branch below then re-sent a 3900-char stump ending in
+        # "...truncated" -- which is how the morning brief kept losing its WORLD section,
+        # Japan included. Chunking on section boundaries keeps every byte AND keeps each
+        # part's HTML self-contained. Applies to every long send, not just the brief.
+        if isinstance(text2, str) and len(text2) > 4096:
+            try:
+                parts = [p for p in _chunk_on_sections(text2) if p and p.strip()]
+            except Exception:
+                parts = []
+            if len(parts) > 1:
+                last = None
+                for _i, _p in enumerate(parts):
+                    kw = dict(kwargs)
+                    if _i < len(parts) - 1:
+                        kw.pop("reply_markup", None)   # buttons belong on the final part
+                    if len(_p) > 4096:
+                        _p = _tg_cut(_p, 4000)         # one oversized section, still rare
+                    last = await _orig_send(self, chat_id=chat_id, text=_p, *args, **kw)
+                return last
         try:
             return await _orig_send(self, chat_id=chat_id, text=text2, *args, **kwargs)
         except Exception as e:
@@ -3517,16 +3619,27 @@ def _disp_w(s):
     starting at the same index (Excel-style) even when cells contain emoji."""
     import unicodedata as _ud
     w = 0
+    _ri_open = False          # first half of a regional-indicator PAIR is pending
     for ch in str(s):
         o = ord(ch)
         if 0xFE00 <= o <= 0xFE0F or 0x0300 <= o <= 0x036F or o == 0x200D:
             continue  # variation selector / combining mark / zero-width joiner
+        # Country flags (ID 201) are TWO regional-indicator codepoints that render as ONE
+        # emoji glyph — 2 cells, not 4. Charging 2 per codepoint made every header row sit
+        # 2 cells wider than its flagged data rows.
+        if 0x1F1E6 <= o <= 0x1F1FF:
+            if _ri_open:
+                _ri_open = False      # closes the pair, costs nothing more
+            else:
+                _ri_open = True
+                w += 2
+            continue
+        _ri_open = False
         # NOTE: bare arrows (→↑↓←) and unfilled shapes (◆) default to NARROW
         # text presentation in Telegram's monospace font unless paired with a
         # variation selector — do NOT add them here, they broke column alignment
         # (found 2026-07-17). Stick to solid emoji (🟢🔴🟡⚪🟩🟥) inside table cells.
         if (0x1F000 <= o <= 0x1FAFF or 0x2600 <= o <= 0x27BF or 0x2B00 <= o <= 0x2BFF
-                or 0x1F1E6 <= o <= 0x1F1FF
                 or _ud.east_asian_width(ch) in ("W", "F")):
             w += 2
         else:
@@ -3622,8 +3735,28 @@ def _pipe_table(header_cols, rows_data, right_cols=None, title=None, legend=None
         so they aren't squished by the monospace grid
     Keep status emoji in column 0 (uniform GRN/RED/YEL family) for the cleanest look.
     """
-    import html as _html
+    import html as _html, re as _re2
     right_cols = right_cols or set()
+
+    # Cap every numeric cell at 2 decimal places (user 2026-08-08: "all no. and percentage
+    # results in all columns should be limit to two floating points"). Done HERE, at the one
+    # choke point every table passes through, rather than chasing hundreds of f-strings.
+    # Only touches cells that are PURELY a number (with optional sign, %, x, $, commas) so
+    # dates like 2026-08-07 and tickers are never rewritten.
+    _NUMRE = _re2.compile(r"^([+-]?)([$₹]?)([\d,]*\.\d{3,})([%x×]?)$")
+
+    def _cap2(v):
+        s = str(v)
+        m = _NUMRE.match(s.strip())
+        if not m:
+            return v
+        sign, cur, num, suf = m.groups()
+        try:
+            return f"{sign}{cur}{float(num.replace(',', '')):,.2f}{suf}"
+        except ValueError:
+            return v
+
+    rows_data = [[_cap2(c) for c in r] for r in rows_data]
     n = len(header_cols)
     all_rows = [list(header_cols)] + [list(r) for r in rows_data]
     widths = [max(_disp_w(r[c]) for r in all_rows) for c in range(n)]
@@ -4565,12 +4698,14 @@ async def positions_view(query):
             for _sid, _stk, _sq, _sep, _sed in _slots:
                 _spx = _last_price(_stk) or 0
                 _spnl = f"{(_spx - float(_sep or 0)) * int(_sq or 0):+,.0f}" if _spx else "—"
-                _srows.append(("🟢" if int(_sq or 0) > 0 else "🔴", _stk,
+                _srows.append(("🟢" if int(_sq or 0) > 0 else "🔴", _flag_tk(_stk),
                                f"{int(_sq or 0)}", _spnl))
+            _sflags = _flag_legend([r[1] for r in _slots])
             parts.append(chr(10) + "📦 <b>Stock lots</b>" + chr(10)
                          + _pipe_table(("ST", "Tkr", "Sh", "P&L$"), _srows,
                                        right_cols={2, 3},
-                                       legend="tax clock & entries — /tax"))
+                                       legend=("tax clock & entries — /tax"
+                                               + (f" · {_sflags}" if _sflags else ""))))
     except Exception:
         log.debug("stock lots block failed", exc_info=True)
 
@@ -4605,9 +4740,12 @@ async def positions_view(query):
     if len(_txt) <= 4000:
         await query.message.reply_text(_txt, parse_mode=H, reply_markup=_kb)
     else:
-        # Split: header+cards first, then urgent+hp+footer (+stock lots) w/ buttons
-        await query.message.reply_text(_tg_cut(card["head"]), parse_mode=H)
-        await query.message.reply_text(_tg_cut('\n'.join([card["tail"].lstrip('\n')] + parts[1:])),
+        # Split: header+cards first, then urgent+hp+footer (+stock lots) w/ buttons.
+        # Neither half is _tg_cut any more (user 2026-08-10) — cutting here silently
+        # dropped whatever came last, usually NEWS. If either half is still over the
+        # limit the send wrapper splits it again rather than discarding the tail.
+        await query.message.reply_text(card["head"], parse_mode=H)
+        await query.message.reply_text('\n'.join([card["tail"].lstrip('\n')] + parts[1:]),
                                        parse_mode=H, reply_markup=_kb)
 
 
@@ -8764,7 +8902,14 @@ def _parse_add_args(args):
             # (options) cast with int() themselves, same as before.
             qty = float(s) if "." in s else int(s)
             continue
-        if tk is None and re.fullmatch(r"[A-Za-z][A-Za-z.\-]{0,7}", s):
+        # Ticker LAST, so every other token shape has already claimed its meaning.
+        # The old cap was 8 chars starting with a letter, which quietly rejected every
+        # long foreign symbol: RELIANCE.NS (11) failed while TCS.NS (6) worked, and Tokyo
+        # codes like 7203.T were rejected outright for starting with a digit (user
+        # 2026-08-10). Digits are safe here because the qty rule above already consumed
+        # anything purely numeric; requiring one letter keeps "100" from becoming a ticker.
+        if (tk is None and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.\-&]{0,14}", s)
+                and re.search(r"[A-Za-z]", s)):
             tk = s.upper()
             continue
         return None, f"can't parse '{s}' — see /add usage"
@@ -11029,7 +11174,9 @@ async def signal_scanner(query):
     ])
     # Send main signals, then strike breakdown as separate messages to avoid 4096 limit
     main_msg = "\n".join(parts)
-    main_msg = _tg_cut(main_msg)     # HTML-safe cut — never slices mid-tag
+    # No pre-cut here any more (user 2026-08-10). Trimming to 4000 BEFORE the send threw
+    # the tail away for good; the send wrapper now splits anything over the limit on
+    # section boundaries, so the whole scan arrives across as many messages as it needs.
     await query.message.reply_text(main_msg, parse_mode=H, reply_markup=kb)
 
     if _strike_parts:
@@ -11321,6 +11468,13 @@ async def market_analytics_report(query):
             _vt_r  = _vix_s / _vx3m
             _vt_lb = "BACKWDTN ⚠️" if _vt_r > 1.05 else ("CONTANGO ✓" if _vt_r < 0.95 else "FLAT")
             _regime.append(f"🌡 <b>VIX Term:</b>  {_vix_s:.1f} / {_vx3m:.1f}  ({_vt_r:.2f}x)  {_vt_lb}")
+            # VXN alongside, never instead (user 2026-08-08). The spread vs VIX is the read:
+            # wide = risk concentrated in tech, narrow = broad.
+            _vn = (_get_vol_indices() or {}).get("vxn") or 0
+            if _vn > 0:
+                _regime.append(f"🌡 <b>VXN (Nasdaq):</b>  {_vn:.1f}   "
+                               f"spread vs VIX {_vn - _vix_s:+.1f} pts  "
+                               f"{'tech-led risk' if _vn - _vix_s >= 4 else 'broad, not tech-specific' if _vn - _vix_s <= 1.5 else 'normal tech premium'}")
         except Exception:
             log.debug("suppressed exception", exc_info=True)
 
@@ -13289,7 +13443,7 @@ def _positions_card_parts(trades, now_s, today):
 
         # +/- prefix = long/short. One char, and it is the single most important fact on a
         # spread (which leg you are short determines the whole risk profile).
-        _leg = f"{'+' if _is_long else '-'}{tk[:4]}{int(strike)}{otype[:1]}"
+        _leg = f"{_ticker_flag(tk)}{'+' if _is_long else '-'}{tk[:4]}{int(strike)}{otype[:1]}"
         _pnl_s = f"{pnl:+,.0f}" if abs(pnl) < 1000 else f"{'+' if pnl >= 0 else '-'}{abs(pnl)/1000:.1f}K"
         # 3-state colored circle (user wants real green/yellow/red 2026-07-17;
         # this is the only way to get genuine color in Telegram — solid emoji
@@ -13665,6 +13819,86 @@ def _last_expected_eod():
     return d.isoformat()
 
 
+# ── 2-week watch on the scoped nightly derive (user 2026-08-12) ──────────────
+# NYSE_OpenBB.py used to re-derive EVERY capture date every night; it now does the
+# captured day plus anything genuinely missing (_derive_scope). That is a large win
+# (~50 min/night, and it no longer grows with history) but it removes an accidental
+# safety net: the full rebuild used to paper over any day that came out wrong. These
+# checks watch for exactly what could now slip through, and they EXPIRE on their own —
+# after the date below the function returns nothing and every alert it raised
+# auto-RESOLVEs through the normal _data_health_upsert reconcile.
+_DERIVE_WATCH_UNTIL = "2026-08-26"
+
+
+def _derive_scope_watch(conn):
+    """Return (kind, detail) issues specific to the scoped derive. Empty after the window."""
+    today = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
+    if today > _DERIVE_WATCH_UNTIL:
+        return []
+    issues = []
+
+    def _dates(tbl, col):
+        try:
+            return [r[0] for r in conn.execute(f"SELECT DISTINCT {col} FROM {tbl} ORDER BY {col}")]
+        except Exception:
+            return []
+
+    cap = _dates("options_openbb", "trade_date")
+    if not cap:
+        return []
+    latest = cap[-1]
+
+    # 1. GAPS — the self-heal in _derive_scope is meant to make these impossible. The newest
+    #    capture date is excluded on purpose: while the EOD job is still running it is legitimately
+    #    absent, and capture_stale/derive_stale already cover it.
+    for tbl, col, label in (("options_daily", "trade_date", "options_daily"),
+                            ("options_change", "trade_date_now", "options_change"),
+                            ("stock_daily", "trade_date", "stock_daily"),
+                            ("daily_ticker_summary", "trade_date", "serving layer"),
+                            ("skew_snapshot", "trade_date", "skew_snapshot")):
+        missing = sorted(set(cap[:-1]) - set(_dates(tbl, col)))
+        if missing:
+            issues.append((f"derive_gap_{tbl}",
+                           f"{label} missing {len(missing)} captured day(s): "
+                           f"{', '.join(missing[-5:])} - scoped derive skipped them and the "
+                           f"self-heal did not pick them up"))
+
+    # 2. SKEW COLUMNS — the regression the skew-before-serving-layer reorder fixes. Before it,
+    #    a day's atm_iv/skew25/pcvol landed NULL and waited for the next full rebuild.
+    try:
+        n, ok = conn.execute(
+            "SELECT COUNT(*), SUM(atm_iv IS NOT NULL) FROM daily_ticker_summary "
+            "WHERE trade_date=(SELECT MAX(trade_date) FROM daily_ticker_summary)").fetchone()
+        d = conn.execute("SELECT MAX(trade_date) FROM daily_ticker_summary").fetchone()[0]
+        if n and (ok or 0) < n * 0.5:
+            issues.append(("derive_skew_nulls",
+                           f"daily_ticker_summary {d}: only {ok or 0}/{n} rows have atm_iv - "
+                           f"skew_snapshot is not landing before the serving layer"))
+    except Exception:
+        pass
+
+    # 3. THIN DAY — a partial derive now survives to morning instead of being redone. Compare the
+    #    newest derived day against the median of the ten before it rather than a fixed floor,
+    #    because row counts drift with the universe.
+    for tbl, col in (("options_change", "trade_date_now"), ("options_daily", "trade_date")):
+        try:
+            rows = conn.execute(
+                f"SELECT {col}, COUNT(*) FROM {tbl} WHERE {col} IN "
+                f"(SELECT DISTINCT {col} FROM {tbl} ORDER BY {col} DESC LIMIT 11) "
+                f"GROUP BY {col} ORDER BY {col}").fetchall()
+            if len(rows) >= 6:
+                hist = sorted(c for _, c in rows[:-1])
+                med = hist[len(hist) // 2]
+                day, cnt = rows[-1]
+                if med and cnt < med * 0.70:
+                    issues.append((f"derive_thin_{tbl}",
+                                   f"{tbl} {day}: {cnt:,} rows vs {med:,} median of prior 10 "
+                                   f"({cnt / med:.0%}) - derive may have run on a partial capture"))
+        except Exception:
+            pass
+    return issues
+
+
 def _data_health_scan(conn):
     """Return list of (kind, detail) issues. Checks capture vs derive vs stock lanes."""
     exp = _last_expected_eod()
@@ -13696,6 +13930,7 @@ def _data_health_scan(conn):
         issues.append(("derive_stale", f"options_change latest {der or 'NONE'} < expected {exp} — derive step missed (bot reads stale OI)"))
     if stk < exp:
         issues.append(("stock_stale", f"stock_daily latest {stk or 'NONE'} < expected {exp}"))
+    issues += _derive_scope_watch(conn)
     return issues
 
 
@@ -15919,6 +16154,26 @@ async def morning_alert(ctx: ContextTypes.DEFAULT_TYPE):
         parts.append(f"🌡 <b>VIX:</b> {_ma_vix:.1f}  {_vem} <b>{_vlbl}</b> — options are pricing "
                      f"a ±{_vday:.1f}% daily move in the S&amp;P "
                      f"({'cheap protection, but calm can end fast' if _ma_vix <= 15 else 'expensive premium — good to SELL, dangerous to buy' if _ma_vix > 25 else 'middling'})")
+        # VXN alongside VIX (user: "add vxn in place of vix"). Shown as its own line rather
+        # than replacing VIX outright, because the two answer different questions and this
+        # book is tech-heavy: VXN is the Nasdaq-100 gauge and it runs structurally ABOVE VIX,
+        # so quoting VXN under a "VIX" label would misread as a fear spike every single day.
+        # The spread is the informative part -- it is what says whether the risk is broad or
+        # concentrated in tech. (_vol_gauge already picks VXN per-ticker for Nasdaq names.)
+        try:
+            _vx = (_get_vol_indices() or {}).get("vxn") or 0.0
+            if _vx > 0:
+                _nday = _vx / 15.87
+                _sprd = _vx - _ma_vix
+                _stxt = ("tech carrying the risk — Nasdaq vol well above the S&amp;P's"
+                         if _sprd >= 4 else
+                         "broad risk, not a tech-specific story" if _sprd <= 1.5 else
+                         "the usual tech premium over the S&amp;P")
+                parts.append(f"🌡 <b>VXN (Nasdaq):</b> {_vx:.1f} — pricing a ±{_nday:.1f}% "
+                             f"daily move in the Nasdaq-100. Spread vs VIX "
+                             f"{_sprd:+.1f} pts: {_stxt}")
+        except Exception:
+            pass
     except Exception: pass
 
     try:
@@ -17571,7 +17826,7 @@ def short_squeeze_signal(ticker, conn=None):
         try:
             _r = conn.execute(
                 "SELECT shares_short, shares_short_prior, short_ratio, pct_float, float_shares "
-                "FROM short_interest WHERE UPPER(ticker)=? ORDER BY asof_date DESC LIMIT 1",
+                "FROM short_interest WHERE ticker=? ORDER BY asof_date DESC LIMIT 1",
                 (tk,)).fetchone()
             if _r:
                 si_now = si_now or (float(_r[0]) if _r[0] else None)
@@ -20614,7 +20869,7 @@ def _ticker_writeup(tk, conn, spot=0.0, call_chg=0.0, put_chg=0.0, pcr=1.0,
         try:
             pos = pd.read_sql(
                 "SELECT strike, option_type, quantity, expiry, entry_price FROM trades "
-                "WHERE UPPER(ticker)=? AND status='OPEN' AND UPPER(option_type)<>'STOCK'",
+                "WHERE ticker=? AND status='OPEN' AND UPPER(option_type)<>'STOCK'",
                 conn, params=(tk,))
         except Exception:
             pos = pd.DataFrame()
@@ -24884,12 +25139,54 @@ def _fmt_briefing(b):
             lines.append(f"⚖️ <b>Play:</b> {lead_trade} — <i>{lead[4]}</i>")
         lines.append(f"\U0001F6E1 <b>Hedge:</b> {ev['hedge']}")
 
-    _wn = _world_news_block()
-    if _wn:
-        lines += ["", "📰 <b>WORLD & MARKETS</b>"]
-        for _h, _s, _u in _wn:
-            _htxt = f'<a href="{_u}">{_h[:110]}</a>' if _u else _h[:110]
-            lines.append(f"• {_htxt}" + (f" <i>({_s})</i>" if _s else ""))
+    # ── OVERNIGHT INTERNATIONAL (user raised repeatedly; ID 92 was closed against the WRONG
+    # function). A US morning brief without Asia/Europe is missing the only thing that
+    # actually happened while you slept, so this leads rather than trails.
+    try:
+        # reuse the proven fetcher rather than a second one: _plan_markets_rows already
+        # handles every symbol, drops failures, and carries region + flag.
+        _mr = [r for r in (_plan_markets_rows() or [])
+               if r["region"] in ("Asia", "Europe") and r.get("last")]
+        if _mr:
+            # name[:7] and NO thousands separator: with 9-char names and commas the table
+            # measured 30 display cells against Telegram's 28-cell <pre> limit.
+            _irows = [("🟢" if (r["pct"] or 0) > 0 else "🔴" if (r["pct"] or 0) < 0 else "🟡",
+                       r["name"][:7], f"{r['last']:.0f}",
+                       f"{r['pct']:+.2f}" if r["pct"] is not None else "—") for r in _mr]
+            _up = sum(1 for r in _mr if (r["pct"] or 0) > 0)
+            lines += ["", _pipe_table(("ST", "Market", "Level", "Chg%"), _irows,
+                                      right_cols={2, 3},
+                                      title=f"🌏 OVERNIGHT — ASIA & EUROPE ({_up}/{len(_mr)} up)")]
+    except Exception:
+        log.debug("brief intl block failed", exc_info=True)
+
+    # ── GEO NEWS. _world_news_block() calls a generic aggregator that has been returning
+    # EMPTY, which is why Japan kept vanishing from this brief while _geo_news() (Japan/yen,
+    # Russia/Ukraine, China/trade, Energy/OPEC) worked perfectly and was simply never wired
+    # in here. Use _geo_news FIRST and keep the old aggregator only as a fallback.
+    _geo_ok = False
+    try:
+        _g = _geo_news() or {}
+        if _g:
+            lines += ["", "🌍 <b>WORLD — what moved overnight</b>"]
+            for _theme, _items in _g.items():
+                if not _items:
+                    continue
+                lines.append(f"<b>{_theme}</b>")
+                for _it in _items[:2]:
+                    _h, _u = (_it if isinstance(_it, (list, tuple)) else (str(_it), ""))[:2]
+                    lines.append(f"  • " + (f'<a href="{_u}">{_h[:105]}</a>' if _u else _h[:105]))
+            _geo_ok = True
+    except Exception:
+        log.debug("brief geo block failed", exc_info=True)
+
+    if not _geo_ok:
+        _wn = _world_news_block()
+        if _wn:
+            lines += ["", "📰 <b>WORLD & MARKETS</b>"]
+            for _h, _s, _u in _wn:
+                _htxt = f'<a href="{_u}">{_h[:110]}</a>' if _u else _h[:110]
+                lines.append(f"• {_htxt}" + (f" <i>({_s})</i>" if _s else ""))
 
     lines += ["",
         "<i>Tap /event NAME for the full 1st/2nd/3rd-order chain, or /opex for the expiration radar.</i>",
@@ -25013,10 +25310,10 @@ def _iv_rank_frame(conn, tickers):
     df = pd.read_sql(
         f"SELECT UPPER(ticker) AS tk, trade_date_now AS d, strike, expiry_date, "
         f"lastPrice_Call_now AS prem FROM options_change "
-        f"WHERE UPPER(ticker) IN ({_ph}) AND lastPrice_Call_now > 0", conn, params=tks)
+        f"WHERE ticker IN ({_ph}) AND lastPrice_Call_now > 0", conn, params=tks)
     sd = pd.read_sql(
         f"SELECT UPPER(ticker) AS tk, trade_date AS d, close FROM stock_daily "
-        f"WHERE UPPER(ticker) IN ({_ph})", conn, params=tks)
+        f"WHERE ticker IN ({_ph})", conn, params=tks)
     if df.empty or sd.empty:
         return {}
     df = df.merge(sd, on=["tk", "d"], how="inner")
@@ -25083,8 +25380,8 @@ def _iv_rank_legacy(conn, tk):
     res = None
     try:
         df = pd.read_sql("SELECT trade_date_now, strike, expiry_date, lastPrice_Call_now "
-                         "FROM options_change WHERE UPPER(ticker)=?", conn, params=(tk.upper(),))
-        sd = pd.read_sql("SELECT trade_date, close FROM stock_daily WHERE UPPER(ticker)=?",
+                         "FROM options_change WHERE ticker=?", conn, params=(tk.upper(),))
+        sd = pd.read_sql("SELECT trade_date, close FROM stock_daily WHERE ticker=?",
                          conn, params=(tk.upper(),))
         if not df.empty and not sd.empty:
             spot_by = {str(d): float(x) for d, x in zip(sd["trade_date"], sd["close"])}
@@ -25228,8 +25525,8 @@ def _plan_oi_flow(conn, tk, spot):
     try:
         df = pd.read_sql(
             "SELECT strike, expiry_date, change_OI_Call, change_OI_Put, vol_Call_now, vol_Put_now "
-            "FROM options_change WHERE UPPER(ticker)=? AND trade_date_now=(SELECT trade_date_now "
-            "FROM options_change WHERE UPPER(ticker)=? ORDER BY trade_date_now DESC LIMIT 1)",
+            "FROM options_change WHERE ticker=? AND trade_date_now=(SELECT trade_date_now "
+            "FROM options_change WHERE ticker=? ORDER BY trade_date_now DESC LIMIT 1)",
             conn, params=(tk.upper(), tk.upper()))
     except Exception:
         return None
@@ -25856,6 +26153,110 @@ _ASSET_BRIEF = {
         "trade": ("Treat natgas moves as noise unless a storage report or a durable weather "
                   "shift is behind them. It is the least mean-reverting-on-schedule commodity here."),
     },
+    # ── International indices (user 2026-08-12: Nikkei +2.1% and no explanation) ────
+    # These are the names that move while the US is asleep, so they are the ones the
+    # morning brief leads with — and they were the only ones with no brief at all.
+    "Nikkei": {
+        "what": "Japan's large-cap index — exporter-heavy, so it trades the yen as much "
+                "as it trades earnings.",
+        "drivers": ("The yen first: a WEAKER yen lifts the Nikkei because Toyota, Sony and "
+                    "the semiconductor-equipment names book overseas revenue back into more "
+                    "yen. Then the BoJ (the last major central bank to normalise rates, so "
+                    "every hint moves the currency), US tech sentiment via the chip supply "
+                    "chain, and China demand."),
+        "up": [("USD/JPY", "usually RISING — a weaker yen is the most common mechanism; "
+                            "check it before assuming the move was domestic"),
+               ("EWJ / DXJ", "RISE — DXJ is the yen-hedged one, so the gap between them "
+                             "tells you how much was currency and how much was equity"),
+               ("SOX / AMAT / LRCX / ASML", "OFTEN RISE — Tokyo Electron and Advantest are "
+                                            "index heavyweights and the chip cycle is shared"),
+               ("Japanese banks", "RISE when the move is BoJ-tightening driven, since a "
+                                  "steeper curve is what they earn on")],
+        "down": [("USD/JPY", "often FALLING — yen strength is the usual culprit, and a sharp "
+                             "one can mean carry-trade unwind, which spills into US equities"),
+                 ("EWJ", "FALLS; DXJ falls harder when the cause is a stronger yen")],
+        "trade": ("Separate currency from equity before acting: EWJ vs DXJ is the cleanest "
+                  "read. A Nikkei rally on a weakening yen is not the same trade as one on "
+                  "earnings, and only the second survives a yen reversal. A +2% night is "
+                  "large — the US open usually gives some of it back."),
+    },
+    "HSI": {
+        "what": "Hong Kong's index — the offshore venue for China exposure, including the "
+                "big China internet names.",
+        "drivers": ("Beijing policy and stimulus, property-sector stress, regulatory "
+                    "headlines, and US-China relations. Moves are policy-driven and abrupt "
+                    "far more often than they are earnings-driven."),
+        "up": [("FXI / KWEB / MCHI", "RISE — the same exposure in US hours"),
+               ("BABA / JD / PDD ADRs", "RISE, and usually lead the US session"),
+               ("Copper / iron ore", "OFTEN RISE if the driver is stimulus rather than tech")],
+        "down": [("KWEB / FXI", "FALL"), ("Luxury / miners", "PRESSURED on China demand fears")],
+        "trade": ("Policy rallies here are fast and often fade when the money does not "
+                  "follow the announcement. Call spreads over outright longs."),
+    },
+    "Shanghai": {
+        "what": "Mainland China's domestic A-share index — retail-heavy and state-influenced.",
+        "drivers": ("PBoC liquidity, state-fund buying, and mainland retail flow. It can "
+                    "diverge from Hong Kong for days because the buyer base is different."),
+        "up": [("FXI / ASHR", "RISE"), ("Industrial metals", "RISE on demand read")],
+        "down": [("Commodity exporters (BHP, RIO, VALE)", "PRESSURED")],
+        "trade": ("Watch whether Hong Kong confirms. Shanghai moving alone is usually a "
+                  "domestic-flow story and travels poorly into US assets."),
+    },
+    "Nifty": {
+        "what": "India's benchmark — a domestic-demand market, not an export cycle.",
+        "drivers": ("RBI policy, the rupee, monsoon and fuel costs (India imports most of "
+                    "its crude), and foreign institutional flows. Falling oil is a genuine "
+                    "tailwind here, which is the opposite of the Gulf markets."),
+        "up": [("INDA / INDY / SMIN", "RISE"), ("USD/INR", "often FALLING — a firmer rupee "
+                                                "usually accompanies foreign inflows")],
+        "down": [("INDA", "FALLS"), ("USD/INR", "often RISING")],
+        "trade": ("Check oil before reading a Nifty move as sentiment: a crude drop and a "
+                  "Nifty rally are frequently the same event."),
+    },
+    "ASX200": {
+        "what": "Australia's index — banks and miners, so it is a leveraged read on China.",
+        "drivers": ("Iron ore and China demand, RBA policy, and commodity prices. Financials "
+                    "plus materials are most of the index, so it rarely moves on tech."),
+        "up": [("BHP / RIO / VALE", "RISE — the miners are the mechanism"),
+               ("Copper / iron ore", "USUALLY RISING with it")],
+        "down": [("Miners", "FALL"), ("Copper", "often FALLING — a China growth read")],
+        "trade": ("Treat it as a China proxy that trades in Asian hours; if the ASX moved on "
+                  "iron ore, the tradable version is the miners, not the index."),
+    },
+    "FTSE": {
+        "what": "UK large-caps — an international earnings basket that happens to list in "
+                "London; energy, miners and pharma dominate.",
+        "drivers": ("Sterling (a WEAKER pound LIFTS it, since roughly three-quarters of "
+                    "revenue is earned abroad), oil and metals prices, and BoE policy."),
+        "up": [("GBP/USD", "often FALLING — the classic inverse; a rally on a rising pound "
+                            "is a genuinely stronger signal"),
+               ("Shell / BP / Glencore", "RISE — index heavyweights")],
+        "down": [("EWU", "FALLS"), ("Energy / miners", "usually the cause")],
+        "trade": ("Always check cable first. A FTSE record set on a sinking pound is a "
+                  "currency event, not an equity one."),
+    },
+    "DAX": {
+        "what": "Germany's index — industrials, autos and chemicals; Europe's cyclical core.",
+        "drivers": ("ECB policy, energy costs (the 2022 lesson), China demand for German "
+                    "capital goods and cars, and the euro. It is a total-return index, so "
+                    "it flatters against price-only peers."),
+        "up": [("EWG / VGK", "RISE"), ("Autos (VWAGY, MBG)", "LEAD when China is the driver"),
+               ("EUR/USD", "often RISING if the move is ECB-driven")],
+        "down": [("EWG", "FALLS"), ("Energy prices", "often the cause when gas spikes")],
+        "trade": ("The DAX is the cleanest European read on China industrial demand. If it "
+                  "and the ASX move together, the story is China, not Europe."),
+    },
+    "CAC": {
+        "what": "France's index — luxury, aerospace and energy, so it trades global "
+                "discretionary demand more than the French economy.",
+        "drivers": ("Luxury demand (LVMH, Hermes, Kering are a large share) which means "
+                    "Chinese consumer health, plus ECB policy and the euro."),
+        "up": [("LVMUY / luxury", "RISE — usually a China-consumer read"),
+               ("EWQ", "RISES")],
+        "down": [("Luxury names", "FALL, often on China consumption data")],
+        "trade": ("A CAC move is usually a China-consumer move wearing a European label. "
+                  "Confirm with Hong Kong before treating it as a Europe story."),
+    },
     "Copper": {
         "what": "'Dr Copper' — the growth bellwether, because it goes into everything built.",
         "drivers": ("China construction and grid spend, global manufacturing PMIs, mine "
@@ -25887,23 +26288,84 @@ _ASSET_BRIEF = {
 _MOVE_THRESH = {"Commodity": 2.0, "Americas": 1.0, "Europe": 1.2, "Asia": 1.2}
 
 
+_MOVE_TERMS = {
+    "Gold": ("gold", "bullion"), "Silver": ("silver",),
+    "Oil": ("oil", "crude", "opec", "wti", "brent"), "NatGas": ("natural gas", "lng"),
+    "Copper": ("copper",), "SPX": ("s&p", "stocks", "wall street"),
+    "NDX": ("nasdaq", "tech stocks"), "RUT": ("small cap", "russell"),
+    "DOW": ("dow", "blue chip"),
+    # International — the whole reason this lane looked broken (user 2026-08-12: Nikkei
+    # +2.1% and "No brief for this instrument yet"). A name with no terms returned early,
+    # so the biggest overnight mover was the one guaranteed to get no explanation.
+    "Nikkei": ("nikkei", "japan", "japanese", "yen", "boj", "bank of japan", "tokyo"),
+    "HSI": ("hang seng", "hong kong", "china", "chinese", "beijing"),
+    "Shanghai": ("shanghai", "china", "chinese", "beijing", "pboc"),
+    "Nifty": ("nifty", "india", "indian", "sensex", "rbi", "rupee"),
+    "ASX200": ("asx", "australia", "australian", "rba"),
+    "FTSE": ("ftse", "britain", "british", "uk ", "boe", "bank of england", "london"),
+    "DAX": ("dax", "germany", "german", "ecb", "frankfurt"),
+    "CAC": ("cac", "france", "french", "ecb", "paris"),
+    "TSX": ("canada", "canadian", "toronto", "boc"),
+    "Bovespa": ("brazil", "brazilian", "bovespa", "real"),
+    "USD/JPY": ("yen", "japan", "boj"), "EUR/USD": ("euro", "ecb"),
+    "USD/INR": ("rupee", "india", "rbi"), "DXY": ("dollar", "greenback"),
+    "US 10Y": ("treasury", "yields", "10-year", "bond"),
+}
+
+
+def _move_news_pool(limit=60):
+    """Every headline we have, as (title, url).
+
+    _world_news_block() is the lane this used to read on its own, and it returns an EMPTY
+    list — which is why NO asset ever got a driver headline, gold and oil included, not
+    just the international names. _geo_news() is the lane that actually returns items
+    (themes incl. Japan/yen), so it leads here and the old one is kept as a supplement.
+    """
+    out = []
+    try:
+        for _theme, items in (_geo_news() or {}).items():
+            for it in (items or []):
+                if isinstance(it, (tuple, list)) and it:
+                    out.append((str(it[0]), it[1] if len(it) > 1 else None))
+                elif isinstance(it, dict):
+                    out.append((str(it.get("title") or ""), it.get("url")))
+    except Exception:
+        log.debug("geo news pool failed", exc_info=True)
+    try:
+        for it in (_world_news_block(limit=40) or []):
+            if isinstance(it, dict):
+                out.append((str(it.get("title") or ""), it.get("url")))
+            else:
+                out.append((str(it), None))
+    except Exception:
+        pass
+    # The general market wire, on top of the geopolitical themes: 6 curated themes are
+    # not enough to explain a DAX or a gold move, and this aggregator was itself dead
+    # until today (one non-200 feed made it raise, so it returned nothing to anybody).
+    try:
+        from market_news_enhanced import get_aggregated_news as _agg
+        for a in (_agg(limit=25) or []):
+            if isinstance(a, dict) and a.get("headline"):
+                out.append((str(a["headline"]), a.get("url")))
+    except Exception:
+        log.debug("aggregated news unavailable", exc_info=True)
+    return out[:limit]
+
+
 def _move_driver_news(name, tk_hint=None, limit=2):
     """Headlines that plausibly explain a move. Empty when nothing matches - never guesses."""
-    terms = {"Gold": ("gold", "bullion"), "Silver": ("silver",),
-             "Oil": ("oil", "crude", "opec", "wti"), "NatGas": ("natural gas", "lng"),
-             "Copper": ("copper",), "SPX": ("s&p", "stocks", "wall street"),
-             "NDX": ("nasdaq", "tech stocks"), "RUT": ("small cap", "russell")}.get(name, ())
+    terms = _MOVE_TERMS.get(name, ())
     if not terms:
         return []
     try:
-        items = _world_news_block(limit=40) or []
+        items = _move_news_pool() or []
     except Exception:
         return []
-    out = []
-    for it in items:
-        t = (it.get("title") if isinstance(it, dict) else str(it)) or ""
-        if any(x in t.lower() for x in terms):
-            u = it.get("url") if isinstance(it, dict) else None
+    out, seen = [], set()
+    for t, u in items:
+        tl = (t or "").lower()
+        if any(x in tl for x in terms) and tl[:60] not in seen:
+            seen.add(tl[:60])
             out.append((t[:110], u))
         if len(out) >= limit:
             break
@@ -27166,6 +27628,23 @@ def wrap_narrative(F, html=True):
                       f"{_wrap_fmt_t(shape['t_peak'])}, then slid to {shape['trough']:,.0f} by {_wrap_fmt_t(shape['t_trough'])} "
                       f"({shape['dd_pct']:+.1f}%). It now trades at {shape['cur']:,.0f}."))
 
+    # The same session facts as a GRID (user: "i asked to tabulate as much as you can").
+    # The prose above stays — it explains; the table lets the numbers be compared without
+    # re-reading a sentence to find them. Prose is the story, the table is the record.
+    if lead:
+        _sess = [("Prev close", f"{lead['prev']:,.0f}")] if lead.get("prev") else []
+        if shape:
+            _sess += [("Open", f"{(shape['open'] / lead['prev'] - 1) * 100:+.2f}%"),
+                      ("Peak", f"{shape['peak']:,.0f}"),
+                      ("Trough", f"{shape['trough']:,.0f}"),
+                      ("Now", f"{shape['cur']:,.0f}"),
+                      ("Peak→trough", f"{shape['dd_pct']:+.2f}%")]
+        _sess += [("Day", f"{lead['pct']:+.2f}%"), ("Points", f"{lead['pts']:+,.0f}")]
+        if lead.get("dollars"):
+            _sess.append(("Value", _wrap_money(abs(lead["dollars"]))))
+        L.append("\n" + _pipe_table(("Metric", "Value"), _sess, right_cols={1},
+                                    title=f"📊 {str(lead['name'])[:14]} — SESSION"))
+
     # FOMC-today flag (user 2026-07-28: "where is today Fed meeting info, why that
     # missing" -- _FOMC_DATES already has the real schedule, the wrap just never checked
     # it against today's date). Mechanical facts only (announcement/press-conference
@@ -27238,6 +27717,14 @@ def wrap_narrative(F, html=True):
             else:
                 parts.append(f"{c['name']} {c['pct']:+.1f}%")
         L.append(_sec("🌐", "CROSS-ASSET", "Contagion check — " + "; ".join(parts) + "."))
+        # …and the same check as a grid, so the assets can be scanned side by side rather
+        # than parsed out of a semicolon list.
+        _xr = [("🟢" if c["pct"] > 0 else "🔴" if c["pct"] < 0 else "🟡",
+                str(c["name"])[:9],
+                (f"{c['last']:.2f}%" if c["kind"] == "rates" else f"{c['last']:,.2f}"),
+                f"{c['pct']:+.2f}%") for c in F["cross"]]
+        L.append("\n" + _pipe_table(("ST", "Asset", "Last", "Day%"), _xr,
+                                    right_cols={2, 3}, title="🌐 CROSS-ASSET"))
 
     lev_lines = []
     _lev_tbl = ""
@@ -31322,7 +31809,22 @@ async def earnings_alert(ctx: ContextTypes.DEFAULT_TYPE):
                 f"{r['surprise']*100:+.0f}", f"{r['days_since']}") for r in pe[:10]]
         parts.append("<b>📊 POST-EARNINGS DRIFT</b>\n" +
                      _pipe_table(("ST", "Tkr", "Surp%", "Days"), _pd, right_cols={2, 3},
-                                 legend="🟢 beat→long · 🔴 miss→short · Days=since report"))
+                                 legend=(
+                     "<b>Surp%</b> = how far actual EPS came in above (+) or below (-) the "
+                     "analyst estimate · <b>Days</b> = trading days since it reported · "
+                     "🟢 beat · 🔴 miss\n"
+                     "The idea (post-earnings drift): a surprise tends to keep pushing the "
+                     "stock the SAME way for a few weeks, because the market re-rates slowly. "
+                     "That is the oldest documented anomaly in equities — but it is a "
+                     "tendency, not a rule.\n"
+                     "Read Surp% with care: it is a PERCENTAGE OF A SOMETIMES-TINY ESTIMATE. "
+                     "+1302% usually means a 1c estimate against a 14c actual, not a "
+                     "blockbuster — the cash amount can be trivial, so check the actual "
+                     "numbers before trading it.\n"
+                     "And measured on our own history: 46% of stocks that BEAT still fell the "
+                     "next day. Misses got punished about four times harder than beats got "
+                     "rewarded (-4.2% vs +1.2%), so the asymmetry is on the downside — a beat "
+                     "is not a green light.")))
     if not parts:
         return
     msg = hdr("📅 EARNINGS RADAR") + "\n" + "\n\n".join(parts)
@@ -32398,6 +32900,131 @@ async def intraday_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
         log.warning(f"intraday lane spawn failed: {e}")
 
 
+def _script_running(script_name, require_arg=None):
+    """Is a PYTHON process actually running `script_name`?
+
+    Deliberately strict. The first version asked whether any process's command line CONTAINED
+    the filename, which matched a shell that merely mentioned it -- a py_compile command in an
+    admin console was enough to convince the bot the watchdog was already up, so it never
+    spawned one (caught 2026-08-08). A stray grep must never suppress a supervisor.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return False
+    for p in psutil.process_iter(["name", "cmdline"]):
+        try:
+            if not (p.info["name"] or "").lower().startswith("python"):
+                continue
+            argv = p.info["cmdline"] or []
+            if not any(os.path.basename(a) == script_name for a in argv):
+                continue
+            if require_arg and require_arg not in argv:
+                continue
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _spawn_watchdog():
+    """Start bot_watchdog.py --loop DETACHED, so it survives this process dying.
+
+    Replaces the TelegramBotWatchdog scheduled task, which cannot be recreated: on this
+    machine Register-ScheduledTask returns Access denied even for a task the user authored,
+    and even in a user subfolder (verified 2026-08-08). DETACHED_PROCESS is the whole point --
+    a normal child would die with the bot and could not restart it.
+
+    The watchdog dedupes itself, so calling this on every start is safe.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(here, "bot_watchdog.py")
+    if not os.path.exists(script):
+        return
+    if _script_running("bot_watchdog.py", require_arg="--loop"):
+        return                                   # already supervising
+    try:
+        subprocess.Popen(
+            [sys.executable, script, "--loop"], cwd=here,
+            creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                           | getattr(subprocess, "DETACHED_PROCESS", 0)),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL)
+        log.info("watchdog loop spawned (detached) - covers this bot dying")
+    except Exception as e:
+        log.warning(f"watchdog spawn failed: {e}")
+
+
+_LAST_EOD_SPAWN = 0.0
+
+
+def _eod_captured(day):
+    """True if the OpenBB capture already landed for `day`. Same test run_all_offhours uses
+    for its own fallback decision (bb_capture_ok, >=300 distinct tickers) — deliberately the
+    SAME bar, so the bot and the EOD chain can never disagree about whether a day is done."""
+    try:
+        conn = get_conn()
+        try:
+            n = conn.execute("SELECT COUNT(DISTINCT ticker) FROM options_openbb "
+                             "WHERE trade_date=?", (day.strftime("%Y-%m-%d"),)).fetchone()[0]
+        finally:
+            conn.close()
+        return n >= 300
+    except Exception:
+        return False        # unknown -> let the chain run and decide for itself
+
+
+async def eod_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
+    """15-min job: make the EOD download independent of Windows Task Scheduler.
+
+    WHY THIS EXISTS (2026-08-08). The EOD chain was launched solely by the scheduled task
+    NYSE_OffHours_Chain, which is a single point of failure that has now failed twice: it was
+    silently disabled, and its ACL is damaged so even its own author cannot re-enable it
+    without elevation. The bot is already an always-on user process that supervises the
+    intraday lane, so it can cover the EOD lane the same way and the download stops depending
+    on a task nobody can fix from here.
+
+    This does NOT replace the scheduled task — it backstops it. Ordering is deliberate:
+
+      * fires at 17:30 ET, AFTER the task's own 17:00 slot, so a working task always wins
+      * skips entirely when options_openbb already holds >=300 tickers for the target day,
+        which is exactly what a successful task run leaves behind
+      * skips when a run_all_offhours.py process is already alive
+
+    Any one of those three is enough to prevent a double run; all three have to miss before
+    this spawns anything.
+    """
+    global _LAST_EOD_SPAWN
+    now_et = _et_now()
+    if now_et.weekday() >= 5:
+        return
+    hm = now_et.hour * 60 + now_et.minute
+    if not (17 * 60 + 30 <= hm <= 23 * 60):
+        return
+    if _eod_captured(now_et.date()):
+        return                                   # the task did its job, or an earlier spawn did
+    if time.time() - _LAST_EOD_SPAWN < 3 * 3600:
+        return                                   # a chain run takes a long while; do not stack
+    if _script_running("run_all_offhours.py"):
+        return                                   # already running (task-launched or ours)
+    here = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(here, "run_all_offhours.py")
+    if not os.path.exists(script):
+        return
+    try:
+        logs = os.path.join(here, "logs")
+        os.makedirs(logs, exist_ok=True)
+        out = open(os.path.join(logs, "eod_lane.log"), "a")
+        subprocess.Popen([sys.executable, script], cwd=here,
+                         stdout=out, stderr=subprocess.STDOUT,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        _LAST_EOD_SPAWN = time.time()
+        log.warning("EOD capture missing for %s - spawned run_all_offhours.py "
+                    "(scheduled task did not deliver)", now_et.date())
+    except Exception as e:
+        log.warning(f"EOD lane spawn failed: {e}")
+
+
 async def heat_streamer_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """15-min job: push heat/fade STATE CHANGES only (one alert per ticker|state per
     day via alert_dedup). Market-hours gated; silently no-ops if the lane is off."""
@@ -32664,31 +33291,67 @@ _STATUS_SECTIONS_ORDER = [
 _LAST_STATUS_EDIT = 0.0
 
 
-async def _status_push(ctx, section_key, body_html, cap=1400):
+_STATUS_LIMIT = 4000        # Telegram hard limit is 4096; leave room for the header + tags
+
+
+def _status_fit(live, limit=_STATUS_LIMIT):
+    """Fit [[key, title, body], ...] into one Telegram message, trimming only what must be.
+
+    Short sections keep every character and hand their unused allowance to the long ones,
+    so a 300-char intraday note is not charged the same budget as a 1.9k positions card.
+    Only a section that is still over its share after redistribution gets cut, and it is cut
+    with _tg_cut so HTML entities stay closed.
+    """
+    overhead = 60 + sum(len(t) + 46 for _k, t, _b in live)   # header + blockquote wrappers
+    budget = max(limit - overhead, 400)
+    if sum(len(b) for _k, _t, b in live) <= budget:
+        return live
+    share, out, n = budget // max(len(live), 1), [], len(live)
+    spare = sum(share - len(b) for _k, _t, b in live if len(b) < share)
+    over = [i for i, (_k, _t, b) in enumerate(live) if len(b) > share] or [0]
+    bonus = spare // len(over)
+    for i, (k, t, b) in enumerate(live):
+        allow = share + (bonus if i in over else 0)
+        out.append([k, t, _tg_cut(b, allow) if len(b) > allow else b])
+    return out
+
+
+async def _status_push(ctx, section_key, body_html, cap=None):
     """Update one section of the consolidated status message and push the combined
     result (new message on a new trading day, else an in-place edit of the same one).
 
     Sections persist in app_settings; only sections stamped with TODAY's date are
     included in the rebuild, so yesterday's content naturally drops off at the first
     call of a new day rather than needing an explicit reset.
+
+    Sections are stored WHOLE and trimmed only if the assembled message would exceed
+    Telegram's limit (user 2026-08-10: "why are messages truncated, fix all of them").
+    The old fixed `cap=1400` per section cut 33% off the positions card on every single
+    tick -- the NEWS block never survived -- while the finished message came to roughly
+    3.4k of the 4096 allowed, so a third of the content was being thrown away to respect
+    a budget that was never actually tight. `cap` is honoured if a caller passes one,
+    but nothing sets it now.
     """
     global _LAST_STATUS_EDIT
     _, chat_id = load_creds()
     conn = get_conn()
     try:
         today = _et_now().date().isoformat()
-        body_html = _tg_cut(body_html, cap) if len(body_html) > cap else body_html
+        if cap and len(body_html) > cap:
+            body_html = _tg_cut(body_html, cap)
         _set_app_setting(conn, f"status_sec_{section_key}", body_html)
         _set_app_setting(conn, f"status_sec_{section_key}_date", today)
 
-        blocks = []
+        live = []
         for key, title in _STATUS_SECTIONS_ORDER:
             sec = _app_setting(conn, f"status_sec_{key}")
             sec_date = _app_setting(conn, f"status_sec_{key}_date")
             if sec and sec_date == today:
-                blocks.append(f"<blockquote expandable><b>{title}</b>\n{sec}</blockquote>")
-        if not blocks:
+                live.append([key, title, sec])
+        if not live:
             return
+        blocks = [f"<blockquote expandable><b>{t}</b>\n{sec}</blockquote>"
+                  for _k, t, sec in _status_fit(live)]
 
         now_et = _et_now().replace(tzinfo=None)
         combined = _tg_balance(hdr(f"📟 STATUS · {now_et.strftime('%H:%M ET')}")
@@ -33352,19 +34015,46 @@ def _riskoff_scan(conn):
 
     # ── TURBULENCE gauge (the one that actually backtests: index put-flow → move
     # SIZE; QQQ t+5 Spearman +0.37, p<0.001). Predicts a big move, NOT its sign. ──
+    # RECALIBRATED 2026-08-08 after the user said the alert gave them no confidence. They
+    # were right, and measuring it showed why: the old rule was `fires >= 5`, which fired on
+    # 89% OF ALL DAYS (134 of 151). A warning that is on nearly every day carries no
+    # information, and the forward week after it was indistinguishable from any other week
+    # (SPY median |5d| 1.18% vs 1.18% baseline, p=0.243).
+    #
+    # Two things came out of the re-test:
+    #   1. The threshold has to be a PERCENTILE of the signal's own history, not an absolute
+    #      count -- the same mistake as reading a dealer's raw net instead of its percentile.
+    #   2. The effect is QQQ-SPECIFIC. Measured over 151 days, put-flow vs |forward move|:
+    #         QQQ  3d +0.213 (p=0.008) | 5d +0.315 (p=0.00008) | 10d +0.240 (p=0.004)
+    #         SPY  5d +0.112 (p=0.17)  | IWM 5d -0.096 (p=0.24)  -- nothing
+    #      Three adjacent horizons on QQQ all positive, and only on SIZE: signed direction is
+    #      ~0 everywhere (5d rho +0.015, p=0.85). So it predicts MAGNITUDE, never side.
+    #
+    # Thresholds are the 60th/80th percentile of fire count over that sample. Recalibrate if
+    # the universe or the UOA rule changes -- tools/ scripts in the 2026-08-08 session.
+    _TURB_P80, _TURB_P60 = 17, 13
     fires = raw["putfires"]
     turb_score = min(100.0, fires * 15.0)
-    if fires >= 5:
+    if fires >= _TURB_P80:
         turb_lvl, turb_emoji = "HIGH", "🔴"
-        turb_txt = ("A big move is brewing (next ~1 week) — heavy index put-flow. "
-                    "Trade smaller, widen stops, don't assume calm. Options: long premium favored.")
-    elif fires >= 2:
+        turb_txt = ("Index put-flow is in the TOP 20% of its own history.\n"
+                    "<b>What followed, measured on 151 days:</b> a &gt;2% Nasdaq week came "
+                    "<b>62%</b> of the time, vs <b>38%</b> after a normal day. Median move "
+                    "2.26% vs 1.55% (p=0.012).\n"
+                    "<b>Direction: 53% up — a coin flip.</b> This calls SIZE, not side.\n"
+                    "<b>Do:</b> favour long premium, widen stops, cut size on short-vol. "
+                    "Do NOT pick a direction off this.")
+    elif fires >= _TURB_P60:
         turb_lvl, turb_emoji = "ELEVATED", "🟡"
-        turb_txt = ("Above-normal chance of a big move soon — some index put-flow. "
-                    "Keep size sensible and stops a touch wider.")
+        turb_txt = ("Index put-flow in the 60-80th percentile of its history.\n"
+                    "<b>What followed (n=38):</b> a &gt;2% Nasdaq week 61% of the time vs 38% "
+                    "normally — close to the HIGH band.\n"
+                    "<b>Do:</b> keep size sensible, stops a touch wider.")
     else:
         turb_lvl, turb_emoji = "NORMAL", "🟢"
-        turb_txt = "No unusual index put-flow — expect a routine range."
+        turb_txt = ("Index put-flow in the bottom 60% of its history.\n"
+                    "<b>What followed (n=81):</b> a &gt;2% Nasdaq week only 38% of the time, "
+                    "median 1.55%. The quietest of the three states — but 38% is not zero.")
 
     # ── DIRECTION lean (soft, low confidence: dealer gamma + breadth; correctly
     # signed but NOT statistically significant in ~6mo history — a hint, not a trigger). ──
@@ -33383,16 +34073,21 @@ def _riskoff_scan(conn):
         dir_txt = "No directional edge — coin-flip either way. Let price pick the side."
 
     # headline/action driven by TURBULENCE (proven) first, direction second
+    # Bottom line now leads with the BASE RATE rather than an adjective. "Expect a large move"
+    # told the user nothing they could size a trade against; "62% vs 38%" does.
     if turb_lvl == "HIGH":
         remoji, headline = turb_emoji, "Big move brewing"
-        action = (f"Expect a large move within a week — size down and widen stops. "
-                  f"Direction lean: {dir_lean} (low confidence), so don't bet the house on one side.")
+        action = (f"<b>62% odds of a &gt;2% Nasdaq week</b> (normal: 38%), measured on 151 days. "
+                  f"Size down, widen stops, prefer long premium over short. "
+                  f"Direction {dir_lean} — historically 53% up after this reading, i.e. no side.")
     elif turb_lvl == "ELEVATED":
         remoji, headline = turb_emoji, "Stay nimble"
-        action = (f"Above-normal move risk — keep size sensible. Direction lean: {dir_lean} (low confidence).")
+        action = (f"<b>61% odds of a &gt;2% Nasdaq week</b> (normal: 38%). Keep size sensible. "
+                  f"Direction {dir_lean} — no measured edge either way.")
     else:
         remoji, headline = dir_emoji if dir_lean != "NEUTRAL" else "🟢", "Routine conditions"
-        action = (f"Calm tape expected. Direction lean: {dir_lean} (low confidence) — normal sizing.")
+        action = (f"<b>38% odds of a &gt;2% Nasdaq week</b> — the calm band, though still not zero. "
+                  f"Normal sizing. Direction {dir_lean}.")
 
     if turb_lvl == "HIGH":     # self-score the turbulence call vs SPY forward |move|
         _persist_scanner_fires(conn, "riskoff", [("SPY", "BEAR" if dir_lean == "DOWN" else "BULL",
@@ -33728,7 +34423,7 @@ def _plan_legs_for(conn, tk):
     R = 0.045
     try:
         tr = pd.read_sql("SELECT ticker,option_type,strike,quantity,expiry,entry_price,entry_iv "
-                         "FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND UPPER(ticker)=?", conn, params=(tk.upper(),))
+                         "FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND ticker=?", conn, params=(tk.upper(),))
     except Exception:
         return [], None, None, None
     if tr is None or tr.empty:
@@ -34082,6 +34777,85 @@ _EVENT_TRACK = {
     "usd_up":         ("UUP", "LONG"),
 }
 
+_NSE_SYMS = None      # NSE symbol set, read once from India_data.db
+_SYM_ALIAS = {}       # bare symbol -> Yahoo symbol (or None when there is no alias)
+
+
+def _yf_alias(tk):
+    """Bare symbol that nothing quotes in the US -> its foreign Yahoo symbol.
+
+    User 2026-08-10: MOTHERSON was added from the NSE without the `.NS` suffix, so every
+    price lane came back empty and the grid fell back to the ENTRY price — a position that
+    looked flat forever. Yahoo needs MOTHERSON.NS.
+
+    Only reached AFTER the US lanes have all failed, so a US ticker never pays for this. The
+    NSE check is a local set lookup against India_data.db, not a network call, which is what
+    makes it safe to try: a symbol that collides with a US ticker (BSE, TITAN) already got a
+    US quote and never arrives here. The answer is cached in `ticker_country`, and resolving
+    one also fixes its flag — an NSE-quoted symbol is Indian by definition."""
+    global _NSE_SYMS, _SYM_ALIAS, _FLAG_DB
+    tk = str(tk or "").upper().strip()
+    if not tk or "." in tk:
+        return None
+    if tk in _SYM_ALIAS:
+        return _SYM_ALIAS[tk]
+    # A symbol that DOES quote in the US has no alias, full stop. Without this guard the
+    # function was callable from anywhere and got INFY wrong: Infosys lists on the NSE too,
+    # so INFY resolved to INFY.NS and its currency came back INR — but the ADR the user
+    # would hold trades in New York, in dollars. (_spot_price is 60s-cached, so the extra
+    # call is free on the path that already looked the price up.)
+    try:
+        if _spot_price(tk) > 0:
+            _SYM_ALIAS[tk] = None
+            return None
+    except Exception:
+        pass
+    alias = None
+    try:
+        conn = get_conn()
+        _flag_setup(conn)
+        cols = [d[1] for d in conn.execute("PRAGMA table_info(ticker_country)")]
+        if "yahoo" not in cols:
+            conn.execute("ALTER TABLE ticker_country ADD COLUMN yahoo TEXT")
+            conn.commit()
+        row = conn.execute("SELECT yahoo FROM ticker_country WHERE ticker=?", (tk,)).fetchone()
+        if row and row[0]:
+            _SYM_ALIAS[tk] = row[0]
+            conn.close()
+            return row[0]
+        if _NSE_SYMS is None:
+            try:
+                ic = _india_conn()
+                _NSE_SYMS = {r[0].upper() for r in
+                             ic.execute("SELECT DISTINCT symbol FROM india_daily")}
+                ic.close()
+            except Exception:
+                _NSE_SYMS = set()
+        if tk in _NSE_SYMS:
+            cand = f"{tk}.NS"
+            px = 0.0
+            try:
+                px = _spot_price(cand)
+                if not px:
+                    h = yf.Ticker(cand).history(period="5d")
+                    px = float(h["Close"].iloc[-1]) if h is not None and len(h) else 0.0
+            except Exception:
+                px = 0.0
+            if px and px > 0:
+                alias = cand
+                conn.execute(
+                    "INSERT OR REPLACE INTO ticker_country (ticker, flag, country, resolved, "
+                    "yahoo) VALUES (?,?,?,?,?)",
+                    (tk, "🇮🇳", "India", datetime.now().strftime("%Y-%m-%d"), cand))
+                conn.commit()
+                _FLAG_DB = None          # so the flag picks up 🇮🇳 on the next read
+        conn.close()
+    except Exception:
+        log.debug("alias resolve failed for %s", tk, exc_info=True)
+    _SYM_ALIAS[tk] = alias
+    return alias
+
+
 def _last_price(ticker):
     """Live-first (shares _spot_price 60s cache); history/stooq fallback."""
     px = _spot_price(ticker)
@@ -34093,7 +34867,22 @@ def _last_price(ticker):
             return float(h["Close"].iloc[-1])
     except Exception:
         pass
-    return _stooq_price(ticker)
+    px = _stooq_price(ticker)
+    if px and px > 0:
+        return px
+    # Nothing quotes it in the US — it may be a bare foreign symbol (see _yf_alias).
+    alt = _yf_alias(ticker)
+    if alt:
+        px = _spot_price(alt)
+        if px > 0:
+            return px
+        try:
+            h = yf.Ticker(alt).history(period="5d")
+            if len(h) >= 1 and float(h["Close"].iloc[-1]) > 0:
+                return float(h["Close"].iloc[-1])
+        except Exception:
+            pass
+    return 0.0
 
 def _fetch_macro_headlines(limit=40):
     """Pull recent macro headlines from Yahoo RSS (no API key). Returns list of
@@ -34393,6 +35182,161 @@ def _wl_range_bar(lo, hi, val, width=10):
     return "".join("●" if i == idx else "─" for i in range(width))
 
 
+# ── Country flag per holding (ID 201, user 2026-08-10) ──────────────────────────────
+# "for each country position, add a flag to differentiate which stock is that."
+#
+# Resolution is deliberately OFFLINE. A yfinance .info lookup costs 1-2s per name, so a
+# 20-holding book would blow Telegram's timeout on the FIRST render of every table that
+# carries a flag. Order, cheapest first:
+#   1. Yahoo exchange suffix (RELIANCE.NS) — unambiguous, needs no data at all
+#   2. _CROSS_MARKET — the country map already curated for /world. Its `adr` lists, country
+#      `etf`, `lev` ETF and `internet` proxy. ETFs are flagged by EXPOSURE (INDA -> India),
+#      which is what "which stock is that" means. The `bridge` lists are US names by
+#      design (SOXX, NVDA) and are deliberately NOT used.
+#   3. _FLAG_EXTRA — foreign operators listed in the US that _CROSS_MARKET doesn't carry.
+#   4. `ticker_country` cache — resolved once, offline, by tools/seed_ticker_country.py,
+#      and the place to correct anything below by hand.
+#   5. default 🇺🇸 — this is a US options book, so unknown-but-quoted means US-listed.
+#
+# NSE membership is NOT used as a lane on purpose: NSE symbols collide with real US
+# tickers (BSE, TITAN, MMTC), so it would put 🇮🇳 on US holdings. A suffix-less symbol
+# stays 🇺🇸 — and an Indian holding needs the .NS suffix anyway to get a Yahoo quote.
+_SUFFIX_FLAG = {
+    "NS": "🇮🇳", "BO": "🇮🇳", "L": "🇬🇧", "T": "🇯🇵", "HK": "🇭🇰", "SS": "🇨🇳", "SZ": "🇨🇳",
+    "KS": "🇰🇷", "KQ": "🇰🇷", "TW": "🇹🇼", "TWO": "🇹🇼", "AX": "🇦🇺", "NZ": "🇳🇿", "SI": "🇸🇬",
+    "KL": "🇲🇾", "BK": "🇹🇭", "JK": "🇮🇩", "TO": "🇨🇦", "V": "🇨🇦", "SA": "🇧🇷", "MX": "🇲🇽",
+    "BA": "🇦🇷", "SN": "🇨🇱", "DE": "🇩🇪", "F": "🇩🇪", "PA": "🇫🇷", "AS": "🇳🇱", "BR": "🇧🇪",
+    "MI": "🇮🇹", "MC": "🇪🇸", "LS": "🇵🇹", "SW": "🇨🇭", "VX": "🇨🇭", "VI": "🇦🇹", "ST": "🇸🇪",
+    "OL": "🇳🇴", "CO": "🇩🇰", "HE": "🇫🇮", "IC": "🇮🇸", "IR": "🇮🇪", "WA": "🇵🇱", "AT": "🇬🇷",
+    "IS": "🇹🇷", "TA": "🇮🇱", "JO": "🇿🇦", "SR": "🇸🇦", "CA": "🇪🇬",
+}
+# Only names whose BUSINESS is foreign. Irish/Bermuda tax domiciles (MDT, ACN, ETN) are
+# left 🇺🇸 on purpose — flagging them by paperwork would mislead, not clarify.
+_FLAG_EXTRA = {
+    "🇨🇳": ["TCOM", "BEKE", "TME", "ZTO", "YUMC", "BILI", "XPEV", "VIPS", "IQ", "FUTU",
+            "TAL", "EDU", "LU", "ZK", "NTES", "MNSO"],
+    "🇮🇳": ["MMYT", "SIFY", "AZRE", "YTRA", "WNS"],
+    "🇬🇧": ["RELX", "NGG", "DEO", "LYG", "IHG", "PSO"],
+    "🇩🇰": ["NVO"], "🇸🇪": ["ERIC", "SPOT"], "🇫🇮": ["NOK"], "🇸🇬": ["SE", "GRAB"],
+    "🇦🇷": ["MELI", "YPF", "GGAL", "BMA"], "🇰🇿": ["KSPI"], "🇧🇪": ["BUD"],
+    "🇲🇽": ["FMX", "KOF", "ASR"], "🇿🇦": ["SBSW", "GFI", "HMY"], "🇨🇱": ["SQM", "BCH"],
+    "🇮🇱": ["TEVA", "CHKP", "NICE", "WIX", "MNDY", "CYBR", "GLBE", "CAMT"],
+    "🇨🇦": ["SHOP", "ENB", "CNQ", "RY", "TD", "BMO", "BNS", "CP", "CNI", "SU", "TRI", "WCN"],
+    "🇧🇷": ["ERJ", "ABEV", "GGB", "SBS", "STNE", "PAGS"],
+    "🇬🇷": ["GLNG", "TEN", "DAC", "STNG"],
+}
+# For tools/seed_ticker_country.py: yfinance .info["country"] -> flag.
+_COUNTRY_NAME_FLAG = {
+    "United States": "🇺🇸", "India": "🇮🇳", "China": "🇨🇳", "Hong Kong": "🇭🇰",
+    "Japan": "🇯🇵", "South Korea": "🇰🇷", "Taiwan": "🇹🇼", "Singapore": "🇸🇬",
+    "United Kingdom": "🇬🇧", "Germany": "🇩🇪", "France": "🇫🇷", "Netherlands": "🇳🇱",
+    "Switzerland": "🇨🇭", "Spain": "🇪🇸", "Italy": "🇮🇹", "Sweden": "🇸🇪",
+    "Denmark": "🇩🇰", "Norway": "🇳🇴", "Finland": "🇫🇮", "Ireland": "🇮🇪",
+    "Belgium": "🇧🇪", "Austria": "🇦🇹", "Portugal": "🇵🇹", "Poland": "🇵🇱",
+    "Greece": "🇬🇷", "Turkey": "🇹🇷", "Israel": "🇮🇱", "Canada": "🇨🇦",
+    "Brazil": "🇧🇷", "Mexico": "🇲🇽", "Argentina": "🇦🇷", "Chile": "🇨🇱",
+    "Australia": "🇦🇺", "New Zealand": "🇳🇿", "South Africa": "🇿🇦",
+    "Kazakhstan": "🇰🇿", "Indonesia": "🇮🇩", "Thailand": "🇹🇭", "Malaysia": "🇲🇾",
+    "Saudi Arabia": "🇸🇦", "United Arab Emirates": "🇦🇪", "Egypt": "🇪🇬",
+    "Luxembourg": "🇱🇺", "Bermuda": "🇧🇲", "Cayman Islands": "🇨🇳",
+}
+_FLAG_STATIC = None      # built once from _CROSS_MARKET + _FLAG_EXTRA
+_FLAG_DB     = None      # ticker_country cache, read once per process
+
+
+def _flag_setup(conn):
+    conn.execute("CREATE TABLE IF NOT EXISTS ticker_country ("
+                 "ticker TEXT PRIMARY KEY, flag TEXT, country TEXT, resolved TEXT)")
+    conn.commit()
+
+
+def _ticker_flag(tk, conn=None):
+    """Country flag for one symbol. Never touches the network — see the note above."""
+    global _FLAG_STATIC, _FLAG_DB
+    tk = str(tk or "").upper().strip()
+    if not tk:
+        return "🇺🇸"
+    if _FLAG_STATIC is None:
+        m = {}
+        for _name, _d in _CROSS_MARKET.items():
+            _fl = str(_name).split()[0]
+            for _t in list(_d.get("adr") or []) + [_d.get("etf"), _d.get("internet")]:
+                if _t:
+                    m.setdefault(str(_t).upper(), _fl)
+            if _d.get("lev"):
+                m.setdefault(str(_d["lev"][0]).upper(), _fl)
+        for _fl, _ts in _FLAG_EXTRA.items():
+            for _t in _ts:
+                m[str(_t).upper()] = _fl        # curated list wins over the ETF map
+        _FLAG_STATIC = m
+    if "." in tk:
+        suf = tk.rsplit(".", 1)[-1]
+        if suf in _SUFFIX_FLAG:
+            return _SUFFIX_FLAG[suf]
+    if tk in _FLAG_STATIC:
+        return _FLAG_STATIC[tk]
+    if _FLAG_DB is None:
+        _FLAG_DB = {}
+        try:
+            _c = conn or get_conn()
+            _flag_setup(_c)
+            _FLAG_DB = {str(a).upper(): b for a, b in
+                        _c.execute("SELECT ticker, flag FROM ticker_country").fetchall() if b}
+            if conn is None:
+                _c.close()
+        except Exception:
+            log.debug("ticker_country cache unavailable", exc_info=True)
+    return _FLAG_DB.get(tk) or "🇺🇸"
+
+
+# Currency follows the LISTING, not the flag: an ADR like INFY is Indian but trades in USD.
+# Only a symbol carrying a foreign exchange suffix is quoted in a foreign currency.
+_CCY_BY_SUFFIX = {
+    "NS": ("INR", "₹"), "BO": ("INR", "₹"), "L": ("GBp", "p"), "T": ("JPY", "¥"),
+    "HK": ("HKD", "HK$"), "SS": ("CNY", "¥"), "SZ": ("CNY", "¥"), "KS": ("KRW", "₩"),
+    "KQ": ("KRW", "₩"), "TW": ("TWD", "NT$"), "TWO": ("TWD", "NT$"), "AX": ("AUD", "A$"),
+    "NZ": ("NZD", "NZ$"), "SI": ("SGD", "S$"), "TO": ("CAD", "C$"), "V": ("CAD", "C$"),
+    "SA": ("BRL", "R$"), "MX": ("MXN", "MX$"), "DE": ("EUR", "€"), "F": ("EUR", "€"),
+    "PA": ("EUR", "€"), "AS": ("EUR", "€"), "BR": ("EUR", "€"), "MI": ("EUR", "€"),
+    "MC": ("EUR", "€"), "LS": ("EUR", "€"), "VI": ("EUR", "€"), "IR": ("EUR", "€"),
+    "HE": ("EUR", "€"), "SW": ("CHF", "CHF"), "VX": ("CHF", "CHF"), "ST": ("SEK", "kr"),
+    "OL": ("NOK", "kr"), "CO": ("DKK", "kr"), "TA": ("ILS", "₪"), "JO": ("ZAR", "R"),
+    "KL": ("MYR", "RM"), "BK": ("THB", "฿"), "JK": ("IDR", "Rp"), "WA": ("PLN", "zł"),
+}
+
+
+def _ccy_of(tk):
+    """(code, symbol) the symbol is QUOTED in. Returns USD for anything US-listed.
+
+    Needed the moment a non-US listing enters the book (user 2026-08-10 added MOTHERSON on
+    the NSE): its price and P&L are in rupees, and stamping a $ on them — or adding them to
+    a dollar total — states something false. There is no FX conversion anywhere in this
+    project, so the honest presentation is per-currency, never a blended number."""
+    tk = str(tk or "").upper()
+    if "." in tk:
+        return _CCY_BY_SUFFIX.get(tk.rsplit(".", 1)[-1], ("USD", "$"))
+    alias = _yf_alias(tk)          # bare NSE symbols resolve to .NS -> INR
+    if alias and "." in alias:
+        return _CCY_BY_SUFFIX.get(alias.rsplit(".", 1)[-1], ("USD", "$"))
+    return ("USD", "$")
+
+
+def _flag_tk(tk, conn=None):
+    """`🇮🇳RELIANCE.NS` — flag glued to the symbol so tables gain one column, not two."""
+    return f"{_ticker_flag(tk, conn)}{tk}"
+
+
+def _flag_legend(tickers, conn=None):
+    """Legend line naming the countries actually present, so the flags are self-explaining
+    without spending a table column on them."""
+    seen = []
+    for t in tickers:
+        f = _ticker_flag(t, conn)
+        if f not in seen:
+            seen.append(f)
+    return " ".join(seen) if len(seen) > 1 else ""
+
+
 def _wl_one_row(tk, r, conn):
     """Row tuple + detail line for one watchlist ticker. Split out of _fmt_watchlist so
     it can be called per asset-class group (user 2026-07-23: Stock/ETF/Bond/Commodity
@@ -34400,7 +35344,7 @@ def _wl_one_row(tk, r, conn):
     try:
         h = _daily_history(tk, years=1, conn=conn)
         if h is None or len(h) < 2:
-            return ("⚪", tk, "—", "—", "—"), None
+            return ("⚪", _flag_tk(tk, conn), "—", "—", "—"), None
         spot = float(h.iloc[-1]); prev = float(h.iloc[-2])
         chg = (spot - prev) / prev * 100 if prev else 0.0
         target = r.get("target_price")
@@ -34416,7 +35360,7 @@ def _wl_one_row(tk, r, conn):
             except Exception:
                 pass
         em = "🟢" if chg > 0 else ("🔴" if chg < 0 else "⚪")
-        row = (em, tk, f"${spot:,.2f}", f"{chg:+.1f}%", dist)
+        row = (em, _flag_tk(tk, conn), f"${spot:,.2f}", f"{chg:+.1f}%", dist)
         earn, _ = _next_events_wl(tk)
         si = _si_read(_si_fetch(tk)) or {}
         si_txt = f" · SI {si['pct_float']:.1f}%" if si.get("pct_float") else ""
@@ -34570,8 +35514,12 @@ def _fmt_paper(conn):
                 "<code>/paper add GOOGL 375P 2026-08-21 -1 @4.35</code>\n"
                 "<code>/paper add GOOG stock 100 @167</code>\n"
                 "<i>Same grammar as /add — see /add for the full one-liner spec.</i>")
-    rows, details = [], []
+    # rows is keyed by CURRENCY: one table per currency, because a rupee row and a dollar row
+    # in one grid under one TOTAL claim a common unit that does not exist (user 2026-08-10).
+    rows, details = {}, []
     tot_pnl = 0.0
+    _by_ccy = {}          # per-currency P&L — never blended, there is no FX rate here
+    _cost_by = {}         # capital deployed per currency, for a real blended TOTAL %
 
     def _earn_txt(tk):
         try:
@@ -34597,12 +35545,17 @@ def _fmt_paper(conn):
         except Exception:
             mark = entry
         pnl = (mark - entry) * qty
-        tot_pnl += pnl
+        _cc, _cs = _ccy_of(tk)
+        _by_ccy[_cs] = _by_ccy.get(_cs, 0.0) + pnl
+        if _cc == "USD":
+            tot_pnl += pnl
         pnl_pct = pnl / (abs(entry * qty) or 1.0) * 100
         em = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
         lots_txt = f" ({len(grp)} lots)" if len(grp) > 1 else ""
-        leg = f"{tk} {qty:+g}sh{lots_txt}"
-        rows.append((em, leg, f"${entry:.2f}", f"${mark:.2f}", f"${pnl:+,.0f}"))
+        leg = f"{_flag_tk(tk, conn)} {qty:+g}sh{lots_txt}"
+        _cost_by[_cc] = _cost_by.get(_cc, 0.0) + abs(entry * qty)
+        rows.setdefault(_cc, []).append(
+            (em, leg, f"{entry:,.2f}", f"{mark:,.2f}", f"{pnl:+,.0f}"))
         earliest = grp["entry_date"].min()
         try:
             days_held = (datetime.now().date() - datetime.strptime(str(earliest), "%Y-%m-%d").date()).days
@@ -34614,11 +35567,21 @@ def _fmt_paper(conn):
         details.append(f"• #{ids_txt} {leg} · entry {earliest}"
                         + (f" ({days_held}d held)" if days_held is not None else "")
                         + f" · {pnl_pct:+.0f}%" + _earn_txt(tk) + note_txt)
+    _expired = 0
     for _, r in _opt_df.iterrows():
         tk = str(r["ticker"]).upper()
         typ = str(r["option_type"]).upper()
         qty = int(r["quantity"])
         entry = float(r["entry_price"] or 0)
+        # Expired legs are out of the live book (user 2026-08-10) — hidden, not deleted, and
+        # excluded from the net so a settled leg cannot drag the running total.
+        try:
+            if (datetime.strptime(str(r["expiry"])[:10], "%Y-%m-%d").date()
+                    - datetime.now().date()).days < 0:
+                _expired += 1
+                continue
+        except Exception:
+            pass
         try:
             mark = _pt_mark(r, conn)
         except Exception:
@@ -34627,8 +35590,11 @@ def _fmt_paper(conn):
         tot_pnl += pnl
         pnl_pct = pnl / (abs(entry * qty * 100) or 1.0) * 100
         em = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
-        leg = f"{tk} {_kfb(r['strike'])}{typ[0]} {qty:+d}x"
-        rows.append((em, leg, f"${entry:.2f}", f"${mark:.2f}", f"${pnl:+,.0f}"))
+        leg = f"{_flag_tk(tk, conn)} {_kfb(r['strike'])}{typ[0]} {qty:+d}x"
+        _by_ccy["$"] = _by_ccy.get("$", 0.0) + pnl      # listed options here are US
+        _cost_by["USD"] = _cost_by.get("USD", 0.0) + abs(entry * qty * 100)
+        rows.setdefault("USD", []).append(
+            (em, leg, f"{entry:,.2f}", f"{mark:,.2f}", f"{pnl:+,.0f}"))
         note_txt = f" — {r['note']}" if r.get("note") else ""
         try:
             days_held = (datetime.now().date() - datetime.strptime(str(r["entry_date"]), "%Y-%m-%d").date()).days
@@ -34644,9 +35610,41 @@ def _fmt_paper(conn):
         details.append(f"• #{int(r['trade_id'])} {leg} · entry {r['entry_date']}"
                         + (f" ({days_held}d held)" if days_held is not None else "")
                         + f" · {pnl_pct:+.0f}%" + dte_txt + _earn_txt(tk) + note_txt)
-    return _report(f"PAPER TRADING (demo) · Net ${tot_pnl:+,.0f}",
-                    ("", "Leg", "Entry", "Mark", "P&L"), rows, right_cols={2, 3, 4}, details=details,
-                    notes="/paper add ... (grammar of /add) · /paper close ID [@price]")
+    _note = "/paper add ... (grammar of /add) · /paper close ID [@price]"
+    if _expired:
+        _note = f"{_expired} expired leg(s) hidden (still in the DB) · " + _note
+    # One headline per currency. Blending them would need an FX rate this project does not
+    # carry, and a rupee added to a dollar is simply a wrong number.
+    _net_txt = " · ".join(f"{s}{v:+,.0f}" for s, v in _by_ccy.items()) or f"${tot_pnl:+,.0f}"
+    if len(_by_ccy) > 1:
+        _note = "totals are PER CURRENCY — not converted · " + _note
+    if not rows:
+        return (f"{hdr('PAPER TRADING (demo)')}\n\nNo live demo positions."
+                + (f"\n<i>{_expired} expired leg(s) hidden.</i>" if _expired else ""))
+    # ONE TABLE PER CURRENCY (user 2026-08-10). US first, then the rest alphabetically; the
+    # prices carry no symbol inside the grid because the whole table is one currency and the
+    # heading says which — that also keeps the 5 columns narrow.
+    _CCY_TITLE = {"USD": "🇺🇸 US · USD", "INR": "🇮🇳 India NSE · INR", "EUR": "🇪🇺 Euro · EUR",
+                  "GBp": "🇬🇧 UK · GBp", "JPY": "🇯🇵 Japan · JPY", "HKD": "🇭🇰 HK · HKD",
+                  "CAD": "🇨🇦 Canada · CAD", "AUD": "🇦🇺 Australia · AUD"}
+    _order = (["USD"] if "USD" in rows else []) + sorted(c for c in rows if c != "USD")
+    parts = [hdr(f"PAPER TRADING (demo) · Net {_net_txt}")]
+    for _cy in _order:
+        _rr = list(rows[_cy])
+        _sub = sum(float(str(r[4]).replace(",", "")) for r in _rr)
+        # Blended return on capital deployed, not the mean of the per-row percentages —
+        # that would weight a 1-share lot like a 3,000-share one (user 2026-08-10).
+        _cst = _cost_by.get(_cy, 0.0)
+        _rr.append(("", "TOTAL", "", f"{_sub / _cst * 100:+.2f}%" if _cst > 0 else "",
+                    f"{_sub:+,.0f}"))
+        parts.append("\n" + _pipe_table(("", "Leg", "Entry", "Mark", "P&L"), _rr,
+                                        right_cols={2, 3, 4},
+                                        title=_CCY_TITLE.get(_cy, _cy),
+                                        legend=f"all values in {_cy}"))
+    if details:
+        parts.append("\n" + "\n".join(details))
+    parts.append(f"\n<i>{_note}</i>")
+    return "\n".join(parts)
 
 
 async def paper_command(update, ctx):
@@ -34764,6 +35762,17 @@ async def watchlist_command(update, ctx):
     finally:
         conn.close()
     await update.message.reply_text(msg, parse_mode=H)
+
+async def positions_command(update, ctx):
+    """/positions — the REAL book (user 2026-08-10: "/positions is not working").
+
+    It never worked because it never existed: the open book was reachable only through the
+    menu's Positions button, whose handler `positions_view` takes a callback query. That
+    handler only ever touches `.message.reply_text`, which an Update carries too — so the
+    command is a straight delegation, one card format everywhere, no second renderer to
+    drift out of sync."""
+    await positions_view(update)
+
 
 async def briefing_view(query):
     conn = get_conn()
@@ -35632,7 +36641,7 @@ def _gex_reports(conn, tickers=None, position_aware=True):
             try:
                 pos = pd.read_sql(
                     "SELECT option_type, strike, quantity, expiry FROM trades"
-                    " WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND UPPER(ticker)=?", conn, params=(tk.upper(),))
+                    " WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND ticker=?", conn, params=(tk.upper(),))
             except Exception:
                 pos = None
         exps = [None]
@@ -35746,6 +36755,1691 @@ def _fred_latest(series_id, api_key=None):
     except Exception:
         return None
     return None
+
+# ── Public Telegram channel ingest (user 2026-08-08) ─────────────────────────────────
+# Reads t.me/s/<channel>, which Telegram renders SERVER-SIDE for public channels. Chosen
+# over the two alternatives on purpose:
+#   * Bot API   - a bot cannot read a channel it is not an admin of, so it needs the user
+#                 to add the bot to someone else's channel. Not possible here.
+#   * Telethon  - works, but needs api_id/api_hash and writes a SESSION FILE that IS the
+#                 user's Telegram identity. A credential on disk for read-only public data
+#                 is a bad trade, especially in a session spent locking this box down.
+# The web feed needs no key, no session, and no permission. Its limit is honest: only the
+# most recent ~20 posts, and public channels only.
+# ── Retail crowding: ApeWisdom Reddit mentions (user 2026-08-08, tracker 187) ────────
+# The ONE dimension nothing else here measures. GEX, OI, dealer futures and macro all
+# describe institutions; this is the crowd. Free, keyless, 100 tickers per feed.
+#
+# SNAPSHOT ONLY -- the API serves today, not history. So it CANNOT be backtested
+# retrospectively; it has to accrue, exactly like the option chains and the macro vintages.
+# That is why the table exists before any alert does.
+_APE_URL = "https://apewisdom.io/api/v1.0/filter/{feed}/page/1"
+_APE_CACHE = {"ts": 0.0, "data": None}
+_APE_TTL = 3600                      # Reddit chatter is hourly at best
+
+
+def _ape_ensure(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS reddit_mentions (
+        asof TEXT, feed TEXT, ticker TEXT, rank INTEGER, mentions INTEGER,
+        mentions_prev INTEGER, upvotes INTEGER,
+        PRIMARY KEY (asof, feed, ticker))""")
+    conn.commit()
+
+
+def _ape_fetch(feed="all-stocks", timeout=25):
+    """[(ticker, rank, mentions, mentions_prev, upvotes)]. [] on failure."""
+    now = time.time()
+    ck = f"{feed}"
+    if _APE_CACHE["data"] and _APE_CACHE["data"].get(ck) and (now - _APE_CACHE["ts"]) < _APE_TTL:
+        return _APE_CACHE["data"][ck]
+    import urllib.request as _u, json as _j
+    try:
+        d = _j.loads(_u.urlopen(_u.Request(
+            _APE_URL.format(feed=feed),
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NYSE-DATA-bot/1.0"}),
+            timeout=timeout).read().decode())
+    except Exception:
+        log.debug("apewisdom fetch failed", exc_info=True)
+        return []
+    out = []
+    for r in (d.get("results") or []):
+        try:
+            out.append((str(r["ticker"]).upper(), int(r.get("rank") or 0),
+                        int(r.get("mentions") or 0), int(r.get("mentions_24h_ago") or 0),
+                        int(r.get("upvotes") or 0)))
+        except Exception:
+            continue
+    cache = _APE_CACHE.get("data") or {}
+    cache[ck] = out
+    _APE_CACHE.update({"ts": now, "data": cache})
+    return out
+
+
+def _ape_store(conn, feed="all-stocks"):
+    """Persist today's snapshot. Returns rows written. History only exists if we accrue it."""
+    rows = _ape_fetch(feed)
+    if not rows:
+        return 0
+    _ape_ensure(conn)
+    today = _et_now().strftime("%Y-%m-%d")
+    conn.executemany(
+        "INSERT OR REPLACE INTO reddit_mentions VALUES (?,?,?,?,?,?,?)",
+        [(today, feed, t, rk, m, mp, up) for t, rk, m, mp, up in rows])
+    conn.commit()
+    return len(rows)
+
+
+# ── Narrative vs data: is the stated reason for a move actually true? (user, ID 190) ──
+# The LLM's job here is NOT to have a view. It is to turn a claim into something FALSIFIABLE
+# -- which ticker, which direction, over what window -- and then OUR DATA returns the verdict.
+# That inversion is the point: a model cannot win this by sounding plausible.
+_NARR_SCHEMA = (
+    'Return ONLY a JSON array, no prose. One object per headline that makes a checkable '
+    'market claim; SKIP headlines that make none. Each object:\n'
+    '{"claim": "<the asserted cause, <=90 chars>", "ticker": "<US ticker or ETF proxy that '
+    'SHOULD have moved: SPY QQQ IWM XLK XLF XLE SMH TLT GLD USO or a single name>", '
+    '"direction": "up"|"down", "window_days": 1|5, "why": "<one line: why that ticker '
+    'follows from the claim>"}\n'
+    'Rules: choose the MOST DIRECT instrument the claim implies. If a claim is vague, '
+    'unfalsifiable, or about something we cannot price, omit it entirely.')
+
+
+# Appended to every long-form LLM prompt. The user's complaint (2026-08-08) was not that the
+# analysis was wrong but that it was unreadable: "explain in easy terms without losing data
+# and use tables". Simplifying must mean EXPLAINING a number, never dropping it.
+_PLAIN_FORMAT = (
+    "\n\nFORMAT — read on a phone by someone who is not a quant:\n"
+    "- Put numbers in MARKDOWN TABLES (| col | col |), at most 3 columns, short cells. "
+    "Tables carry the data; prose carries the reasoning. Do not bury figures in paragraphs.\n"
+    "- PLAIN ENGLISH. The FIRST time any jargon appears (VRP, IV rank, percentile, gamma, "
+    "basis, term structure, skew), follow it immediately with its meaning in brackets — "
+    "e.g. 'IV rank 6% (options cheaper than 94% of the past year)'. Never use a term and "
+    "move on.\n"
+    "- KEEP EVERY NUMBER. Simplifying means explaining it, not removing it.\n"
+    "- Say what it means for money: cheaper or dearer, more or less risk, bigger or "
+    "smaller expected move.\n"
+    "- No '##' headings and no '**' around whole paragraphs; short bold labels only.")
+
+
+# ── XIRR: time-weighted return on holdings (ID 195) ─────────────────────────────────
+# WHY THIS IS NOT THE SAME AS THE P&L% BAR (row 96): P&L% ignores TIME. +8% in a week and
+# +8% in a year read identically there, while XIRR annualises them to ~+50%/yr and ~+8%/yr.
+# For deciding whether a holding is actually working, the second comparison is the useful one.
+#
+# THE TRAP, guarded below rather than mentioned in passing: annualising a short holding turns
+# noise into nonsense. A 2% move over 3 days annualises above +800%/yr. So under _XIRR_MIN_DAYS
+# the annualised figure is SUPPRESSED and the raw return shown instead.
+_XIRR_MIN_DAYS = 30
+
+
+def _xirr(flows, guess=0.1):
+    """Irregular-cashflow IRR. flows = [(date, amount)], negative = money out.
+
+    Bisection rather than Newton: Newton diverges on the sign patterns real holdings produce,
+    and this has to be dependable more than it has to be fast.
+    """
+    if len(flows) < 2:
+        return None
+    flows = sorted(flows, key=lambda x: x[0])
+    t0 = flows[0][0]
+    yrs = [((d - t0).days / 365.0, a) for d, a in flows]
+    if all(a >= 0 for _t, a in yrs) or all(a <= 0 for _t, a in yrs):
+        return None                                   # no sign change -> no root
+
+    def npv(r):
+        if r <= -0.9999:
+            return float("inf")
+        return sum(a / ((1 + r) ** t) for t, a in yrs)
+
+    lo, hi = -0.9999, 10.0
+    f_lo, f_hi = npv(lo), npv(hi)
+    if f_lo * f_hi > 0:
+        return None
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        f_mid = npv(mid)
+        if abs(f_mid) < 1e-7:
+            return mid
+        if f_lo * f_mid < 0:
+            hi, f_hi = mid, f_mid
+        else:
+            lo, f_lo = mid, f_mid
+    return (lo + hi) / 2
+
+
+def _xirr_holding(ticker, entry_date, entry_price, qty, conn=None, spot=None):
+    """XIRR for one buy-and-hold. Returns dict or None."""
+    try:
+        d0 = datetime.strptime(str(entry_date)[:10], "%Y-%m-%d")
+    except Exception:
+        return None
+    if spot is None:
+        try:
+            s = _daily_history(ticker, years=1, conn=conn)
+            spot = float(s.iloc[-1]) if s is not None and len(s) else None
+        except Exception:
+            spot = None
+    if not spot or not entry_price or entry_price <= 0:
+        return None
+    now = _et_now().replace(tzinfo=None)
+    days = (now - d0).days
+    raw = (spot / float(entry_price) - 1) * 100
+    r = _xirr([(d0, -float(entry_price) * abs(qty or 1)),
+               (now, float(spot) * abs(qty or 1))])
+    return {"ticker": ticker, "days": days, "raw": raw, "spot": spot,
+            "entry": float(entry_price),
+            # short holdings: keep the raw number, drop the annualised fantasy
+            "xirr": (r * 100 if (r is not None and days >= _XIRR_MIN_DAYS) else None),
+            "too_short": days < _XIRR_MIN_DAYS}
+
+
+def _xirr_history(ticker, conn=None, windows=(1, 3, 5)):
+    """The stock's own annualised return over 1/3/5y, so today's number has a yardstick."""
+    try:
+        s = _daily_history(ticker, years=max(windows) + 1, conn=conn)
+    except Exception:
+        return {}
+    if s is None or len(s) < 30:
+        return {}
+    px = s.astype(float)
+    out = {}
+    for w in windows:
+        n = int(252 * w)
+        if len(px) <= n:
+            continue
+        a, b = float(px.iloc[-n - 1]), float(px.iloc[-1])
+        if a > 0:
+            out[f"{w}y"] = ((b / a) ** (1.0 / w) - 1) * 100
+    return out
+
+
+def _xirr_book(conn=None, include_watchlist=True):
+    """[(source, dict)] across paper trades and watchlist."""
+    own = conn is None
+    if own:
+        conn = get_conn()
+    rows = []
+    try:
+        try:
+            # STOCK legs ONLY. Without this filter an option row's PREMIUM gets compared
+            # against the UNDERLYING's spot: a GOOG put bought at ~$14 against a $355 stock
+            # printed +2,443% raw return (caught 2026-08-08). Options need their own
+            # contract mark to be measured, which is a different job from this one, and the
+            # ask here was explicitly about stocks.
+            pt = pd.read_sql("SELECT ticker, entry_price, quantity, entry_date FROM "
+                             "paper_trades WHERE UPPER(status)='OPEN' AND "
+                             "(option_type IS NULL OR UPPER(option_type) IN ('STOCK',''))",
+                             conn)
+            for r in pt.itertuples():
+                h = _xirr_holding(r.ticker, r.entry_date, r.entry_price, r.quantity, conn)
+                if h:
+                    rows.append(("paper", h))
+        except Exception:
+            pass
+        if include_watchlist:
+            try:
+                wl = pd.read_sql("SELECT ticker, target_price, added_date FROM watchlist "
+                                 "WHERE UPPER(status)='ACTIVE'", conn)
+                for r in wl.itertuples():
+                    # no purchase, so measure from the date it was ADDED at that day's close -
+                    # "what would it have done if you had acted when you flagged it"
+                    try:
+                        s = _daily_history(r.ticker, years=2, conn=conn)
+                        base = float(s.loc[s.index <= str(r.added_date)[:10]].iloc[-1]) \
+                            if s is not None and len(s.loc[s.index <= str(r.added_date)[:10]]) \
+                            else None
+                    except Exception:
+                        base = None
+                    if base:
+                        h = _xirr_holding(r.ticker, r.added_date, base, 1, conn)
+                        if h:
+                            rows.append(("watch", h))
+            except Exception:
+                pass
+    finally:
+        if own:
+            conn.close()
+    return rows
+
+
+def _fmt_xirr(conn=None):
+    """/xirr — annualised return per holding, with a historical yardstick."""
+    rows = _xirr_book(conn)
+    if not rows:
+        return None
+    body = []
+    for src, h in sorted(rows, key=lambda x: -(x[1]["xirr"] if x[1]["xirr"] is not None
+                                               else x[1]["raw"])):
+        ico = "🟢" if h["raw"] > 0 else "🔴"
+        xs = "—" if h["xirr"] is None else f"{h['xirr']:+.0f}"
+        body.append((ico, h["ticker"][:6], f"{h['raw']:+.1f}", xs))
+    out = [_pipe_table(("ST", "Tkr", "Raw%", "XIRR"), body, right_cols={2, 3},
+                       title="📈 XIRR — annualised return per holding")]
+    short = [h for _s, h in rows if h["too_short"]]
+    if short:
+        out.append(f"<i>{len(short)} holding(s) show '—' for XIRR: held under "
+                   f"{_XIRR_MIN_DAYS} days, where annualising turns noise into nonsense "
+                   f"(a 2% move over 3 days annualises above +800%/yr). Raw return is "
+                   f"still shown and is the honest number at that horizon.</i>")
+    out.append("<b>Against the stock's own history (annualised):</b>")
+    for _s, h in rows[:6]:
+        hist = _xirr_history(h["ticker"], conn)
+        if hist:
+            hs = " · ".join(f"{k} {v:+.0f}%" for k, v in hist.items())
+            mark = ""
+            if h["xirr"] is not None and "3y" in hist:
+                mark = " ✅ beating it" if h["xirr"] > hist["3y"] else " ⚠️ lagging it"
+            out.append(f"  • <b>{h['ticker']}</b> — {hs}{mark}")
+    out.append("<i>XIRR annualises the return between your entry and today, so a holding of "
+               "any age is comparable to any other — which raw P&L% cannot do (+8% in a week "
+               "and +8% in a year look identical there). Watchlist rows are measured from the "
+               "close on the day you ADDED them: what it would have done had you acted then. "
+               "Ignores dividends.</i>")
+    return "\n".join(out)
+
+
+async def xirr_command(update, ctx):
+    """/xirr — annualised (XIRR) return on paper trades and watchlist."""
+    msg = await update.message.reply_text("📈 Computing XIRR…", parse_mode=H)
+    txt = await asyncio.to_thread(_fmt_xirr)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if not txt:
+        await update.message.reply_text("No paper trades or watchlist entries to measure.",
+                                        parse_mode=H)
+        return
+    for p in _chunk_on_sections(txt):
+        await update.message.reply_text(p, parse_mode=H)
+
+
+# ── India / NSE lane (ID 39) ────────────────────────────────────────────────────────
+# WHAT ACTUALLY WORKS, measured 2026-08-08 rather than assumed:
+#   * nsearchives.nseindia.com bhavcopy CSV  -> 200, no cookies needed, 3,299 rows/day
+#   * www.nseindia.com homepage handshake    -> 403 Forbidden
+#   * www.nseindia.com/api/... JSON quotes   -> 404
+# So this lane is EOD-only by necessity, and that is stated rather than papered over: there
+# is no live Indian quote here and none is implied.
+#
+# WHY IT IS WORTH HAVING AT ALL: the bhavcopy carries DELIV_PER - the share of traded volume
+# that was actually taken to delivery instead of squared off intraday. US tapes have no
+# equivalent. High volume with LOW delivery is churn; high volume with HIGH delivery is
+# someone genuinely accumulating, and that distinction is the one thing this lane adds that
+# nothing else in the project can see.
+_NSE_BHAV = "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{d}.csv"
+_NSE_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+           "Chrome/131.0.0.0 Safari/537.36")
+
+
+def _nse_bhavcopy(day=None, back=8, timeout=30):
+    """(DataFrame, 'YYYY-MM-DD') for the most recent available session. (None, None) on fail."""
+    import urllib.request as _u, io as _io
+    days = ([day] if day else
+            [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(0, back)])
+    for ds in days:
+        try:
+            dt = datetime.strptime(ds, "%Y-%m-%d")
+        except ValueError:
+            continue
+        if dt.weekday() >= 5:                     # NSE is shut at the weekend
+            continue
+        try:
+            raw = _u.urlopen(_u.Request(_NSE_BHAV.format(d=dt.strftime("%d%m%Y")),
+                                        headers={"User-Agent": _NSE_UA}),
+                             timeout=timeout).read().decode("utf-8", "ignore")
+        except Exception:
+            continue
+        try:
+            df = pd.read_csv(_io.StringIO(raw))
+        except Exception:
+            continue
+        # the CSV ships with leading spaces in its header names
+        df.columns = [str(c).strip().upper() for c in df.columns]
+        if "SYMBOL" not in df.columns or df.empty:
+            continue
+        for c in df.columns:
+            if c not in ("SYMBOL", "SERIES", "DATE1"):
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        df["SYMBOL"] = df["SYMBOL"].astype(str).str.strip().str.upper()
+        df["SERIES"] = df["SERIES"].astype(str).str.strip().str.upper()
+        return df, ds
+    return None, None
+
+
+_INDIA_DB = os.path.join(os.path.dirname(DB_PATH), "India_data.db")
+
+
+def _india_conn():
+    """India lives in its OWN database (user 2026-08-08), not the US one.
+
+    Same front end, separate store. The reasons are practical, not cosmetic: different
+    exchange calendar, different currency, ~2,400 EQ symbols a day that would otherwise
+    dilute every US universe query, and a lane whose failure must never touch the US book.
+    Keeping it apart also means it can be deleted or rebuilt without a US restore.
+    """
+    c = sqlite3.connect(_INDIA_DB, timeout=30)
+    c.execute("PRAGMA journal_mode=WAL")
+    return c
+
+
+def _india_store(conn=None, df=None, day=None):
+    """Persist one session of EQ-series rows. Returns rows written."""
+    own = conn is None
+    if own:
+        conn = _india_conn()
+    try:
+        return _india_store_inner(conn, df, day)
+    finally:
+        if own:
+            conn.close()
+
+
+def _india_store_inner(conn, df=None, day=None):
+    conn.execute("""CREATE TABLE IF NOT EXISTS india_daily (
+        trade_date TEXT, symbol TEXT, close REAL, prev_close REAL, pct REAL,
+        volume REAL, turnover REAL, trades REAL, deliv_qty REAL, deliv_pct REAL,
+        PRIMARY KEY (trade_date, symbol))""")
+    if df is None:
+        df, day = _nse_bhavcopy(day)
+    if df is None:
+        return 0
+    d = df[df.SERIES == "EQ"].copy()
+    if d.empty:
+        return 0
+    dcol = next((c for c in ("DELIV_PER", "DELIV_PERC") if c in d.columns), None)
+    qcol = next((c for c in ("DELIV_QTY",) if c in d.columns), None)
+    d["pct"] = (d.CLOSE_PRICE / d.PREV_CLOSE - 1) * 100
+    rows = [(day, r.SYMBOL, float(r.CLOSE_PRICE or 0), float(r.PREV_CLOSE or 0),
+             float(r.pct if pd.notna(r.pct) else 0), float(r.TTL_TRD_QNTY or 0),
+             float(getattr(r, "TURNOVER_LACS", 0) or 0), float(r.NO_OF_TRADES or 0),
+             float(getattr(r, qcol, 0) or 0) if qcol else 0.0,
+             float(getattr(r, dcol, 0) or 0) if dcol else 0.0)
+            for r in d.itertuples() if pd.notna(r.CLOSE_PRICE) and pd.notna(r.PREV_CLOSE)]
+    conn.executemany("INSERT OR REPLACE INTO india_daily VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    return len(rows)
+
+
+def _fmt_india(conn=None, top=8, min_turnover=500.0):
+    """/india — EOD movers ranked with DELIVERY %, the thing US data cannot show."""
+    # India has its own DB; ignore any US connection handed in.
+    conn = _india_conn()
+    own = True
+    try:
+        n = _india_store_inner(conn)
+        day = conn.execute("SELECT MAX(trade_date) FROM india_daily").fetchone()[0]
+        if not day:
+            return None
+        d = pd.read_sql(
+            "SELECT symbol, close, pct, turnover, deliv_pct FROM india_daily "
+            "WHERE trade_date=? AND turnover >= ? ORDER BY pct DESC",
+            conn, params=(day, min_turnover))
+        hist = conn.execute("SELECT COUNT(DISTINCT trade_date) FROM india_daily").fetchone()[0]
+    finally:
+        if own:
+            conn.close()
+    if d.empty:
+        return None
+    up, dn = d.head(top), d.tail(top).iloc[::-1]
+    out = [_pipe_table(
+        ("ST", "Symbol", "Chg%", "Dlv%"),
+        # 8 chars, not 9: Indian symbols run long and 9 pushed the table to 29 display
+        # cells, one over Telegram's 28-cell <pre> limit
+        [("🟢", r.symbol[:8], f"{r.pct:+.1f}", f"{r.deliv_pct:.0f}") for r in up.itertuples()]
+        + [("🔴", r.symbol[:8], f"{r.pct:+.1f}", f"{r.deliv_pct:.0f}") for r in dn.itertuples()],
+        right_cols={2, 3}, title=f"🇮🇳 NSE — {day}")]
+
+    # the actual edge: big move + high delivery = accumulation, not day-trading
+    conv = d[(d.pct.abs() >= 3) & (d.deliv_pct >= 60)].head(6)
+    if len(conv):
+        out.append("<b>High conviction (move ≥3% AND delivery ≥60%):</b>")
+        for r in conv.itertuples():
+            out.append(f"  • <b>{r.symbol}</b> {r.pct:+.1f}% with {r.deliv_pct:.0f}% delivered "
+                       f"— buyers took stock rather than squaring off")
+    out.append(f"<i>DELIVERY % is the share of traded volume actually taken to delivery "
+               f"instead of closed intraday — Indian tapes publish it and US ones do not. "
+               f"High volume with LOW delivery is churn; the same volume with HIGH delivery "
+               f"is genuine accumulation. Filtered to EQ series above ₹{min_turnover:.0f} lakh "
+               f"turnover. EOD ONLY: NSE's live API blocks us (403/404), the archive does not, "
+               f"so there is no intraday Indian quote here. {n} rows stored today, "
+               f"{hist} session(s) held.</i>")
+    return "\n".join(out)
+
+
+async def india_command(update, ctx):
+    """/india — NSE end-of-day movers with delivery percentage."""
+    msg = await update.message.reply_text("🇮🇳 Pulling the NSE bhavcopy…", parse_mode=H)
+    txt = await asyncio.to_thread(_fmt_india)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if not txt:
+        await update.message.reply_text(
+            "NSE data unavailable right now (archive did not respond, or no session yet).",
+            parse_mode=H)
+        return
+    for p in _chunk_on_sections(txt):
+        await update.message.reply_text(p, parse_mode=H)
+
+
+# ── Dispersion: index IV vs its constituents (ID 35.5) ──────────────────────────────
+# STORAGE ONLY, deliberately. tools/test_dispersion.py established feasibility (all gates
+# pass: index IV + 15/15 member IVs on the same date) but ALSO that we cannot trade it yet:
+#   1. The IV ratio sat in 0.37-0.40 across every captured day. A level is not a signal
+#      without a distribution, and 5 days is not a distribution.
+#   2. Implied correlation from a 44%-weight subset is BIASED LOW (it renormalises those
+#      weights to 1, pretending the mega-caps are the whole index) and must not be quoted.
+# So we store the ratio daily and judge it once there is history — same discipline as the
+# macro vintages and the Reddit snapshots.
+_DISP_MEMBERS = {"NVDA": .075, "MSFT": .065, "AAPL": .060, "AMZN": .040, "META": .030,
+                 "AVGO": .025, "GOOGL": .022, "GOOG": .020, "TSLA": .020, "BRK-B": .017,
+                 "JPM": .015, "LLY": .013, "V": .012, "XOM": .011, "UNH": .010}
+
+
+def _disp_atm_iv(conn, ticker, day, lo=20, hi=60):
+    """ATM IV for one ticker on one capture date. None when unusable."""
+    try:
+        df = pd.read_sql(
+            "SELECT strike, expiry_date, iv_Call, iv_Put, underlying_price FROM options_openbb "
+            "WHERE ticker=? AND trade_date=?", conn, params=(ticker.upper(), day))
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    sp = pd.to_numeric(df.underlying_price, errors="coerce").dropna()
+    if sp.empty:
+        return None
+    s = float(sp.iloc[0])
+    dte = (pd.to_datetime(df.expiry_date, errors="coerce") - pd.Timestamp(day)).dt.days
+    d = df[(dte >= lo) & (dte <= hi)]
+    if d.empty:
+        return None
+    near = d.iloc[(d.strike - s).abs().argsort()[:6]]
+    iv = pd.concat([near.iv_Call, near.iv_Put]).astype(float)
+    iv = iv[(iv > 0.01) & (iv < 3.0)]
+    return float(iv.median()) if len(iv) >= 2 else None
+
+
+def _disp_snapshot(conn, day=None, index="SPY"):
+    """Store one day's index-vs-members IV ratio. Returns dict or None."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS dispersion_daily (
+        trade_date TEXT, idx_ticker TEXT, idx_iv REAL, member_iv REAL,
+        iv_ratio REAL, n_members INTEGER, weight_cov REAL,
+        PRIMARY KEY (trade_date, idx_ticker))""")
+    if day is None:
+        r = conn.execute("SELECT MAX(trade_date) FROM options_openbb").fetchone()
+        day = r[0] if r else None
+    if not day:
+        return None
+    iv_i = _disp_atm_iv(conn, index, day)
+    got = {t: _disp_atm_iv(conn, t, day) for t in _DISP_MEMBERS}
+    got = {k: v for k, v in got.items() if v}
+    if iv_i is None or len(got) < 8:
+        return None
+    w = np.array([_DISP_MEMBERS[t] for t in got])
+    cov = float(w.sum())
+    wavg = float(np.sum(w * np.array([got[t] for t in got])) / cov)
+    row = {"trade_date": day, "idx": index, "idx_iv": iv_i, "member_iv": wavg,
+           "ratio": iv_i / wavg, "n": len(got), "cov": cov}
+    conn.execute("INSERT OR REPLACE INTO dispersion_daily VALUES (?,?,?,?,?,?,?)",
+                 (day, index, iv_i, wavg, row["ratio"], len(got), cov))
+    conn.commit()
+    return row
+
+
+# ── Scenario what-if via Entropy Pooling (ID 132, adopted after passing its test) ────
+# Meucci's Entropy Pooling: re-weight the historical joint scenarios so a stated view holds
+# on average, changing the probabilities as LITTLE as possible (minimum relative entropy).
+# Adopted because it passed a falsifiable check, not because it is fashionable: asked for
+# "gold +5%" it reproduced what actually happened across 386 real gold-rally windows to
+# MAE 0.35pp with 5/5 correct directions (tools/test_entropy_pooling.py).
+#
+# What it buys us: our crash analysis uses HAND-PICKED windows, so it only answers questions
+# we thought of in advance. This answers an arbitrary what-if from the same history, and it
+# keeps the CROSS-ASSET correlations intact instead of assuming a beta.
+_EP_CORE = ["SPY", "QQQ", "IWM", "TLT", "GLD", "USO"]
+_EP_HORIZON = 21          # ~1 month
+
+
+def _ep_panel(conn, extra=(), horizon=_EP_HORIZON, min_rows=250):
+    """(returns DataFrame in %, columns) over overlapping `horizon`-day windows."""
+    tks = list(dict.fromkeys([t.upper() for t in list(_EP_CORE) + list(extra)]))
+    q = ("SELECT UPPER(ticker) t, trade_date d, close FROM stock_history "
+         f"WHERE ticker IN ({','.join('?' * len(tks))}) ORDER BY d")
+    px = pd.read_sql(q, conn, params=tks).pivot(index="d", columns="t", values="close")
+    px = px.dropna(axis=1, thresh=int(min_rows * 1.2)).dropna()
+    if px.empty or len(px) < min_rows:
+        return None, []
+    r = (px.shift(-horizon) / px - 1).dropna() * 100
+    return r, list(r.columns)
+
+
+def _ep_scenario(conn, ticker, move_pct, horizon=_EP_HORIZON):
+    """Impose 'ticker moves move_pct%' and return implied moves for everything else.
+
+    Returns (rows, meta) or (None, reason). rows = [(tk, baseline, implied, delta)].
+    """
+    try:
+        from fortitudo.tech import entropy_pooling
+    except ImportError:
+        return None, "fortitudo.tech not installed"
+    book = []
+    try:
+        book = [r[0] for r in conn.execute(
+            "SELECT DISTINCT UPPER(ticker) FROM trades WHERE UPPER(status)='OPEN'").fetchall()]
+    except Exception:
+        pass
+    R, cols = _ep_panel(conn, extra=[ticker] + book, horizon=horizon)
+    if R is None or ticker.upper() not in cols:
+        return None, f"no usable history for {ticker.upper()}"
+    S = R.to_numpy(dtype=float)
+    n = len(S)
+    gi = cols.index(ticker.upper())
+    p0 = np.ones((n, 1)) / n
+    A = np.vstack([np.ones(n), S[:, gi]])
+    b = np.array([[1.0], [float(move_pct)]])
+    try:
+        q = np.asarray(entropy_pooling(p0, A, b)).flatten()
+    except Exception as e:
+        return None, f"solver failed: {type(e).__name__}"
+    base = S.mean(axis=0)
+    imp = S.T @ q
+    eff = 1.0 / float(np.sum(q ** 2))
+    rows = [(t, base[i], imp[i], imp[i] - base[i]) for i, t in enumerate(cols)]
+    rows.sort(key=lambda x: -abs(x[3]))
+    return rows, {"n": n, "eff": eff, "horizon": horizon, "book": book}
+
+
+def _fmt_whatif(ticker, move_pct, conn=None):
+    """/whatif — implied cross-asset and book impact of a stated view."""
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        rows, meta = _ep_scenario(conn, ticker, move_pct)
+    finally:
+        if own:
+            conn.close()
+    if rows is None:
+        return f"<b>🔮 WHAT-IF</b>\n<i>Cannot run: {meta}</i>"
+    tk = ticker.upper()
+    body = [("🎯" if t == tk else ("🟢" if d > 0.15 else "🔴" if d < -0.15 else "🟡"),
+             t[:6], f"{imp:+.1f}", f"{d:+.1f}")
+            for t, bs, imp, d in rows]
+    out = [_pipe_table(("ST", "Tkr", "Impl%", "vs base"), body, right_cols={2, 3},
+                       title=f"🔮 IF {tk} MOVES {move_pct:+.1f}% IN {meta['horizon']}d")]
+    held = [r for r in rows if r[0] in (meta["book"] or [])]
+    if held:
+        out.append("<b>Your holdings in this scenario:</b>")
+        for t, bs, imp, d in held:
+            out.append(f"  • <b>{t}</b> implied <b>{imp:+.1f}%</b> "
+                       f"({d:+.1f} pts vs its normal {bs:+.1f}%)")
+    out.append(f"<i>Entropy Pooling over {meta['n']} overlapping {meta['horizon']}-day "
+               f"windows; the view re-weights history to {meta['eff']:.0f} effective "
+               f"scenarios. 'Impl%' is the average outcome ACROSS HISTORY WHEN THIS HAPPENED, "
+               f"with real cross-asset correlations intact — not a forecast and not a beta "
+               f"assumption. It answers 'what usually accompanied this', which is a different "
+               f"and more honest question than 'what will happen'.</i>")
+    return "\n".join(out)
+
+
+async def whatif_command(update, ctx):
+    """/whatif TICKER ±PCT — e.g. /whatif GLD +5, /whatif SPY -10."""
+    args = list(getattr(ctx, "args", []) or [])
+    tk, mv = "GLD", 5.0
+    if args:
+        tk = args[0].upper().lstrip("$")
+    if len(args) > 1:
+        try:
+            mv = float(str(args[1]).replace("%", "").replace("+", ""))
+        except ValueError:
+            pass
+    msg = await update.message.reply_text(f"🔮 Re-weighting history for {tk} {mv:+.1f}%…",
+                                          parse_mode=H)
+    txt = await asyncio.to_thread(_fmt_whatif, tk, mv)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    for p in _chunk_on_sections(txt):
+        await update.message.reply_text(p, parse_mode=H)
+
+
+def _md_to_tg(md):
+    """Markdown -> Telegram HTML, including real tables.
+
+    LLMs emit markdown no matter what the prompt says, and Telegram renders HTML: the user
+    saw literal '**1. THE READ**' and '##' in /insight and /desk output (2026-08-08). This
+    converts headings and bold, and — the part that matters — rebuilds markdown pipe tables
+    as fixed-width <pre> blocks via _pipe_table, so columns actually line up on a phone.
+    """
+    import html as _he, re as _re
+
+    def _table(block):
+        # strip inline markdown INSIDE cells: _pipe_table escapes its content, so a stray
+        # "**Bullish**" would reach Telegram as literal asterisks (caught 2026-08-08)
+        rows = [[_re.sub(r"[*`_]{1,2}", "", c).strip()
+                 for c in ln.strip().strip("|").split("|")]
+                for ln in block if ln.strip().startswith("|")]
+        rows = [r for r in rows if not all(_re.fullmatch(r":?-{2,}:?", c or "-") for c in r)]
+        if len(rows) < 2:
+            return None
+        hdr, body = rows[0], rows[1:]
+        n = len(hdr)
+        body = [(r + [""] * n)[:n] for r in body]
+
+        def _w(cols, rws):
+            return (sum(max([_disp_w(cols[c])] + [_disp_w(r[c]) for r in rws])
+                        for c in range(len(cols))) + 3 * (len(cols) - 1))
+
+        # Telegram <pre> is ~28 cells. Narrow columns that overflow BEFORE dropping any,
+        # and when a column still will not fit, move it BELOW as a detail line instead of
+        # deleting it -- the overflow column is usually the plain-English explanation, which
+        # is the whole point of the table (2026-08-08). Losing data to fit is not a fix.
+        # truncate ONLY for width measurement / table cells -- the detail lines below keep
+        # the full text, otherwise the explanation gets clipped to "options underpri"
+        trunc = [[(c[:16] if len(c) > 16 else c) for c in r] for r in body]
+        extra = []
+        while n > 2 and _w(hdr[:n], [r[:n] for r in trunc]) > 28:
+            n -= 1
+            extra.append((hdr[n], [r[n] for r in body]))
+        keep_h, keep_b = tuple(h[:12] for h in hdr[:n]), [r[:n] for r in trunc]
+        # Dropping columns stops at 2 -- a 2-col table that is still too wide (long labels
+        # like "VXN - VIX Spread" | "98th pctile" = 30 cells) has to be narrowed by SHRINKING
+        # cells instead, or it wraps on a phone. Shrink until it fits, floor 6.
+        cap = 16
+        while cap > 6 and _w(keep_h, keep_b) > 28:
+            cap -= 1
+            keep_b = [[(c[:cap] if len(c) > cap else c) for c in r] for r in
+                      [row[:n] for row in body]]
+            keep_h = tuple(h[:max(cap, 8)] for h in hdr[:n])
+        out = [_pipe_table(keep_h, keep_b)]
+        # A clipped cell ("Big-Move Gau") is still lost data, so whenever the fit forced a
+        # truncation, restate that row in full underneath. The table stays scannable; the
+        # detail line keeps the meaning.
+        full = [row[:n] for row in body]
+        for shown, orig in zip(keep_b, full):
+            if any(len(str(o)) > len(str(s)) for s, o in zip(shown, orig)):
+                out.append("  • " + " — ".join(_he.escape(str(o)) for o in orig if str(o).strip()))
+        for lab, vals in reversed(extra):
+            for r, v in zip(keep_b, vals):
+                if str(v).strip():
+                    out.append(f"  • <b>{_he.escape(str(r[0]))}</b> — "
+                               f"{_he.escape(lab)}: {_he.escape(str(v))}")
+        return "\n".join(out)
+
+    out, buf = [], []
+    for ln in (md or "").splitlines():
+        if ln.strip().startswith("|"):
+            buf.append(ln)
+            continue
+        if buf:
+            t = _table(buf)
+            out.append(t if t else "\n".join(_he.escape(b) for b in buf))
+            buf = []
+        s = ln.rstrip()
+        if _re.match(r"^\s*#{1,6}\s+", s):
+            out.append("<b>" + _he.escape(_re.sub(r"^\s*#{1,6}\s+", "", s)) + "</b>")
+            continue
+        if _re.fullmatch(r"\s*[-*_]{3,}\s*", s):
+            continue                                  # horizontal rules add nothing here
+        s = _he.escape(s)
+        s = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+        s = _re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"<i>\1</i>", s)
+        s = _re.sub(r"^\s*[-*]\s+", "  • ", s)
+        out.append(s)
+    if buf:
+        t = _table(buf)
+        out.append(t if t else "\n".join(_he.escape(b) for b in buf))
+    return "\n".join(out)
+
+
+def _narr_ensure(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS narrative_checks (
+        asof TEXT, source TEXT, claim TEXT, ticker TEXT, direction TEXT,
+        window_days INTEGER, actual_pct REAL, verdict TEXT,
+        PRIMARY KEY (asof, source, claim))""")
+    conn.commit()
+
+
+def _narr_extract(headlines):
+    """[(claim, ticker, direction, window_days, why)] — LLM turns prose into hypotheses."""
+    import json as _j, re as _re
+    txt, _who = _llm_chat(
+        _NARR_SCHEMA + "\n\nHEADLINES:\n" + "\n".join(f"{i}. {h[:300]}"
+                                                      for i, h in enumerate(headlines, 1)),
+        system=("You convert market commentary into falsifiable, checkable predictions. "
+                "You never editorialise and never output anything except the JSON array. "
+                "Do not explain your reasoning. Begin your reply with '[' and end it with ']'."),
+        # STRUCTURED extraction, not long-form reasoning -- so route to the fast lane. Sent to
+        # Google first it leaked chain-of-thought instead of JSON ("GLD up) Let's do H2...")
+        # and nothing parsed, which read as "no checkable claims" when there were plenty.
+        max_tokens=1800, temperature=0.1, provider=_llm_pick("fast"))
+    if not txt:
+        return []
+    m = _re.search(r"\[.*\]", txt, _re.S)
+    if not m:
+        return []
+    try:
+        arr = _j.loads(m.group(0))
+    except Exception:
+        return []
+    out = []
+    for o in arr:
+        try:
+            d = str(o["direction"]).lower()
+            if d not in ("up", "down"):
+                continue
+            out.append((str(o["claim"])[:200], str(o["ticker"]).upper().strip(),
+                        d, int(o.get("window_days") or 1), str(o.get("why", ""))[:160]))
+        except Exception:
+            continue
+    return out
+
+
+def _narr_verdict(conn, ticker, direction, window_days):
+    """What the DATA says. (actual_pct, verdict) — UNTESTABLE when we cannot price it."""
+    try:
+        s = _daily_history(ticker, years=1, conn=conn)
+    except Exception:
+        return None, "UNTESTABLE"
+    if s is None or len(s) < window_days + 1:
+        return None, "UNTESTABLE"
+    px = s.astype(float)
+    pct = (px.iloc[-1] / px.iloc[-1 - window_days] - 1) * 100
+    # A move too small to distinguish from noise is NOT a confirmation. ~0.3%/day is roughly
+    # a quiet session on a broad index; below that the claim is simply unresolved.
+    if abs(pct) < 0.3 * (window_days ** 0.5):
+        return pct, "INCONCLUSIVE"
+    moved_up = pct > 0
+    return pct, ("SUPPORTED" if moved_up == (direction == "up") else "CONTRADICTED")
+
+
+def _fmt_why(conn=None, limit=8):
+    """/why — score today's narratives against our own price data."""
+    import html as _he
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        try:
+            feed = _tg_feed_all()[-limit:]
+        except Exception:
+            feed = []
+        if not feed:
+            return None
+        heads = [t for _c, _s, t, _u in feed]
+        src = feed[0][0] if feed else "feed"
+        claims = _narr_extract(heads)
+        if not claims:
+            return ("<b>🔍 NARRATIVE CHECK</b>\n<i>No falsifiable market claim in the latest "
+                    "headlines — which is itself worth knowing.</i>")
+        _narr_ensure(conn)
+        today = _et_now().strftime("%Y-%m-%d")
+        rows, det = [], []
+        for claim, tk, dr, wd, why in claims:
+            pct, verd = _narr_verdict(conn, tk, dr, wd)
+            ico = {"SUPPORTED": "🟢", "CONTRADICTED": "🔴",
+                   "INCONCLUSIVE": "🟡", "UNTESTABLE": "⚪"}[verd]
+            rows.append((ico, tk[:6], dr[:4], "-" if pct is None else f"{pct:+.1f}"))
+            det.append(f"{ico} <b>{tk}</b> claim said <b>{dr.upper()}</b> over {wd}d — "
+                       f"actual {'n/a' if pct is None else f'{pct:+.2f}%'} → <b>{verd}</b>"
+                       f"\n    <i>{_he.escape(claim)}</i>")
+            try:
+                conn.execute("INSERT OR REPLACE INTO narrative_checks VALUES (?,?,?,?,?,?,?,?)",
+                             (today, src, claim, tk, dr, wd,
+                              None if pct is None else float(pct), verd))
+            except Exception:
+                pass
+        conn.commit()
+        hist = pd.read_sql(
+            "SELECT verdict, COUNT(*) n FROM narrative_checks GROUP BY verdict", conn)
+    finally:
+        if own:
+            conn.close()
+
+    out = [_pipe_table(("ST", "Tkr", "Said", "Act%"), rows, right_cols={3},
+                       title="🔍 NARRATIVE vs OUR DATA")]
+    out += det
+    tot = int(hist.n.sum()) if len(hist) else 0
+    sup = int(hist.loc[hist.verdict == "SUPPORTED", "n"].sum()) if len(hist) else 0
+    con = int(hist.loc[hist.verdict == "CONTRADICTED", "n"].sum()) if len(hist) else 0
+    if sup + con:
+        out.append(f"\n<b>Running record ({tot} checks stored):</b> {sup} supported, "
+                   f"{con} contradicted → {100*sup/(sup+con):.0f}% of resolved claims held up.")
+        # Several claims routinely resolve to the SAME instrument on the same day (four of
+        # today's seven were SPY), so they share one outcome and are NOT independent checks.
+        # Counting them separately would flatter the hit-rate exactly the way the pooled
+        # rank-IC t-stat flattered signals before it was banned. Say so, in the output.
+        _dupes = len(rows) - len({r[1] for r in rows})
+        if _dupes > 0:
+            out.append(f"<i>⚠️ {_dupes} of today's {len(rows)} claims resolve to an instrument "
+                       f"another claim already used, so they share one outcome — the effective "
+                       f"number of independent checks today is {len({r[1] for r in rows})}, "
+                       f"not {len(rows)}. Read the percentage accordingly.</i>")
+    out.append("<i>The headline is the HYPOTHESIS; your price history is the judge. "
+               "SUPPORTED only means the named instrument moved the claimed way — it is NOT "
+               "proof the stated cause was the reason. One day of verdicts proves nothing; "
+               "the number worth having is the hit-rate BY SOURCE, once it accrues.</i>")
+    return "\n".join(out)
+
+
+async def why_command(update, ctx):
+    """/why — check the stated reasons for today's moves against our own data."""
+    msg = await update.message.reply_text("🔍 Testing today's narratives…", parse_mode=H)
+    txt = await asyncio.to_thread(_fmt_why)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if not txt:
+        await update.message.reply_text("No headlines to test right now.", parse_mode=H)
+        return
+    for p in _chunk_on_sections(txt):
+        await update.message.reply_text(p, parse_mode=H, disable_web_page_preview=True)
+
+
+async def reddit_snapshot_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Persist the retail-crowding snapshot. Silent: it collects, it never alerts."""
+    def _go():
+        c = get_conn()
+        try:
+            return _ape_store(c)
+        finally:
+            c.close()
+    try:
+        n = await asyncio.to_thread(_go)
+        if n:
+            log.info("reddit crowding snapshot stored (%d tickers)", n)
+    except Exception as e:
+        log.debug("reddit snapshot failed: %s", e)
+
+
+def _desk_atr_em(conn, ticker, horizon_days=5, lookback=20):
+    """ATR-based expected move over `horizon_days`. Returns a [CALCULATIONS] dict or None.
+
+    Exists because section 8 of the research-desk report demands LEVELS, and a model with no
+    supplied levels will invent them. This derives them from the OHLC we already store, so
+    every level in the report is traceable to data rather than imagined.
+    """
+    try:
+        h = pd.read_sql("SELECT trade_date, high, low, close FROM stock_history "
+                        "WHERE ticker=? ORDER BY trade_date DESC LIMIT ?",
+                        conn, params=(ticker.upper(), lookback + 1))
+    except Exception:
+        return None
+    if len(h) < lookback:
+        return None
+    h = h.iloc[::-1].reset_index(drop=True)
+    pc = h["close"].shift(1)
+    tr = pd.concat([h["high"] - h["low"], (h["high"] - pc).abs(),
+                    (h["low"] - pc).abs()], axis=1).max(axis=1)
+    atr = float(tr.tail(lookback).mean())
+    spot = float(h["close"].iloc[-1])
+    em = atr * (horizon_days ** 0.5)          # sqrt-of-time scaling
+    return {"name": f"ATR({lookback}) expected move, {horizon_days}d",
+            "method": "True Range mean over 20 sessions, scaled by sqrt(horizon)",
+            "lookback": f"{lookback} sessions ending {h['trade_date'].iloc[-1]}",
+            "result": (f"spot {spot:.2f}; ATR {atr:.2f} ({atr/spot*100:.2f}% of spot); "
+                       f"{horizon_days}d expected move +/-{em:.2f} "
+                       f"({em/spot*100:.2f}%) -> band {spot-em:.2f} to {spot+em:.2f}"),
+            "assumptions": "Range scales with sqrt(time); no drift; no event premium",
+            "limitations": ("Backward-looking. Understates the move across a scheduled "
+                            "event and overstates it in a quiet drift.")}
+
+
+def _desk_analogs(conn, ticker, horizon_days=5, lookback_years=6):
+    """What HAS followed, historically, when this name's volatility looked like today?
+
+    Section 6 of the report asks for historical analogs. Without this the model either
+    invents one or is forced to say none exists. Conditions on the ticker's OWN realised-vol
+    decile -- an honest, cheap analog -- and reports the forward distribution.
+    """
+    try:
+        s = _daily_history(ticker, years=lookback_years, conn=conn)
+    except Exception:
+        return None
+    if s is None or len(s) < 260:
+        return None
+    r = s.pct_change()
+    rv = r.rolling(20).std() * (252 ** 0.5) * 100          # annualised realised vol, %
+    fwd = (s.shift(-horizon_days) / s - 1) * 100
+    d = pd.DataFrame({"rv": rv, "fwd": fwd}).dropna()
+    if len(d) < 100:
+        return None
+    cur = float(rv.iloc[-1])
+    lo, hi = d["rv"].quantile(0.4), d["rv"].quantile(0.6)
+    band = d[(d.rv >= cur * 0.85) & (d.rv <= cur * 1.15)]
+    if len(band) < 20:
+        return None
+    pct = float((d["rv"] < cur).mean() * 100)
+    return {"name": f"Historical analogs: {ticker} at similar realised vol",
+            "method": (f"20d annualised realised vol within +/-15% of today's, then the "
+                       f"{horizon_days}-session forward return of each analog"),
+            "lookback": f"{len(d)} sessions (~{lookback_years}y)",
+            "result": (f"today RV {cur:.1f}% = {_ordinal(pct)} percentile of its own history; "
+                       f"{len(band)} analog sessions; forward {horizon_days}d: "
+                       f"median {band.fwd.median():+.2f}%, mean {band.fwd.mean():+.2f}%, "
+                       f"{(band.fwd > 0).mean()*100:.0f}% positive, "
+                       f"worst {band.fwd.min():+.2f}%, best {band.fwd.max():+.2f}%; "
+                       f"unconditional median {d.fwd.median():+.2f}% "
+                       f"({(d.fwd > 0).mean()*100:.0f}% positive)"),
+            "assumptions": "Realised vol regime is the conditioning variable",
+            "limitations": ("Analog sessions OVERLAP, so they are not independent draws -- "
+                            "treat the count as far smaller than it looks. Compare the "
+                            "conditional numbers against the unconditional ones: if they "
+                            "match, the regime carries no information.")}
+
+
+def _insight_facts(conn):
+    """Compact MEASURED facts from every lane we own, for the LLM to reason over.
+
+    Hands the model NUMBERS WE COMPUTED, never raw text to re-interpret. The lanes are
+    different populations on purpose - your book, our own option flow, dealer futures, vol,
+    macro and retail-facing news - and the valuable output is where they CONFLICT. Every
+    block is separately guarded: one dead lane must degrade the summary, not kill it.
+    """
+    f = []
+    # 1. the book -- what actually has money on it.
+    # This block MUST always append something. The first version selected a `pnl` column
+    # that is not in the trades schema, so it threw, the except swallowed it, and the book
+    # lane vanished silently -- whereupon the LLM INVENTED positions ("my long SPY and QQQ,
+    # short VIX and VXN") that do not exist. A silently missing lane is worse than a stated
+    # one, because the model fills the gap with fiction. So: narrow columns, and an explicit
+    # "no data" fact when empty.
+    try:
+        tr = pd.read_sql("SELECT ticker, option_type, strike, expiry, quantity, entry_price "
+                         "FROM trades WHERE UPPER(status)='OPEN'", conn)
+        if len(tr):
+            f.append("YOUR OPEN BOOK (%d legs, THIS IS THE COMPLETE LIST): %s" % (
+                len(tr), "; ".join(
+                    f"{r.ticker} {(r.option_type or 'STOCK')}"
+                    f"{'' if not r.strike else ' ' + str(int(r.strike))}"
+                    f" exp {r.expiry or '-'} qty {int(r.quantity)} @ {r.entry_price:.2f}"
+                    for r in tr.head(15).itertuples())))
+        else:
+            f.append("YOUR OPEN BOOK: NO open positions. Do not reference any holdings.")
+    except Exception as e:
+        f.append("YOUR OPEN BOOK: unavailable (%s). Do not reference any holdings."
+                 % type(e).__name__)
+    try:                                   # 2. OI + volume change on the names you hold
+        d = pd.read_sql(
+            "SELECT ticker, SUM(change_OI_Call) c_oi, SUM(change_OI_Put) p_oi, "
+            "SUM(vol_Call_now) c_v, SUM(vol_Put_now) p_v FROM options_change "
+            "WHERE trade_date_now=(SELECT MAX(trade_date_now) FROM options_change) "
+            "GROUP BY ticker ORDER BY (c_v+p_v) DESC LIMIT 10", conn)
+        if len(d):
+            f.append("OI / VOLUME today (top by volume): " + "; ".join(
+                f"{r.ticker} dOI C{r.c_oi:+.0f}/P{r.p_oi:+.0f} vol C{r.c_v:.0f}/P{r.p_v:.0f}"
+                for r in d.itertuples()))
+    except Exception:
+        pass
+    try:
+        r = _riskoff_scan(conn)
+        t = r["turbulence"]
+        f.append(f"BIG-MOVE GAUGE: {t['level']} ({t['fires']} index put-flow fires). "
+                 f"MEASURED base rate: after HIGH a >2% Nasdaq week followed 62% of the time "
+                 f"vs 38% normally; direction 53% up = coin flip. Lean {r['direction']['lean']}.")
+    except Exception:
+        pass
+    try:
+        vi = _get_vol_indices() or {}
+        v, n = float(vi.get("vix") or 0), float(vi.get("vxn") or 0)
+        if v and n:
+            f.append(f"VOL: VIX {v:.1f}, VXN {n:.1f}, spread {n-v:+.1f} pts "
+                     f"({'tech-led risk' if n - v >= 4 else 'broad'}).")
+    except Exception:
+        pass
+    try:
+        dl = _cftc_dealer()
+        ext = [f"{x['name']} {x['net_pct']:+.0f}% of OI ({_ordinal(x['pctile'])} pctile)"
+               for x in dl if x["pctile"] >= 90 or x["pctile"] <= 10]
+        if ext:
+            f.append(f"DEALER FUTURES (CFTC {dl[0]['date']}) stretched vs own history: "
+                     + "; ".join(ext[:5]))
+    except Exception:
+        pass
+    try:
+        u = _uoa_scan(conn, top=12)
+        if u:
+            f.append("UNUSUAL OPTION FLOW (vol>>OI = new positioning): " + "; ".join(
+                f"{x['ticker']} {x['side']}{x['strike']:.0f} x{x['ratio']:.1f}" for x in u[:8]))
+    except Exception:
+        pass
+    try:
+        news = _tg_feed_all()
+        if news:
+            f.append("NEWS HEADLINES:\n" + "\n".join("- " + t[:170]
+                                                     for _c, _s, t, _u in news[-6:]))
+    except Exception:
+        pass
+    return f
+
+
+_DESK_SYSTEM = (
+    "You are a simulated institutional futures/equity-derivatives research desk. Analyse ONLY "
+    "the supplied data and produce transparent, evidence-grounded scenario analysis.\n"
+    "You are not an oracle. You have no live market access, no private information and no "
+    "real trading account. This is research and scenario analysis, NOT financial advice.\n\n"
+    "NON-NEGOTIABLE RULES\n"
+    "1. Use ONLY information supplied in the prompt. Add no external prices, events, levels, "
+    "news or dates.\n"
+    "2. Do NOT invent data. If something is missing, stale, inconsistent or insufficient, say "
+    "so explicitly.\n"
+    "3. Label every statement as one of: OBSERVED FACT (directly in the inputs), "
+    "INTERPRETATION (plausible reading of the evidence), or SCENARIO (conditional future, not "
+    "a certainty).\n"
+    "4. Never treat correlation, coincidence, one headline or one indicator as causation.\n"
+    "5. Treat supplied calculations as inputs. Do not silently alter them; flag anything "
+    "inconsistent.\n"
+    "6. Cite the source of every factual claim: [MARKET_DATA], [NEWS-1], [CALCULATIONS-1] etc.\n"
+    "7. Use BROAD probability ranges, never false precision. Justify each confidence rating.\n"
+    "8. No personalised advice, no guaranteed prices, no 'buy now'/'sell now' instruction.\n"
+    "9. Do not assume history repeats. Analogs are context only.\n"
+    "10. If uncertainty or data quality is too poor, output 'NO TRADE / INSUFFICIENT "
+    "EVIDENCE' rather than forcing a directional conclusion.\n\n"
+    "HIGH confidence requires agreement across at least THREE independent evidence types "
+    "(price/volume/OI · macro · confirmed news · options/vol/term-structure · validated "
+    "historical pattern). One evidence type alone caps confidence at LOW.\n"
+    "The Risk Manager holds a veto: a NO TRADE verdict overrides every directional conclusion.")
+
+
+def _desk_inputs(conn, ticker, horizon="5 sessions"):
+    """Assemble [MARKET_DATA] / [NEWS-x] / [CALCULATIONS-x] exactly as the desk prompt expects.
+
+    The whole value of that prompt is that every claim must cite a source, which only works
+    if the inputs ARE sourced blocks. So this builds them explicitly rather than dumping prose.
+    """
+    tk = ticker.upper()
+    md, news, calcs = [], [], []
+
+    md.append(f"Instrument: {tk} (US listed) · Horizon requested: {horizon} · "
+              f"Analysis cutoff: {_et_now():%Y-%m-%d %H:%M} ET · Data frequency: daily")
+    for f in _insight_facts(conn):
+        md.append(f)
+
+    try:
+        for i, (ch, ts, txt, url) in enumerate(_tg_feed_all()[-6:], 1):
+            news.append(f"[NEWS-{i}]\nTimestamp: {ts}\nSource: t.me/{ch} (public channel)\n"
+                        f"Headline/Text: {txt[:400]}\n"
+                        f"Verification status: unverified third-party commentary")
+    except Exception:
+        pass
+
+    for fn in (_desk_atr_em, _desk_analogs):
+        try:
+            c = fn(conn, tk)
+            if c:
+                calcs.append(c)
+        except Exception:
+            continue
+    try:                                     # realised vs implied, already a house function
+        v = _vrp_scan(conn, tickers=[tk]) or []
+        if v:
+            r = v[0]
+            calcs.append({"name": f"VRP ({tk}): implied minus realised vol",
+                          "method": "ATM IV from the chain minus Yang-Zhang realised vol",
+                          "lookback": "30 sessions",
+                          "result": f"{r}",
+                          "assumptions": "ATM IV represents the surface",
+                          "limitations": "Single-expiry snapshot; no term structure"})
+    except Exception:
+        pass
+
+    blocks = ["<MARKET_DATA>\n" + "\n\n".join(md) + "\n</MARKET_DATA>"]
+    blocks.append("<NEWS>\n" + ("\n\n".join(news) if news else
+                                "No news items supplied.") + "\n</NEWS>")
+    cb = []
+    for i, c in enumerate(calcs, 1):
+        cb.append(f"[CALCULATIONS-{i}]\nName: {c['name']}\nMethod: {c['method']}\n"
+                  f"Lookback: {c['lookback']}\nResult: {c['result']}\n"
+                  f"Assumptions: {c['assumptions']}\nLimitations: {c['limitations']}")
+    blocks.append("<CALCULATIONS>\n" + ("\n\n".join(cb) if cb else
+                                        "No calculations supplied.") + "\n</CALCULATIONS>")
+    return "\n\n".join(blocks), len(md), len(news), len(calcs)
+
+
+def _fmt_desk(ticker, conn=None, horizon="5 sessions"):
+    """/desk — the full research-desk report. Returns text, or a stated failure."""
+    import html as _he
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        inputs, n_md, n_news, n_calc = _desk_inputs(conn, ticker, horizon)
+    finally:
+        if own:
+            conn.close()
+
+    txt, who = _llm_chat(
+        inputs + "\n\n---\nProduce the report in EXACTLY this order, using the section "
+        "headings given:\n"
+        "1. EXECUTIVE VIEW — 3-5 sentences: regime, main evidence, main risk, confidence "
+        "(LOW/MEDIUM/HIGH) and WHY that rating.\n"
+        "2. DATA QUALITY AND LIMITATIONS — table: Check | Finding | Impact.\n"
+        "3. ROLE FINDINGS — table over Quant, Technical, Macro, News/Sentiment, Bull, Bear, "
+        "Risk Manager: Main finding | Evidence strength | Key evidence | What would prove it "
+        "wrong. The Risk Manager row must read APPROVE / CAUTION / NO TRADE.\n"
+        "4. VERIFIED EVIDENCE — only facts traceable to a cited input.\n"
+        "5. MARKET DRIVERS — ranked, with transmission mechanism and counterargument.\n"
+        "6. HISTORICAL CONTEXT — use the supplied analog calculation; if none is supplied "
+        "write 'No valid historical analog was provided in the inputs.'\n"
+        "7. FORWARD SCENARIOS — table: Scenario | Probability range | Conditions | Expected "
+        "behaviour | Confirming | Invalidation | Risks. Probabilities total ~100%.\n"
+        "8. KEY LEVELS AND CATALYSTS — ONLY levels present in or derived from the supplied "
+        "calculations.\n"
+        "9. RISK AUDIT — missing information, contradictions, tail and liquidity risk, the "
+        "most fragile conclusion.\n"
+        "10. MONITORING PLAN — 5-8 items: Signal | Why | What would change the thesis.\n"
+        "11. FINAL CONDITIONAL THESIS — exactly: 'While [conditions], the balance of evidence "
+        "favors [scenario] over the stated horizon. The bullish case requires [conditions]. "
+        "The bearish case becomes more likely if [conditions]. This thesis is invalidated if "
+        "[evidence/levels].' Then the Risk Manager verdict line. "
+        "End with exactly: 'This is scenario analysis, not a prediction or financial advice.'"
+        + _PLAIN_FORMAT,
+        # 11 sections with tables genuinely needs the room: at 4000 it stopped mid-sentence
+        # inside section 1. Telegram is handled by _chunk_on_sections, so length is not the
+        # constraint here -- the model's budget is.
+        system=_DESK_SYSTEM, max_tokens=8000, temperature=0.3,
+        provider=_llm_pick("reason"))
+
+    if not txt:
+        return ("<b>🏛 RESEARCH DESK</b>\n<i>No LLM provider reachable — try /llm.</i>")
+    return "\n".join([
+        f"<b>🏛 RESEARCH DESK — {ticker.upper()}</b>",
+        f"<i>{who} · {n_md} market-data blocks · {n_news} news items · "
+        f"{n_calc} calculations · horizon {horizon}</i>", "",
+        _md_to_tg(txt), "",
+        "<i>Scenario analysis from OUR measured inputs. Every claim should carry a source "
+        "tag; anything without one is the model overstepping — treat it as unsupported.</i>"])
+
+
+async def desk_command(update, ctx):
+    """/desk TICKER — full institutional research-desk report on one instrument."""
+    args = list(getattr(ctx, "args", []) or [])
+    tk = (args[0].upper() if args else "SPY")
+    msg = await update.message.reply_text(
+        f"🏛 Convening the desk on {tk} — 8 roles, this takes a moment…", parse_mode=H)
+    txt = await asyncio.to_thread(_fmt_desk, tk)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    for p in _chunk_on_sections(txt):
+        await update.message.reply_text(p, parse_mode=H, disable_web_page_preview=True)
+
+
+def _fmt_insight(conn=None):
+    """/insight — one LLM synthesis across the book, flow, dealer, vol and news."""
+    import html as _he
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        facts = _insight_facts(conn)
+    finally:
+        if own:
+            conn.close()
+    if not facts:
+        return None
+    txt, who = _llm_chat(
+        "MEASURED MARKET STATE (independent lanes, all numbers already computed):\n\n"
+        + "\n\n".join(facts)[:7000] +
+        "\n\n---\nProduce EXACTLY these five sections, no others:\n\n"
+        "**1. THE READ** — 3-4 sentences. What is the dominant force in this tape right now? "
+        "Name the single most important number and what it implies. Do not list the inputs "
+        "back to me; tell me what they MEAN together.\n\n"
+        "**2. THE DISAGREEMENT** — where do the lanes conflict? State which side you take and "
+        "WHY, using the base rates given. If they agree, say so and say what would break it.\n\n"
+        "**3. MY BOOK** — for each position in OPEN BOOK: is it helped or hurt by this state, "
+        "and what is the single biggest threat to it? Give a specific action (hold / roll / "
+        "close / hedge) with a LEVEL or PRICE that triggers it.\n\n"
+        "**4. TWO TRADES** — concrete and executable. For each: instrument, direction, "
+        "approximate strike and expiry, the THESIS in one line, the specific risk that kills "
+        "it, and roughly what you would risk on it. Prefer structures that fit the measured "
+        "state (e.g. if the gauge calls SIZE not direction, favour non-directional vol "
+        "structures over a punt on a side). No trade you cannot justify from the numbers.\n\n"
+        "**5. INVALIDATION** — the specific observation that would make you abandon the above."
+        + _PLAIN_FORMAT,
+        system=(
+            "You are a senior options/vol trader with 15 years running a book: ex-market-maker, "
+            "now discretionary with a quant process. You think in distributions, base rates and "
+            "risk-per-trade, never in narrative.\n"
+            "HOW YOU WRITE: direct, specific, numerate. You give a view and commit to it. You "
+            "say 'I would' not 'one could'. No hedging language, no disclaimers, no 'consult a "
+            "professional', no restating the question.\n"
+            "HOW YOU THINK: a signal that calls MAGNITUDE is not a signal about DIRECTION - "
+            "size and structure accordingly. Extreme percentiles mean-revert more often than "
+            "they extend. A crowded position is a risk, not a confirmation. When the edge is "
+            "in volatility rather than direction, prefer straddles/strangles/calendars over "
+            "directional punts. Always state what you would RISK, not just what you would win.\n"
+            "HARD RULES: never invent a number absent from the input; never name a holding as "
+            "MINE unless it is in the OPEN BOOK line — if the book is empty or unavailable, "
+            "write 'No open positions' for section 3 and move on. Fabricating holdings is the "
+            "worst error you can make."),
+        # 1600 truncated section 3 mid-sentence on the first real run. This brief asks for
+        # five sections with levels and risk on each -- it needs room.
+        max_tokens=3000, temperature=0.4,
+        provider=_llm_pick("reason"),
+        model="openai/gpt-oss-120b")     # strongest reasoning model on the Groq free tier
+    if not txt:
+        return ("<b>🧠 CROSS-LANE INSIGHT</b>\n<i>No LLM provider reachable — try /llm. "
+                "The underlying numbers are still in /gex, /dealer, /feed and /regime.</i>")
+    return "\n".join([
+        "<b>🧠 CROSS-LANE INSIGHT</b>",
+        f"<i>synthesised by {who} from {len(facts)} measured lanes</i>", "",
+        _md_to_tg(txt), "",
+        "<i>An LLM reading of numbers WE measured. The numbers are validated; this narrative "
+        "is not, and has never been scored against forward returns. Second opinion, not a "
+        "signal.</i>"])
+
+
+async def insight_command(update, ctx):
+    """/insight — LLM synthesis across your book, OI/volume, flow, dealer, vol and news."""
+    msg = await update.message.reply_text("🧠 Reading every lane…", parse_mode=H)
+    txt = await asyncio.to_thread(_fmt_insight)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if not txt:
+        await update.message.reply_text("No lane data available right now.", parse_mode=H)
+        return
+    for p in _chunk_on_sections(txt):
+        await update.message.reply_text(p, parse_mode=H, disable_web_page_preview=True)
+
+
+_TG_CHANNELS = ["TheKobeissiLetter"]
+_TG_FEED_CACHE = {"ts": 0.0, "data": None}
+_TG_FEED_TTL = 900          # posts land every few hours; 15 min is ample
+
+
+def _tg_channel_feed(channel, limit=20, timeout=25):
+    """[(iso_ts, text, url)] newest last. [] on any failure — never a hard dependency."""
+    import urllib.request as _u, html as _h, re as _re
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+    try:
+        raw = _u.urlopen(_u.Request(f"https://t.me/s/{channel}", headers={"User-Agent": ua}),
+                         timeout=timeout).read().decode("utf-8", "ignore")
+    except Exception:
+        log.debug("tg feed %s failed", channel, exc_info=True)
+        return []
+    texts = _re.findall(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', raw, _re.S)
+    stamps = _re.findall(r'<time datetime="([^"]+)"', raw)
+    links = _re.findall(r'<a class="tgme_widget_message_date" href="([^"]+)"', raw)
+    out = []
+    for i, t in enumerate(texts):
+        s = _re.sub(r"<br\s*/?>", " ", t)
+        s = _h.unescape(_re.sub(r"<[^>]+>", "", s)).strip()
+        if len(s) < 40:
+            continue
+        out.append((stamps[i] if i < len(stamps) else "",
+                    s, links[i] if i < len(links) else f"https://t.me/{channel}"))
+    return out[-limit:]
+
+
+def _tg_feed_all(limit=20):
+    now = time.time()
+    if _TG_FEED_CACHE["data"] and (now - _TG_FEED_CACHE["ts"]) < _TG_FEED_TTL:
+        return _TG_FEED_CACHE["data"]
+    rows = []
+    for ch in _TG_CHANNELS:
+        rows += [(ch,) + r for r in _tg_channel_feed(ch, limit)]
+    rows.sort(key=lambda r: r[1])
+    _TG_FEED_CACHE.update({"ts": now, "data": rows})
+    return rows
+
+
+def _fmt_channel_news(rows=None, analyse=True):
+    """Headlines + an LLM read. None when the feed is unreachable."""
+    import html as _hesc
+    rows = _tg_feed_all() if rows is None else rows
+    if not rows:
+        return None
+    out = [f"<b>📰 {_TG_CHANNELS[0]} — latest {min(len(rows), 8)}</b>"]
+    recent = rows[-8:]
+    for ch, ts, txt, url in recent:
+        out.append(f"• <i>{ts[5:16].replace('T', ' ')}</i> — "
+                   f"<a href=\"{url}\">{_hesc.escape(txt[:150])}</a>")
+    if analyse:
+        joined = "\n".join(f"- {t}" for _c, _s, t, _u in recent)
+        txt, who = _llm_chat(
+            "Here are the latest posts from a markets news channel:\n\n" + joined[:6000] +
+            "\n\nGive: (1) the two items that matter most for a US options trader and why, "
+            "(2) one concrete trade IDEA with its risk, (3) one thing the headlines are "
+            "over-reading. Be terse. No preamble, no disclaimers.",
+            system="You are a sceptical markets analyst. Prefer base rates over narrative.",
+            max_tokens=650)
+        if txt:
+            out.append(f"\n<b>🧠 Read ({who})</b>\n{_hesc.escape(txt)}")
+            out.append("<i>LLM commentary on public headlines — NOT a validated signal and "
+                       "not scored against forward returns. Treat as a reading aid.</i>")
+    return "\n".join(out)
+
+
+async def feed_command(update, ctx):
+    """/feed — latest posts from the tracked public channels, plus an LLM read."""
+    msg = await update.message.reply_text("📰 Pulling the channel…", parse_mode=H)
+    txt = await asyncio.to_thread(_fmt_channel_news)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if not txt:
+        await update.message.reply_text("Channel feed unavailable right now.", parse_mode=H)
+        return
+    for p in _chunk_on_sections(txt):
+        await update.message.reply_text(p, parse_mode=H,
+                                        disable_web_page_preview=True)
+
+
+# ── Free-tier LLM lane (user 2026-08-08) ─────────────────────────────────────────────
+# ONE client, several providers. Every provider below speaks the OpenAI chat-completions
+# schema -- including Google AI Studio, which publishes an OpenAI-compatible endpoint -- so
+# swapping provider is a base_url + model change, never a rewrite. That is the whole point:
+# free tiers change their terms and limits, and we must be able to move in one edit.
+#
+# Why not Anthropic here: it bills per token and this lane is high-volume, low-stakes work
+# (summarising a news channel). The paid key stays for things that are acted on.
+# Why not local: this box has no usable GPU and 15.4 GB RAM, and the user ruled it out.
+#
+# Order matters -- it is the fallback chain. Groq first for speed, Google for the big free
+# context window, OpenRouter last as the catch-all that reaches many free models on one key.
+_LLM_PROVIDERS = [
+    ("groq",   ("GROQ_API_KEY",),
+     "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+    # gemini-2.0-flash / 2.5-flash are RETIRED for new projects: 2.5 returns 404 "no longer
+    # available to new users" and the 2.0 family returns 429 with no free quota. A NEW AI
+    # Studio project only gets the current generation, so use the moving alias rather than a
+    # pinned version -- pinning is what made this look like a dead key (2026-08-08).
+    # Avoid gemini-3-flash-preview here: it is a THINKING model, and with a small max_tokens
+    # the reasoning budget consumes the whole response, returning a message with no content.
+    ("google", ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_AI_STUDIO_KEY"),
+     "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-flash-latest"),
+    # OpenRouter's :free catalogue CHURNS. deepseek-chat-v3-0324:free was the default here
+    # and by 2026-08-08 returned HTTP 404 "unavailable for free - the paid version is
+    # available now", as did deepseek-r1:free, llama-3.3-70b:free and qwen3-8b:free. Only 14
+    # slugs were actually free that day. Never hard-trust a :free slug; if this 404s, list
+    # https://openrouter.ai/api/v1/models and pick a live one ending in :free.
+    # Cerebras model list is PER-ORGANISATION. llama-3.3-70b 404'd ("model does not exist or
+    # you do not have access"); this account has gpt-oss-120b (Production), gemma-4-31b and
+    # zai-glm-4.7 (both Preview). Limits: 5 req/min, 2,400/day, 30k tok/min, 1M tok/day.
+    # The 5/min ceiling is the binding constraint -- fine for scheduled digests, NOT for a
+    # per-message loop over a busy news channel.
+    ("cerebras", ("CEREBRAS_API_KEY",),
+     "https://api.cerebras.ai/v1", "gpt-oss-120b"),
+    ("openrouter", ("OPENROUTER_API_KEY",),
+     "https://openrouter.ai/api/v1", "nvidia/nemotron-3-super-120b-a12b:free"),
+]
+
+
+def _llm_key(names):
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    return None
+
+
+def _llm_pick(task="fast"):
+    """Which provider suits THIS job? Neither is 'better' outright -- they win at different
+    things, so route by task rather than crowning one (user 2026-08-08).
+
+      fast   -> Groq. 270ms and 14,400 req/day: per-message triage, alerts, anything in a
+                loop. Google at ~1.2s and OpenRouter at ~0.9s would be the bottleneck.
+      reason -> Google. Far bigger context (1M) and stronger long-form synthesis, and
+                /insight runs a handful of times a day so latency is irrelevant.
+      long   -> Google, same reason: whole-day digests that would not fit Groq's window.
+
+    Returns None (= use the normal fallback chain) when the preferred provider has no key,
+    so a missing key degrades to "still works, slightly worse" rather than failing.
+    """
+    want = {"fast": "groq", "reason": "google", "long": "google"}.get(task, "groq")
+    for n, keys, _u, _m in _LLM_PROVIDERS:
+        if n == want and _llm_key(keys):
+            return want
+    return None
+
+
+def _llm_status():
+    """[(provider, model, configured_bool)] — so a missing key is visible, not mysterious."""
+    return [(n, model, bool(_llm_key(keys))) for n, keys, _u, model in _LLM_PROVIDERS]
+
+
+def _llm_chat(prompt, system=None, max_tokens=700, temperature=0.3,
+              provider=None, timeout=45, model=None):
+    """Ask the first configured provider. Returns (text, provider_name); (None, None) on
+    total failure — callers must treat "no LLM" as normal, never as an error path.
+
+    Falls through to the NEXT provider on any failure, because free tiers rate-limit: a 429
+    from one is an ordinary Tuesday, not an outage.
+    """
+    import urllib.request as _u, json as _j
+    msgs = ([{"role": "system", "content": system}] if system else []) + \
+           [{"role": "user", "content": prompt}]
+    # `provider` is a PREFERENCE, not a pin: try it first, then fall through to the rest.
+    # Hard-pinning meant one bad request killed the call with no fallback (caught when a
+    # Groq model slug was sent to Google and /insight went dark).
+    order = sorted(_LLM_PROVIDERS, key=lambda p: 0 if p[0] == provider else 1)
+    for name, keys, base, _default_model in order:
+        key = _llm_key(keys)
+        if not key:
+            continue
+        # A caller-supplied `model` is provider-SPECIFIC and only valid for the provider it
+        # was chosen for. Applying it to any other provider sends an unknown slug.
+        use_model = model if (model and name == "groq") else _default_model
+        # Gemini spends part of the budget REASONING before it emits anything, so a small
+        # cap returns finish_reason="length" with content=None -- which looks exactly like a
+        # dead key. Measured 2026-08-08: max_tokens=10 -> None, 200 -> "OK". Floor it.
+        _mt = max(int(max_tokens), 256) if name == "google" else int(max_tokens)
+        body = _j.dumps({"model": use_model, "messages": msgs,
+                         "max_tokens": _mt,
+                         "temperature": float(temperature)}).encode()
+        # User-Agent is REQUIRED. Groq sits behind Cloudflare, which bans urllib's default
+        # UA outright: every call returned HTTP 403 "error code: 1010" until this was set
+        # (2026-08-08). Note this is the exact OPPOSITE of FRED in this same file, which
+        # rejects a Mozilla UA and needs the default -- so neither is a safe global default
+        # and the header belongs per-endpoint.
+        req = _u.Request(base + "/chat/completions", data=body, headers={
+            "Authorization": f"Bearer {key}", "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NYSE-DATA-bot/1.0"})
+        try:
+            with _u.urlopen(req, timeout=timeout) as r:
+                d = _j.loads(r.read().decode())
+            txt = (d.get("choices") or [{}])[0].get("message", {}).get("content")
+            if txt and txt.strip():
+                return txt.strip(), name
+        except Exception as e:
+            log.debug("LLM provider %s failed: %s", name, e)
+            continue
+    return None, None
+
+
+async def llm_command(update, ctx):
+    """/llm — which free LLM providers are configured, and a live round-trip test."""
+    rows = [("🟢" if ok else "🔴", n[:10], m[:16]) for n, m, ok in _llm_status()]
+    out = [_pipe_table(("ST", "Provider", "Model"), rows, title="🤖 LLM PROVIDERS")]
+    if not any(ok for _n, _m, ok in _llm_status()):
+        out.append("<i>No key set. Add ONE of GROQ_API_KEY / GOOGLE_API_KEY / "
+                   "OPENROUTER_API_KEY to a plaintext <code>api_keys.env</code> next to the "
+                   "bot — it is merged into the encrypted vault and the plaintext deleted on "
+                   "the next start. Free keys: console.groq.com · aistudio.google.com · "
+                   "openrouter.ai</i>")
+    else:
+        txt, who = await asyncio.to_thread(
+            _llm_chat, "Reply with exactly: OK", max_tokens=12)
+        out.append(f"<b>Live test:</b> {'✅ ' + who + ' → ' + txt[:40] if txt else '❌ all configured providers failed'}")
+    for p in _chunk_on_sections("\n".join(out)):
+        await update.message.reply_text(p, parse_mode=H)
+
+
+# ── Dealer positioning: CFTC Traders in Financial Futures (user 2026-08-08) ──────────
+# The one dealer view that is REAL data rather than an assumption. Every GEX tool -- ours
+# included -- INFERS dealer option inventory from a sign convention (customers buy puts, so
+# dealers must be short them). Nobody publishes who actually took which side. The CFTC does
+# publish, weekly, what the sell-side holds in FUTURES, which is where those option books get
+# hedged. So this is a second, independent view of the same positioning.
+#
+# READ THE PERCENTILE, NOT THE LEVEL. Dealers are STRUCTURALLY net short equity index futures
+# and have been in nearly every week since 2006, so "dealers are short 716k E-minis" is not
+# bearish, it is Tuesday. What carries information is whether the position is extreme against
+# its OWN history, and which way it moved this week.
+#
+# Contract codes are PINNED, not name-matched: matching on name silently mixes E-MINI S&P 500
+# with MICRO E-MINI and S&P 500 Consolidated, which are different books (caught 2026-08-08
+# when a name LIKE query returned the Micro Nasdaq contract instead of the main one).
+
+_CFTC_URL = "https://publicreporting.cftc.gov/resource/gpe5-46if.json"
+_CFTC_MARKETS = [
+    ("13874A", "S&P 500",   "EQUITY"),
+    ("209742", "Nasdaq100", "EQUITY"),
+    ("239742", "Russell2k", "EQUITY"),
+    ("1170E1", "VIX",       "VOL"),
+    ("043602", "UST 10Y",   "RATES"),
+    ("020601", "UST 30Y",   "RATES"),
+    ("042601", "UST 2Y",    "RATES"),
+    ("098662", "USD index", "FX"),
+    ("097741", "Yen",       "FX"),
+    ("099741", "Euro",      "FX"),
+]
+_CFTC_CACHE = {"ts": 0.0, "data": None}
+_CFTC_CACHE_TTL = 6 * 3600   # weekly data released Fri 15:30 ET; 6h is more than enough
+
+
+def _ordinal(n):
+    """1 -> 1st, 2 -> 2nd, 93 -> 93rd, 11 -> 11th. The teens are the whole reason this
+    exists: naive suffix logic renders '11st' and '93th'."""
+    n = int(round(n))
+    if 10 <= n % 100 <= 20:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }".replace(" ", "")
+
+
+def _cftc_dealer(weeks=156, timeout=25):
+    """Dealer/Intermediary futures positioning per market, newest week first.
+
+    One request for every market at once -- ten separate calls took several seconds and this
+    is a panel, not a signal. Returns [] on any failure; nothing downstream may depend on it.
+    """
+    now = time.time()
+    if _CFTC_CACHE["data"] and (now - _CFTC_CACHE["ts"]) < _CFTC_CACHE_TTL:
+        return _CFTC_CACHE["data"]
+    import urllib.request as _u, urllib.parse as _up, json as _j
+    codes = ",".join("'%s'" % c for c, _, _ in _CFTC_MARKETS)
+    cutoff = (datetime.now(timezone.utc).replace(tzinfo=None)
+              - timedelta(weeks=weeks)).strftime("%Y-%m-%d")
+    where = ("cftc_contract_market_code in (%s) and report_date_as_yyyy_mm_dd > '%s'"
+             % (codes, cutoff))
+    url = (_CFTC_URL + "?$select=" + _up.quote(
+        "cftc_contract_market_code,report_date_as_yyyy_mm_dd,dealer_positions_long_all,"
+        "dealer_positions_short_all,change_in_dealer_long_all,change_in_dealer_short_all,"
+        "open_interest_all")
+        + "&$where=" + _up.quote(where)
+        + "&$order=" + _up.quote("report_date_as_yyyy_mm_dd DESC") + "&$limit=6000")
+    try:
+        raw = _j.loads(_u.urlopen(url, timeout=timeout).read().decode())
+    except Exception:
+        log.debug("CFTC dealer fetch failed", exc_info=True)
+        return []
+    by_code = {}
+    for r in raw:
+        try:
+            lo = float(r.get("dealer_positions_long_all") or 0)
+            sh = float(r.get("dealer_positions_short_all") or 0)
+            oi = float(r.get("open_interest_all") or 0)
+            if oi <= 0:
+                continue
+            by_code.setdefault(r["cftc_contract_market_code"], []).append({
+                "date": r["report_date_as_yyyy_mm_dd"][:10],
+                "net": lo - sh,
+                "net_pct": (lo - sh) / oi * 100.0,
+                "chg": (float(r.get("change_in_dealer_long_all") or 0)
+                        - float(r.get("change_in_dealer_short_all") or 0)),
+            })
+        except Exception:
+            continue
+    out = []
+    for code, name, grp in _CFTC_MARKETS:
+        hist = sorted(by_code.get(code) or [], key=lambda x: x["date"], reverse=True)
+        if len(hist) < 8:
+            continue
+        cur = hist[0]
+        # Percentile of the CURRENT net within its own history. Net is normalised by open
+        # interest first, because raw contract counts are not comparable across years as
+        # the contracts themselves grow.
+        vals = sorted(h["net_pct"] for h in hist)
+        pct = 100.0 * sum(1 for v in vals if v < cur["net_pct"]) / len(vals)
+        out.append({"code": code, "name": name, "group": grp, "date": cur["date"],
+                    "net": cur["net"], "net_pct": cur["net_pct"], "chg": cur["chg"],
+                    "pctile": pct, "n": len(hist),
+                    "hist": [(h["date"], h["net_pct"]) for h in hist[:104]][::-1]})
+    _CFTC_CACHE.update({"ts": now, "data": out})
+    return out
+
+
+def _fmt_dealer(rows=None):
+    """The /dealer report. None when CFTC is unreachable."""
+    rows = _cftc_dealer() if rows is None else rows
+    if not rows:
+        return None
+    body = []
+    for r in rows:
+        # extreme against its own history is the signal; the sign is not
+        st = "🟢" if r["pctile"] >= 90 else "🔴" if r["pctile"] <= 10 else "🟡"
+        # no '%' suffix on the value: it costs a column and the header already says Net%
+        body.append((st, r["name"][:9], f"{r['net_pct']:+.1f}", f"{r['pctile']:.0f}"))
+    out = [_pipe_table(("ST", "Market", "Net%", "Pct"), body, right_cols={2, 3},
+                       title=f"🏦 DEALER POSITIONING — CFTC week of {rows[0]['date']}")]
+
+    movers = sorted(rows, key=lambda r: -abs(r["chg"]))[:3]
+    out.append(_pipe_table(("Market", "Wk change"),
+                           [(m["name"][:9], f"{m['chg']:+,.0f}") for m in movers],
+                           right_cols={1}, title="📊 Biggest shifts this week"))
+
+    ext = [r for r in rows if r["pctile"] >= 90 or r["pctile"] <= 10]
+    if ext:
+        out.append("<b>Stretched vs their own history:</b>")
+        for r in ext:
+            side = "LONG" if r["pctile"] >= 90 else "SHORT"
+            out.append(f"  • <b>{r['name']}</b> — dealers unusually {side} "
+                       f"({_ordinal(r['pctile'])} pctile of {r['n']} weeks)")
+    else:
+        out.append("<i>Nothing stretched — every market sits inside its normal "
+                   "dealer-positioning range.</i>")
+
+    out.append("<i>WHAT THIS IS: the sell-side's FUTURES book, from the CFTC's weekly "
+               "Traders in Financial Futures report. It is where dealers hedge the options "
+               "they have written, so it is the one dealer view that is measured rather than "
+               "assumed — /gex infers option inventory from a sign convention, this does not."
+               "\n\nHOW TO READ IT: Net%OI is dealer long minus short as a share of open "
+               "interest; Pct is where that sits in its own 3-year history. Dealers are "
+               "ALWAYS net short equity index futures, so the negative sign means nothing — "
+               "only the percentile and the weekly change do. Data is as of the Tuesday of "
+               "the stated week and published the following Friday, so it is deliberately "
+               "stale: it shows where hedges were set, not where they are now.</i>")
+    return "\n".join(out)
+
+
+async def dealer_command(update, ctx):
+    """/dealer — CFTC dealer (sell-side) futures positioning, the hedge side of GEX."""
+    msg = await update.message.reply_text("🏦 Pulling CFTC dealer positioning…", parse_mode=H)
+    txt = _fmt_dealer()
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if not txt:
+        await update.message.reply_text(
+            "CFTC dealer data unavailable right now (publicreporting.cftc.gov did not "
+            "respond). It is a weekly report — nothing is lost, try again later.",
+            parse_mode=H)
+        return
+    for _p in _chunk_on_sections(txt):
+        await update.message.reply_text(_p, parse_mode=H)
+
 
 _M2_CACHE = {"ts": 0.0, "data": None}
 _M2_CACHE_TTL = 12 * 3600   # M2 is monthly data; no need to refetch more than ~2x/day
@@ -36979,7 +39673,7 @@ def _fmt_vanna_report(ticker, conn, spot):
     try:
         _pos = pd.read_sql(
             "SELECT strike, option_type, expiry, quantity FROM trades "
-            "WHERE status='OPEN' AND UPPER(ticker)=?", conn, params=(ticker.upper(),))
+            "WHERE status='OPEN' AND ticker=?", conn, params=(ticker.upper(),))
     except Exception:
         _pos = None
     if _pos is not None and not _pos.empty:
@@ -37171,8 +39865,23 @@ def _earnvol_table(rows):
         ivr_s = f"{r['ivr']:.0f}" if r["ivr"] is not None else "--"
         em_s  = f"{r['em_pct']:.1f}" if r["em_pct"] is not None else "--"
         _data.append((r["emoji"], r["ticker"], f"{r['dte_e']}d", ivr_s, em_s))
+    # Headers stay short because Telegram <pre> is capped at 28 display cells; the fix for
+    # "I don't understand the headers" is a real key, not wider columns (user 2026-08-08).
     return _pipe_table(_hdrs, _data, right_cols={2, 3, 4},
-                       legend="🔴 sell vol · 🟢 buy vol · ED=days to earnings")
+                       legend=("<b>ED</b> = trading days until it reports · "
+                               "<b>IVR</b> = IV Rank 0-100, how expensive this stock's options "
+                               "are versus its OWN past year (69 = pricier than 69% of the "
+                               "year) · <b>EM%</b> = the move the options are pricing for the "
+                               "report itself\n"
+                               "🔴 IV rich — the market is paying up for this event, so "
+                               "SELLING premium is the favoured side · 🟢 IV cheap — buying "
+                               "it is\n"
+                               "Why it matters: IV almost always collapses the morning "
+                               "after a report (the 'crush'), so a short-premium trade can win "
+                               "on vol even if the stock barely moves. The risk is the "
+                               "opposite tail — if the stock moves MORE than EM%, the crush "
+                               "will not save you. Treat EM% as your break-even, not a "
+                               "forecast."))
 
 
 async def earnvol_command(update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -37316,10 +40025,10 @@ def _ai_risk_check(conn, sig):
     try:
         oi = pd.read_sql(
             "SELECT SUM(change_OI_Call) cc, SUM(change_OI_Put) cp FROM options_change "
-            "WHERE UPPER(ticker)=? AND trade_date_now=(SELECT MAX(trade_date_now) FROM options_change)",
+            "WHERE ticker=? AND trade_date_now=(SELECT MAX(trade_date_now) FROM options_change)",
             conn, params=(tk,))
         sd = pd.read_sql(
-            "SELECT close, pcr_oi FROM stock_daily WHERE UPPER(ticker)=? "
+            "SELECT close, pcr_oi FROM stock_daily WHERE ticker=? "
             "ORDER BY trade_date DESC LIMIT 6",
             conn, params=(tk,))
         ev = [f"Ensemble: {side} conf {sig.get('conf')} prob {float(sig.get('prob', 0)):.0f}% "
@@ -37440,6 +40149,16 @@ async def _post_init(app):
             # if you already knew to type them (found 2026-08-07: 73 handlers vs 61 menu
             # entries). Telegram caps the menu at 100, so there is room for all of them.
             BotCommand("feargreed", "Fear & Greed now + 1d/1w/1m/3m/1y/5y"),
+            BotCommand("xirr", "Annualised (XIRR) return on paper trades + watchlist"),
+            BotCommand("india", "NSE end-of-day movers with delivery %"),
+            BotCommand("positions", "Open book — live marks, P&L, per-leg advice"),
+            BotCommand("whatif", "Scenario: /whatif GLD +5 — implied cross-asset move"),
+            BotCommand("why", "Test today's narratives against our data"),
+            BotCommand("desk", "Research desk report on a ticker (/desk NVDA)"),
+            BotCommand("insight", "LLM read across book, OI, flow, dealer, vol, news"),
+            BotCommand("feed", "Kobeissi channel + LLM read"),
+            BotCommand("llm", "Free LLM providers: status + live test"),
+            BotCommand("dealer", "CFTC dealer futures book (hedge side of GEX)"),
             BotCommand("heatmap", "Sector heatmap: size=cap, colour=move"),
             BotCommand("breaking", "Breaking news on YOUR positions"),
             BotCommand("catchup", "Resend today's scheduled briefings"),
@@ -37597,6 +40316,16 @@ def main():
     app.add_handler(CommandHandler("paper", paper_command))
     app.add_handler(CommandHandler("gex", gex_command))
     app.add_handler(CommandHandler("feargreed", feargreed_command))  # F&G history
+    app.add_handler(CommandHandler("xirr", xirr_command))         # annualised return/holding
+    app.add_handler(CommandHandler("india", india_command))       # NSE EOD + delivery %
+    app.add_handler(CommandHandler("positions", positions_command))  # real book (was menu-only)
+    app.add_handler(CommandHandler("whatif", whatif_command))     # entropy-pooling scenario
+    app.add_handler(CommandHandler("why", why_command))           # narrative vs our data
+    app.add_handler(CommandHandler("desk", desk_command))         # full research-desk report
+    app.add_handler(CommandHandler("insight", insight_command))   # cross-lane LLM synthesis
+    app.add_handler(CommandHandler("feed", feed_command))         # public channel + LLM read
+    app.add_handler(CommandHandler("llm", llm_command))           # free-LLM provider status
+    app.add_handler(CommandHandler("dealer", dealer_command))     # CFTC dealer futures book
     app.add_handler(CommandHandler("heatmap", heatmap_command))   # sector treemap
     app.add_handler(CommandHandler("breaking", breaking_command))  # news on your book
     app.add_handler(CommandHandler("catchup", catchup_command))   # resend today's briefings
@@ -37678,6 +40407,15 @@ def main():
         log.info("Scheduled 15-min heat-seeker stream (state-change pushes)")
         # Lane supervisor: auto-(re)start NYSE_intraday.py during market hours
         job_queue.run_repeating(intraday_lane_supervisor, interval=300, first=20)
+        # EOD lane backstop: the scheduled task is no longer the only thing that can start
+        # the download (2026-08-08). 15 min is ample - the window it watches is 5.5h wide.
+        job_queue.run_repeating(eod_lane_supervisor, interval=900, first=90)
+        # Retail crowding accrues or it does not exist: ApeWisdom serves only a snapshot, so
+        # without a scheduled write there is never any history to test the CHANGE against.
+        # Measured 2026-08-08: mention LEVELS are reactive (rho +0.27 vs trailing 5d move,
+        # p=0.007), so nothing alerts on this -- it is collected purely to become testable.
+        job_queue.run_repeating(reddit_snapshot_job, interval=6 * 3600, first=300)
+        _spawn_watchdog()
         log.info("Scheduled intraday-lane supervisor (auto-start during market hours)")
 
         # Event writeup system — pre/post macro briefs + anomaly scan
@@ -37701,3 +40439,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

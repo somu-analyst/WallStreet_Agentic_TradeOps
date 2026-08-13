@@ -378,6 +378,23 @@ if __name__ == "__main__":
                     log_msg(f"FAILURE: bb_rc={bb_rc}, rc1={rc1}")
                     exit_code = 1
 
+        # 5. NSE bhavcopy — India's own DB, independent of the US lanes above.
+        # Ingest used to be store-on-read: the file was only fetched when someone ran
+        # /india, so india_daily held whatever days the user happened to ask about. Delivery
+        # % is only meaningful as a TREND (is real accumulation building?), and a trend needs
+        # unattended daily capture. Runs whatever the US lanes did — the NSE closes ~06:00 ET,
+        # long before this — and a failure here never fails the US run.
+        if not DRY_RUN:
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                import telegram_bot_optimized as _tb
+                _n = _tb._india_store()
+                log_msg(f"NSE bhavcopy: {_n} rows stored")
+            except Exception as _e:
+                log_msg(f"NSE bhavcopy skipped ({type(_e).__name__}: {_e})")
+        else:
+            log_msg("[DRY-RUN] Would fetch the NSE bhavcopy into India_data.db")
+
         elapsed = (datetime.now() - start_time).total_seconds()
         log_msg(f"Total runtime: {elapsed:.1f}s")
         log_msg("=== SCHEDULER ENDED ===")

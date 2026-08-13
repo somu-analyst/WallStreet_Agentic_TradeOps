@@ -611,6 +611,40 @@ keep accruing our own capture-forward DB (already ~20 days and growing daily, wh
 exactly how it reaches multi-cohort on its own), or price a direct options-data vendor
 (ThetaData appears as a first-party LEAN integration and is worth a quote).
 
+## 8.1 - Databento (asked 2026-07-26, written up 2026-08-08)
+
+Asked alongside the OpenBB-vs-yfinance question and answered in conversation at the time,
+but never written down - so it kept resurfacing. Recording it here closes that loop.
+
+**What it is:** an institutional market-data vendor selling normalised historical and live
+data straight from venue feeds - full order book (MBO/MBP), trades, and OHLCV, with
+nanosecond timestamps and point-in-time correctness. It is a paid, usage-priced service; the
+free tier is a trial credit, not a lane you can run a daily job on.
+
+**Where it would genuinely help us.** Exactly one place, and it is the same gap Part 8
+identified: OPTIONS QUOTE HISTORY. Our `options_openbb` table only reaches back as far as we
+have been capturing, which is why `_hiprob_scan_asof` backfill is bounded and why
+`/recperf` must keep LIVE and BACKFILL rows apart. Databento sells OPRA history, which would
+retire that limitation outright.
+
+**Why it is still not adopted:**
+
+| Consideration | Finding |
+|---|---|
+| Cost | Usage-priced. OPRA is the largest feed in US markets - a wide chain history over years is not a hobby-budget purchase |
+| Our actual blocker | Not tooling and not equity prices. `stock_history` already goes back to 1990 and cost nothing |
+| Free alternatives | yfinance + OpenBB-cboe already cover spot, chains and fundamentals for 741 names |
+| Self-capture | The DB accrues forward every day at zero marginal cost, and now stores macro vintages and Reddit snapshots the same way |
+
+**Verdict: not adopted, and the reason is unchanged.** Buying options history only makes
+sense once a specific question is BLOCKED by its absence and that question is worth the
+invoice. Every validation this project has run so far - the pooled-t-stat retraction, the
+Investment Clock rejection, the earnings-drift asymmetry, the 89%-firing big-move alert -
+was answerable from data we already hold. When a test finally fails for want of deeper
+options history rather than for want of edge, get a Databento quote and price it against
+ThetaData. Until then it is a solution shopping for a problem.
+
+
 ---
 
 # Part 9 — Validation pass: re-testing what we already claimed (2026-08-02)
@@ -898,3 +932,226 @@ unfalsifiable; the Clock is not.
    `/recperf`; the three solo repos are the QuantMuse pattern again.
 
 **Not started - logged as tracker items 131/132, not shipped.**
+
+---
+
+# Part 12 - The Investment Clock, tested and rejected (2026-08-08)
+
+Part 11 recommended building the Merrill Lynch Investment Clock **only if it survived a test
+first**. It did not. This part records the result so nobody rebuilds it in six months.
+
+Harness: `tools/test_investment_clock.py`. 832 months, 1957-02 to 2026-06, from FRED
+(`INDPRO`, `CPIAUCSL`, `SPASTT01USM661N`, `GS10`, `TB3MS`, `PPIACO`). All macro inputs lagged
+**2 months** so nothing uses a number before it was published. Four pass/fail gates were
+written down **before** the run.
+
+## 12.1 - The result
+
+| Gate | Result |
+|---|---|
+| aggregate t > 2.0 | **PASS** t=+2.68 |
+| beats block-shuffled regimes | **PASS** p=0.014 |
+| beats a static always-stocks book | **FAIL** t=-0.17 |
+| >=3 of 4 quadrant maps correct | **FAIL** 1 of 4 |
+
+Only **Recovery -> stocks** is right. The other three are wrong:
+
+| Quadrant | Clock says | Actually wins | Designated asset's excess |
+|---|---|---|---|
+| Reflation | bonds | **stocks** (+6.00%) | -0.26% |
+| Recovery | stocks | **stocks** (+6.63%) | +6.63% (match) |
+| Overheat | commodities | **bonds** (+1.40%) | +0.23% |
+| Stagflation | cash | **bonds** (+1.70%) | +1.13% |
+
+## 12.2 - Why the headline number lied
+
+The aggregate looked good - +1.89%/yr over an equal-weight basket, t=+2.68, and it beat a
+block-shuffled null at p=0.014. Every one of those numbers is real. They are also **beside
+the point**, because the entire edge is the equity risk premium arriving through the one
+quadrant that happens to designate stocks. Against the benchmark a person would actually
+hold - all stocks - the Clock adds **-0.25%/yr, t=-0.17**.
+
+This is the Part 9 lesson in a new costume: *the null you choose decides the answer.* An
+equal-weight basket containing two assets that lose to stocks over 70 years is not a
+benchmark, it is a handicap. The gate that caught it was "beat the best static allocation",
+and it is now the gate to apply to any regime or rotation idea.
+
+## 12.3 - The one real finding
+
+The growth axis is close to noise; the **inflation axis is not**. Absolute annualised returns:
+
+| Quadrant | stocks | bonds | commodities | cash |
+|---|---|---|---|---|
+| Reflation (infl falling) | **+12.05%** | +5.79% | +2.10% | +4.26% |
+| Recovery (infl falling) | **+12.87%** | +5.37% | +2.58% | +4.14% |
+| Overheat (infl rising) | +3.14% | **+5.82%** | +4.66% | +4.07% |
+| Stagflation (infl rising) | +0.38% | **+5.26%** | +3.91% | +4.69% |
+
+The two falling-inflation rows are near-identical and so are the two rising-inflation rows -
+that is the growth axis contributing nothing. But **stocks earn ~12.5%/yr when inflation is
+falling and ~1.5%/yr when it is rising**, and bonds are flat near 5.5% in all four states.
+
+A one-axis rule (inflation falling -> stocks, rising -> bonds) gives CAGR 9.00% vs 6.65%,
+Sharpe 0.50 vs 0.24, max drawdown **-22.0% vs -53.3%**.
+
+**This is not adopted either**, for two stated reasons:
+
+1. **It is in-sample.** It was found by reading the result matrix, not pre-registered. Its
+   return edge over always-stocks is **not significant**: +1.86%/yr, t=+1.46 (halves +2.10
+   t=+1.19 and +1.62 t=+0.89 - same sign, neither conclusive).
+2. **The equity series is price-only.** No dividends, so always-stocks is understated by
+   roughly 2-3%/yr and most of the CAGR gap would close on total-return data.
+
+The Sharpe and drawdown gap is the part least likely to be an artifact, because halving a
+53% drawdown is not something a missing dividend explains. Logged as tracker **ID 168**:
+re-run on total-return series, then track it **forward** rather than re-testing the same 832
+months.
+
+## 12.4b - The one-axis rule, retested on TOTAL returns (2026-08-08)
+
+Part 12.3 kept one finding alive and attached two objections to it. The bigger objection -
+**price-only equity** - is now tested, using Shiller's `ie_data` (monthly S&P price AND
+dividends, one consistent source that also supplies CPI and the 10y rate). 1,169 months,
+1926-2023, CPI lagged 2 months. Harness: `tools/test_inflation_rule.py`.
+
+**The FINDING survives.** Inflation direction really does split equity returns, and adding
+dividends slightly WIDENS the gap rather than closing it:
+
+| State | stocks (total return) | stocks (price only) | bonds |
+|---|---|---|---|
+| inflation FALLING | **12.95%** | 9.17% | 4.65% |
+| inflation RISING | **8.58%** | 4.97% | 4.93% |
+
+Gap, falling minus rising: **+4.37%/yr** on total return, versus +4.20% price-only.
+
+**The RULE dies.** Switching to bonds when inflation rises costs **-1.71%/yr against
+always-stocks (t=-1.35)**, and both halves agree (-3.34% and -0.09%).
+
+| Strategy | CAGR | vol | Sharpe | maxDD |
+|---|---|---|---|---|
+| one-axis rule | 8.91% | 11.04% | 0.40 | -71.6% |
+| **always stocks** | **10.16%** | 15.43% | 0.40 | -81.8% |
+| static 60/40 | 8.28% | 9.74% | 0.38 | -61.0% |
+
+**Why it looked good before, in one sentence:** without dividends, rising-inflation equities
+appeared to earn ~1.5%/yr, so almost anything beat them - but their real total return is
+**8.58%**, which comfortably beats bonds' 4.93%, so the switch was never justified. The
+entire apparent edge was the missing dividend, exactly as flagged.
+
+Sharpe is a dead heat (0.40 vs 0.40) and the drawdown improvement (-71.6% vs -81.8%) is not
+worth 1.7%/yr of CAGR when both numbers are catastrophic.
+
+**Not adopted.** What to keep is the descriptive fact - equities pay you far less while
+inflation is rising - as CONTEXT in the macro read, never as a switching signal.
+
+**The transferable lesson:** a caveat you write down is only worth something if you later go
+and test it. This one was recorded the same day and overturned the conclusion within hours.
+
+# Part 13 - Entropy Pooling: ADOPTED (2026-08-08)
+
+The first thing in this whole review sequence that PASSED its pre-registered test. Parts 4,
+9, 11 and 12 all ended in rejection; recording a pass matters as much as recording a failure,
+because otherwise the file reads as reflexive scepticism rather than measurement.
+
+**The method.** Meucci's Entropy Pooling takes a panel of historical JOINT scenarios and
+re-weights them so a stated view holds on average, moving the probabilities as little as
+possible (minimum relative entropy). Package: `fortitudo.tech` 1.2.4 (pulls `cvxopt`).
+
+**The test, exactly as pre-registered in tracker row 132.** Feed `stock_history` as the joint
+panel, impose "GLD +5% over 21 days", and compare the IMPLIED move of every other asset
+against what ACTUALLY happened on real gold-rally windows. Harness:
+`tools/test_entropy_pooling.py`, 1,500 overlapping 21-day windows, 6 assets.
+
+| Asset | baseline | EP implied | actual (386 real windows) | error |
+|---|---|---|---|---|
+| SPY | 1.36% | 1.53% | 1.89% | -0.36 |
+| QQQ | 1.58% | 1.71% | 1.73% | -0.02 |
+| TLT | -0.64% | 0.10% | 0.67% | -0.57 |
+| IWM | 1.21% | 1.58% | 2.11% | -0.53 |
+| USO | 2.48% | 2.45% | 2.16% | +0.29 |
+
+**Mean absolute error 0.35pp on the non-viewed assets; direction correct 5 of 5.** It
+reproduced the historical record without being shown which windows were the gold rallies.
+
+**Why it earns its place.** Our crash analysis uses HAND-PICKED windows, so it can only
+answer questions we thought of in advance. This answers an arbitrary what-if from the same
+history, and critically it keeps real cross-asset correlations intact rather than assuming a
+beta. Shipped as `/whatif TICKER +N` and a Streamlit tab; the book's own tickers are pulled
+into the panel automatically, so it reports the implied move on positions actually held.
+
+**The honest framing kept in the output:** "Impl%" is the average outcome ACROSS HISTORY WHEN
+THIS HAPPENED. That is a different and more defensible question than "what will happen", and
+the caption says so rather than letting the number imply a forecast.
+
+**Coherence check also run:** opposite views must not give the same answer. GLD +5% implies
+SPY +1.53%; GLD -5% implies SPY -0.32%.
+
+---
+
+## 12.4 - What carries forward
+
+- **Benchmark against the best static allocation**, never only against a basket average.
+- **Read the per-cell matrix, not the aggregate.** The aggregate hid a 1-of-4 hit rate.
+- Pre-committed gates work. The verdict line said HOLDS on the first two gates alone; the
+  two written down afterwards are what produced the correct answer.
+
+---
+
+# Part 14 - The academic factor zoo, tested (2026-08-08)
+
+Row 193 asked whether the HKU Alpha Zoo's 450+ published factor definitions are worth
+mining. Ten were pre-registered and tested. Harness: `tools/test_alpha_zoo.py`.
+
+## 14.1 - The protocol, fixed before the first run
+
+Testing many ideas at p<0.05 manufactures winners by arithmetic: 10 dead factors give about
+one "significant" hit, 450 would give ~22. So the method was written down first:
+
+1. The 10 factors were **named before any was run** - none added, dropped or re-specified
+   after seeing a score.
+2. None has a free parameter, so there is nothing to fit and `daily_ic` is the right tool.
+3. Daily cross-sectional IC, de-overlapped by the 21-day horizon. Never a pooled t-stat.
+4. **Benjamini-Hochberg FDR across all 10** - ten tests at 5% is not a 5% error rate.
+5. Sanity gate first: 7% of random signals passed (expect ~5%, >10% means broken harness).
+6. **Losers reported.** A table of only the winners is how the zoo earned its reputation.
+
+Panel: 492 tickers x 2,931 days (2015-2026), from `stock_history` alone.
+
+## 14.2 - The result: nothing survives
+
+| Factor | expected | IC | t | p | sign |
+|---|---|---|---|---|---|
+| prox_52w_high | + | +0.0474 | +1.25 | 0.221 | ok |
+| momentum_12_1 | + | +0.0435 | +1.68 | **0.098** | ok |
+| mom_vol_scaled | + | +0.0417 | +1.40 | 0.169 | ok |
+| idio_vol | - | +0.0364 | +1.50 | 0.140 | **WRONG** |
+| reversal_36m | - | +0.0303 | +1.13 | 0.268 | **WRONG** |
+| low_volatility | + | +0.0228 | +0.67 | 0.506 | ok |
+| skewness | - | +0.0196 | +1.14 | 0.260 | **WRONG** |
+| illiquidity | + | -0.0079 | -0.38 | 0.703 | **WRONG** |
+| max_daily | - | +0.0033 | +0.12 | 0.904 | **WRONG** |
+| reversal_1m | - | -0.0004 | -0.02 | 0.987 | ok |
+
+**Raw p<0.05 survivors: 0 of 10** (chance alone would give ~0.5). **After FDR: 0.**
+And **5 of 10 carry the wrong sign** against their own published direction.
+
+## 14.3 - The caveat that keeps this honest
+
+This test is **underpowered**, and saying so matters more than the headline. De-overlapping
+a 21-day horizon leaves only **37-72 independent dates** per factor. Detecting a true IC of
+0.04 on ~50 observations is hard, so "nothing survives" is NOT proof these factors are dead
+- it is proof they are not strong enough to find in this panel at this horizon.
+
+What the wrong signs add is different and more damning: if these were weak-but-real effects,
+they should at least lean the right way. Half of them do not, which looks like noise rather
+than faint signal.
+
+## 14.4 - Verdict
+
+**Do not ship any of them, and do not mine the remaining 440.** If ten of the most-cited
+factors in finance cannot clear a correctly-specified test on our own universe, screening
+440 more would mostly produce false positives - which is the exact failure this project
+already paid for once with the pooled rank-IC t-stat.
+
+The one thing worth carrying forward is `momentum_12_1`: right sign, p=0.098, the closest
+to real. **Track it forward** rather than re-testing the same panel.

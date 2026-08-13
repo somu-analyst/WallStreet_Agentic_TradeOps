@@ -18,6 +18,52 @@ paths:
 - `/allocate [sharpe|minvar|rp]` covariance optimizer · `/ic` factor rank-IC validation.
 - Tools: `/plan` game plan · `/add` one-line add (order-free: `TICKER 375P YYYY-MM-DD ±QTY @PX [entry-date]` | `TICKER stock QTY @PX [date]`; wizard step 1 accepts typed ticker, 10-min gate in `ai_chat_handler`) · `/journal` · `/bookmarks` · `/tv` · `/terminal` (dashboard; tunnel parked — env `NYSE_MINIAPP_TUNNEL=1` re-enables).
 - `/wan` 24-model ensemble stream (15-min job, daily dedup); cached snapshot feeds `ai_chat_handler` plain-text answers.
+- **Added 2026-08-08** (all also in the Macro/Event Hub as tabs):
+  - `/dealer` CFTC Traders-in-Financial-Futures — the sell-side FUTURES book, where written options get hedged. 10 PINNED contract codes (name-matching returns MICRO E-mini by mistake). **Read the PERCENTILE, not the level** — dealers are structurally net short index futures, so -33.9% of OI at the 47th pctile is normal.
+  - `/whatif TICKER ±PCT` Entropy Pooling scenario — re-weights real history so a view holds, keeping cross-asset correlations. ADOPTED after passing its test (MAE 0.35pp vs 386 real gold-rally windows, 5/5 directions).
+  - `/insight` LLM synthesis across book + OI/volume + flow + dealer + vol + news. Every lane block is separately guarded AND must always emit something: a silently-missing lane made the model INVENT positions.
+  - `/desk [TICKER]` 11-section research-desk report, every claim tagged + source-cited.
+  - `/why` narrative vs OUR data — LLM turns a headline into a falsifiable claim, the DB returns the verdict. Stored in `narrative_checks`; the product is the per-source hit-rate once it accrues.
+  - `/feed` public Telegram channel (`_TG_CHANNELS`, t.me/s/ needs no key/session) + LLM read.
+  - `/llm` free-provider status + live round-trip. `/xirr` annualised return per holding (suppressed under 30d — annualising noise gives +800%/yr). `/india` NSE EOD + **delivery %** (own DB).
+- **Added 2026-08-10**:
+  - `/positions` — the REAL book. It never existed before: the open book was menu-button-only,
+    so typing `/positions` did nothing. The command delegates to `positions_view`, which only
+    uses `.message.reply_text` — an Update carries that too, so there is no second renderer.
+  - **Country flags on holdings** — `_ticker_flag(tk)` resolves suffix (`.NS`→🇮🇳, 45 of them)
+    → `_CROSS_MARKET` adr/etf/lev/internet → `_FLAG_EXTRA` curated ADRs → `ticker_country`
+    cache → 🇺🇸 default. **Offline by design** (a `.info` call is 1-2s; a 20-name book would
+    blow the Telegram timeout) — `tools/seed_ticker_country.py` fills the cache out of band.
+    NSE membership is NOT a lane: BSE/TITAN/MMTC collide with US tickers. Dashboard shares the
+    same resolver through `_flag_of`/`_with_flag` — never reimplement it there.
+  - `_disp_w` counts a **regional-indicator PAIR as 2 cells, not 4**. Charging 2 per codepoint
+    made every header row sit 2 cells wider than its flagged data rows.
+  - Ticker grammar in `_parse_add_args` is 15 chars and may start with a digit (`RELIANCE.NS`,
+    `7203.T`). The old 8-char letter-first cap silently rejected long foreign symbols.
+- **Previously undocumented (swept 2026-08-08)** — these were live but appeared in no doc:
+  - `/antibubble` anti-bubble watchlist
+  - `/board` command board
+  - `/breaking` market-wide + your-positions breaking news, two sections
+  - `/catalysts` catalyst radar — events with consensus vs actual
+  - `/catchup` what you missed — fires on laptop open, then hourly
+  - `/data` data-health / capture audit
+  - `/digest` EOD digest (morning/midday/evening editions)
+  - `/feargreed` Fear & Greed history 1d/1w/1m/3m/1y, reconstructed
+  - `/freq` alert frequency control
+  - `/gexcheck` GEX pre-trade check
+  - `/gexplan` GEX blueprint for a ticker
+  - `/heatmap` sector treemap PNG, tile=market cap, colour=move
+  - `/paper` paper-trading book
+  - `/premium` premium-selling scan
+  - `/reopen` reopen a closed trade
+  - `/riskoff` risk-on/off master read
+  - `/rotation` sector rotation tracker
+  - `/rovalidate` risk-on/off validation
+  - `/screen` 8 master-investor fundamental screens (Buffett/Munger/Graham/Lynch…)
+  - `/skew` put-skew panel
+  - `/status` bot + lane health
+  - `/watchlist` watchlist add/edit/list
+  - `/whymoved` why a name moved — cause + knock-on
 - Most scanners are ALSO in dashboard: ⚙️ Strategy Scanners (24) + 📡 Macro/Event Hub (incl. Live/Heat/Skew/Catalysts/Regime tabs) via `_render_tg` bridge — one engine, no duplication.
 
 ## Telegram UX conventions (2026-07-16)

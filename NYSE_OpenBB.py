@@ -634,7 +634,11 @@ def main():
     ap.add_argument("--compare", nargs="?", const="today", default=None,
                     help="parallel-test scorer: compare openbb vs yfinance for a date (default today) and exit")
     ap.add_argument("--full", action="store_true",
-                    help="after capture, automatically run derive (--stock) then skew_snapshot — one-shot recovery")
+                    help="after capture, automatically run skew_snapshot then derive (--stock) "
+                         "for the captured day plus any date missing downstream")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="with --full: redo EVERY capture date instead of just the captured day "
+                         "(one-shot recovery / after a derive formula change)")
     args = ap.parse_args()
     if args.strike_pct is not None:
         global STRIKE_PCT
@@ -834,20 +838,30 @@ def main():
     except Exception as e:
         print(f"(compare vs yfinance skipped: {e})")
 
-    # --full: one-shot recovery — derive + skew run in-process (no subprocess)
+    # --full: capture -> skew -> derive, in-process (no subprocess)
     if getattr(args, "full", False):
         _sc = sqlite3.connect(OB_DB, timeout=30)
-        _dates = [r[0] for r in _sc.execute(
-            "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
-        _sc.close()
-        print(f"\n{'='*60}\n  derive (options_daily/options_change/stock_daily)\n{'='*60}")
-        derive(dates=_dates, do_stock=True)
+        if getattr(args, "rebuild", False):
+            _dates = [r[0] for r in _sc.execute(
+                "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
+            print(f"\n--rebuild: whole-history pass over {len(_dates)} capture dates")
+        else:
+            _dates = _derive_scope(_sc)
+            print(f"\nderive scope: {_dates or 'nothing to do'}")
+        # SKEW RUNS FIRST, and the order matters: _build_serving_layer merges skew_snapshot
+        # for the SAME date, so with skew last a day's atm_iv/skew25/pcvol were written NULL
+        # and only got filled when the next night's whole-history rebuild happened to redo
+        # them. Measured 2026-08-12: daily_ticker_summary 2026-08-11 had 0/734 atm_iv while
+        # every older date had ~720. Scoping to one day without this reorder would have made
+        # those three columns permanently NULL.
         print(f"\n{'='*60}\n  skew_snapshot\n{'='*60}")
-        _sc = sqlite3.connect(OB_DB, timeout=30)
         try:
-            build_skew(_sc)
+            if _dates:
+                build_skew(_sc, dates=_dates)
         finally:
             _sc.close()
+        print(f"\n{'='*60}\n  derive (options_daily/options_change/stock_daily)\n{'='*60}")
+        derive(dates=_dates, do_stock=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1104,15 +1118,57 @@ def _build_fundamentals(conn, min_oi=10000, max_names=500):
     return n
 
 
+def _derive_scope(conn, target=None):
+    """The dates the nightly derive actually has to touch.
+
+    Every step here is a PURE function of data that does not change after capture:
+    step 1 rewrites options_daily from options_openbb, step 2 joins a day against the one
+    before it, step 4 aggregates that day's options_change. Re-running an old date therefore
+    reproduces byte-identical rows. The old loop ran all of them every night anyway — 29
+    capture dates, ~50 min of the ~57 min derive, growing ~2 min per night as history
+    accrues (measured 2026-08-12, see IDEA_TRACKER 224-229).
+
+    Scope = the captured day PLUS any capture date genuinely MISSING downstream, so a night
+    that died mid-run still self-heals on the next one without paying for a full rebuild.
+    Whole history remains available on demand via --rebuild.
+    """
+    cap = [r[0] for r in conn.execute(
+        "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
+    if not cap:
+        return []
+    want = {target or cap[-1]}
+    for tbl, col in (("options_daily", "trade_date"), ("options_change", "trade_date_now"),
+                     ("stock_daily", "trade_date"), ("daily_ticker_summary", "trade_date"),
+                     ("skew_snapshot", "trade_date")):
+        try:
+            have = {r[0] for r in conn.execute(f"SELECT DISTINCT {col} FROM {tbl}")}
+        except Exception:
+            continue                      # table not created yet — first run
+        want |= (set(cap) - have)
+    return [d for d in cap if d in want]
+
+
 def derive(dates=None, do_stock=False):
     """Full derive pipeline: options_daily -> options_change -> stock_daily -> serving layer."""
     conn = sqlite3.connect(OB_DB, timeout=30)
     all_dates = [r[0] for r in conn.execute(
         "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
-    dates = dates or all_dates
-    print(f"\nOpenBB derive -> {OB_DB}\ncapture dates: {all_dates}\nprocessing: {dates}")
+    dates = all_dates if dates is None else [d for d in dates if d]
+    if not dates:
+        print("derive: nothing in scope — skipping"); conn.close(); return
+    print(f"\nOpenBB derive -> {OB_DB}\ncapture dates: {len(all_dates)} "
+          f"({all_dates[0]}..{all_dates[-1]})\nprocessing: {dates}")
     print("\nSTEP 1: map raw -> options_daily")
-    for d in all_dates:
+    # STEP 2 joins each day against the PREVIOUS capture date, so that day must exist in
+    # options_daily — it normally does, from its own night. Map it only when it is actually
+    # missing instead of re-mapping the whole history to guarantee it.
+    have = {r[0] for r in conn.execute("SELECT DISTINCT trade_date FROM options_daily")}
+    need = set(dates)
+    for d in dates:
+        prevs = [x for x in all_dates if x < d]
+        if prevs and prevs[-1] not in have:
+            need.add(prevs[-1])
+    for d in sorted(need):
         _map_raw_to_options_daily(conn, d)
     conn.close()
     print("\nSTEP 2: compute_oi_vol_change")
@@ -1176,15 +1232,20 @@ def _skew_metrics(g):
             "liq": liq}
 
 
-def build_skew(conn):
-    """Compute skew_snapshot metrics from options_openbb into skew_snapshot table."""
+def build_skew(conn, dates=None):
+    """Compute skew_snapshot metrics from options_openbb into skew_snapshot table.
+
+    `dates=None` still means every capture date (manual rebuilds rely on that); the nightly
+    path passes the derive scope so it does one day instead of the whole history.
+    """
     conn.execute("""CREATE TABLE IF NOT EXISTS skew_snapshot (
         trade_date TEXT, ticker TEXT, skew25 REAL, atm_iv REAL, pc_iv REAL,
         pcvol REAL, pcoi REAL, liq REAL, PRIMARY KEY (trade_date, ticker))""")
     conn.commit()
-    dates = [r[0] for r in conn.execute(
-        "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
-    print(f"skew_snapshot: capture dates {dates}")
+    if dates is None:
+        dates = [r[0] for r in conn.execute(
+            "SELECT DISTINCT trade_date FROM options_openbb ORDER BY trade_date")]
+    print(f"skew_snapshot: dates {dates}")
     for d in dates:
         df = pd.read_sql(
             "SELECT ticker,strike,expiry_date,iv_Call,iv_Put,delta_Call,delta_Put,"

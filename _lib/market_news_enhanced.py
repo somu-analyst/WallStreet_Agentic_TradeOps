@@ -36,6 +36,12 @@ def get_google_finance_news(limit=5):
                 })
             
             return news
+
+        # Every getter here returned None when the feed answered non-200, and
+        # get_aggregated_news() extends a list with the result -- so ONE unhappy
+        # feed raised TypeError and killed the whole aggregation (found 2026-08-12,
+        # the news lane behind /whymoved was empty because of it).
+        return []
     except Exception as e:
         print(f"Google News error: {e}")
         return []
@@ -61,6 +67,8 @@ def get_yahoo_finance_news(limit=5):
             })
         
         return formatted_news
+
+        return []
     except Exception as e:
         print(f"Yahoo News error: {e}")
         return []
@@ -91,6 +99,8 @@ def get_marketwatch_rss(limit=5):
                 })
             
             return news
+
+        return []
     except Exception as e:
         print(f"MarketWatch error: {e}")
         return []
@@ -121,6 +131,8 @@ def get_benzinga_rss(limit=5):
                 })
 
             return news
+
+        return []
     except Exception as e:
         print(f"Benzinga error: {e}")
         return []
@@ -129,17 +141,23 @@ def get_aggregated_news(limit=5):
     """Get news from multiple sources"""
     all_news = []
 
-    # Try multiple sources
-    all_news.extend(get_yahoo_finance_news(3))
-    all_news.extend(get_google_finance_news(3))
-    all_news.extend(get_marketwatch_rss(2))
-    all_news.extend(get_benzinga_rss(2))
+    # One dead feed must not take the other three down with it. Each getter is guarded
+    # individually AND its result coerced to a list: a feed that 404s, times out or
+    # returns junk costs us that source only.
+    for _fn, _n in ((get_yahoo_finance_news, 3), (get_google_finance_news, 3),
+                    (get_marketwatch_rss, 2), (get_benzinga_rss, 2)):
+        try:
+            all_news.extend(_fn(_n) or [])
+        except Exception as _e:
+            print(f"news source {_fn.__name__} failed: {_e}")
     
     # Remove duplicates by headline similarity
     unique_news = []
     seen_titles = set()
     
     for article in all_news:
+        if not isinstance(article, dict) or not article.get('headline'):
+            continue
         # First 30 chars as duplicate check
         title_key = article['headline'][:30].lower()
         if title_key not in seen_titles:

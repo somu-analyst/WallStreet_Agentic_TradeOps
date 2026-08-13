@@ -37,6 +37,346 @@ except Exception:
     _TB_ENGINE = None
 
 
+def _flag_of(tk):
+    """Country flag for a symbol — ONE resolver, shared with the bot (ID 201).
+
+    Deliberately not reimplemented here: the bot owns `_ticker_flag` (suffix -> curated
+    country map -> `ticker_country` cache -> 🇺🇸 default) and it is offline, so calling it
+    per row costs nothing. A second copy would drift the moment one side gained a ticker."""
+    try:
+        return _TB_ENGINE._ticker_flag(tk)
+    except Exception:
+        return ""
+
+
+# ── Real flag pictures for the grid (user 2026-08-10: "show usa flag, not US") ───────────
+# Telegram ships its own emoji font, so 🇺🇸 renders as a flag there. Windows does NOT have a
+# flag glyph for regional-indicator pairs — Chrome falls back to drawing the two letters, so
+# the dashboard column read "us" / "in". The fix is to stop relying on a font: each flag is
+# a tiny inline SVG served as a data URI through st.column_config.ImageColumn, which looks
+# identical on every OS and needs no network. Anything not drawn here falls back to a
+# labelled chip (still a picture, never a bare emoji that might not resolve).
+_FLAG_SVG = {
+    "US": ('<rect width="60" height="40" fill="#fff"/><g fill="#B22234">'
+           + "".join(f'<rect y="{i * 6.154:.2f}" width="60" height="3.08"/>' for i in range(7))
+           + '</g><rect width="25" height="21.5" fill="#3C3B6E"/>'
+           + "".join(f'<circle cx="{3.5 + c * 4.3:.1f}" cy="{3.2 + r * 4.5:.1f}" r="1.15" '
+                     f'fill="#fff"/>' for r in range(4) for c in range(5))),
+    "IN": ('<rect width="60" height="13.34" fill="#FF9933"/>'
+           '<rect y="13.33" width="60" height="13.34" fill="#fff"/>'
+           '<rect y="26.66" width="60" height="13.34" fill="#138808"/>'
+           '<circle cx="30" cy="20" r="5.4" fill="none" stroke="#000080" stroke-width="1.1"/>'
+           '<circle cx="30" cy="20" r="1.1" fill="#000080"/>'),
+    "JP": ('<rect width="60" height="40" fill="#fff"/>'
+           '<circle cx="30" cy="20" r="11" fill="#BC002D"/>'),
+    "CN": ('<rect width="60" height="40" fill="#EE1C25"/>'
+           '<path d="M10 5 12.4 12.3 6.2 7.8h7.6L7.6 12.3z" fill="#FFDE00"/>'
+           '<circle cx="21" cy="4.5" r="1.6" fill="#FFDE00"/>'
+           '<circle cx="25" cy="8.5" r="1.6" fill="#FFDE00"/>'
+           '<circle cx="25" cy="14" r="1.6" fill="#FFDE00"/>'
+           '<circle cx="21" cy="18" r="1.6" fill="#FFDE00"/>'),
+    "GB": ('<rect width="60" height="40" fill="#012169"/>'
+           '<path d="M0 0 60 40M60 0 0 40" stroke="#fff" stroke-width="8"/>'
+           '<path d="M0 0 60 40M60 0 0 40" stroke="#C8102E" stroke-width="4"/>'
+           '<path d="M30 0v40M0 20h60" stroke="#fff" stroke-width="13"/>'
+           '<path d="M30 0v40M0 20h60" stroke="#C8102E" stroke-width="8"/>'),
+    "DE": ('<rect width="60" height="13.34" fill="#000"/>'
+           '<rect y="13.33" width="60" height="13.34" fill="#DD0000"/>'
+           '<rect y="26.66" width="60" height="13.34" fill="#FFCE00"/>'),
+    "FR": ('<rect width="20" height="40" fill="#002395"/>'
+           '<rect x="20" width="20" height="40" fill="#fff"/>'
+           '<rect x="40" width="20" height="40" fill="#ED2939"/>'),
+    "IT": ('<rect width="20" height="40" fill="#009246"/>'
+           '<rect x="20" width="20" height="40" fill="#fff"/>'
+           '<rect x="40" width="20" height="40" fill="#CE2B37"/>'),
+    "IE": ('<rect width="20" height="40" fill="#169B62"/>'
+           '<rect x="20" width="20" height="40" fill="#fff"/>'
+           '<rect x="40" width="20" height="40" fill="#FF883E"/>'),
+    "NL": ('<rect width="60" height="13.34" fill="#AE1C28"/>'
+           '<rect y="13.33" width="60" height="13.34" fill="#fff"/>'
+           '<rect y="26.66" width="60" height="13.34" fill="#21468B"/>'),
+    "BE": ('<rect width="20" height="40" fill="#000"/>'
+           '<rect x="20" width="20" height="40" fill="#FDDA24"/>'
+           '<rect x="40" width="20" height="40" fill="#EF3340"/>'),
+    "AT": ('<rect width="60" height="13.34" fill="#ED2939"/>'
+           '<rect y="13.33" width="60" height="13.34" fill="#fff"/>'
+           '<rect y="26.66" width="60" height="13.34" fill="#ED2939"/>'),
+    "ES": ('<rect width="60" height="40" fill="#AA151B"/>'
+           '<rect y="10" width="60" height="20" fill="#F1BF00"/>'),
+    "PT": ('<rect width="60" height="40" fill="#FF0000"/>'
+           '<rect width="24" height="40" fill="#006600"/>'
+           '<circle cx="24" cy="20" r="6" fill="#FFFF00" stroke="#FF0000" stroke-width="1"/>'),
+    "CH": ('<rect width="60" height="40" fill="#D52B1E"/>'
+           '<rect x="26" y="10" width="8" height="20" fill="#fff"/>'
+           '<rect x="18" y="16" width="24" height="8" fill="#fff"/>'),
+    "SE": ('<rect width="60" height="40" fill="#006AA7"/>'
+           '<rect x="17" width="7" height="40" fill="#FECC00"/>'
+           '<rect y="16.5" width="60" height="7" fill="#FECC00"/>'),
+    "DK": ('<rect width="60" height="40" fill="#C60C30"/>'
+           '<rect x="17" width="7" height="40" fill="#fff"/>'
+           '<rect y="16.5" width="60" height="7" fill="#fff"/>'),
+    "NO": ('<rect width="60" height="40" fill="#BA0C2F"/>'
+           '<rect x="15" width="11" height="40" fill="#fff"/>'
+           '<rect y="14.5" width="60" height="11" fill="#fff"/>'
+           '<rect x="18" width="5" height="40" fill="#00205B"/>'
+           '<rect y="17.5" width="60" height="5" fill="#00205B"/>'),
+    "FI": ('<rect width="60" height="40" fill="#fff"/>'
+           '<rect x="16" width="9" height="40" fill="#003580"/>'
+           '<rect y="15.5" width="60" height="9" fill="#003580"/>'),
+    "IS": ('<rect width="60" height="40" fill="#02529C"/>'
+           '<rect x="15" width="11" height="40" fill="#fff"/>'
+           '<rect y="14.5" width="60" height="11" fill="#fff"/>'
+           '<rect x="18" width="5" height="40" fill="#DC1E35"/>'
+           '<rect y="17.5" width="60" height="5" fill="#DC1E35"/>'),
+    "KR": ('<rect width="60" height="40" fill="#fff"/>'
+           '<path d="M30 12a8 8 0 010 16 8 8 0 000-16z" fill="#CD2E3A"/>'
+           '<path d="M30 12a8 8 0 000 16 8 8 0 010-16z" fill="#0047A0"/>'
+           '<g stroke="#000" stroke-width="1.4"><path d="M8 10h7M8 13h7M45 10h7M45 13h7"/></g>'),
+    "TW": ('<rect width="60" height="40" fill="#FE0000"/>'
+           '<rect width="30" height="20" fill="#000095"/>'
+           '<circle cx="15" cy="10" r="5" fill="#fff"/>'),
+    "HK": ('<rect width="60" height="40" fill="#DE2910"/>'
+           '<circle cx="30" cy="20" r="8" fill="#fff"/>'
+           '<circle cx="30" cy="20" r="3" fill="#DE2910"/>'),
+    "SG": ('<rect width="60" height="40" fill="#fff"/>'
+           '<rect width="60" height="20" fill="#EF3340"/>'
+           '<circle cx="14" cy="10" r="6.5" fill="#fff"/>'
+           '<circle cx="17.5" cy="10" r="6.5" fill="#EF3340"/>'),
+    "IL": ('<rect width="60" height="40" fill="#fff"/>'
+           '<rect y="4" width="60" height="5" fill="#0038B8"/>'
+           '<rect y="31" width="60" height="5" fill="#0038B8"/>'
+           '<path d="M30 12l6 10.5H24zM30 28l-6-10.5h12z" fill="none" stroke="#0038B8" '
+           'stroke-width="1.6"/>'),
+    "CA": ('<rect width="60" height="40" fill="#fff"/>'
+           '<rect width="15" height="40" fill="#FF0000"/>'
+           '<rect x="45" width="15" height="40" fill="#FF0000"/>'
+           '<path d="M30 9l2.4 5.4 4.6-2-1.6 5.6 4.6.6-3.8 3.2 1.4 5-5.6-2.4-1.6 6.6-1.6-6.6'
+           '-5.6 2.4 1.4-5-3.8-3.2 4.6-.6-1.6-5.6 4.6 2z" fill="#FF0000"/>'),
+    "BR": ('<rect width="60" height="40" fill="#009B3A"/>'
+           '<path d="M30 5 55 20 30 35 5 20z" fill="#FEDF00"/>'
+           '<circle cx="30" cy="20" r="7" fill="#002776"/>'),
+    "AU": ('<rect width="60" height="40" fill="#00008B"/>'
+           '<rect width="30" height="20" fill="#012169"/>'
+           '<path d="M0 0 30 20M30 0 0 20" stroke="#fff" stroke-width="4"/>'
+           '<path d="M15 0v20M0 10h30" stroke="#fff" stroke-width="6"/>'
+           '<path d="M15 0v20M0 10h30" stroke="#C8102E" stroke-width="3"/>'
+           '<circle cx="15" cy="31" r="2.6" fill="#fff"/>'
+           '<circle cx="45" cy="12" r="1.8" fill="#fff"/>'
+           '<circle cx="49" cy="24" r="1.8" fill="#fff"/>'),
+    "NZ": ('<rect width="60" height="40" fill="#00247D"/>'
+           '<rect width="30" height="20" fill="#012169"/>'
+           '<path d="M0 0 30 20M30 0 0 20" stroke="#fff" stroke-width="4"/>'
+           '<path d="M15 0v20M0 10h30" stroke="#fff" stroke-width="6"/>'
+           '<path d="M15 0v20M0 10h30" stroke="#C8102E" stroke-width="3"/>'
+           '<circle cx="44" cy="10" r="1.8" fill="#C8102E"/>'
+           '<circle cx="48" cy="20" r="1.8" fill="#C8102E"/>'
+           '<circle cx="44" cy="30" r="1.8" fill="#C8102E"/>'),
+    "MX": ('<rect width="20" height="40" fill="#006847"/>'
+           '<rect x="20" width="20" height="40" fill="#fff"/>'
+           '<rect x="40" width="20" height="40" fill="#CE1126"/>'
+           '<circle cx="30" cy="20" r="4" fill="#8B4513"/>'),
+    "AR": ('<rect width="60" height="40" fill="#fff"/>'
+           '<rect width="60" height="13.34" fill="#74ACDF"/>'
+           '<rect y="26.66" width="60" height="13.34" fill="#74ACDF"/>'
+           '<circle cx="30" cy="20" r="4" fill="#F6B40E"/>'),
+    "CL": ('<rect width="60" height="40" fill="#fff"/>'
+           '<rect y="20" width="60" height="20" fill="#D52B1E"/>'
+           '<rect width="20" height="20" fill="#0039A6"/>'
+           '<circle cx="10" cy="10" r="4" fill="#fff"/>'),
+    "ZA": ('<rect width="60" height="40" fill="#002395"/>'
+           '<rect width="60" height="20" fill="#DE3831"/>'
+           '<rect y="16" width="60" height="8" fill="#fff"/>'
+           '<path d="M0 0 22 20 0 40z" fill="#007A4D"/>'),
+    "KZ": ('<rect width="60" height="40" fill="#00AFCA"/>'
+           '<circle cx="32" cy="19" r="7" fill="#FEC50C"/>'),
+    "TR": ('<rect width="60" height="40" fill="#E30A17"/>'
+           '<circle cx="24" cy="20" r="8" fill="#fff"/>'
+           '<circle cx="27" cy="20" r="6.4" fill="#E30A17"/>'
+           '<circle cx="36" cy="20" r="3" fill="#fff"/>'),
+    "GR": ('<rect width="60" height="40" fill="#fff"/>'
+           + "".join(f'<rect y="{i * 8.9:.1f}" width="60" height="4.45" fill="#0D5EAF"/>'
+                     for i in range(5))
+           + '<rect width="22" height="22" fill="#0D5EAF"/>'
+             '<rect x="9" width="4.5" height="22" fill="#fff"/>'
+             '<rect y="9" width="22" height="4.5" fill="#fff"/>'),
+    "TH": ('<rect width="60" height="40" fill="#A51931"/>'
+           '<rect y="6.7" width="60" height="26.6" fill="#F4F5F8"/>'
+           '<rect y="13.3" width="60" height="13.4" fill="#2D2A4A"/>'),
+    "ID": ('<rect width="60" height="20" fill="#CE1126"/>'
+           '<rect y="20" width="60" height="20" fill="#fff"/>'),
+    "PL": ('<rect width="60" height="20" fill="#fff"/>'
+           '<rect y="20" width="60" height="20" fill="#DC143C"/>'),
+    "SA": ('<rect width="60" height="40" fill="#006C35"/>'
+           '<rect x="10" y="26" width="40" height="2.5" fill="#fff"/>'
+           '<rect x="14" y="13" width="32" height="2.5" fill="#fff"/>'),
+    "EG": ('<rect width="60" height="13.34" fill="#CE1126"/>'
+           '<rect y="13.33" width="60" height="13.34" fill="#fff"/>'
+           '<rect y="26.66" width="60" height="13.34" fill="#000"/>'
+           '<circle cx="30" cy="20" r="3.4" fill="#C09300"/>'),
+    "MY": ('<rect width="60" height="40" fill="#fff"/>'
+           + "".join(f'<rect y="{i * 5.71:.1f}" width="60" height="2.86" fill="#CC0001"/>'
+                     for i in range(7))
+           + '<rect width="30" height="22.8" fill="#010066"/>'
+             '<circle cx="12" cy="11" r="6" fill="#FFCC00"/>'
+             '<circle cx="15" cy="11" r="5" fill="#010066"/>'),
+    "EU": ('<rect width="60" height="40" fill="#003399"/>'
+           + "".join(f'<circle cx="{30 + 11 * __import__("math").cos(a):.1f}" '
+                     f'cy="{20 + 11 * __import__("math").sin(a):.1f}" r="1.5" fill="#FFCC00"/>'
+                     for a in [i * 0.5236 for i in range(12)])),
+}
+
+
+def _flag_img(tk):
+    """data: URI for the country picture of one symbol — no network, no font dependency."""
+    cc = "".join(chr(ord(c) - 0x1F1E6 + 65) for c in _flag_of(tk)
+                 if 0x1F1E6 <= ord(c) <= 0x1F1FF) or "US"
+    return _cc_img(cc)
+
+
+# Currency -> the country whose flag represents it in headings and headline numbers.
+_CCY_CC = {"USD": "US", "INR": "IN", "EUR": "EU", "GBp": "GB", "GBP": "GB", "JPY": "JP",
+           "HKD": "HK", "CNY": "CN", "KRW": "KR", "TWD": "TW", "CAD": "CA", "AUD": "AU",
+           "NZD": "NZ", "SGD": "SG", "CHF": "CH", "SEK": "SE", "NOK": "NO", "DKK": "DK",
+           "BRL": "BR", "MXN": "MX", "ILS": "IL", "ZAR": "ZA", "MYR": "MY", "THB": "TH",
+           "IDR": "ID", "PLN": "PL"}
+
+
+def _flag_html(cc, h=15):
+    """Inline <img> flag for a markdown heading or headline number.
+
+    st.metric labels and st.markdown are ordinary HTML, but a 🇺🇸 emoji there hits the same
+    Windows font gap that made the grid read "us" — so the flag has to be a picture here too.
+    """
+    # Sized with the width/height ATTRIBUTES, not a style attribute: inline styles do not
+    # survive into this file, so a styled <img> silently rendered at its natural size.
+    return f'<img src="{_cc_img(cc)}" alt="{cc}" height="{h}" width="{int(h * 1.5)}">'
+
+
+def _cc_img(cc):
+    """data: URI flag picture for a 2-letter country code."""
+    import base64 as _b64
+    cc = str(cc or "US").upper()
+    body = _FLAG_SVG.get(cc)
+    if not body:      # not drawn yet — a labelled chip is still a picture, never a bare glyph
+        body = ('<rect width="60" height="40" rx="6" fill="#4a5568"/>'
+                f'<text x="30" y="26" font-family="Segoe UI,Arial" font-size="19" '
+                f'font-weight="700" fill="#fff" text-anchor="middle">{cc}</text>')
+    # ImageColumn scales an image to the ROW HEIGHT, so a flag that fills its own canvas
+    # renders as a big picture (user 2026-08-10: "flag is very big... small size"). Drawing
+    # it small inside a mostly-TRANSPARENT canvas is what controls the apparent size: the
+    # canvas still scales to the row, the flag only occupies ~40% of it, left-aligned so it
+    # reads like an inline glyph next to the ticker rather than a tile.
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 40" width="60" '
+           f'height="40"><g transform="translate(1,12) scale(0.40)">{body}'
+           f'<rect width="60" height="40" fill="none" stroke="#00000055" stroke-width="2.5"/>'
+           f'</g></svg>')
+    return "data:image/svg+xml;base64," + _b64.b64encode(svg.encode("utf-8")).decode()
+
+
+def _with_flag(df, col="Ticker", at=0):
+    """Insert a 🌍 column beside the ticker. Kept as its own column rather than glued onto
+    the symbol so sorting, filtering and every downstream ticker lookup still see a clean
+    symbol string."""
+    try:
+        if df is None or col not in getattr(df, "columns", []):
+            return df
+        if "🌍" in df.columns:
+            return df
+        df.insert(at, "🌍", df[col].astype(str).map(_flag_img))
+    except Exception:
+        pass
+    return df
+
+
+# ── One box per session: the compact up/down strip (user 2026-08-10, ID 219) ────────────
+# "you can show one day one small green or red box". A LineChartColumn draws a curve whose
+# height is set by Streamlit, which is what made the trend column taller than every other
+# cell. An ImageColumn scales its picture to the ROW height instead, so the strip can never
+# grow the row — the same reason the flag column is drawn, not written.
+#
+# Shade carries magnitude so a week of +0.1% days does not look like a week of +4% days:
+# pale = under 1%, mid = 1-3%, deep = 3%+. Colour alone still answers "up or down?" at a
+# glance, which is the question the column exists to answer.
+_UD_UP   = ("#86efac", "#22c55e", "#15803d")
+_UD_DOWN = ("#fca5a5", "#ef4444", "#b91c1c")
+_UD_FLAT = "#9ca3af"
+
+
+def _updown_img(closes, n=5):
+    """N daily up/down boxes as a data-URI SVG, or None when history is too short.
+
+    Canvas is 3:1 and identical for both spans, so the 1W and 1M columns line up and stay
+    inside the 2x-P&L%-width budget the user set — 21 boxes just get thinner than 5.
+    """
+    try:
+        px = [float(c) for c in (closes or []) if c == c and c is not None]
+    except (TypeError, ValueError):
+        return None
+    if len(px) < 2:
+        return None
+    rets = [(px[i] - px[i - 1]) / px[i - 1] * 100 for i in range(1, len(px)) if px[i - 1]]
+    rets = rets[-n:]
+    if not rets:
+        return None
+    import base64 as _b64          # local: the flag helper imports it inside its own body
+    W, H, BH = 96.0, 32.0, 19.0
+    gap = 1.6 if len(rets) <= 8 else 0.7
+    bw = max((W - gap * (len(rets) - 1)) / len(rets), 0.8)
+    body, x = [], 0.0
+    for r in rets:
+        a = abs(r)
+        if a < 0.05:
+            fill = _UD_FLAT
+        else:
+            ramp = _UD_UP if r > 0 else _UD_DOWN
+            fill = ramp[2] if a >= 3 else (ramp[1] if a >= 1 else ramp[0])
+        body.append(f'<rect x="{x:.2f}" y="{(H - BH) / 2:.1f}" width="{bw:.2f}" '
+                    f'height="{BH:.0f}" rx="{min(1.4, bw / 3):.1f}" fill="{fill}"/>')
+        x += bw + gap
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W:.0f} {H:.0f}" '
+           f'width="{W:.0f}" height="{H:.0f}">{"".join(body)}</svg>')
+    return "data:image/svg+xml;base64," + _b64.b64encode(svg.encode("utf-8")).decode()
+
+
+def _updown_pair(hist, close_col="Close"):
+    """(1W, 1M) strips from one daily-history frame. 5 and 21 sessions = a trading week
+    and a trading month, not 7/30 calendar days that would silently include weekends."""
+    try:
+        ser = hist[close_col].dropna().tolist() if hist is not None and len(hist) else []
+    except Exception:
+        return None, None
+    return (_updown_img(ser[-6:], 5), _updown_img(ser[-22:], 21))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _vxn_now():
+    """Live VXN (Nasdaq-100 vol), or None.
+
+    User 2026-08-08: show VXN wherever VIX is shown -- IN ADDITION to it, not replacing it.
+    Reads the bot's _get_vol_indices (5-min cache, ^VIX + ^VXN in one fetch) rather than the
+    DB: ^VXN has never been written to stock_daily and ^VIX there stopped updating on
+    2026-07-01, so the table is not a usable source for either.
+    """
+    try:
+        return float((_TB_ENGINE._get_vol_indices() or {}).get("vxn") or 0) or None
+    except Exception:
+        return None
+
+
+def _vix_vxn(vix_val):
+    """('VIX / VXN', '14.9 / 22.8') for a combined tile, or plain VIX when VXN is missing.
+
+    Combined rather than a new column because every one of these rows is already a fixed
+    4-6 column layout; adding a column would reflow them all.
+    """
+    _n = _vxn_now()
+    if vix_val is None:
+        return ("VIX / VXN", f"— / {_n:.1f}" if _n else "N/A")
+    if not _n:
+        return ("VIX", f"{vix_val:.1f}")
+    return ("VIX / VXN", f"{vix_val:.1f} / {_n:.1f}")
+
+
 @st.cache_data(ttl=21600, show_spinner=False)
 def _si_for(ticker):
     """Short-interest read for one ticker. 6h TTL: exchanges publish SI twice a month with a
@@ -480,6 +820,20 @@ def _cached_price(ticker: str) -> float:
     db = _db_spot(ticker)
     if db > 0:
         return db
+    # Bare foreign symbol (MOTHERSON -> MOTHERSON.NS), via the SAME resolver the bot uses.
+    # Only reached once every US lane is empty, so no US ticker pays for it. Without this
+    # the grid fell back to the ENTRY price and the position looked flat forever.
+    try:
+        alt = _TB_ENGINE._yf_alias(ticker) if _TB_ENGINE else None
+        if alt:
+            _px = float(yf.Ticker(alt).fast_info.get("lastPrice") or 0)
+            if _px > 0:
+                return _px
+            _h = _cached_history(alt, period="5d")
+            if len(_h) >= 1:
+                return float(_h["Close"].iloc[-1])
+    except Exception:
+        pass
     try:
         h = _cached_history(ticker, period="5d")
         return float(h["Close"].iloc[-1]) if len(h) >= 1 else 0.0
@@ -1403,8 +1757,11 @@ def _gp_live_strip():
             (_chg / _base * 100.0) if (_chg is not None and _base > 0) else None)
         # delta vs the LAST TICK, so you can see which quote just moved
         _tick = _px - float(_prev.get(_tk, _px))
-        _arrow = "up" if _tick > 0 else ("dn" if _tick < 0 else "flat")
-        _cols[_i].metric(f"{_arrow} {_tk}", f"${_px:,.2f}",
+        # Ticker FIRST, then a tick glyph (user 2026-08-12: the strip read "up GOOG" —
+        # the placeholder words "up"/"dn"/"flat" were shipping as the visible label, which
+        # also buried the identity of the quote behind a direction word).
+        _arrow = "▲" if _tick > 0 else ("▼" if _tick < 0 else "")
+        _cols[_i].metric(f"{_tk} {_arrow}".strip(), f"${_px:,.2f}",
                          (f"{_chg:+.2f} ({_pct:+.2f}%)" if _pct is not None else None))
     st.session_state["_live_last_px"] = _now
     st.caption(f"live · {datetime.now().strftime('%H:%M:%S')} — quotes update in place; "
@@ -3553,8 +3910,8 @@ def _gp_orderflow(tk):
     try:
         df = pd.read_sql(
             "SELECT change_OI_Call, change_OI_Put, vol_Call_now, vol_Put_now FROM options_change "
-            "WHERE UPPER(ticker)=? AND trade_date_now=(SELECT trade_date_now FROM options_change "
-            "WHERE UPPER(ticker)=? ORDER BY trade_date_now DESC LIMIT 1)", conn, params=(tk.upper(), tk.upper()))
+            "WHERE ticker=? AND trade_date_now=(SELECT trade_date_now FROM options_change "
+            "WHERE ticker=? ORDER BY trade_date_now DESC LIMIT 1)", conn, params=(tk.upper(), tk.upper()))
     except Exception:
         df = pd.DataFrame()
     finally:
@@ -3599,8 +3956,8 @@ def _gp_oi_analytics(tk, spot):
         df = pd.read_sql(
             "SELECT strike, expiry_date, change_OI_Call, change_OI_Put, "
             "openInt_Call_now, openInt_Put_now, vol_Call_now, vol_Put_now FROM options_change "
-            "WHERE UPPER(ticker)=? AND trade_date_now=(SELECT trade_date_now FROM options_change "
-            "WHERE UPPER(ticker)=? ORDER BY trade_date_now DESC LIMIT 1)", conn, params=(tk.upper(), tk.upper()))
+            "WHERE ticker=? AND trade_date_now=(SELECT trade_date_now FROM options_change "
+            "WHERE ticker=? ORDER BY trade_date_now DESC LIMIT 1)", conn, params=(tk.upper(), tk.upper()))
     except Exception:
         df = pd.DataFrame()
     finally:
@@ -4859,8 +5216,8 @@ def _iv_rank(ticker, r=0.045):
     try:
         df = pd.read_sql(
             "SELECT trade_date_now, strike, expiry_date, lastPrice_Call_now FROM options_change "
-            "WHERE UPPER(ticker)=?", conn, params=(ticker.upper(),))
-        sd = pd.read_sql("SELECT trade_date, close FROM stock_daily WHERE UPPER(ticker)=?",
+            "WHERE ticker=?", conn, params=(ticker.upper(),))
+        sd = pd.read_sql("SELECT trade_date, close FROM stock_daily WHERE ticker=?",
                          conn, params=(ticker.upper(),))
     finally:
         conn.close()
@@ -4951,7 +5308,7 @@ def _roll_suggestion(conn, leg):
                                        leg["side"], leg["spot"], leg["cur"])
         last_col = "lastPrice_Call_now" if typ == "call" else "lastPrice_Put_now"
         ch = pd.read_sql(
-            f"SELECT expiry_date, strike, {last_col} AS last FROM options_change WHERE UPPER(ticker)=?",
+            f"SELECT expiry_date, strike, {last_col} AS last FROM options_change WHERE ticker=?",
             conn, params=(tk.upper(),))
         if ch.empty:
             return None
@@ -5001,7 +5358,7 @@ def _portfolio_var(legs, r=0.045, lookback=60, conf=0.05):
         rets = {}
         for tk in {l["ticker"] for l in legs}:
             sd = pd.read_sql(
-                "SELECT close FROM stock_daily WHERE UPPER(ticker)=? ORDER BY "
+                "SELECT close FROM stock_daily WHERE ticker=? ORDER BY "
                 "trade_date DESC LIMIT ?",
                 conn, params=(tk.upper(), lookback + 1))
             c = list(sd["close"].astype(float))[::-1]
@@ -6163,13 +6520,89 @@ _PIN_PRIMARY = ("Ticker", "Tkr", "Symbol", "Sym", "Pair", "Market", "Name", "Com
 _PIN_SECOND = ("Spot", "Spot $", "Px", "Price", "Close", "Last", "Score", "Value")
 
 
-def _pinned_df(data, *args, **kwargs):
-    """st.dataframe with identity columns pinned. Falls back silently on older Streamlit."""
+_DEC3_RE = re.compile(r"^[^\d]{0,2}[\d,]*\.\d{3,}[^\d]{0,2}$")
+
+
+def _two_dp(v):
+    """2dp, but never fake a zero: a real 0.004 shows as <0.01, not 0.00."""
+    try:
+        if v is None or (isinstance(v, float) and v != v):    # None / NaN
+            return "—"
+        f = float(v)
+    except (TypeError, ValueError):
+        return v
+    if f != 0 and abs(f) < 0.005:
+        # Rounds to zero but isn't zero. NOT "<0.01": pandas' Styler does not escape HTML,
+        # so a literal '<' opens a tag and the cell disappears from the rendered grid.
+        return "≈0.00" if f > 0 else "≈-0.00"
+    return f"{f:,.2f}"
+
+
+def _cap_2dp(data):
+    """Cap DISPLAY precision at 2 decimals everywhere (user 2026-08-08, ID 197/203).
+
+    Values were already rounded at source in most places; the leak was on the DISPLAY side —
+    a pandas Styler with no .format() falls back to `display.precision` of 6, which is how
+    Paper Trading was showing `Qty 101.000000`. Doing it here, in the one helper every grid
+    goes through, is what keeps it from having to be remembered per table.
+
+    Two things are deliberately left alone:
+      * columns a caller already formatted (per-column `.format({...})` dicts on the Shorts
+        and Gamma-Wall tables) — those are intentional and would be clobbered by a blanket
+        format, so only unformatted float columns are touched;
+      * any column with an explicit column_config — that is the escape hatch for a column
+        that genuinely needs more precision.
+    """
     try:
         import pandas as _pd
-        cols = list(data.columns) if isinstance(data, _pd.DataFrame) else []
+        from pandas.io.formats.style import Styler as _Styler
     except Exception:
-        cols = []
+        return data
+    try:
+        if not isinstance(data, _Styler):
+            return data
+        _df = data.data
+        if _df.empty:
+            return data
+        funcs = getattr(data, "_display_funcs", None)
+        # Ask each column what it would actually PRINT, and cap only the ones printing 3+
+        # decimals. Checking the rendered text (not the dtype) is what makes this safe next
+        # to the per-column .format({...}) dicts on the Shorts and Gamma-Wall tables:
+        # "$450" and "12.3%" do not match, so they are left exactly as their author wrote
+        # them. Same test the bot's _pipe_table uses, so both front ends agree on the rule.
+        wide = []
+        for j, c in enumerate(_df.columns):
+            for i in range(min(len(_df), 5)):
+                v = _df.iloc[i, j]
+                if v is None or (isinstance(v, float) and v != v):
+                    continue
+                try:
+                    fn = funcs[(i, j)] if funcs is not None else None
+                    shown = fn(v) if callable(fn) else None
+                except Exception:
+                    shown = None
+                if shown is None:
+                    shown = f"{v:.6f}" if isinstance(v, float) else str(v)
+                if isinstance(shown, str) and _DEC3_RE.match(shown.strip()):
+                    wide.append(c)
+                break
+        return data.format(_two_dp, subset=wide) if wide else data
+    except Exception:
+        return data
+
+
+def _pinned_df(data, *args, **kwargs):
+    """st.dataframe with identity columns pinned. Falls back silently on older Streamlit."""
+    data = _cap_2dp(data)
+    try:
+        import pandas as _pd
+        # A Styler hides its columns behind .data — read through it, or every styled table
+        # (Paper Trading, P&L groups, …) silently loses pinning AND the flag ImageColumn,
+        # which is how the flag column would have rendered as a raw data: URI string.
+        _frame = data.data if hasattr(data, "data") and not isinstance(data, _pd.DataFrame) else data
+        cols = list(_frame.columns) if isinstance(_frame, _pd.DataFrame) else []
+    except Exception:
+        _frame, cols = data, []
     if cols:
         cfg = dict(kwargs.get("column_config") or {})
         pinned = 0
@@ -6191,6 +6624,31 @@ def _pinned_df(data, *args, **kwargs):
                     pinned += 1
                 except Exception:
                     pass
+        # Plain-DataFrame half of the 2dp rule. Only float columns with no caller-supplied
+        # config: ints keep their natural form, and an explicit column_config still wins.
+        # The flag column is a picture everywhere it appears, without each caller repeating it.
+        if "🌍" in cols and "🌍" not in cfg:
+            try:
+                cfg["🌍"] = st.column_config.ImageColumn(
+                    "🌍", width="small",
+                    help="Country the instrument belongs to — from the exchange suffix "
+                         "(.NS = India) or a curated ADR/ETF map; 🇺🇸 by default.")
+            except Exception:
+                pass
+        try:
+            import pandas as _pd2
+            for name in cols:
+                if name in cfg or not _pd2.api.types.is_float_dtype(_frame[name]):
+                    continue
+                _s = _frame[name].dropna()
+                if _s.empty:
+                    continue
+                # EVERY float column reads 2dp, not just the ones that overflow it — the rule
+                # is a display rule, so 166.8 and 166.80 in the same column is the same bug in
+                # a smaller size. Callers that need other precision pass their own config.
+                cfg[name] = st.column_config.NumberColumn(str(name), format="%.2f")
+        except Exception:
+            pass
         if cfg:
             kwargs["column_config"] = cfg
     try:
@@ -6388,7 +6846,11 @@ if page == "🌍 Market Overview":
                     _vts_label = "🟡 FLAT — Transitioning / uncertain"
                     _vts_color = "#e6a800"
                 _vtc1, _vtc2, _vtc3, _vtc4 = st.columns(4)
-                _vtc1.metric("VIX (spot)", f"{_vix_now:.2f}", help="Short-term fear gauge")
+                _vn_ts = _vxn_now()
+                _vtc1.metric("VIX (spot)", f"{_vix_now:.2f}",
+                             f"VXN {_vn_ts:.1f}" if _vn_ts else None, delta_color="off",
+                             help="Short-term S&P fear gauge. VXN below it is the "
+                                  "Nasdaq-100 equivalent, normally higher.")
                 _vtc2.metric("VIX3M (3-month)", f"{_vix3m_now:.2f}", help="3-month implied vol")
                 _vtc3.metric("VIX/VIX3M Ratio", f"{_vts_ratio:.3f}")
                 _vtc4.markdown(
@@ -8821,7 +9283,25 @@ elif page == "🎛️ Command Center":
                 r = pd.read_sql("SELECT close FROM stock_daily WHERE ticker=? "
                                 "ORDER BY trade_date DESC LIMIT 2", _c, params=(tk,))
                 return (float(r.close.iloc[0]), float(r.close.iloc[1])) if len(r) >= 2 else (None, None)
-            return {"spy": _last2("SPY"), "qqq": _last2("QQQ"), "vix": _last2("^VIX")}
+            # VXN added 2026-08-08 (user ask). Vol levels come from the BOT's live gauge,
+            # not from stock_daily, because the table is not a usable source for either:
+            # ^VXN has never been written to it at all, and ^VIX stopped updating on
+            # 2026-07-01 -- so this tile had been quoting a five-week-old VIX. _vol_info()
+            # pulls ^VIX and ^VXN from the live feed on a 5-minute cache. DB stays as the
+            # fallback so a dead network degrades to stale-but-labelled rather than blank.
+            _vix_db, _vxn_db = _last2("^VIX"), (None, None)
+            try:
+                import telegram_bot_optimized as _tb
+                _vi = _tb._get_vol_indices() or {}
+                _lv, _ln = float(_vi.get("vix") or 0), float(_vi.get("vxn") or 0)
+                if _lv > 0:
+                    _vix_db = (_lv, _vix_db[1] if _vix_db[1] else _lv)
+                if _ln > 0:
+                    _vxn_db = (_ln, _ln)
+            except Exception:
+                pass
+            return {"spy": _last2("SPY"), "qqq": _last2("QQQ"),
+                    "vix": _vix_db, "vxn": _vxn_db}
         finally:
             _c.close()
 
@@ -8917,7 +9397,7 @@ elif page == "🎛️ Command Center":
     try:
         _r = _cc_radar(); _w = _cc_weather()
         _t = _r["turbulence"]; _d = _r["direction"]; _nd = _r.get("nextday")
-        _c1, _c2, _c3, _c4 = st.columns(4)
+        _c1, _c2, _cv, _c3, _c4 = st.columns(5)
         _sp, _spp = _w["spy"]
         if _sp:
             _c1.metric("SPY", f"{_sp:.2f}", f"{(_sp/_spp-1)*100:+.2f}%")
@@ -8925,6 +9405,19 @@ elif page == "🎛️ Command Center":
         if _vx:
             _vlab = "calm" if _vx < 18 else ("elevated" if _vx < 25 else "high")
             _c2.metric("VIX", f"{_vx:.1f}", f"{_vx-_vxp:+.1f} · {_vlab}", delta_color="inverse")
+        # VXN sits NEXT TO VIX rather than replacing it: this book is tech-heavy, so the
+        # Nasdaq gauge is the more relevant one, but VXN runs structurally above VIX and a
+        # lone number under a "fear" heading would read as a spike every day. The delta
+        # shown is the SPREAD vs VIX, which is the part that says whether the risk is broad
+        # or concentrated in tech.
+        _vn, _vnp = _w.get("vxn", (None, None))
+        if _vn:
+            _c_spread = _vn - _vx if _vx else 0.0
+            _cv.metric("VXN (Nasdaq)", f"{_vn:.1f}",
+                       f"{_c_spread:+.1f} vs VIX" if _vx else f"{_vn-_vnp:+.1f}",
+                       delta_color="inverse",
+                       help="Nasdaq-100 volatility. Normally runs above VIX; a wide spread "
+                            "means the risk is concentrated in tech rather than broad.")
         _brd = next((p["reading"] for p in _r["pillars"] if p["label"] == "Broad weakness"), "n/a")
         _c3.metric("Breadth (soft)", _brd)
         _c4.metric("Big-move risk", _t["level"])
@@ -10699,9 +11192,11 @@ elif page == "🔮 Live Position Predictor":
     # ── 3) VIX Term Structure Signal ──
     st.markdown("<div>📊 Volatility & Yield Analysis</div>", unsafe_allow_html=True)
     vc1, vc2, vc3, vc4 = st.columns(4)
-    vc1.metric("VIX Level", f"{vix_val:.1f}" if vix_val else "N/A",
+    _vl, _vv = _vix_vxn(vix_val if vix_val else None)
+    vc1.metric(_vl + " Level", _vv,
                delta=f"{vix_chg:+.1f}%" if vix_chg else None,
-               delta_color="inverse")
+               delta_color="inverse",
+               help="VIX = S&P 500 vol · VXN = Nasdaq-100 vol (runs structurally higher)")
     vc2.metric("ES Futures", f"{es_pct:+.2f}%" if es_pct is not None else "N/A")
     vc3.metric("10Y Yield", f"{tnx_val:.2f}%" if tnx_val else "N/A")
     vc4.metric("Dollar Index", f"{dx_pct:+.2f}% chg" if dx_pct is not None else "N/A")
@@ -14056,7 +14551,8 @@ Real edge comes from discipline and filters — not a higher strike.
                              "Tier": st.column_config.TextColumn("Tier"),
                              "σ away": st.column_config.NumberColumn("σ away", format="%.1f"),
                              "Expectancy%": st.column_config.NumberColumn(
-                                 "Expectancy%", format="%.4f"),
+                                 # 2dp cap on result columns (user 2026-08-08)
+                                 "Expectancy%", format="%.2f"),
                          })
             st.caption("\U0001f947 Tier 1 = Far OTM ≥2% + GEX+ + VIX<16   "
                        "\U0001f948 Tier 2 = same but VIX 16-20   "
@@ -14246,7 +14742,7 @@ Real edge comes from discipline and filters — not a higher strike.
                 _tk = str(_r["ticker"]).upper()
                 if _tk not in _spots:
                     _sp = _ga_conn.execute(
-                        "SELECT close FROM stock_daily WHERE UPPER(ticker)=? ORDER BY "
+                        "SELECT close FROM stock_daily WHERE ticker=? ORDER BY "
                         "trade_date DESC LIMIT 1",
                         (_tk,)).fetchone()
                     _spots[_tk] = float(_sp[0]) if _sp else None
@@ -15024,6 +15520,27 @@ elif page == "⚡ Trade Risk Calculator":
 # ──  PAGE 10: NEXT-DAY EXIT PLANNER
 # ===================================================================
 elif page == "🎯 Next-Day Exit Planner":
+    # ID 102 — "it eats away space and I have to scroll down every time".
+    # Measured 2026-08-08: 12,387px of content, ~12 screens at a 1000px viewport. The single
+    # biggest offender was not the content but the GAPS — Streamlit's 16px block gap across
+    # 182 blocks is ~2,900px, nearly 3 screens of empty space — plus 1,382px of caption
+    # margins over 22 captions. Halving the gap and tightening paragraph/caption margins
+    # reclaims roughly a third of the page without deleting a single number.
+    # NOTE the selectors: scoping to `section.main` did NOT bind (blockGap still measured
+    # 16px after the first attempt) because current Streamlit renders the main column as
+    # .stMainBlockContainer, not <section>. Target the testid directly and
+    # exclude the sidebar, which is the only thing the section scope was buying.
+    st.markdown("""<style>
+    div[data-testid="stVerticalBlock"]{gap:.5rem !important}
+    section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"]{gap:1rem !important}
+    div[data-testid="stMarkdownContainer"] p{margin-bottom:.3rem}
+    div[data-testid="stCaptionContainer"]{margin-top:-.35rem;margin-bottom:.2rem}
+    div[data-testid="stExpander"]{margin-bottom:.3rem}
+    .stMainBlockContainer{padding-top:2rem;padding-bottom:2rem}
+    .stMainBlockContainer h2{margin-top:.4rem;margin-bottom:.3rem}
+    .stMainBlockContainer h3{margin-top:.5rem;margin-bottom:.25rem}
+    .stMainBlockContainer hr{margin:.5rem 0}
+    </style>""", unsafe_allow_html=True)
     _hdr1, _hdr2 = st.columns([4, 1])
     with _hdr1:
         st.markdown("## 🎯 Next-Day Exit Planner")
@@ -15393,7 +15910,7 @@ elif page == "🎯 Next-Day Exit Planner":
                 pass
             try:
                 row = _gp_conn.execute(
-                    "SELECT close FROM stock_daily WHERE UPPER(ticker)=? ORDER BY "
+                    "SELECT close FROM stock_daily WHERE ticker=? ORDER BY "
                     "trade_date DESC LIMIT 1",
                     (tk.upper(),)).fetchone()
                 return float(row[0]) if row else None
@@ -15424,7 +15941,7 @@ elif page == "🎯 Next-Day Exit Planner":
             try:
                 r = pd.read_sql(
                     f"SELECT {p}_close_now AS c, {p}_high_now AS h, {p}_low_now AS lo "
-                    "FROM options_change WHERE UPPER(ticker)=? AND strike=? AND expiry_date=? "
+                    "FROM options_change WHERE ticker=? AND strike=? AND expiry_date=? "
                     "ORDER BY trade_date_now DESC LIMIT 1",
                     _gp_conn, params=(tk.upper(), float(K), exp_mdy))
                 if not r.empty:
@@ -15439,7 +15956,7 @@ elif page == "🎯 Next-Day Exit Planner":
             col = "lastPrice_Call_now" if typ == "call" else "lastPrice_Put_now"
             try:
                 pr = pd.read_sql(
-                    f"SELECT {col} AS last FROM options_change WHERE UPPER(ticker)=? AND strike=? "
+                    f"SELECT {col} AS last FROM options_change WHERE ticker=? AND strike=? "
                     "AND expiry_date=? ORDER BY trade_date_now DESC LIMIT 1",
                     _gp_conn, params=(tk.upper(), float(K), exp_mdy))
                 if not pr.empty and pr.iloc[0]["last"] and float(pr.iloc[0]["last"]) > 0:
@@ -15999,7 +16516,21 @@ elif page == "🎯 Next-Day Exit Planner":
                                  "Spot": st.column_config.NumberColumn(format="$%.2f"),
                                  "Entry": st.column_config.NumberColumn(format="$%.2f"),
                                  "Now": st.column_config.NumberColumn(format="$%.2f"),
-                                 "P&L %": st.column_config.NumberColumn(format="%d%%"),
+                                 # ID 96: P&L as a BAR, like the 52w one. Denominator chosen
+                                 # rather than asked about: return on capital at risk (what
+                                 # the leg cost), because it is the only measure defined for
+                                 # EVERY leg type here - debit spreads, naked longs and stock
+                                 # alike. "% of max profit" would read better but is
+                                 # undefined for anything with unlimited upside, and a bar
+                                 # that blanks out on half the book is worse than no bar.
+                                 # Range is -100..+100: -100% = premium fully lost, which is
+                                 # the real floor on a long option, and +100% = a double.
+                                 # Values beyond +100% still show their true number in the
+                                 # label, the bar simply pins full.
+                                 "P&L %": st.column_config.ProgressColumn(
+                                     "P&L %", format="%d%%", min_value=-100, max_value=100,
+                                     help="Return on the capital this leg tied up. Bar spans "
+                                          "-100% (premium gone) to +100% (doubled)."),
                                  "P&L $": st.column_config.NumberColumn(format="$%d")})
                 st.caption(f"All **{len(_flat)}** legs across **{len(_by_tk)}** tickers · total open "
                            f"P&L **${_ftot:,.0f}**.  **Now** = live option mid (bid/ask) when the market's "
@@ -16115,8 +16646,8 @@ elif page == "🎯 Next-Day Exit Planner":
                         try:
                             _chain = pd.read_sql(
                                 "SELECT strike, openInt_Call_now, openInt_Put_now, R1, S1 FROM options_change "
-                                "WHERE UPPER(ticker)=? AND expiry_date=? AND trade_date_now=("
-                                "SELECT trade_date_now FROM options_change WHERE UPPER(ticker)=? AND expiry_date=? "
+                                "WHERE ticker=? AND expiry_date=? AND trade_date_now=("
+                                "SELECT trade_date_now FROM options_change WHERE ticker=? AND expiry_date=? "
                                 "ORDER BY trade_date_now "
                                 "DESC LIMIT 1)",
                                 _gp_conn, params=(_tk, _near["exp_mdy"], _tk, _near["exp_mdy"]))
@@ -17544,7 +18075,9 @@ elif page == "🎯 Next-Day Exit Planner":
         _mi_cols[1].metric("🌙 After-Hours", "N/A", "Market open")
     _mi_cols[2].metric("ES Futures", f"{_es_pct:+.2f}%")
     _mi_cols[3].metric("NQ Futures", f"{_nq_pct:+.2f}%")
-    _mi_cols[4].metric("VIX", f"{_vix_val:.1f}", f"{_vix_pct:+.1f}%", delta_color="inverse")
+    _mi_lbl, _mi_v = _vix_vxn(_vix_val)
+    _mi_cols[4].metric(_mi_lbl, _mi_v, f"{_vix_pct:+.1f}%", delta_color="inverse",
+                       help="VIX = S&P 500 vol · VXN = Nasdaq-100 vol. The delta shown is VIX's.")
     _mi_cols[5].metric("News Tone", _news_sentiment)
 
     # Staleness warning if data is not from today
@@ -20767,7 +21300,9 @@ if page == "📰 Market Wrap":
             if _d:
                 _cols[_i].metric(_lbl, f"{_d['last']:,.0f}", f"{_d['pct']:+.2f}%")
         if _F.get("vix"):
-            _cols[4].metric("VIX", f"{_F['vix']['last']:.1f}", f"{_F['vix']['pct']:+.1f}%", delta_color="inverse")
+            _wl, _wv = _vix_vxn(_F["vix"]["last"])
+            _cols[4].metric(_wl, _wv, f"{_F['vix']['pct']:+.1f}%", delta_color="inverse",
+                            help="VIX = S&P 500 vol · VXN = Nasdaq-100 vol")
 
         _lead = _F["lead"]
         _h = _wrap_hist(_lead["sym"], "1d", "5m")
@@ -21090,8 +21625,8 @@ if page == "📺 TradingView":
             with get_conn() as _wc:
                 _wdf = pd.read_sql(
                     "SELECT strike, openInt_Call_now, openInt_Put_now FROM options_change "
-                    "WHERE UPPER(ticker)=? AND trade_date_now=(SELECT trade_date_now FROM options_change "
-                    "WHERE UPPER(ticker)=? ORDER BY trade_date_now DESC LIMIT 1)", _wc, params=(_wsym, _wsym))
+                    "WHERE ticker=? AND trade_date_now=(SELECT trade_date_now FROM options_change "
+                    "WHERE ticker=? ORDER BY trade_date_now DESC LIMIT 1)", _wc, params=(_wsym, _wsym))
             _w = compute_walls(_wdf, _sp if _lv else None) if _wdf is not None and not _wdf.empty else None
             if _w:
                 if _w.get("call_wall"):
@@ -21297,7 +21832,7 @@ def _hiprob_settle_px(c, tk, expiry):
     ei = str(expiry)[:10]                       # ISO date string sorts naturally
     for tbl in ("stock_history", "stock_daily"):
         try:
-            r = c.execute(f"SELECT close, trade_date FROM {tbl} WHERE UPPER(ticker)=? AND trade_date<=? "
+            r = c.execute(f"SELECT close, trade_date FROM {tbl} WHERE ticker=? AND trade_date<=? "
                           f"ORDER BY trade_date DESC LIMIT 1", (tk.upper(), ei)).fetchone()
             if r and r[0] and r[1] >= (pd.Timestamp(expiry) - pd.Timedelta(days=7)).strftime("%Y-%m-%d"):
                 return float(r[0])
@@ -22031,7 +22566,9 @@ if page == "💡 Action Board":
             else:
                 _opn["Src"] = _opn["Notes"].fillna("").map(
                     lambda s: "💡 idea" if str(s).startswith("ActionBoard") else "✋ mine")
-                _pinned_df(_opn.drop(columns=["Notes"]), hide_index=True, use_container_width=True)
+                _pinned_df(_with_flag(_opn.drop(columns=["Notes"]))
+                           .style.format(precision=2, thousands=",", na_rep="—"),
+                           hide_index=True, use_container_width=True)
                 st.caption("💡 idea = added from this board (paper) · ✋ mine = manually entered. "
                            "Live P&L, events and exit advice: **🎯 Next-Day Exit Planner**.")
         except Exception as _e:
@@ -23217,12 +23754,122 @@ if page == "📡 Macro/Event Hub":
 
     if _tbmod is not None:
         _hub_conn = get_conn()
+        # 2026-08-08: the five lanes built today were Telegram-only. Same engine, same bridge
+        # — no duplicated logic, the dashboard just renders what the bot functions return.
         (_tb_brief, _tb_opex, _tb_sq, _tb_gex, _tb_van, _tb_mom, _tb_ev, _tb_jr, _tb_mac,
-         _tb_live, _tb_heat, _tb_skew, _tb_cat, _tb_reg, _tb_flow, _tb_world) = st.tabs(
+         _tb_live, _tb_heat, _tb_skew, _tb_cat, _tb_reg, _tb_flow, _tb_world,
+         _tb_deal, _tb_feed, _tb_why, _tb_ins, _tb_desk, _tb_wif, _tb_ind,
+         _tb_xir) = st.tabs(
             ["☀️ Briefing", "🗓️ OpEx", "🩳 Squeeze", "📐 GEX", "🌀 Vanna", "🚀 Momentum",
              "🌍 Events", "📓 Journal", "📊 Macro",
              "🔴 Live", "🔥 Heat", "📉 Skew", "⚡ Catalysts", "🌡️ Regime",
-             "💸 Flow", "🌐 World"])
+             "💸 Flow", "🌐 World",
+             "🏦 Dealer", "📰 Feed", "🔍 Why", "🧠 Insight", "🏛 Desk", "🔮 What-if",
+             "🇮🇳 India", "📈 XIRR"])
+
+        with _tb_deal:
+            st.caption("CFTC Traders in Financial Futures (bot /dealer) — the sell-side's "
+                       "FUTURES book, where written options get hedged. Read the PERCENTILE, "
+                       "not the level: dealers are structurally net short index futures.")
+            if st.button("🔄 Refresh", key="hub_deal_btn"):
+                st.rerun()
+            try:
+                _dl = _tbmod._fmt_dealer()
+                _render_tg(_dl) if _dl else st.info("CFTC feed unreachable right now.")
+            except Exception as e:
+                st.error(f"Dealer error: {e}")
+
+        with _tb_feed:
+            st.caption("Public Telegram channel ingest (bot /feed) + an LLM read. "
+                       "Commentary on public headlines — not a validated signal.")
+            if st.button("🔄 Refresh", key="hub_feed_btn"):
+                st.rerun()
+            try:
+                _fd = _tbmod._fmt_channel_news()
+                _render_tg(_fd) if _fd else st.info("Channel feed unavailable.")
+            except Exception as e:
+                st.error(f"Feed error: {e}")
+
+        with _tb_why:
+            st.caption("Narrative vs OUR data (bot /why). The headline is the HYPOTHESIS; "
+                       "your price history returns the verdict. SUPPORTED only means the "
+                       "named instrument moved the claimed way — not that the cause was real.")
+            if st.button("🔄 Run check", key="hub_why_btn"):
+                st.rerun()
+            try:
+                _wy = _tbmod._fmt_why()
+                _render_tg(_wy) if _wy else st.info("No headlines to test right now.")
+            except Exception as e:
+                st.error(f"Why error: {e}")
+
+        with _tb_ins:
+            st.caption("Cross-lane LLM synthesis (bot /insight) over your book, OI/volume, "
+                       "unusual flow, dealer futures, vol and news. Numbers are measured; "
+                       "the narrative is not, and is unscored against forward returns.")
+            if st.button("🔄 Synthesise", key="hub_ins_btn"):
+                st.rerun()
+            try:
+                _in = _tbmod._fmt_insight()
+                _render_tg(_in) if _in else st.info("No lane data available.")
+            except Exception as e:
+                st.error(f"Insight error: {e}")
+
+        with _tb_desk:
+            st.caption("Full institutional research-desk report (bot /desk): 11 sections, "
+                       "every claim tagged [OBSERVED FACT] / [INTERPRETATION] and cited to a "
+                       "source block. Risk Manager can return NO TRADE.")
+            _dk_tk = st.text_input("Ticker", "SPY", key="hub_desk_tk").strip().upper() or "SPY"
+            if st.button("🏛 Convene the desk", key="hub_desk_btn"):
+                with st.spinner(f"8 roles on {_dk_tk} — this takes a moment…"):
+                    try:
+                        _render_tg(_tbmod._fmt_desk(_dk_tk))
+                    except Exception as e:
+                        st.error(f"Desk error: {e}")
+            else:
+                st.info("Pick a ticker and convene — the report is long, so it runs on demand.")
+
+        with _tb_xir:
+            st.caption("Annualised return per holding (bot /xirr) across paper trades and "
+                       "watchlist. Unlike raw P&L%, XIRR accounts for TIME — +8% in a week "
+                       "and +8% in a year are very different, and only this tells them "
+                       "apart. Holdings under 30 days show raw return only.")
+            if st.button("🔄 Recompute", key="hub_xirr_btn"):
+                st.rerun()
+            try:
+                _xt = _tbmod._fmt_xirr()
+                _render_tg(_xt) if _xt else st.info("No paper trades or watchlist entries.")
+            except Exception as e:
+                st.error(f"XIRR error: {e}")
+
+        with _tb_ind:
+            st.caption("NSE end-of-day movers with DELIVERY % (bot /india) — the share of "
+                       "volume actually taken to delivery rather than squared off intraday. "
+                       "US tapes have no equivalent. EOD only: NSE's live API blocks us "
+                       "(403/404), the archive does not.")
+            if st.button("🔄 Refresh NSE", key="hub_ind_btn"):
+                st.rerun()
+            try:
+                _iv = _tbmod._fmt_india()
+                _render_tg(_iv) if _iv else st.info("NSE archive unavailable right now.")
+            except Exception as e:
+                st.error(f"India error: {e}")
+
+        with _tb_wif:
+            st.caption("Entropy Pooling scenario (bot /whatif). Re-weights real history so "
+                       "your view holds, keeping cross-asset correlations intact — it answers "
+                       "'what usually accompanied this', not 'what will happen'. Validated: "
+                       "MAE 0.35pp vs 386 real gold-rally windows.")
+            _wc1, _wc2 = st.columns([2, 1])
+            _wf_tk = _wc1.text_input("Ticker", "GLD", key="hub_wif_tk").strip().upper() or "GLD"
+            _wf_mv = _wc2.number_input("Move %", value=5.0, step=1.0, key="hub_wif_mv")
+            if st.button("🔮 Run scenario", key="hub_wif_btn"):
+                with st.spinner("Re-weighting history…"):
+                    try:
+                        _render_tg(_tbmod._fmt_whatif(_wf_tk, float(_wf_mv)))
+                    except Exception as e:
+                        st.error(f"What-if error: {e}")
+            else:
+                st.info("Set a view (e.g. GLD +5, SPY -10) and run it.")
 
         with _tb_live:
             st.caption("Minute-level intraday writeup (bot /live) — VWAP dislocation, volume pace, "
@@ -24154,13 +24801,20 @@ if page == "👀 Watchlist":
             st.markdown(f"### {_WL_ICON.get(_wcls, '•')} {_WL_PLURAL.get(_wcls, _wcls)} ({len(_cls_rows)})")
             for _r0 in _cls_rows:
                 _r0["Day line"] = _wl_paths.get(str(_r0.get("Ticker") or "").upper())
-            _cls_show = pd.DataFrame(_cls_rows)
+                # One box per session, green up / red down (user 2026-08-12). Built from
+                # the 90d daily history already fetched for this row — no extra request.
+                _r0["1W"], _r0["1M"] = _updown_pair(_r0.get("_hist"))
+            _cls_show = _with_flag(pd.DataFrame(_cls_rows), at=1)   # 🌍 sits next to Ticker
             # Ticker / Name / Spot stay put when the table is scrolled right (pinned=True,
             # Streamlit >=1.42) and every header carries a hover explanation, so the
             # abbreviations do not have to be guessed at (user 2026-08-03).
             _wl_cfg = {
                 "Ticker": st.column_config.TextColumn("Ticker", pinned=True, width="small",
                     help="Exchange symbol. Pinned — stays visible while you scroll right."),
+                "🌍": st.column_config.ImageColumn("🌍", pinned=True, width="small",
+                    help="Country the instrument belongs to. Resolved from the exchange "
+                         "suffix (.NS = India) or a curated ADR/ETF map — 🇺🇸 by default, "
+                         "since an unsuffixed symbol is a US listing."),
                 "Name": st.column_config.TextColumn("Company", pinned=True, width="medium",
                     help="Company / instrument name."),
                 "Spot": st.column_config.NumberColumn("Spot $", pinned=True, format="$%.2f",
@@ -24176,6 +24830,16 @@ if page == "👀 Watchlist":
                     help="Today's actual intraday price path from 1-minute bars — the shape "
                          "behind the low-high range, not just its endpoints. Blank when the "
                          "ticker is outside the intraday lane (~31 names)."),
+                "1W": st.column_config.ImageColumn(
+                    "1W", width="small",
+                    help="One box per session for the last trading WEEK — green closed up, "
+                         "red closed down. Shade carries size: pale under 1%, mid 1-3%, "
+                         "deep 3%+. Drawn as a picture so it scales to the row height and "
+                         "never makes the row taller."),
+                "1M": st.column_config.ImageColumn(
+                    "1M", width="small",
+                    help="Same, for the last 21 sessions (a trading month). Boxes get "
+                         "thinner, not taller — the strip stays the same size as 1W."),
                 "Day Pos": st.column_config.ProgressColumn("Day position", min_value=0.0,
                     max_value=1.0, format="%.0f%%",
                     help="Where the current price sits inside TODAY's low-high range. "
@@ -24224,7 +24888,8 @@ if page == "👀 Watchlist":
                 "Added": st.column_config.TextColumn("Added on",
                     help="Date this ticker was added to the watchlist."),
             }
-            _wl_order = ["Ticker", "Name", "Spot", "Day%", "Day line", "Day Pos", "52w Pos",
+            _wl_order = ["Ticker", "🌍", "Name", "Spot", "Day%", "1W", "1M",
+                         "Day line", "Day Pos", "52w Pos",
                          "52w L-H", "Day L-H",
                          "Call Wall", "Put Wall", "Target", "Dist to Target", "RSI(14)",
                          "PCR(OI)", "SI %", "DTC", "Shorts", "Earnings", "Ex-Div",
@@ -24389,7 +25054,9 @@ if page == "📝 Paper Trading":
         except Exception:
             return float(row["entry_price"] or 0)
 
-    with st.expander("➕ Add a demo position", expanded=True):
+    # Always starts collapsed (user 2026-08-12) — the book is what you come here to read;
+    # the add form is an occasional action and was pushing the table below the fold.
+    with st.expander("➕ Add a demo position", expanded=False):
         _pa1, _pa2, _pa3, _pa4 = st.columns(4)
         _pa_tk = _pa1.text_input("Ticker", key="pt_add_tk", placeholder="e.g. AAPL").strip().upper()
         _pa_typ = _pa2.selectbox("Type", ["Stock", "Call", "Put"], key="pt_add_typ")
@@ -24448,6 +25115,7 @@ if page == "📝 Paper Trading":
         # stay one row per contract: a 340C and a 345C are genuinely different instruments,
         # not fungible the way shares of the same stock are.
         _pt_rows = []
+        _pt_expired = 0          # expired legs held back from the live grid, counted not lost
         _pt_stock = _pt_df[_pt_df["option_type"].astype(str).str.upper() == "STOCK"]
         _pt_opts = _pt_df[_pt_df["option_type"].astype(str).str.upper() != "STOCK"]
         def _pt_52w(ticker):
@@ -24459,6 +25127,21 @@ if page == "📝 Paper Trading":
                     "WHERE ticker=? ORDER BY trade_date DESC LIMIT 252)", _pt_conn, params=(ticker,))
                 if not _rng.empty and _rng.iloc[0]["hi"] is not None:
                     return float(_rng.iloc[0]["lo"]), float(_rng.iloc[0]["hi"])
+            except Exception:
+                pass
+            # stock_daily only carries the OPTIONS universe, so a broad ETF like VGT — or any
+            # foreign listing — had no row and the cell just showed a dash (user 2026-08-10).
+            # Price history has it, and the bare-symbol alias covers MOTHERSON-style entries.
+            try:
+                _sym = ticker
+                if _TB_ENGINE:
+                    _sym = _TB_ENGINE._yf_alias(ticker) or ticker
+                _h = _cached_history(_sym, period="1y")
+                if _h is not None and len(_h) > 5:
+                    _hi = float(_h["High"].max() if "High" in _h else _h["Close"].max())
+                    _lo = float(_h["Low"].min() if "Low" in _h else _h["Close"].min())
+                    if _hi > 0:
+                        return _lo, _hi
             except Exception:
                 pass
             return None, None
@@ -24515,13 +25198,26 @@ if page == "📝 Paper Trading":
                 _pxirr = _xirr(_pcfs)
             except Exception:
                 _pxirr = None
+            # A non-US listing is quoted in its own currency (MOTHERSON on the NSE is in
+            # rupees). Carry it per row so the column can never imply dollars it isn't.
+            try:
+                _pccy = _TB_ENGINE._ccy_of(_ptk)[0] if _TB_ENGINE else "USD"
+            except Exception:
+                _pccy = "USD"
             _pt_rows.append({"id": tuple(int(x) for x in _grp["trade_id"]),
-                             "Ticker": _ptk, "Type": "Stock",
+                             "Ticker": _ptk, "Type": "Stock", "Ccy": _pccy,
                              "Qty": _pqty, "Lots": len(_grp), "Status": "🟢 Live",
                              "Entry": round(_pentry, 2), "Current Price": round(_pmark, 2),
-                             "52w L-H": (f"${_p52lo:,.2f}-${_p52hi:,.2f}" if _p52hi else "—"),
-                             "P&L $": round(_ppnl), "P&L %": round(_ppnl_pct, 1),
-                             "XIRR %": (round(_pxirr * 100, 1) if _pxirr is not None else None),
+                             "52w L-H": (f"{_p52lo:,.2f}-{_p52hi:,.2f}" if _p52hi else "—"),
+                             "52w Pos": (round((_pmark - _p52lo) / (_p52hi - _p52lo), 4)
+                                         if _p52hi and _p52hi > _p52lo else None),
+                             # Capital at risk, carried so the TOTAL row can show a REAL
+                             # blended return instead of a blank (user 2026-08-10). Averaging
+                             # the per-row percentages would weight a 1-share lot like a
+                             # 3,000-share one; P&L over cost is the only honest total.
+                             "_cost": abs(_pentry * _pqty),
+                             "P&L": round(_ppnl), "P&L %": round(_ppnl_pct, 2),
+                             "XIRR %": (round(_pxirr * 100, 2) if _pxirr is not None else None),
                              "Entry Date": _pearliest, "Days Held": _pdays_held,
                              "DTE": None, "Earnings": _pearn, "Ex-Div": _pdiv, "Note": _pnotes})
         for _, _pr in _pt_opts.iterrows():
@@ -24543,43 +25239,223 @@ if page == "📝 Paper Trading":
                 _pdte = (datetime.strptime(str(_pr["expiry"]), "%Y-%m-%d").date() - datetime.now().date()).days
             except Exception:
                 _pdte = None
+            # Expired legs are OUT of the live grid (user 2026-08-10). Hidden, not deleted:
+            # the row stays OPEN in paper_trades, so nothing is destroyed and the count below
+            # says how many are being held back. They also stop polluting the net P&L metric.
+            if _pdte is not None and _pdte < 0:
+                _pt_expired += 1
+                continue
             _pearn, _pdiv = _next_events(_ptk)
             _p52lo, _p52hi = _pt_52w(_ptk)
             try:
                 _pspot = _cached_price(_ptk) or 0.0
             except Exception:
                 _pspot = 0.0
-            # Status flag (user 2026-07-24: "$0.00 current price" on an expired option read
-            # as a fetch failure -- it's actually a real, correct settled value (intrinsic at
-            # expiry). Label it explicitly so $0 isn't mistaken for a bug.
-            _pstatus = "⚫ EXPIRED (settled)" if (_pdte is not None and _pdte < 0) else "🟢 Live"
+            _pstatus = "🟢 Live"
             _pt_rows.append({"id": (int(_pr["trade_id"]),),
                              "Ticker": _ptk, "Type": f"${_pr['strike']:.0f}{_ptyp[0]} exp {_pr['expiry']}",
+                             "Ccy": "USD",          # listed options in this book are US
                              "Qty": _pqty, "Lots": 1, "Status": _pstatus,
                              "Entry": round(_pentry, 2), "Current Price": round(_pmark, 2),
                              "Spot": (round(_pspot, 2) if _pspot else None),
-                             "52w L-H": (f"${_p52lo:,.2f}-${_p52hi:,.2f}" if _p52hi else "—"),
-                             "P&L $": round(_ppnl), "P&L %": round(_ppnl_pct, 1),
+                             "52w L-H": (f"{_p52lo:,.2f}-{_p52hi:,.2f}" if _p52hi else "—"),
+                             "52w Pos": (round((_pspot - _p52lo) / (_p52hi - _p52lo), 4)
+                                         if _p52hi and _pspot and _p52hi > _p52lo else None),
+                             "_cost": abs(_pentry * _pqty * 100),   # options: 100x multiplier
+                             "P&L": round(_ppnl), "P&L %": round(_ppnl_pct, 2),
                              "Entry Date": _pr["entry_date"], "Days Held": _pdays_held,
                              "DTE": _pdte, "Earnings": _pearn, "Ex-Div": _pdiv,
                              "Note": _pr.get("notes") or ""})
-        _pt_show = pd.DataFrame(_pt_rows)
-        _net = _pt_show["P&L $"].sum()
-        st.metric("Net demo P&L", f"${_net:+,.0f}")
-        # TOTAL row (user 2026-07-24) -- sums the dollar columns, blanks anything that
-        # isn't meaningfully summable (per-ticker rates/dates/ranges).
-        _pt_total = {c: "" for c in _pt_show.columns}
-        _pt_total["Ticker"] = "TOTAL"
-        for _c in ("P&L $",):
-            if _c in _pt_show.columns:
-                _pt_total[_c] = round(_pt_show[_c].sum())
-        _pt_show = pd.concat([_pt_show, pd.DataFrame([_pt_total])], ignore_index=True)
+        if not _pt_rows:
+            st.info(f"No live demo positions" +
+                    (f" — {_pt_expired} expired leg(s) are hidden." if _pt_expired else "."))
+            st.stop()
+        _pt_show = _with_flag(pd.DataFrame(_pt_rows), at=1)
+        # Up/down strips for the underlying (user 2026-08-12). Fetched once per distinct
+        # ticker, not once per leg — a two-leg spread on one name is one history call.
         try:
-            _pinned_df(_pt_show.drop(columns=["id"]).style.set_properties(
-                             subset=["Current Price"], **{"font-weight": "bold"}),
-                         use_container_width=True, hide_index=True)
+            _pt_strip = {}
+            for _utk in {str(t).upper() for t in _pt_show["Ticker"].dropna()}:
+                _pt_strip[_utk] = _updown_pair(_cached_history(_utk, period="90d",
+                                                               interval="1d"))
+            # Anchor on whichever price column this book actually has. An all-stock book
+            # has no "Spot" column at all, and get_loc("Spot") then raised into the except
+            # below — the strips were built and silently thrown away.
+            _anchor = next((c for c in ("Spot", "Current Price", "Entry")
+                            if c in _pt_show.columns), None)
+            _at = (_pt_show.columns.get_loc(_anchor) + 1) if _anchor else len(_pt_show.columns)
+            _pt_show.insert(_at, "1W", _pt_show["Ticker"].map(
+                lambda t: _pt_strip.get(str(t).upper(), (None, None))[0]))
+            _pt_show.insert(_at + 1, "1M", _pt_show["Ticker"].map(
+                lambda t: _pt_strip.get(str(t).upper(), (None, None))[1]))
+        except Exception as _spe:
+            st.caption(f"trend strips unavailable: {_spe}")
+        # One headline PER CURRENCY. There is no FX rate anywhere in this project, so adding
+        # a rupee to a dollar would simply be a wrong number (user 2026-08-10 added an NSE
+        # stock, whose Rs 194,340 gain would otherwise have inflated a USD total).
+        _net_by = _pt_show.groupby("Ccy")["P&L"].sum().to_dict()
+        _sym = {"USD": "$", "INR": "₹", "EUR": "€", "GBp": "p", "JPY": "¥", "HKD": "HK$",
+                "CAD": "C$", "AUD": "A$", "SGD": "S$", "CHF": "CHF", "BRL": "R$"}
+        # XIRR per currency, shown INSIDE the same tile (user 2026-08-12). Annualising is
+        # only meaningful once a holding has run a while, so the bot's 30-day floor is
+        # reused here rather than invented: a 3-day +2% would annualise to a fantasy.
+        _pt_xirr = {}
+        try:
+            from datetime import date as _date
+            _today = _date.today()
+            _flows_by = {}
+            for _r in _pt_rows:
+                _cost, _pnl = float(_r.get("_cost") or 0), float(_r.get("P&L") or 0)
+                _ed = pd.to_datetime(_r.get("Entry Date"), errors="coerce")
+                if _cost <= 0 or pd.isna(_ed):
+                    continue
+                _flows_by.setdefault(_r.get("Ccy", "USD"), []).extend(
+                    [(_ed.date(), -_cost), (_today, _cost + _pnl)])
+            for _cy2, _fl in _flows_by.items():
+                _span = (_today - min(d for d, _a in _fl)).days
+                if _span < 30:
+                    continue
+                _fl = [(pd.Timestamp(d).to_pydatetime(), a) for d, a in _fl]
+                _r2 = _TB_ENGINE._xirr(_fl) if _TB_ENGINE else None
+                if _r2 is not None and abs(_r2) < 100:
+                    _pt_xirr[_cy2] = _r2
         except Exception:
-            _pinned_df(_pt_show.drop(columns=["id"]), use_container_width=True, hide_index=True)
+            _pt_xirr = {}
+
+        _mc = st.columns(max(len(_net_by), 1))
+        for _i, (_cy, _v) in enumerate(sorted(_net_by.items())):
+            # st.metric owns the box and the big number — hand-rolling it in markdown lost
+            # both, and st.markdown's sanitizer strips <img src="data:…"> so the flag came
+            # out as its alt text ("INNET DEMO P&L"). st.html is not sanitized that way, so
+            # the picture goes there, immediately above the untouched native metric.
+            with _mc[_i]:
+                try:
+                    # Sized to the metric card, not to the text (user 2026-08-10) — this is
+                    # the headline number for a whole market, so its flag reads as a banner.
+                    st.html(_flag_html(_CCY_CC.get(_cy, "US"), 58))
+                except Exception:
+                    pass
+                st.metric(f"Net demo P&L ({_cy})", f"{_sym.get(_cy, '')}{_v:+,.0f}")
+                # Pulled up under the number so it reads as part of the same card rather
+                # than a stray caption; red as asked, and always red so it is a label you
+                # look for, not a sign indicator that would contradict a positive XIRR.
+                _x = _pt_xirr.get(_cy)
+                st.html(
+                    "<div style='margin-top:-1.15rem;color:#e53935;font-weight:700;"
+                    "font-size:0.95rem;letter-spacing:.2px'>XIRR "
+                    + (f"{_x * 100:+,.2f}%" if _x is not None else "—")
+                    + "</div>")
+        if len(_net_by) > 1:
+            st.caption("💱 Totals are shown **per currency and never converted** — the book "
+                       "holds no FX rate, so a blended number would be false.")
+        _net = _net_by.get("USD", 0)
+        if _pt_expired:
+            st.caption(f"⚫ {_pt_expired} expired leg(s) hidden — they still exist in "
+                       "`paper_trades`, they are just out of the live view and out of the "
+                       "net P&L above. Close them with **/paper close ID**.")
+        # ONE TABLE PER CURRENCY (user 2026-08-10). A single grid with a single TOTAL row
+        # implies a common unit, and there isn't one: entry, mark and P&L for an NSE holding
+        # are rupees. Splitting also makes each TOTAL a real number instead of a sum of
+        # unlike things. US first, then everything else alphabetically.
+        _CCY_LABEL = {"USD": "United States (USD)", "INR": "India — NSE (INR)",
+                      "EUR": "Euro area (EUR)", "GBp": "United Kingdom (GBp)",
+                      "JPY": "Japan (JPY)", "HKD": "Hong Kong (HKD)",
+                      "CAD": "Canada (CAD)", "AUD": "Australia (AUD)"}
+        _order = (["USD"] if "USD" in _net_by else []) + sorted(
+            c for c in _net_by if c != "USD")
+        for _cy in _order:
+            _grpdf = _pt_show[_pt_show["Ccy"] == _cy].copy()
+            if _grpdf.empty:
+                continue
+            _cs = _sym.get(_cy, "")
+            if len(_order) > 1:
+                # st.html, not st.markdown — the markdown sanitizer drops <img src="data:…">
+                # and the heading came out showing the alt text instead of the flag.
+                try:
+                    st.html(f'<h5>{_flag_html(_CCY_CC.get(_cy, "US"), 20)}&nbsp;'
+                            f'{_CCY_LABEL.get(_cy, _cy)} &mdash; {len(_grpdf)} position(s), '
+                            f'net {_cs}{_grpdf["P&L"].sum():+,.0f}</h5>')
+                except Exception:
+                    st.markdown(f"##### {_CCY_LABEL.get(_cy, _cy)} — {len(_grpdf)} "
+                                f"position(s), net {_cs}{_grpdf['P&L'].sum():+,.0f}")
+            # Numeric columns get None, not "" — an empty string turns the column to object
+            # dtype and ProgressColumn silently stops drawing its bar.
+            _tot = {c: (None if pd.api.types.is_numeric_dtype(_grpdf[c]) else "")
+                    for c in _grpdf.columns}
+            _tot["Ticker"] = "TOTAL"
+            _tot["Ccy"] = _cy
+            _tot["P&L"] = round(_grpdf["P&L"].sum())
+            # Blended return on the capital actually deployed — P&L over cost, NOT the mean
+            # of the per-row percentages (that would give a 1-share lot the same weight as a
+            # 3,000-share one).
+            _cost_sum = float(_grpdf["_cost"].sum()) if "_cost" in _grpdf.columns else 0.0
+            if _cost_sum > 0:
+                _tot["P&L %"] = round(_grpdf["P&L"].sum() / _cost_sum * 100, 2)
+            _grpdf = pd.concat([_grpdf, pd.DataFrame([_tot])], ignore_index=True)
+            # Coerce by NAME, not by current dtype. A column holding even one None (XIRR on
+            # an option leg, DTE on a stock) is already `object` before the TOTAL row is
+            # added, so a dtype-based sweep skipped exactly the columns that then printed the
+            # literal "None". As float64 the same gaps render as blank cells and the
+            # ProgressColumns still draw.
+            for _nc in ("Qty", "Lots", "Entry", "Current Price", "Spot", "52w Pos",
+                        "P&L", "P&L %", "XIRR %", "Days Held", "DTE"):
+                if _nc in _grpdf.columns:
+                    _grpdf[_nc] = pd.to_numeric(_grpdf[_nc], errors="coerce")
+            # Streamlit's grid prints the literal word "None" for an empty numeric cell, and
+            # it does so for float64 NaN and nullable Float64 alike — the TOTAL row was a row
+            # of "None"s with two real numbers in it. So every column that has nothing to say
+            # on the TOTAL row becomes a preformatted 2dp STRING, where blank really is blank.
+            # The three columns that must stay numeric are the ones carrying meaning there:
+            # P&L, P&L % and 52w Pos (the last two draw bars, which need real numbers).
+            for _nc in ("Qty", "Lots", "Entry", "Current Price", "Spot", "XIRR %",
+                        "Days Held", "DTE"):
+                if _nc in _grpdf.columns:
+                    _dec = 0 if _nc in ("Lots", "Days Held", "DTE") else 2
+                    _grpdf[_nc] = _grpdf[_nc].map(
+                        lambda v, _d=_dec: "" if pd.isna(v) else f"{float(v):,.{_d}f}")
+            _grpdf = _grpdf.drop(columns=["id", "Ccy", "_cost"], errors="ignore")
+            # Bars, not bare numbers (user asked for this and it had not reached this grid).
+            # P&L% spans -100 (wiped out) to +100 (doubled); anything beyond still prints its
+            # true figure in the label, the bar just pins full. 52w Pos is where the current
+            # price sits inside its own yearly range: empty = at the low, full = at the high.
+            _pcfg = {}
+            try:
+                _pcfg["P&L %"] = st.column_config.ProgressColumn(
+                    "P&L %", format="%.2f%%", min_value=-100, max_value=100,
+                    help="Return on the capital this position tied up. Bar spans -100% to +100%.")
+                if "52w Pos" in _grpdf.columns:
+                    _pcfg["52w Pos"] = st.column_config.ProgressColumn(
+                        "52w position", format="%.2f", min_value=0.0, max_value=1.0,
+                        help="Where the price sits in its 52-week range: empty = at the low, "
+                             "full = at the high.")
+                # Thousands separators on the money column. "localized" is newer Streamlit;
+                # fall back to a plain integer format rather than lose the column.
+                try:
+                    _pcfg["P&L"] = st.column_config.NumberColumn("P&L", format="localized")
+                except Exception:
+                    _pcfg["P&L"] = st.column_config.NumberColumn("P&L", format="%d")
+                for _sp, _lbl in (("1W", "last 5 sessions"), ("1M", "last 21 sessions")):
+                    if _sp in _grpdf.columns:
+                        _pcfg[_sp] = st.column_config.ImageColumn(
+                            _sp, width="small",
+                            help=f"One box per session, {_lbl} of the UNDERLYING — green "
+                                 "closed up, red down, shade by size. Scales to the row "
+                                 "height, so it never makes the row taller.")
+            except Exception:
+                _pcfg = {}
+            try:
+                # A bare Styler falls back to pandas' display.precision of 6, which is how
+                # this grid showed "101.000000" — the values were rounded at source, the
+                # DISPLAY was not (2dp rule, user 2026-08-08). _pinned_df now caps it
+                # centrally; set_properties only carries the bold mark column.
+                # ProgressColumn needs a real numeric column, which a Styler's TOTAL row
+                # (blank strings) breaks — so the bars go on the plain DataFrame and the
+                # bold-mark styling is dropped rather than losing the bars the user asked for.
+                _pinned_df(_grpdf, use_container_width=True, hide_index=True,
+                           column_config=_pcfg)
+            except Exception:
+                _pinned_df(_grpdf, use_container_width=True, hide_index=True)
+            st.caption(f"Prices and P&L in **{_cy}** ({_cs or _cy}).")
 
         st.markdown("---")
         st.markdown("**Close a demo position** (closing a multi-lot stock position closes ALL its lots)")

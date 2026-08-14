@@ -1,51 +1,59 @@
 # NEXT — handoff
 
-_Updated 2026-08-08. Read `docs/IDEA_TRACKER.xlsx` (or `python tools/show_pending.py`) for
-the authoritative queue; this file is orientation only._
+_Updated 2026-08-13. `docs/IDEA_TRACKER.xlsx` (`python tools/show_pending.py`) is the
+authoritative queue; this file is orientation only._
 
 ## State
 
-Bot, dashboard and watchdog all running. **197 tracker rows, 182 done, 1 queued, 1 blocked.**
+Bot and dashboard both running the committed code. **242 tracker rows.** Working tree clean
+at `a416dd4`. Last three commits: message-truncation fix, trend columns, paper-tile P&L.
 
-## Only 2 items open
+## Start here — ID 241 needs one answer before any code
 
-| ID | Status | Note |
+The user pasted this verbatim as the next task and will open a fresh window to continue it:
+
+> Index put-flow is in the TOP 20% of its own history. **What followed, measured on 151
+> days:** a >2% Nasdaq week came **62%** of the time, vs **38%** after a normal day. Median
+> move 2.26% vs 1.55% (p=0.012). **Direction: 53% up — a coin flip.** This calls SIZE, not
+> side. **Do:** favour long premium, widen stops, cut size on short-vol. Do NOT pick a
+> direction off this.
+
+This is the Market-Radar finding already validated here (put-flow predicts SIZE, not
+direction) written the way the user wants signals surfaced: measured base rates, a p-value,
+an explicit coin-flip warning, then a Do list. **Ask first which is wanted** — (a) wire this
+block into the brief / radar output, or (b) adopt it as the house template for every signal
+writeup. Guessing means a rebuild.
+
+## Genuinely open
+
+| ID | Pri | Item |
 |---|---|---|
-| 36 | BLOCKED | Cross-strategy allocator — needs ~1000 graded fires (~7 months). Time, not work. |
-| 28 | QUEUED | Drop `options_daily` entirely. **Advice: don't.** Row 27 proved 8 of its "dead" columns are LIVE, written by `NYSE_YFin.py` (which can target this DB). Dropping the table kills the Yahoo fallback silently — surfacing only the day OpenBB capture fails, i.e. exactly when it is needed. |
+| 241 | P1 | Put-flow writeup — confirm intent, then implement (above). |
+| 237 | P1 | India news lane: daily/weekly/monthly per holding, written as an advisor. Google News RSS per NSE symbol needs no key. |
+| 217 | P1 | **Needs a user decision, not work.** Position alerts are not lost — ID 52 consolidated them into ONE status message that is EDITED in place, and Telegram does not notify on an edit, so it scrolls away silently. Offered: re-send on material change (±20%, EXIT/CUT) vs pin the message. |
+| 211 | P2 | Country/asset-class picker when adding. Mostly overtaken — country is inferred from the symbol now; asset class is still watchlist-only. |
+| 28 | P2 | Drop `options_daily`. **Advice: don't.** Row 27 proved 8 "dead" columns are LIVE, written by `NYSE_YFin.py`; dropping it kills the Yahoo fallback silently, surfacing only the day OpenBB capture fails. |
+| 36 | P2 | Cross-strategy allocator — BLOCKED on ~1000 graded fires (~7 months). Time, not work. |
+| 234 | P2 | DUE 2026-08-26: remove or promote `_derive_scope_watch()`. |
+| 204 | P3 | `/paper` 61 cells, `/watchlist` 41 vs the 28-cell guideline. Aligned, just wide. Waiting on whether they wrap badly on the user's phone. |
 
-## Built 2026-08-08 (all on BOTH surfaces)
+## Two traps that cost real work this session
 
-`/dealer` CFTC dealer futures · `/whatif` Entropy-Pooling scenario · `/insight` cross-lane LLM ·
-`/desk` research-desk report · `/why` narrative-vs-data · `/feed` channel ingest · `/llm` provider
-status · `/xirr` annualised returns · `/india` NSE EOD + delivery %
+- **The tracker had a concurrent writer.** A second Claude session edited
+  `IDEA_TRACKER.xlsx` at the same time; IDs collided and four rows lost their outcome text
+  to an ID-keyed update landing on the wrong row. **Write through `tools/tracker_io.py`** —
+  `add()` allocates at write time, `update(..., expect=)` refuses a mismatched row. Assume
+  another session may be live and re-read before writing.
+- **`dashboard.py` also changed under me mid-edit.** Re-read before any edit that depends on
+  surrounding lines.
 
-## Tested and REJECTED (do not rebuild — see ADOPTED.md)
+## Recently fixed — do not re-diagnose
 
-- **Investment Clock** (Part 12) — 1 of 4 quadrants correct; the aggregate was the equity risk
-  premium leaking through the one quadrant that picks stocks.
-- **Inflation-direction rule** (Part 12.4b) — the FINDING survives (+4.37%/yr equity gap on total
-  returns) but the RULE dies: −1.71%/yr vs always-stocks. The whole apparent edge was the
-  missing dividend, exactly as the caveat predicted.
-- **Alpha Zoo, 10 pre-registered factors** (Part 14) — 0 of 10 clear raw p<0.05, 5 of 10 carry the
-  WRONG sign. Underpowered (37–72 independent dates), and said so.
-- **Kronos** — pretrained through an unpublished cutoff; permanently untestable here.
-
-## Accruing — worthless until they have history, and CANNOT be backfilled
-
-`macro_vintages` (BLS revisions) · `reddit_mentions` (crowding) · `dispersion_daily` (index-vs-member
-IV ratio, 7 days so far, sd 0.012 — no distribution yet) · `narrative_checks` (per-source hit-rate)
-
-## Watch-outs earned the hard way today
-
-1. **Never rewrite source from PowerShell** — double-encoded 1,914 emoji, still compiled.
-2. **Never `UPPER(ticker)` in a WHERE** — 330× slower; killed at 33 sites.
-3. **A silently-empty lane makes the LLM invent data** — it fabricated positions when the book
-   query failed. Every lane block must emit something, even "unavailable".
-4. Groq/OpenRouter don't train on prompts; **Google's free tier does** — public news only.
-
-## Housekeeping
-
-- `US_data_OpenBB.db.pre27.bak` (3.39 GB) — safe to delete after ~1 week if nothing breaks.
-- If `Options_chain_data` syncs to Google Drive, exclude `*.db` / `*.bak` (6.7 GB).
-- `docs/PLAN.md` (10d) and `docs/LOG.md` (13d) are stale; the tracker superseded them in practice.
+- Long Telegram messages are SPLIT in `_send_message_sanitized`, not truncated. If something
+  looks cut, check for a NEW pre-send `_tg_cut`, not the wrapper.
+- `_world_news_block()` returns EMPTY and always has. `_geo_news()` is the working lane;
+  `_move_news_pool()` combines it with the (now repaired) aggregator.
+- All four getters in `_lib/market_news_enhanced.py` used to return `None` on a non-200,
+  which made `get_aggregated_news` raise and kill all four sources.
+- Bare NSE symbols need `_yf_alias`; `_hist_for()` in the dashboard does this. Any new
+  price/history lane for a foreign name must go through it or India goes blank again.

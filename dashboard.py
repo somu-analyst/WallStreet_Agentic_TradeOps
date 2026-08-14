@@ -357,6 +357,64 @@ def _updown_pair(hist, close_col="Close"):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _hist_for(tk, period="90d"):
+    """Daily history for a symbol, resolving a BARE foreign ticker to its Yahoo alias.
+
+    NSE names are stored the way they are typed — MOTHERSON, not MOTHERSON.NS — so a plain
+    yfinance call returns nothing and every derived cell (trend strips, week/month P&L)
+    silently came back blank for the whole India book. The bot already resolves this in
+    _yf_alias, which checks the NSE symbol set locally and only runs after the US lanes
+    fail, so a US ticker never pays for it. Reused here rather than reimplemented.
+    """
+    h = _cached_history(tk, period=period, interval="1d")
+    if h is not None and len(h):
+        return h
+    try:
+        alias = _TB_ENGINE._yf_alias(tk) if _TB_ENGINE else None
+    except Exception:
+        alias = None
+    return _cached_history(alias, period=period, interval="1d") if alias else h
+
+
+def _close_n_ago(hist, n, close_col="Close"):
+    """Close n SESSIONS back, or None. Sessions, not calendar days — a 7-day lookback
+    silently spans a weekend the market was shut and compares Friday with Friday."""
+    try:
+        ser = hist[close_col].dropna().tolist() if hist is not None and len(hist) else []
+    except Exception:
+        return None
+    return float(ser[-(n + 1)]) if len(ser) > n else None
+
+
+def _period_pnl(rows, hist_by_tk, sessions):
+    """Realised-to-date P&L change over the last `sessions` trading days, per currency.
+
+    There is no stored daily equity curve in this project, so this is reconstructed from
+    closes: for SHARES that is exact (qty x price change). Option legs are EXCLUDED and
+    counted, not estimated — pricing them back in time needs the IV surface as it stood
+    then, and holding today's IV constant would report a number that looks precise and
+    isn't. Returning "5 of 8 legs" beats returning a confident fiction.
+    """
+    out, opts, nohist = {}, {}, {}
+    for r in rows or []:
+        cy = r.get("Ccy", "USD")
+        if str(r.get("Type", "")).strip().lower() != "stock":
+            opts[cy] = opts.get(cy, 0) + 1        # option leg: cannot be priced backwards
+            continue
+        h = hist_by_tk.get(str(r.get("Ticker") or "").upper())
+        prev = _close_n_ago(h, sessions)
+        try:
+            last = float(h["Close"].dropna().iloc[-1]) if h is not None and len(h) else None
+        except Exception:
+            last = None
+        if prev is None or last is None:
+            nohist[cy] = nohist.get(cy, 0) + 1    # different problem: no history came back
+            continue
+        out[cy] = out.get(cy, 0.0) + (last - prev) * float(r.get("Qty") or 0)
+    return out, opts, nohist
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def _vxn_now():
     """Live VXN (Nasdaq-100 vol), or None.
 
@@ -24688,7 +24746,7 @@ if page == "👀 Watchlist":
                         _wsrc = (_get_ah_price(_wtk) or {}).get("label") or "Live"
                     except Exception:
                         _wsrc = "Live"
-                _whist = _cached_history(_wtk, period="90d", interval="1d")
+                _whist = _hist_for(_wtk)          # alias-aware: a bare NSE name still resolves
                 _wchg = None
                 if _whist is not None and len(_whist) >= 2:
                     _wprev = float(_whist["Close"].iloc[-2])
@@ -25286,10 +25344,10 @@ if page == "📝 Paper Trading":
         # Up/down strips for the underlying (user 2026-08-12). Fetched once per distinct
         # ticker, not once per leg — a two-leg spread on one name is one history call.
         try:
-            _pt_strip = {}
+            _pt_strip, _pt_hist = {}, {}
             for _utk in {str(t).upper() for t in _pt_show["Ticker"].dropna()}:
-                _pt_strip[_utk] = _updown_pair(_cached_history(_utk, period="90d",
-                                                               interval="1d"))
+                _pt_hist[_utk] = _hist_for(_utk)          # alias-aware: MOTHERSON -> .NS
+                _pt_strip[_utk] = _updown_pair(_pt_hist[_utk])
             # Anchor on whichever price column this book actually has. An all-stock book
             # has no "Spot" column at all, and get_loc("Spot") then raised into the except
             # below — the strips were built and silently thrown away.
@@ -25301,7 +25359,14 @@ if page == "📝 Paper Trading":
                     lambda t, _k=_off: _pt_strip.get(str(t).upper(),
                                                      (None, None, None))[_k]))
         except Exception as _spe:
+            _pt_hist = {}
             st.caption(f"trend strips unavailable: {_spe}")
+        # Week / month profit for the tiles (user 2026-08-12, ID 220).
+        try:
+            _pnl_1w, _opt_sk, _nh_sk = _period_pnl(_pt_rows, _pt_hist, 5)
+            _pnl_1m, _, _ = _period_pnl(_pt_rows, _pt_hist, 21)
+        except Exception:
+            _pnl_1w = _pnl_1m = _opt_sk = _nh_sk = {}
         # One headline PER CURRENCY. There is no FX rate anywhere in this project, so adding
         # a rupee to a dollar would simply be a wrong number (user 2026-08-10 added an NSE
         # stock, whose Rs 194,340 gain would otherwise have inflated a USD total).
@@ -25352,11 +25417,31 @@ if page == "📝 Paper Trading":
                 # than a stray caption; red as asked, and always red so it is a label you
                 # look for, not a sign indicator that would contradict a positive XIRR.
                 _x = _pt_xirr.get(_cy)
+                _cur = _sym.get(_cy, "")
+                _wk, _mo = _pnl_1w.get(_cy), _pnl_1m.get(_cy)
+                _amt = lambda v: (f"{_cur}{v:+,.0f}" if v is not None else "—")
+                _col = lambda v: ("#2e7d32" if (v or 0) > 0 else
+                                  "#c62828" if (v or 0) < 0 else "#78909c")
+                # Name the reason. Lumping these together produced "3 option leg(s)
+                # excluded" for a book whose three INR rows are all SHARES — the real
+                # problem was that no history came back for them.
+                _no = [f"{_opt_sk.get(_cy, 0)} option leg(s)"] if _opt_sk.get(_cy) else []
+                if _nh_sk.get(_cy):
+                    _no.append(f"{_nh_sk[_cy]} with no price history")
+                _miss = " · ".join(_no)
                 st.html(
                     "<div style='margin-top:-1.15rem;color:#e53935;font-weight:700;"
                     "font-size:0.95rem;letter-spacing:.2px'>XIRR "
                     + (f"{_x * 100:+,.2f}%" if _x is not None else "—")
-                    + "</div>")
+                    + "</div>"
+                    # Week/month profit sits with the headline number rather than in its own
+                    # tile, so one card answers "how much, and how fast did it get there".
+                    + "<div>"
+                    + f"1W {_amt(_wk)}"
+                    + " &nbsp;·&nbsp; "
+                    + f"1M {_amt(_mo)}</div>"
+                    + (f"<div>excludes {_miss}"
+                       "</div>" if _miss else ""))
         if len(_net_by) > 1:
             st.caption("💱 Totals are shown **per currency and never converted** — the book "
                        "holds no FX rate, so a blended number would be false.")

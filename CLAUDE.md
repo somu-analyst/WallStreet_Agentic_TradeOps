@@ -27,6 +27,11 @@
 - **The tracker is the ONLY source of pending work.** Never type a status table from memory —
   READ the sheet (`python tools/show_pending.py`) and print what it says. A memory-written
   summary already went out stale once, omitting a P1 the sheet did contain.
+- **Write the tracker through `tools/tracker_io.py` — never hardcode an ID.** Two sessions
+  edited the workbook at once on 2026-08-12, both computed "next ID" from a stale copy, and
+  the second save won: 5 rows collided and 4 lost their outcome text to an ID-keyed update
+  landing on the wrong row. `add()` allocates max(ID)+1 at write time; `update(..., expect=)`
+  refuses to write unless the question text matches.
 - **Mid-turn messages: log first, finish current task, then work in order** (user 2026-08-03).
   When the user sends a message while a change is in flight: (1) finish the in-flight edit and
   verify it, (2) add EVERY new ask as a row in `docs/IDEA_TRACKER.xlsx` immediately — before

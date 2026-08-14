@@ -13587,10 +13587,15 @@ def _positions_card_parts(trades, now_s, today):
             _erows.append((f"{_em2}{_etk2[:4]}", _lastd, _res, _nextd, _nin))
         _ec.close()
         if _erows:
+            # Header order follows the tuple appended above — it did not, so the table read
+            # "Date 2.91/9.11" and "Est/Act +79d" (user 2026-08-12). The row is
+            # (ticker, last report date, est/actual, next report date, days until next).
+            # `In` is always the countdown to the NEXT report, so it is always +d; the old
+            # legend also advertised a "−d passed" case that this table never produces.
             _events_section += ("\n" + _pipe_table(
-                ("Tkr", "Event", "Date", "In", "Est/Act"), _erows, right_cols={3, 4},
-                title="📅 EARNINGS", legend="In: −d passed / +d upcoming · "
-                "Est/Act = EPS · 🟢 beat 🔴 miss 🟡 upcoming") + "\n")
+                ("Tkr", "Rept", "Est/Act", "Next", "In"), _erows, right_cols={2, 4},
+                title="📅 EARNINGS", legend="Rept = last report · Est/Act = EPS est/actual · "
+                "Next = next report, In = days away · 🟢 beat 🔴 miss 🟡 upcoming") + "\n")
         # Call highlights for EVERY position, not just whichever ticker you drilled into
         # (user 2026-07-23). One line per name keeps it readable on a multi-position book.
         #

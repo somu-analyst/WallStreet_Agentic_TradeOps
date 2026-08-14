@@ -395,6 +395,31 @@ if __name__ == "__main__":
         else:
             log_msg("[DRY-RUN] Would fetch the NSE bhavcopy into India_data.db")
 
+        # 6. Audit the day we just captured (user 2026-08-14). The audit used to run ONLY
+        # from the bot's job queue, which had no completion signal from this process and so
+        # guessed the day off a hardcoded 22:30 UTC cutoff in _last_expected_eod(). That
+        # cutoff was sized for the pre-2026-08-12 lane (~57 min and growing); since the
+        # derive was scoped the lane finishes in ~32 min, so the dashboard banner sat ~58 min
+        # behind ready data — and in EST the same constant lands at 17:30 ET, BEFORE the lane
+        # ends, which would have flipped the banner to a half-captured day. Here we know the
+        # real target day and the real completion moment, so neither can drift.
+        # The bot's daily job stays as the backstop + Telegram notifier (it dedups on
+        # day|status, so this early row does not cause a double post).
+        if not DRY_RUN:
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                import telegram_bot_optimized as _tb
+                _conn = _tb.get_conn()
+                try:
+                    _st, _, _day = _tb._data_audit(_conn, target_day.strftime("%Y-%m-%d"))
+                finally:
+                    _conn.close()
+                log_msg(f"Data audit {_day}: {_st}")
+            except Exception as _e:
+                log_msg(f"Data audit skipped ({type(_e).__name__}: {_e})")
+        else:
+            log_msg("[DRY-RUN] Would run the data audit for the captured day")
+
         elapsed = (datetime.now() - start_time).total_seconds()
         log_msg(f"Total runtime: {elapsed:.1f}s")
         log_msg("=== SCHEDULER ENDED ===")

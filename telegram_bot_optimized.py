@@ -13814,10 +13814,22 @@ def _ensure_data_health_table(conn):
 
 def _last_expected_eod():
     """Most recent trading day whose EOD capture should already exist (ISO).
-    Before ~22:30 UTC (post-EOD-lane) we only expect the PREVIOUS weekday."""
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    d = now.date()
-    if now.hour < 22 or (now.hour == 22 and now.minute < 30):
+    Before the EOD lane has had time to land (18:00 ET) we only expect the
+    PREVIOUS weekday.
+
+    The cutoff is NY-clock, not UTC (user 2026-08-14). It used to be a hardcoded
+    22:30 UTC, which is 18:30 ET in EDT but **17:30 ET in EST** — earlier than the
+    ~17:32 ET lane finish. Every winter that let the dashboard's _live_audit_refresh()
+    audit a still-capturing day and write a FAILED row for TODAY, which then won
+    MAX(audit_date) and flashed a red banner over data that was merely unfinished.
+    An ET cutoff is the same moment in both halves of the year, so it cannot drift.
+
+    The scheduler now audits the captured day directly at lane completion, so this
+    is the backstop path (bot job + dashboard live refresh), not the primary one.
+    """
+    ny = _et_now()
+    d = ny.date()
+    if ny.hour < 18:
         d -= timedelta(days=1)
     while d.weekday() >= 5:
         d -= timedelta(days=1)

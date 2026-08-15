@@ -13571,7 +13571,10 @@ def _positions_card_parts(trades, now_s, today):
             action = "TAKE PROFIT"
             em     = "🟢"
             urgent_lines.append(f"🟢 #{tid} {tk} {otype[:1]} ${strike:.0f} — up {pnl_pct:.0f}%, take profit")
-            urgent_keys.append(f"{tid}:profit")
+            # Deliberately NOT added to urgent_keys: the user scoped the re-send to EXIT/CUT
+            # (2026-08-14). A take-profit still shows in ACTION REQUIRED on the card, and a
+            # move big enough to reach +70% will normally trip the 20-point P&L rule anyway --
+            # so it is surfaced, just not as its own interrupt. Losses interrupt; gains wait.
         elif pnl_pct >= 50:
             action = "TAKE PROFIT"
             em     = "🟢"

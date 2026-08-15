@@ -26,6 +26,18 @@ paths:
   - `/why` narrative vs OUR data — LLM turns a headline into a falsifiable claim, the DB returns the verdict. Stored in `narrative_checks`; the product is the per-source hit-rate once it accrues.
   - `/feed` public Telegram channel (`_TG_CHANNELS`, t.me/s/ needs no key/session) + LLM read.
   - `/llm` free-provider status + live round-trip. `/xirr` annualised return per holding (suppressed under 30d — annualising noise gives +800%/yr). `/india` NSE EOD + **delivery %** (own DB).
+- **Added 2026-08-14**:
+  - `/indianews [daily|weekly|monthly]` — material company news on Indian holdings + an advisor
+    view per name. Keyless Google News RSS **pinned to India** (`hl=en-IN&gl=IN`); the US-pinned
+    feed used elsewhere buries domestic coverage. Searches the **company name**, not the bare
+    symbol (TITAN/BSE/MMTC are English words or other companies) — names cached in `india_names`.
+    8 materiality buckets; non-material price blurbs are dropped. Job `india_news_job` at 02:30
+    UTC (~08:00 IST, pre-open) serves all three horizons: weekly on Fri, monthly on the last weekday.
+    **Keyword matching is letter-bounded, never a bare substring** — `"ban" in "bank"` filed every
+    HDFC/ICICI/Axis headline under Regulator.
+    ⚠️ **The advisor layer is PAID-Anthropic-only by design**: its prompt names the user's
+    holdings, and the free tier trains on prompts. No key ⇒ news without advice, never a
+    silent downgrade to the free lane.
 - **Added 2026-08-10**:
   - `/positions` — the REAL book. It never existed before: the open book was menu-button-only,
     so typing `/positions` did nothing. The command delegates to `positions_view`, which only

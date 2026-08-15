@@ -3724,6 +3724,109 @@ def _report(title, headers, rows, right_cols=None, legend=None, notes=None, deta
     return "\n".join(parts)
 
 
+def _p_txt(p):
+    """p-value as a reader-facing string; anything under 0.001 is reported as a
+    bound, never as a suspiciously precise decimal."""
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return ""
+    return "p&lt;0.001" if p < 0.001 else f"p={p:.3f}".rstrip("0").rstrip(".")
+
+
+def _coin_flip(dir_up, n):
+    """True when an up/down split is NOT distinguishable from 50/50 on n days.
+
+    Normal approximation to the binomial (se = sqrt(0.25/n) under the null), two-sided
+    at 95%. Deliberately arithmetic and not a scipy call: this runs inside message
+    rendering, and the whole point is that it always runs.
+    """
+    try:
+        n = float(n)
+        if n <= 0:
+            return True
+        return abs(float(dir_up) - 0.5) < 1.96 * (0.25 / n) ** 0.5
+    except (TypeError, ValueError):
+        return True
+
+
+def _signal_odds_phrase(outcome, hit, base):
+    """One-line base-rate claim for a bottom line: '62% odds of X (normal: 38%)'.
+    Exists so the headline number is derived from the same inputs as the block
+    underneath it -- the two used to be typed separately and could drift apart."""
+    import html as _h
+    return (f"<b>{float(hit) * 100:.0f}% odds of {_h.escape(str(outcome))}</b> "
+            f"(normal: {float(base) * 100:.0f}%)")
+
+
+def _signal_writeup(state, do, outcome=None, n=None, hit=None, base=None,
+                    median=None, median_base=None, p=None, dir_up=None,
+                    dir_n=None, dont=None):
+    """HOUSE TEMPLATE for every signal writeup (user 2026-08-14, ID 241).
+
+    The shape, lifted from the validated put-flow block the user quoted as the standard:
+      1. where the signal sits in ITS OWN history -- a percentile, never an adjective
+      2. what FOLLOWED, measured: base rate vs the unconditional baseline, with n and p
+      3. an explicit direction verdict, including the coin-flip warning
+      4. a Do list
+
+    Why a function rather than a copied paragraph. Two failure modes get designed out:
+      * The direction verdict is COMPUTED from (dir_up, dir_n) by `_coin_flip`, so a
+        writeup cannot claim a side the data never supported. That error is precisely
+        what the put-flow finding exists to prevent -- it predicts SIZE, not side -- and
+        leaving it to prose is how it comes back.
+      * A signal with no measured base rate SAYS SO. It does not inherit the confident
+        cadence of a measured one, and it never gets invented numbers. If you find
+        yourself wanting to pass a hit rate you have not measured, the answer is to
+        measure it (see the validation recipe in .claude/rules/bot-conventions.md).
+
+    Rates are FRACTIONS (0.62, not 62). `median`/`median_base` are fractional returns.
+    `dir_n` defaults to `n`; pass the band's own count when the direction split was
+    measured on a subset. Returns an HTML block for Telegram.
+    """
+    import html as _h
+    lines = [str(state).strip()]
+
+    if hit is not None and base is not None and n:
+        what = _h.escape(str(outcome or "the move"))
+        line = (f"<b>What followed, measured on {int(n)} days:</b> {what} came "
+                f"<b>{float(hit) * 100:.0f}%</b> of the time, vs "
+                f"<b>{float(base) * 100:.0f}%</b> after a normal day")
+        if median is not None and median_base is not None:
+            line += (f". Median move {float(median) * 100:.2f}% vs "
+                     f"{float(median_base) * 100:.2f}%")
+        if p is not None:
+            line += f" ({_p_txt(p)})"
+        lines.append(line + ".")
+    else:
+        lines.append("<b>Not measured here</b> — there is no base rate to quote for this "
+                     "reading, so treat it as context, not an edge.")
+
+    flip = None
+    if dir_up is not None:
+        flip = _coin_flip(dir_up, dir_n or n)
+        if flip:
+            lines.append(f"<b>Direction: {float(dir_up) * 100:.0f}% up — a coin flip.</b> "
+                         f"This calls SIZE, not side.")
+        else:
+            side = "up" if float(dir_up) > 0.5 else "down"
+            lines.append(f"<b>Direction: {float(dir_up) * 100:.0f}% {side}</b> on "
+                         f"{int(dir_n or n)} days — outside the coin-flip band.")
+
+    do_txt = do if isinstance(do, str) else ", ".join(str(d) for d in do)
+    do_line = f"<b>Do:</b> {do_txt.rstrip('.')}."
+    if dont:
+        d = str(dont).strip()
+        do_line += " " + (d if d.lower().startswith("do not") else f"Do NOT {d}")
+        do_line = do_line.rstrip(".") + "."
+    elif flip:
+        # Auto-guard: a coin-flip direction ALWAYS carries the warning, even if the
+        # caller forgot it. This is the safe default being unskippable, on purpose.
+        do_line += " Do NOT pick a direction off this."
+    lines.append(do_line)
+    return "\n".join(lines)
+
+
 def _pipe_table(header_cols, rows_data, right_cols=None, title=None, legend=None):
     """Excel-style fixed-width table in <pre> — columns align at the same index.
 
@@ -11722,7 +11825,33 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE, force=False):
         return
 
     now_et = _et_now().replace(tzinfo=None)   # DST-aware (was fixed UTC-5)
-    parts = _positions_card_parts(trades, now_et.strftime("%H:%M ET"), now_et.date())
+    # GUARDED (ID 217): this builder is SHARED with positions_view, so an edit made for the
+    # menu card can throw here and kill the scheduled push -- and because this is a job, the
+    # failure is completely silent: no message, no user-visible error, just a card that
+    # "stopped arriving". That is one of the two failure modes in the original report, and it
+    # was unguarded. A throw now surfaces as a real (notifying) message, deduped to once per
+    # day so a persistent break does not spam every 10 minutes.
+    try:
+        parts = _positions_card_parts(trades, now_et.strftime("%H:%M ET"), now_et.date())
+    except Exception as e:
+        log.exception("positions card build FAILED — scheduled push cannot render")
+        try:
+            import html as _he
+            _c = get_conn()
+            _ensure_alert_dedup_table(_c)
+            _first = not _alert_already_sent(_c, now_et.date().isoformat(),
+                                             "position_monitor", "card_build_failed")
+            _c.close()
+            if _first:
+                await ctx.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=(f"⚠️ <b>Positions card is failing to build</b>\n"
+                          f"The recurring positions update cannot render, so it will be "
+                          f"missing until this is fixed.\n<code>{_he.escape(str(e)[:300])}</code>"),
+                    parse_mode=H)
+        except Exception:
+            log.debug("could not send card-build failure notice", exc_info=True)
+        return
     if force:
         # Manual/adhoc trigger: user tapped a button and wants the FULL rich card right
         # now, keyboard included -- the consolidated status message (A10) is for the
@@ -11739,10 +11868,82 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE, force=False):
         except Exception as e:
             log.warning(f"position_monitor send failed: {e}")
         return
+    # ── Material change? Then NOTIFY, don't just edit (ID 217) ──────────────────────
+    # The consolidated status card is edited in place, and Telegram fires no notification
+    # on an edit -- so before this, a CUT LOSS could appear and scroll away unseen. Minor
+    # ticks still edit silently (that consolidation is the point); only a material change
+    # earns a fresh message.
+    reason = None
+    try:
+        reason = _position_material_change(parts)
+    except Exception as e:
+        log.debug(f"materiality check failed, falling back to silent edit: {e}")
+    if reason:
+        try:
+            await ctx.bot.send_message(
+                chat_id=int(chat_id),
+                text=f"{hdr('🔔 POSITION UPDATE')}\n<i>{reason}</i>\n\n{parts['full']}"[:4000],
+                parse_mode=H, reply_markup=_positions_card_kb(parts["first_tk"]))
+            return
+        except Exception as e:
+            log.warning(f"position_monitor material re-send failed: {e}")
     try:
         await _status_push(ctx, "position_monitor", parts["full"])
     except Exception as e:
         log.warning(f"position_monitor status_push failed: {e}")
+
+
+# Materiality thresholds for the re-send rule (user 2026-08-14, ID 217).
+_POS_RESEND_PCT = 20.0        # percentage POINTS of book P&L move since the last notify
+
+
+def _position_material_change(parts):
+    """Return a short reason string when the book has moved enough to deserve a NEW
+    (notifying) message, else None. Baseline is persisted in app_settings so the rule
+    survives a restart and cannot re-fire on the same event.
+
+    Two triggers, both chosen by the user:
+      * book P&L moves >= 20 percentage points since the last notification
+      * a NEW action-required leg appears (EXIT NOW / CUT LOSS / TAKE PROFIT)
+
+    Deliberately compares against the last NOTIFIED state, not the previous tick: a slow
+    drift that accumulates to 20pts over an hour is material even though no single 10-min
+    tick was, and a position sitting at CUT LOSS all afternoon must not re-alert every tick.
+    """
+    conn = get_conn()
+    try:
+        pct = float(parts.get("pnl_pct") or 0.0)
+        keys = set(parts.get("urgent_keys") or [])
+        prev_pct_raw = _app_setting(conn, "pos_notify_pnl_pct")
+        prev_keys = set(filter(None, (_app_setting(conn, "pos_notify_keys") or "").split(",")))
+        new_keys = keys - prev_keys
+
+        reason = None
+        if new_keys:
+            _label = {"exit": "EXIT NOW", "cut": "CUT LOSS", "profit": "TAKE PROFIT"}
+            hits = sorted({_label.get(k.split(":")[-1], k) for k in new_keys})
+            reason = f"New action required: {', '.join(hits)}."
+        elif prev_pct_raw is None or prev_pct_raw == "":
+            # First run ever: seed the baseline silently rather than firing on nothing.
+            pass
+        else:
+            try:
+                move = pct - float(prev_pct_raw)
+            except (TypeError, ValueError):
+                move = 0.0
+            if abs(move) >= _POS_RESEND_PCT:
+                reason = (f"Book P&amp;L moved {move:+.1f} points since the last update "
+                          f"(now {pct:+.1f}%).")
+
+        # Persist the baseline whenever it is seeded or consumed. Urgent keys are stored on
+        # EVERY tick, including quiet ones, so a leg that drops out of ACTION REQUIRED and
+        # later returns is treated as new -- and one that simply persists is not.
+        _set_app_setting(conn, "pos_notify_keys", ",".join(sorted(keys)))
+        if reason or prev_pct_raw is None or prev_pct_raw == "":
+            _set_app_setting(conn, "pos_notify_pnl_pct", f"{pct:.4f}")
+        return reason
+    finally:
+        conn.close()
 
 
 def _positions_card_kb(first_tk):
@@ -13165,7 +13366,13 @@ def _positions_card_parts(trades, now_s, today):
     rows       = []
     _eod_list  = []                  # EOD mark per leg, parallel to rows (2nd loop builds table)
     total_pnl  = 0.0
+    total_cost = 0.0                 # basis, so the card can report P&L as a % (ID 217)
     urgent_lines = []
+    # Stable identifiers for the ACTION REQUIRED lines below. The recurring status card is
+    # EDITED in place and Telegram does not notify on an edit, so a newly-fired EXIT/CUT
+    # would scroll past silently. `position_monitor` diffs these keys against the last
+    # notified set to decide when to send a FRESH (notifying) message instead. (ID 217)
+    urgent_keys = []
     _pc_conn   = get_conn()          # shared conn for fast BB leg marks
     _ah_cache  = {}                  # per-ticker after-hours spot (avoid repeat fast_info)
     _ah_any    = False               # did any leg use an extended-hours mark?
@@ -13321,6 +13528,7 @@ def _positions_card_parts(trades, now_s, today):
         pnl     = (cur_px - entry) * qty * 100
         pnl_pct = (pnl / abs(entry * qty * 100) * 100) if entry > 0 else 0
         total_pnl += pnl
+        total_cost += abs(entry * qty * 100)
 
         oi_s = oi_sigs.get(tk, "?")
         oi_align = not ((otype == "CALL" and oi_s == "BEA") or (otype == "PUT" and oi_s == "BUL"))
@@ -13350,10 +13558,12 @@ def _positions_card_parts(trades, now_s, today):
             action = "EXIT NOW"
             em     = "🚨"
             urgent_lines.append(f"🚨 #{tid} {tk} {otype[:1]} ${strike:.0f} — {dte}d left, exit immediately")
+            urgent_keys.append(f"{tid}:exit")
         elif pnl_pct <= -50:
             action = "CUT LOSS"
             em     = "🔴"
             urgent_lines.append(f"🔴 #{tid} {tk} {otype[:1]} ${strike:.0f} — down {pnl_pct:.0f}%, cut loss")
+            urgent_keys.append(f"{tid}:cut")
         elif pnl_pct <= -40:
             action = "CUT LOSS"
             em     = "🔴"
@@ -13361,6 +13571,7 @@ def _positions_card_parts(trades, now_s, today):
             action = "TAKE PROFIT"
             em     = "🟢"
             urgent_lines.append(f"🟢 #{tid} {tk} {otype[:1]} ${strike:.0f} — up {pnl_pct:.0f}%, take profit")
+            urgent_keys.append(f"{tid}:profit")
         elif pnl_pct >= 50:
             action = "TAKE PROFIT"
             em     = "🟢"
@@ -13767,7 +13978,12 @@ def _positions_card_parts(trades, now_s, today):
     return {"full": full_msg,
             "head": f"{hdr(f'💼 POSITIONS · {now_s}')}\n\n{_ah_banner}{colour_section}",
             "tail": urgent_section + hp_section + footer + _context_section,
-            "first_tk": str(trades["ticker"].iloc[0]).upper() if not trades.empty else "SPY"}
+            "first_tk": str(trades["ticker"].iloc[0]).upper() if not trades.empty else "SPY",
+            # Materiality inputs for the re-send rule (ID 217) -- surfaced from figures the
+            # card already computed rather than re-priced, so the check costs nothing.
+            "total_pnl": total_pnl,
+            "pnl_pct": (total_pnl / total_cost * 100) if total_cost > 0 else 0.0,
+            "urgent_keys": urgent_keys}
 
 
 def _ensure_alert_dedup_table(conn):
@@ -34052,26 +34268,30 @@ def _riskoff_scan(conn):
     _TURB_P80, _TURB_P60 = 17, 13
     fires = raw["putfires"]
     turb_score = min(100.0, fires * 15.0)
+    # Rendered through the house signal template (_signal_writeup, ID 241) rather than
+    # hand-typed prose. The HIGH block below reproduces the wording the user set as the
+    # standard; the value is that the direction verdict is now COMPUTED, so this block
+    # cannot drift back into claiming a side.
+    _TURB_OUTCOME = "a >2% Nasdaq week"
     if fires >= _TURB_P80:
         turb_lvl, turb_emoji = "HIGH", "🔴"
-        turb_txt = ("Index put-flow is in the TOP 20% of its own history.\n"
-                    "<b>What followed, measured on 151 days:</b> a &gt;2% Nasdaq week came "
-                    "<b>62%</b> of the time, vs <b>38%</b> after a normal day. Median move "
-                    "2.26% vs 1.55% (p=0.012).\n"
-                    "<b>Direction: 53% up — a coin flip.</b> This calls SIZE, not side.\n"
-                    "<b>Do:</b> favour long premium, widen stops, cut size on short-vol. "
-                    "Do NOT pick a direction off this.")
+        turb_txt = _signal_writeup(
+            "Index put-flow is in the TOP 20% of its own history.",
+            "favour long premium, widen stops, cut size on short-vol",
+            outcome=_TURB_OUTCOME, n=151, hit=0.62, base=0.38,
+            median=0.0226, median_base=0.0155, p=0.012, dir_up=0.53)
     elif fires >= _TURB_P60:
         turb_lvl, turb_emoji = "ELEVATED", "🟡"
-        turb_txt = ("Index put-flow in the 60-80th percentile of its history.\n"
-                    "<b>What followed (n=38):</b> a &gt;2% Nasdaq week 61% of the time vs 38% "
-                    "normally — close to the HIGH band.\n"
-                    "<b>Do:</b> keep size sensible, stops a touch wider.")
+        turb_txt = _signal_writeup(
+            "Index put-flow is in the 60-80th percentile of its own history.",
+            "keep size sensible and stops a touch wider — this sits close to the HIGH band",
+            outcome=_TURB_OUTCOME, n=38, hit=0.61, base=0.38)
     else:
         turb_lvl, turb_emoji = "NORMAL", "🟢"
-        turb_txt = ("Index put-flow in the bottom 60% of its history.\n"
-                    "<b>What followed (n=81):</b> a &gt;2% Nasdaq week only 38% of the time, "
-                    "median 1.55%. The quietest of the three states — but 38% is not zero.")
+        turb_txt = _signal_writeup(
+            "Index put-flow is in the BOTTOM 60% of its own history — the calm band.",
+            "size normally — but 38% is not zero, so keep stops in place",
+            outcome=_TURB_OUTCOME, n=81, hit=0.38, base=0.38)
 
     # ── DIRECTION lean (soft, low confidence: dealer gamma + breadth; correctly
     # signed but NOT statistically significant in ~6mo history — a hint, not a trigger). ──
@@ -34094,17 +34314,17 @@ def _riskoff_scan(conn):
     # told the user nothing they could size a trade against; "62% vs 38%" does.
     if turb_lvl == "HIGH":
         remoji, headline = turb_emoji, "Big move brewing"
-        action = (f"<b>62% odds of a &gt;2% Nasdaq week</b> (normal: 38%), measured on 151 days. "
+        action = (f"{_signal_odds_phrase(_TURB_OUTCOME, 0.62, 0.38)}, measured on 151 days. "
                   f"Size down, widen stops, prefer long premium over short. "
                   f"Direction {dir_lean} — historically 53% up after this reading, i.e. no side.")
     elif turb_lvl == "ELEVATED":
         remoji, headline = turb_emoji, "Stay nimble"
-        action = (f"<b>61% odds of a &gt;2% Nasdaq week</b> (normal: 38%). Keep size sensible. "
+        action = (f"{_signal_odds_phrase(_TURB_OUTCOME, 0.61, 0.38)}. Keep size sensible. "
                   f"Direction {dir_lean} — no measured edge either way.")
     else:
         remoji, headline = dir_emoji if dir_lean != "NEUTRAL" else "🟢", "Routine conditions"
-        action = (f"<b>38% odds of a &gt;2% Nasdaq week</b> — the calm band, though still not zero. "
-                  f"Normal sizing. Direction {dir_lean}.")
+        action = (f"{_signal_odds_phrase(_TURB_OUTCOME, 0.38, 0.38)} — the calm band, though "
+                  f"still not zero. Normal sizing. Direction {dir_lean}.")
 
     if turb_lvl == "HIGH":     # self-score the turbulence call vs SPY forward |move|
         _persist_scanner_fires(conn, "riskoff", [("SPY", "BEAR" if dir_lean == "DOWN" else "BULL",
@@ -37241,6 +37461,323 @@ async def india_command(update, ctx):
         await update.message.reply_text(p, parse_mode=H)
 
 
+# ══════════════════════════════════════════════════════════════════════════════════
+#  INDIA NEWS LANE (ID 237) — per-holding company news, daily / weekly / monthly
+# ══════════════════════════════════════════════════════════════════════════════════
+# User: cannot track news on their Indian holdings; wants sales, management changes and
+# "all material aspects", written the way an advisor would -- a view and a recommendation,
+# not a headline dump.
+#
+# PRIVACY DECISION, and it is not cosmetic. The advice layer needs to know WHICH stocks are
+# held, and that is position data. CLAUDE.md: Google's free tier TRAINS on prompts, so the
+# free `_llm_chat` lane is for public news only. This lane therefore sends the book to the
+# PAID Anthropic key or to nothing at all -- with no key it still prints the categorised
+# news and says the advice layer is off. It must never silently downgrade to the free lane.
+#
+# Materiality buckets. Ordered by how much they move an Indian mid/large-cap; the FIRST
+# match wins, so put the decisive ones first.
+_INDIA_NEWS_CATS = [
+    ("Results",  ("q1", "q2", "q3", "q4", "quarterly", "results", "profit", "revenue",
+                  "earnings", "ebitda", "margin", "net sales", "topline", "bottomline")),
+    ("Mgmt",     ("ceo", "cfo", "managing director", "chairman", "resign", "steps down",
+                  "appoint", "board approves", "succession", "md &")),
+    ("M&A",      ("acquire", "acquisition", "merger", "stake sale", "divest", "takeover",
+                  "open offer", "amalgamation")),
+    ("Regulator",("sebi", "rbi", "cci", "nclt", "gst", "income tax", "probe", "penalty",
+                 "show cause", "investigation", "ban", "fraud", "raid")),
+    ("Guidance", ("guidance", "outlook", "forecast", "target", "capex plan", "expansion")),
+    ("Orders",   ("order win", "bags order", "contract", "wins", "loi", "letter of intent",
+                  "new plant", "commissions")),
+    ("Rating",   ("upgrade", "downgrade", "rating", "crisil", "icra", "care ratings",
+                  "outperform", "underperform", "buy call", "sell call", "price target")),
+    ("Capital",  ("dividend", "buyback", "bonus", "split", "rights issue", "qip",
+                  "fund raise", "preferential")),
+]
+_INDIA_HORIZONS = {"daily": ("1d", "last 24 hours"), "weekly": ("7d", "last 7 days"),
+                   "monthly": ("30d", "last 30 days")}
+
+
+# Keyword match is LETTER-BOUNDED, not a bare substring. Plain `"ban" in title` matched
+# "Bank" -- which in an Indian-equity feed (HDFC Bank, ICICI Bank, Axis Bank) filed a large
+# share of ordinary headlines under "Regulator". Caught in test 2026-08-14. `\b` is wrong
+# here because some keys end in punctuation ("md &"), so guard on adjacent LETTERS only.
+_INDIA_CAT_RE = [
+    (cat, [__import__("re").compile(r"(?<![a-z])" + __import__("re").escape(k) + r"(?![a-z])")
+           for k in keys])
+    for cat, keys in _INDIA_NEWS_CATS]
+
+
+def _india_news_cat(title):
+    """First matching materiality bucket, else None. None = not material, and it is DROPPED:
+    the user asked for material aspects, so a price-movement blurb is noise here."""
+    low = str(title or "").lower()
+    for cat, pats in _INDIA_CAT_RE:
+        if any(p.search(low) for p in pats):
+            return cat
+    return None
+
+
+def _india_name_for(sym):
+    """Company name for an NSE symbol, cached in the India DB.
+
+    Needed because a Google News search on a bare NSE symbol is badly ambiguous -- TITAN,
+    MMTC and BSE are ordinary English words or other companies -- so searching the symbol
+    alone returns stories about the wrong entity. The name is resolved once via yfinance and
+    then cached: the same reasoning as `ticker_country` for flags (a .info call is 1-2s, far
+    too slow to do on every render), except the India book is small enough to resolve lazily.
+    """
+    base = str(sym or "").upper().split(".")[0]
+    if not base:
+        return ""
+    conn = _india_conn()
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS india_names ("
+                     "symbol TEXT PRIMARY KEY, name TEXT, updated TEXT)")
+        row = conn.execute("SELECT name FROM india_names WHERE symbol=?", (base,)).fetchone()
+        if row and row[0]:
+            return row[0]
+        name = ""
+        try:
+            info = _yf_ticker(_yf_alias(sym)).info or {}
+            name = str(info.get("longName") or info.get("shortName") or "").strip()
+        except Exception:
+            log.debug(f"india name lookup failed for {base}", exc_info=True)
+        # Cache even an EMPTY result: a failed lookup is usually a delisted/odd symbol, and
+        # retrying it on every run would pay the 1-2s penalty forever. `updated` makes a
+        # deliberate refresh possible later.
+        conn.execute("INSERT OR REPLACE INTO india_names VALUES (?,?,?)",
+                     (base, name, _et_now().date().isoformat()))
+        conn.commit()
+        return name
+    finally:
+        conn.close()
+
+
+def _india_book_symbols(conn=None):
+    """India names the user HOLDS or WATCHES, via the canonical `_ticker_flag` resolver.
+
+    Never reimplement the country lane here (CLAUDE.md): `_ticker_flag` already handles the
+    .NS/.BO suffix, the curated ADR lists and the `ticker_country` cache, and bare NSE
+    symbols that collide with US tickers are excluded there ON PURPOSE.
+    """
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        tks = set()
+        for sql in ("SELECT DISTINCT UPPER(ticker) FROM trades WHERE status='OPEN'",
+                    "SELECT DISTINCT UPPER(ticker) FROM watchlist"):
+            try:
+                tks |= {r[0] for r in conn.execute(sql) if r and r[0]}
+            except Exception:
+                log.debug(f"india book source unavailable: {sql[:40]}", exc_info=True)
+        out = []
+        for tk in sorted(tks):
+            try:
+                if _ticker_flag(tk, conn) == "🇮🇳":
+                    out.append(tk)
+            except Exception:
+                log.debug(f"flag lookup failed for {tk}", exc_info=True)
+        return out
+    finally:
+        if own:
+            conn.close()
+
+
+def _india_news_for(sym, when="7d", limit=6, timeout=10):
+    """Material headlines for ONE Indian name. [(cat, title, link, when_str)].
+
+    Keyless Google News RSS, region-pinned to India (hl=en-IN&gl=IN) so domestic outlets
+    rank first -- the US-pinned feed used elsewhere in this file buries Indian coverage.
+    """
+    import urllib.parse as _u, urllib.request as _ur, re as _re, html as _h
+    base = str(sym or "").upper().split(".")[0]
+    name = _india_name_for(sym)
+    # Search the company NAME when known and fall back to the symbol qualified with NSE.
+    # Unqualified symbols return the wrong company (see _india_name_for).
+    q = f'"{name}"' if name else f"{base} NSE"
+    url = ("https://news.google.com/rss/search?q="
+           + _u.quote(f"{q} when:{when}") + "&hl=en-IN&gl=IN&ceid=IN:en")
+    try:
+        xml = _ur.urlopen(_ur.Request(url, headers={"User-Agent": "Mozilla/5.0"}),
+                          timeout=timeout).read().decode("utf-8", "ignore")
+    except Exception:
+        log.debug(f"india news fetch failed for {base}", exc_info=True)
+        return []
+    out, seen = [], set()
+    for blk in _re.findall(r"<item[^>]*>(.*?)</item>", xml, _re.S):
+        m = _re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", blk, _re.S)
+        l = _re.search(r"<link>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>", blk, _re.S)
+        d = _re.search(r"<pubDate>(.*?)</pubDate>", blk, _re.S)
+        if not m:
+            continue
+        title = _h.unescape(_re.sub(r"<[^>]+>", "", m.group(1))).strip()
+        key = title[:60].lower()
+        if not title or key in seen:
+            continue
+        cat = _india_news_cat(title)
+        if not cat:
+            continue                      # not material -> drop, per the user's ask
+        seen.add(key)
+        out.append((cat, title[:180],
+                    (l.group(1).strip() if l else ""),
+                    (d.group(1)[:16] if d else "")))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _india_news_digest(horizon="daily", max_syms=12):
+    """{symbol: [(cat, title, link, when)]} for the whole India book, plus the symbol list.
+    Bounded at `max_syms` because each symbol is one network fetch."""
+    when, _label = _INDIA_HORIZONS.get(horizon, _INDIA_HORIZONS["daily"])
+    syms = _india_book_symbols()[:max_syms]
+    return {s: _india_news_for(s, when=when) for s in syms}, syms
+
+
+def _india_news_advice(digest, horizon):
+    """Advisor view + recommendation per name. Returns (text, engine) or (None, reason).
+
+    PAID Anthropic lane ONLY -- see the privacy note at the top of this section. The prompt
+    names the user's holdings, so routing it to the free tier would hand the book to a
+    provider that trains on prompts. No key means no advice, never a quiet downgrade.
+    """
+    body = []
+    for sym, items in digest.items():
+        if not items:
+            continue
+        body.append(f"{sym}:\n" + "\n".join(f"  - [{c}] {t}" for c, t, _l, _w in items))
+    if not body:
+        return None, "no material news"
+    key = _load_ai_key()
+    if not key:
+        return None, ("no ANTHROPIC_API_KEY — advice layer off (the free LLM tier trains on "
+                      "prompts and this one names your holdings)")
+    prompt = (
+        f"You are an equity advisor covering Indian (NSE) stocks. Below are MATERIAL "
+        f"headlines from the {_INDIA_HORIZONS.get(horizon, ('', horizon))[1]} for stocks the "
+        f"client holds or watches.\n\n" + "\n\n".join(body) + "\n\n"
+        "For EACH stock write at most 3 short lines:\n"
+        "1. What actually happened (one line, concrete).\n"
+        "2. Your view — why it matters for the investment case.\n"
+        "3. A recommendation: ADD / HOLD / TRIM / EXIT / WATCH, with the trigger that would "
+        "change it.\n\n"
+        "Rules: use ONLY the headlines given; never invent numbers, prices or events. If a "
+        "stock's news is not decision-relevant, say 'no action' and move on. Be direct and "
+        "specific — no hedging boilerplate. Plain text, no markdown headers.")
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=key)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=1200,
+            messages=[{"role": "user", "content": prompt}])
+        txt = "".join(b.text for b in resp.content if b.type == "text").strip()
+        return (txt or None), ("Claude Haiku 4.5" if txt else "empty response")
+    except Exception as e:
+        log.warning(f"india news advice failed: {e}")
+        return None, f"advice call failed: {str(e)[:80]}"
+
+
+def _fmt_india_news(horizon="daily"):
+    """Full Telegram body for the India news lane. Runs the network work, so call it in a
+    thread. Returns the message string (never None -- an empty book still explains itself)."""
+    import html as _h
+    label = _INDIA_HORIZONS.get(horizon, _INDIA_HORIZONS["daily"])[1]
+    digest, syms = _india_news_digest(horizon)
+    if not syms:
+        return (f"{hdr('🇮🇳 INDIA NEWS')}\n\nNo Indian holdings or watchlist names found.\n"
+                f"<i>Indian symbols need the .NS suffix (RELIANCE.NS) to be recognised — a "
+                f"bare NSE symbol is left as US on purpose, because names like BSE and TITAN "
+                f"collide with real US tickers.</i>")
+    rows = [(s.split(".")[0][:10], str(len(v)), (v[0][0] if v else "—"))
+            for s, v in digest.items()]
+    tbl = _report(f"🇮🇳 INDIA NEWS · {label}", ("Symbol", "N", "Top"), rows,
+                  right_cols={1},
+                  legend="N = material stories · Top = leading category",
+                  notes="Material stories only — price-move blurbs are filtered out.")
+    details = []
+    for sym, items in digest.items():
+        if not items:
+            continue
+        details.append(f"\n<b>{_h.escape(sym)}</b>")
+        for cat, title, link, when in items[:4]:
+            t = _h.escape(title)
+            details.append(f"• [{cat}] " + (f'<a href="{_h.escape(link)}">{t}</a>' if link else t))
+    quiet = [s for s in syms if not digest.get(s)]
+    if quiet:
+        details.append(f"\n<i>No material news: {', '.join(s.split('.')[0] for s in quiet)}</i>")
+    advice, engine = _india_news_advice(digest, horizon)
+    adv_block = ""
+    if advice:
+        adv_block = (f"\n\n{hdr('🧭 ADVISOR VIEW')}\n"
+                     f"<blockquote expandable>{_h.escape(advice)}</blockquote>"
+                     f"\n<i>Generated by {engine} from the headlines above · NOT advice.</i>")
+    else:
+        adv_block = f"\n\n<i>🧭 Advisor view unavailable — {_h.escape(str(engine))}.</i>"
+    return tbl + "\n" + "\n".join(details) + adv_block
+
+
+async def indianews_command(update, ctx):
+    """/indianews [daily|weekly|monthly] — material company news on Indian holdings,
+    with an advisor view and a recommendation per name."""
+    arg = (ctx.args[0].lower() if getattr(ctx, "args", None) else "daily")
+    horizon = arg if arg in _INDIA_HORIZONS else "daily"
+    msg = await update.message.reply_text(
+        f"🇮🇳 Scanning Indian holdings — {_INDIA_HORIZONS[horizon][1]}…", parse_mode=H)
+    try:
+        txt = await asyncio.to_thread(_fmt_india_news, horizon)
+    except Exception as e:
+        log.exception("indianews failed")
+        txt = f"⚠️ India news scan failed: {_html_escape_safe(e)}"
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    for p in _chunk_on_sections(txt):
+        await update.message.reply_text(p, parse_mode=H,
+                                        disable_web_page_preview=True)
+
+
+def _html_escape_safe(e):
+    import html as _h
+    return _h.escape(str(e)[:200])
+
+
+async def india_news_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Recurring India news push. DAILY on weekdays; the weekly edition rides Friday and the
+    monthly one the last weekday of the month, so one job serves all three horizons the user
+    asked for without three separate schedules."""
+    now = _et_now()
+    if now.weekday() >= 5:
+        return
+    conn = get_conn()
+    try:
+        _ensure_alert_dedup_table(conn)
+        today = now.date().isoformat()
+        # Month-end = no further weekday left in this month.
+        _nxt = now.date() + timedelta(days=1)
+        while _nxt.weekday() >= 5:
+            _nxt += timedelta(days=1)
+        horizon = ("monthly" if _nxt.month != now.month
+                   else ("weekly" if now.weekday() == 4 else "daily"))
+        if _alert_already_sent(conn, today, "india_news", horizon):
+            return
+    finally:
+        conn.close()
+    _, chat_id = load_creds()
+    try:
+        txt = await asyncio.to_thread(_fmt_india_news, horizon)
+    except Exception:
+        log.exception("india_news_job build failed")
+        return
+    for p in _chunk_on_sections(txt):
+        try:
+            await ctx.bot.send_message(chat_id=int(chat_id), text=p, parse_mode=H,
+                                       disable_web_page_preview=True)
+        except Exception as e:
+            log.warning(f"india_news_job send failed: {e}")
+
+
 # ── Dispersion: index IV vs its constituents (ID 35.5) ──────────────────────────────
 # STORAGE ONLY, deliberately. tools/test_dispersion.py established feasibility (all gates
 # pass: index IV + 15/15 member IVs on the same date) but ALSO that we cannot trade it yet:
@@ -40335,6 +40872,7 @@ def main():
     app.add_handler(CommandHandler("feargreed", feargreed_command))  # F&G history
     app.add_handler(CommandHandler("xirr", xirr_command))         # annualised return/holding
     app.add_handler(CommandHandler("india", india_command))       # NSE EOD + delivery %
+    app.add_handler(CommandHandler("indianews", indianews_command))  # India holdings news + advisor view
     app.add_handler(CommandHandler("positions", positions_command))  # real book (was menu-only)
     app.add_handler(CommandHandler("whatif", whatif_command))     # entropy-pooling scenario
     app.add_handler(CommandHandler("why", why_command))           # narrative vs our data
@@ -40391,6 +40929,10 @@ def main():
         _sched_once(job_queue, action_board_alert, (13, 35), "action_board", "Action Board") # Action Board ~8:35 AM ET pre-market
         _sched_once(job_queue, earnings_alert, (13, 45), "earnings_alert", "Earnings Radar") # Earnings Radar ~8:45 AM ET pre-market
         job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # weekly sector rotation, Mondays
+        # India news ~08:00 IST (02:30 UTC) — before the NSE 09:15 open, so the overnight
+        # material news lands before the session rather than after it. ONE job serves all
+        # three horizons: it picks weekly on Fridays and monthly on the last weekday.
+        job_queue.run_daily(india_news_job, time=dt_time(2, 30, 0))
         job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
         job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs ~4:30pm ET
         job_queue.run_daily(record_short_interest, time=dt_time(21, 40, 0))  # SI snapshot ~4:40pm ET

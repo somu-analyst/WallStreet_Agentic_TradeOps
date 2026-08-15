@@ -1,5 +1,117 @@
 # LOG
 
+## 2026-08-14 — House signal template (ID 241) + position alerts that actually notify (ID 217)
+
+Both items were blocked on a user decision, not on work. Asked both up front, then built.
+
+### ID 241 — `_signal_writeup()` is now the house template for every signal writeup
+
+User chose the **template** option, not the one-off block. Shipped near `_report`
+(`telegram_bot_optimized.py` ~3737): `_signal_writeup()` + `_signal_odds_phrase()`, with
+`_coin_flip()` and `_p_txt()` helpers.
+
+The shape (from the put-flow block the user quoted as the standard):
+percentile in its OWN history → what FOLLOWED, measured (base rate vs baseline, n, p) →
+explicit direction verdict → Do list.
+
+**Why a function instead of a copied paragraph** — two failure modes are designed out:
+- The direction verdict is **computed** from `(dir_up, dir_n)` by a binomial test
+  (normal approx, two-sided 95%), so a writeup *cannot* claim a side the data never
+  supported. That is exactly the error the put-flow finding exists to prevent — it calls
+  SIZE, not side — and leaving it to prose is how it comes back. A coin-flip result
+  **auto-appends** "Do NOT pick a direction off this" even when the caller forgets it.
+- A signal with **no measured base rate says so** ("Not measured here") rather than
+  inheriting the confident cadence of a measured one. It never gets invented numbers.
+
+Turbulence gauge rewired onto it; HIGH band reproduces the user's wording **character-exact**
+(asserted in test). Bottom-line odds now come from `_signal_odds_phrase` with the same inputs
+as the block, so headline and body can no longer drift apart — they were typed separately before.
+
+Verified: exact-match assertion · 6 behaviour cases · binomial boundary (60% up = a real edge
+on 400 days, a coin flip on 30) · Telegram HTML tag/entity validation on all 8 render paths.
+
+**Rollout is NOT mechanical** (new ID 243): most signals have no measured base rate, and the
+template refuses to fabricate one — so converting a signal means *measuring* it first. Convert
+opportunistically as each is touched; do not bulk-convert.
+
+### ID 217 — position alerts scrolled away silently
+
+**Root cause confirmed in code, and it was not where the title suggested.** `position_alerts`
+was never the problem — it already sends fresh messages. The scheduled `position_monitor` tick
+pushes through `_status_push`, which **edits the consolidated card in place**, and Telegram
+fires no notification on an edit. Nothing was lost; it was silent.
+
+User chose **re-send on material change**. `_positions_card_parts` now also returns
+`total_pnl` / `pnl_pct` / `urgent_keys`, reusing figures it already computed (the check costs
+no extra pricing). `_position_material_change(parts)` diffs against the **last notified**
+state persisted in `app_settings` (`pos_notify_pnl_pct`, `pos_notify_keys`), so it survives
+restarts. Triggers: book P&L moves ≥20 percentage points, or a NEW action-required leg appears.
+
+Comparing against last-*notified* rather than last-*tick* is the point: slow drift that
+accumulates to 20 points over an hour still fires, while a leg parked at CUT LOSS does **not**
+re-alert every 10 minutes. Minor ticks still edit silently — that consolidation was deliberate.
+
+Verified with a 10-step state-machine test on real sqlite (all pass), including the two
+anti-spam cases: a persisting CUT LOSS stays quiet, and one that clears and later returns fires again.
+
+### ID 217, second failure mode — caught only by re-reading the sheet
+
+The user asked "you are following the entries from excel right", which forced a re-read of the
+row's own `Detail` column. It contained a **second hypothesis that had not been tested**:
+
+> `_positions_card_parts` was edited today (flag on `_leg`) and it is SHARED by the 10-min
+> `position_monitor` push — a throw there would silence it.
+
+That is a *different* bug from the silent-edit one, and it was real: the call at
+`position_monitor` was **unguarded inside a scheduled job**. Any edit made for the menu card
+could throw and kill the recurring push with no message, no user-visible error, and nothing but
+a job-queue traceback — the literal "no longer arrives" half of the original report, as opposed
+to the "scrolls away silently" half.
+
+Now wrapped: logs the traceback and sends **one** visible alert per day (via `alert_dedup`)
+naming the exception, so the failure can never again be silent. Verified by injecting
+`KeyError('_leg')` — the exact shape flagged — across 3 ticks: 1 message sent, cause named,
+no per-tick spam.
+
+**Method lesson:** `show_pending.py` prints a truncated one-line summary per row. Working from
+that list is *not* the same as reading the row. The `Detail` and `Next Step` columns carry the
+diagnostic content, and here one of them held a live bug. Read the full row before acting on it.
+
+### ID 237 — India news lane shipped
+
+`/indianews [daily|weekly|monthly]` + `india_news_job` at 02:30 UTC (~08:00 IST, before the
+09:15 NSE open, so overnight news lands *before* the session).
+
+Design points worth keeping:
+- **Search the company name, not the symbol.** A Google News query on a bare NSE symbol is
+  badly ambiguous — TITAN, BSE and MMTC are English words or other companies. Names resolve
+  once via yfinance and cache in `india_names`, the same reasoning as `ticker_country` for flags.
+- **India-pinned feed** (`hl=en-IN&gl=IN`). The US-pinned RSS used elsewhere in this file
+  buries domestic Indian coverage.
+- **8 materiality buckets**, non-material price blurbs dropped — the user asked for material
+  aspects, so "share price rises 2% in early trade" is noise here.
+- **One job, three horizons**: weekly rides Friday, monthly the last weekday of the month.
+- **The advisor layer is paid-Anthropic-only, by design.** Its prompt names the user's
+  holdings, which is position data, and CLAUDE.md records that the free tier trains on prompts.
+  With no key it prints the news and says the advice layer is off — it must never quietly
+  downgrade to the free lane. That is asserted in the test, not just intended.
+
+**Bug caught by the test, not by review:** matching keywords as bare substrings filed
+"HDFC Bank raises FY26 guidance" under **Regulator**, because `"ban"` is inside `"bank"`. In an
+Indian-equity feed (HDFC Bank, ICICI Bank, Axis Bank) that would have misclassified a large
+share of all headlines. Now letter-bounded — `(?<![a-z])key(?![a-z])` rather than `\b`, since
+some keys end in punctuation.
+
+Verified: 10 categorisation cases, 6 horizon-rollover dates, 5 privacy assertions, and a LIVE
+fetch over RELIANCE/INFY/HDFCBANK/TATAMOTORS returning 16 correctly-tagged real stories
+(Infosys CEO change → Mgmt, Tata Motors Q1 −80% → Results, HDFC Bank probe → Regulator).
+**Not** verified live: the Anthropic advisor call (spends a paid API call) and the scheduled
+job firing — both need a bot restart.
+
+**One widening to confirm:** the trigger fires on any new ACTION REQUIRED leg, which includes
+TAKE PROFIT — the user said "EXIT/CUT". Take-profit is genuinely actionable and usually
+coincides with the 20-point rule anyway, but it is a slightly wider net than asked for.
+
 ## 2026-07-24 (late) — 4 real bugs found from one user report, all fixed + verified
 
 User reported 4 things in one message: missing OI charts, "trimmed" daily alerts, stale

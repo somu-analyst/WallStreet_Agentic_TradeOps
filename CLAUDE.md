@@ -27,6 +27,12 @@
 - **The tracker is the ONLY source of pending work.** Never type a status table from memory —
   READ the sheet (`python tools/show_pending.py`) and print what it says. A memory-written
   summary already went out stale once, omitting a P1 the sheet did contain.
+- **Reading the pending LIST is not reading the ROW.** `show_pending.py` truncates each item to
+  one line; the `Detail` / `Next Step` columns hold the diagnostic content. Before ACTING on an
+  item, dump its full row. On 2026-08-14 ID 217's `Detail` named a second, untested failure
+  hypothesis ("`_positions_card_parts` is SHARED by the 10-min push — a throw there would
+  silence it") which turned out to be a real unguarded crash path in a scheduled job; it was
+  found only because the user asked whether the sheet was being followed.
 - **Write the tracker through `tools/tracker_io.py` — never hardcode an ID.** Two sessions
   edited the workbook at once on 2026-08-12, both computed "next ID" from a stale copy, and
   the second save won: 5 rows collided and 4 lost their outcome text to an ID-keyed update

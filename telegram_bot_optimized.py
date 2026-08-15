@@ -37499,6 +37499,47 @@ _INDIA_NEWS_CATS = [
 _INDIA_HORIZONS = {"daily": ("1d", "last 24 hours"), "weekly": ("7d", "last 7 days"),
                    "monthly": ("30d", "last 30 days")}
 
+# INDEX ETFs are not companies (ID 250). An ETF has no CEO, no results and no order book, so
+# the company buckets above match nothing and every story gets dropped; and searching its
+# legal name ("Nippon India ETF Nifty Bank BeES") returns essentially nothing. What actually
+# moves it is the INDEX -- policy, flows, the sector. So these route to an index query and
+# keep general market news instead of discarding it.
+_INDIA_INDEX_PROXY = {
+    "NIFTYIETF":  ("Nifty 50 index", "Nifty 50"),
+    "NIFTYBEES":  ("Nifty 50 index", "Nifty 50"),
+    "BANKIETF":   ("Bank Nifty index", "Bank Nifty"),
+    "BANKBEES":   ("Bank Nifty index", "Bank Nifty"),
+    "JUNIORBEES": ("Nifty Next 50 index", "Nifty Next 50"),
+    "GOLDBEES":   ("gold price India", "Gold"),
+    "ITBEES":     ("Nifty IT index", "Nifty IT"),
+}
+# Index-relevant buckets, used ONLY for the ETF lane.
+_INDIA_INDEX_CATS = [
+    ("Policy", ("rbi", "repo rate", "monetary policy", "mpc", "inflation", "cpi", "budget",
+                "fiscal", "gdp")),
+    ("Flows",  ("fii", "dii", "foreign investors", "inflow", "outflow", "sip")),
+    ("Level",  ("record high", "all-time high", "correction", "rally", "slumps", "surges",
+                "falls", "gains", "crash", "selloff")),
+]
+
+
+# Live-quote and directory pages that carry no news. The index lane keeps general market
+# stories by design, which lets these through -- measured 2026-08-14, they took 2 of every 6
+# ETF slots ("Nifty Bank Live | NSE Nifty Bank Index Today", "Nifty 50 Live | ...").
+_INDIA_JUNK_RE = __import__("re").compile(
+    r"live\s*\||index today|share price today|stock price live|live updates?\b"
+    r"|price today|quotes?\s*&|moneycontrol\.com$", __import__("re").I)
+
+
+def _india_index_cat(title):
+    """Bucket for an INDEX story. Falls back to 'Index' rather than None: for an ETF a plain
+    market move IS the material news, so nothing is dropped here."""
+    low = str(title or "").lower()
+    for cat, keys in _INDIA_INDEX_CATS:
+        if any(k in low for k in keys):
+            return cat
+    return "Index"
+
 
 # Keyword match is LETTER-BOUNDED, not a bare substring. Plain `"ban" in title` matched
 # "Bank" -- which in an Indian-equity feed (HDFC Bank, ICICI Bank, Axis Bank) filed a large
@@ -37568,7 +37609,12 @@ def _india_book_symbols(conn=None):
         conn = get_conn()
     try:
         tks = set()
+        # paper_trades IS a real source, not a rehearsal (ID 250). The user's entire India
+        # exposure lives there as OPEN STOCK legs -- BANKIETF, MOTHERSON, NIFTYIETF -- and
+        # NOTHING Indian sits in `trades` or `watchlist`. Reading only those two made this
+        # command report "no Indian holdings" for the exact book it was built to cover.
         for sql in ("SELECT DISTINCT UPPER(ticker) FROM trades WHERE status='OPEN'",
+                    "SELECT DISTINCT UPPER(ticker) FROM paper_trades WHERE status='OPEN'",
                     "SELECT DISTINCT UPPER(ticker) FROM watchlist"):
             try:
                 tks |= {r[0] for r in conn.execute(sql) if r and r[0]}
@@ -37595,10 +37641,17 @@ def _india_news_for(sym, when="7d", limit=6, timeout=10):
     """
     import urllib.parse as _u, urllib.request as _ur, re as _re, html as _h
     base = str(sym or "").upper().split(".")[0]
-    name = _india_name_for(sym)
-    # Search the company NAME when known and fall back to the symbol qualified with NSE.
-    # Unqualified symbols return the wrong company (see _india_name_for).
-    q = f'"{name}"' if name else f"{base} NSE"
+    proxy = _INDIA_INDEX_PROXY.get(base)
+    if proxy:
+        # ETF lane: search the INDEX, and keep general market news (see _INDIA_INDEX_PROXY).
+        q, _disp = proxy
+        _catfn = _india_index_cat
+    else:
+        # Search the company NAME when known and fall back to the symbol qualified with NSE.
+        # Unqualified symbols return the wrong company (see _india_name_for).
+        name = _india_name_for(sym)
+        q = f'"{name}"' if name else f"{base} NSE"
+        _catfn = _india_news_cat
     url = ("https://news.google.com/rss/search?q="
            + _u.quote(f"{q} when:{when}") + "&hl=en-IN&gl=IN&ceid=IN:en")
     try:
@@ -37616,9 +37669,9 @@ def _india_news_for(sym, when="7d", limit=6, timeout=10):
             continue
         title = _h.unescape(_re.sub(r"<[^>]+>", "", m.group(1))).strip()
         key = title[:60].lower()
-        if not title or key in seen:
+        if not title or key in seen or _INDIA_JUNK_RE.search(title):
             continue
-        cat = _india_news_cat(title)
+        cat = _catfn(title)
         if not cat:
             continue                      # not material -> drop, per the user's ask
         seen.add(key)

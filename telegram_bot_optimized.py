@@ -40908,44 +40908,58 @@ def main():
     job_queue = app.job_queue
     if job_queue:
         from datetime import time as dt_time
-        _sched_once(job_queue, morning_alert, (14, 0), "morning_alert", "Morning alert")
+        # ── SCHEDULE TIMES ARE UTC ────────────────────────────────────────────────────
+        # PTB resolves a naive dt_time against `bot.defaults.tzinfo or UTC`, and no
+        # Defaults(tzinfo=...) is set here -- verified against PTB 22.6, not assumed. So every
+        # (H, M) below is UTC and does NOT shift with US daylight saving; the ET wall-clock it
+        # lands on does.
+        #
+        # ET equivalents are therefore given as EDT/EST pairs. Writing only one of them is the
+        # same confusion that produced the ID 245 cutoff bug, and it had already rotted here:
+        # 21:15 UTC carried TWO contradictory comments (5:15 PM on one line, 4:15 PM on the
+        # next, for the same instant). Corrected 2026-08-14.
+        #   EDT = UTC-4 (mid-Mar to early Nov, i.e. MOST of the year) · EST = UTC-5
+        #   US equities: open 9:30 ET, close 16:00 ET.
+        # NOTE: four jobs' labels do not hold in both seasons -- see tracker ID 249. That is a
+        # scheduling decision, deliberately NOT changed as part of a comment fix.
+        _sched_once(job_queue, morning_alert, (14, 0), "morning_alert", "Morning alert")  # 10:00am EDT / 9:00am EST
         # Catch-up (user 2026-08-07): run_daily fires once, so a sleeping laptop loses
         # that push for the day. Sweep 90s after startup and then hourly; each alert is
         # dedup-guarded, so a normal day sends nothing extra.
         job_queue.run_once(catchup_alert, when=90)
-        job_queue.run_repeating(catchup_alert, interval=3600, first=3600)  # 9 AM ET = 14:00 UTC
-        _sched_once(job_queue, briefing_alert, (14, 5), "briefing_alert", "Daily briefing")  # daily brief 9:05 AM ET
-        _sched_once(job_queue, plan_alert, (13, 30), "plan_alert", "Next-day game plan")     # next-day game plan ~8:30 AM ET pre-market
-        _sched_once(job_queue, digest_morning_alert, (12, 15), "digest_morning", "Morning digest")  # ~8:15 AM ET pre-open
+        job_queue.run_repeating(catchup_alert, interval=3600, first=3600)  # hourly sweep, NOT a fixed hour
+        _sched_once(job_queue, briefing_alert, (14, 5), "briefing_alert", "Daily briefing")  # 10:05am EDT / 9:05am EST
+        _sched_once(job_queue, plan_alert, (13, 30), "plan_alert", "Next-day game plan")     # 9:30am EDT / 8:30am EST (EDT = AT the open, see ID 249)
+        _sched_once(job_queue, digest_morning_alert, (12, 15), "digest_morning", "Morning digest")  # 8:15am EDT / 7:15am EST, pre-open in both
         # Auto-triggers for the new commands (user 2026-08-07). Content-gated, not just
         # timed: breaking pushes only on severity-3 news that has not already gone out.
         job_queue.run_repeating(breaking_alert, interval=7200, first=600)   # every 2h
         _sched_once(job_queue, whymoved_alert, (20, 45), "whymoved_alert",
-                    "Why it moved (post-close)")                            # ~4:45pm ET
-        job_queue.run_daily(digest_midday_alert, time=dt_time(16, 30, 0))   # ~12:30 PM ET, gated on a >=1% move
-        job_queue.run_daily(digest_evening_alert, time=dt_time(21, 15, 0))  # ~5:15 PM ET post-close
-        job_queue.run_daily(wrap_alert, time=dt_time(21, 15, 0))     # daily market wrap ~4:15 PM ET post-close
-        _sched_once(job_queue, catalyst_alert, (13, 20), "catalyst_alert", "Catalyst Radar")  # Catalyst Radar ~8:20 AM ET pre-market
-        _sched_once(job_queue, action_board_alert, (13, 35), "action_board", "Action Board") # Action Board ~8:35 AM ET pre-market
-        _sched_once(job_queue, earnings_alert, (13, 45), "earnings_alert", "Earnings Radar") # Earnings Radar ~8:45 AM ET pre-market
-        job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # weekly sector rotation, Mondays
+                    "Why it moved (post-close)")                            # 4:45pm EDT / 3:45pm EST (EST = BEFORE the close, see ID 249)
+        job_queue.run_daily(digest_midday_alert, time=dt_time(16, 30, 0))   # 12:30pm EDT / 11:30am EST, gated on a >=1% move
+        job_queue.run_daily(digest_evening_alert, time=dt_time(21, 15, 0))  # 5:15pm EDT / 4:15pm EST, post-close in both
+        job_queue.run_daily(wrap_alert, time=dt_time(21, 15, 0))     # same instant as digest_evening: 5:15pm EDT / 4:15pm EST
+        _sched_once(job_queue, catalyst_alert, (13, 20), "catalyst_alert", "Catalyst Radar")  # 9:20am EDT / 8:20am EST, pre-open in both
+        _sched_once(job_queue, action_board_alert, (13, 35), "action_board", "Action Board") # 9:35am EDT / 8:35am EST (EDT = AFTER the open, see ID 249)
+        _sched_once(job_queue, earnings_alert, (13, 45), "earnings_alert", "Earnings Radar") # 9:45am EDT / 8:45am EST (EDT = AFTER the open, see ID 249)
+        job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # Mondays 9:50am EDT / 8:50am EST
         # India news ~08:00 IST (02:30 UTC) — before the NSE 09:15 open, so the overnight
         # material news lands before the session rather than after it. ONE job serves all
         # three horizons: it picks weekly on Fridays and monthly on the last weekday.
         job_queue.run_daily(india_news_job, time=dt_time(2, 30, 0))
         job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
-        job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs ~4:30pm ET
-        job_queue.run_daily(record_short_interest, time=dt_time(21, 40, 0))  # SI snapshot ~4:40pm ET
-        job_queue.run_daily(record_earnings_history, time=dt_time(21, 45, 0))  # est/actual EPS
-        job_queue.run_daily(record_transcripts, time=dt_time(22, 5, 0))     # call transcripts (tranched)
+        job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs 5:30pm EDT / 4:30pm EST
+        job_queue.run_daily(record_short_interest, time=dt_time(21, 40, 0))  # SI snapshot 5:40pm EDT / 4:40pm EST
+        job_queue.run_daily(record_earnings_history, time=dt_time(21, 45, 0))  # est/actual EPS 5:45pm EDT / 4:45pm EST
+        job_queue.run_daily(record_transcripts, time=dt_time(22, 5, 0))     # transcripts 6:05pm EDT / 5:05pm EST
         job_queue.run_once(riskoff_alert, when=25)                    # Risk-Off Radar readout ~on startup
-        job_queue.run_daily(riskoff_alert, time=dt_time(21, 20, 0), data={"gate": True})  # post-close ~4:20 PM ET, only if caution+
-        job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # ~4:35 PM ET — silently log anti-bubble baskets for tracking
-        job_queue.run_daily(data_health_alert, time=dt_time(13, 10, 0))  # data-health check ~8:10 AM ET (nags until acked)
-        job_queue.run_daily(data_health_alert, time=dt_time(23, 30, 0))  # and post-EOD-lane ~6:30 PM ET
-        job_queue.run_daily(data_audit_alert, time=dt_time(23, 35, 0))   # stringent EOD audit verdict ~6:35 PM ET
+        job_queue.run_daily(riskoff_alert, time=dt_time(21, 20, 0), data={"gate": True})  # 5:20pm EDT / 4:20pm EST, only if caution+
+        job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # 5:35pm EDT / 4:35pm EST — silently log anti-bubble baskets
+        job_queue.run_daily(data_health_alert, time=dt_time(13, 10, 0))  # data-health 9:10am EDT / 8:10am EST (nags until acked)
+        job_queue.run_daily(data_health_alert, time=dt_time(23, 30, 0))  # and post-EOD-lane 7:30pm EDT / 6:30pm EST
+        job_queue.run_daily(data_audit_alert, time=dt_time(23, 35, 0))   # EOD audit verdict 7:35pm EDT / 6:35pm EST
         log.info("Scheduled Risk-Off Radar (startup + post-close)")
-        log.info("Scheduled morning alert at 9:00 AM ET daily")
+        log.info("Scheduled morning alert 14:00 UTC (10:00am EDT / 9:00am EST)")
         # 15-min intraday alert (fires every 15 min; function checks market hours internally)
         job_queue.run_repeating(intraday_alert, interval=900, first=30)
         log.info("Scheduled 15-min intraday OI alert")

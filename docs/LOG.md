@@ -1,5 +1,49 @@
 # LOG
 
+## 2026-08-14 (later) — Schedule comments (ID 248), and a DST behaviour bug found under them (ID 249)
+
+Handed over from the session that fixed ID 245, which flagged "six comment lines written in EST"
+as an optional sweep. It was bigger than six, and there was a real bug hiding under it.
+
+**Verified the premise before touching anything.** PTB resolves a naive `dt_time` against
+`bot.defaults.tzinfo or UTC`; no `Defaults(tzinfo=...)` is set here. Checked against the
+installed PTB 22.6 source rather than recalled — so every `(H, M)` in the block is UTC and does
+not shift with DST. The ET wall-clock it lands on does.
+
+Of 22 schedule comments: **8 were EST-only** (wrong for the ~8 months of EDT), 2 were
+EDT-correct, and **21:15 UTC carried two contradictory comments** — `digest_evening` "5:15 PM ET"
+and `wrap_alert` "4:15 PM ET", for the same instant. `catchup_alert` still carried
+`# 9 AM ET = 14:00 UTC`, describing a fixed daily slot it no longer has (it is `run_repeating`,
+hourly). All now state EDT/EST pairs under a header explaining that UTC is authoritative.
+
+Diff verified **comments-only** by stripping trailing comments and comparing code-bearing lines:
+23 added / 23 removed, identical apart from one `log.info` that was itself announcing a wrong time.
+
+### The real find (ID 249) — four labels are false in one season
+
+Auditing the `_sched_once` lines too, not just the flagged `run_daily` ones, turned up jobs whose
+*label contradicts when they actually fire*:
+
+| Job | UTC | EDT | EST | Label | Problem |
+|---|---|---|---|---|---|
+| `plan_alert` | 13:30 | 9:30am | 8:30am | pre-market | EDT = **at** the open |
+| `action_board` | 13:35 | 9:35am | 8:35am | pre-market | EDT = **after** the open |
+| `earnings_alert` | 13:45 | 9:45am | 8:45am | pre-market | EDT = **after** the open |
+| `whymoved_alert` | 20:45 | 4:45pm | 3:45pm | post-close | EST = **15 min before** the close |
+
+EDT covers mid-March to early November — most of the year — so three "pre-market" jobs spend
+most of their life firing into a live session. `whymoved_alert` in winter explains a move that
+has not finished. `bot-conventions.md` also advertises the earnings push as 8:45am ET, true only
+in winter.
+
+**Left unchanged on purpose.** Moving these alters when a live bot fires; that is the user's
+call, not a side effect of a comment fix. Logged as ID 249 with both options (shift the UTC
+times, or gate each job on `_et_now()`).
+
+**Method note:** the flagged scope was "six comment lines". Auditing the adjacent lines that
+were *not* flagged is what surfaced the behaviour bug — the same lesson as ID 217, where the
+untested half of the report was the real one.
+
 ## 2026-08-14 — House signal template (ID 241) + position alerts that actually notify (ID 217)
 
 Both items were blocked on a user decision, not on work. Asked both up front, then built.

@@ -31,18 +31,25 @@ Changes are in the working tree at `telegram_bot_optimized.py`, compiled and tes
   advisor layer is **paid-Anthropic-only by design** — its prompt names holdings, and the free
   tier trains on prompts. Needs a bot restart to load.
 
-## ⚠️ A second Claude session is live in this repo
+## Start here — two decisions, no blocked work
 
-While this session worked, another added tracker IDs 244/245 (a data-capture thread) and has
-modified `run_all_offhours.py`, which this session never touched. **Do not `git commit -a`** —
-it would sweep up their in-progress work. Commit by explicit path, and re-read the tracker
-before writing it.
+1. **ID 249 (P2) — four jobs have a label that is false in one DST season.** Schedule times are
+   UTC and don't shift; the ET wall-clock does. `plan_alert` / `action_board` / `earnings_alert`
+   are labelled "pre-market" but fire at or after the 9:30 open under **EDT** (most of the year);
+   `whymoved_alert` is "(post-close)" but fires 3:45pm **EST**, 15 min before the close. Fix is
+   either to move the UTC times or gate each job on `_et_now()`. Not changed unilaterally — it
+   alters when a live bot fires. Note `bot-conventions.md` still advertises the 8:45am ET
+   earnings push, which is only true in winter.
+2. **ID 217 widening** — the re-send fires on any new ACTION REQUIRED leg, which includes
+   TAKE PROFIT; the user said "EXIT/CUT". One line to narrow (drop `"profit"` from
+   `urgent_keys` in `_positions_card_parts`) if unwanted.
 
-## Start here — one confirmation, then open work
+## Restart needed
 
-**Confirm the ID 217 widening:** the re-send trigger fires on any new ACTION REQUIRED leg, which
-includes TAKE PROFIT. The user said "EXIT/CUT". Narrow it by dropping `"profit"` from the keys
-in `_positions_card_parts` if unwanted — one line.
+The running bot and dashboard both hold pre-fix modules. Nothing landed this session is live yet:
+`/indianews` + its 02:30 UTC job, the material-change position re-send, the card-build guard,
+and the ID 245 cutoff all need a restart. Harmless meanwhile — old and new paths agree on
+today's audit row.
 
 ## Genuinely open
 

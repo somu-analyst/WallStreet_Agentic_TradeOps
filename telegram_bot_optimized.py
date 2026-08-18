@@ -28317,17 +28317,29 @@ async def _run_alert_once(ctx, key, fn, label=""):
         return False
 
 
-def _sched_once(job_queue, fn, hhmm_utc, key, label):
-    """Register a daily alert AND record it for catch-up."""
+def _sched_once(job_queue, fn, hhmm_utc, key, label, days=None, data=None):
+    """Register a daily alert AND record it for catch-up.
+
+    `days` uses PTB's convention -- 0 = SUNDAY, 6 = Saturday (verified against PTB 22.6;
+    they changed it from monday-sunday and the old meaning is a silent off-by-one). Pass
+    `data` for jobs that read `job.data`, e.g. riskoff's quiet-day gate.
+
+    Everything registered here is swept by `catchup_alert`, so an alert whose slot passed
+    while the bot was down still arrives on the next start (ID 252).
+    """
     from functools import partial
     from datetime import time as dt_time      # main() imports this locally; we are outside it
     h, m = hhmm_utc
     # name= matters operationally: without it every _sched_once job logs as "partial", so
     # eight different briefings are indistinguishable in the scheduler log and a failure
     # cannot be traced to an alert (found 2026-08-07 reading the startup log).
-    job_queue.run_daily(partial(_run_alert_once_job, key=key, fn=fn, label=label),
-                        time=dt_time(h, m, 0), name=key)
-    _CATCHUP_JOBS.append((key, h * 60 + m, fn, label))
+    kw = {"time": dt_time(h, m, 0), "name": key}
+    if days is not None:
+        kw["days"] = days
+    if data is not None:
+        kw["data"] = data
+    job_queue.run_daily(partial(_run_alert_once_job, key=key, fn=fn, label=label), **kw)
+    _CATCHUP_JOBS.append((key, h * 60 + m, fn, label, days))
 
 
 async def _run_alert_once_job(ctx, key=None, fn=None, label=""):
@@ -28376,10 +28388,15 @@ async def catchup_alert(ctx):
         return
     now_utc = datetime.now(timezone.utc)
     now_min = now_utc.hour * 60 + now_utc.minute
+    # PTB days are 0=SUNDAY; datetime.weekday() is 0=Monday. Convert rather than compare the
+    # two conventions directly -- mixing them is what made rotate_alert fire on Sundays.
+    ptb_today = (now.weekday() + 1) % 7
     sent = []
-    for key, mins, fn, label in _CATCHUP_JOBS:
+    for key, mins, fn, label, days in _CATCHUP_JOBS:
         if mins > now_min:
             continue                      # not due yet today
+        if days is not None and ptb_today not in tuple(days):
+            continue                      # e.g. a Monday-only weekly push, on a Wednesday
         try:
             if await _run_alert_once(ctx, key, fn, label):
                 sent.append(label or key)
@@ -40992,28 +41009,28 @@ def main():
         job_queue.run_repeating(breaking_alert, interval=7200, first=600)   # every 2h
         _sched_once(job_queue, whymoved_alert, (20, 45), "whymoved_alert",
                     "Why it moved (post-close)")                            # 4:45pm EDT / 3:45pm EST (EST = BEFORE the close, see ID 249)
-        job_queue.run_daily(digest_midday_alert, time=dt_time(16, 30, 0))   # 12:30pm EDT / 11:30am EST, gated on a >=1% move
-        job_queue.run_daily(digest_evening_alert, time=dt_time(21, 15, 0))  # 5:15pm EDT / 4:15pm EST, post-close in both
-        job_queue.run_daily(wrap_alert, time=dt_time(21, 15, 0))     # same instant as digest_evening: 5:15pm EDT / 4:15pm EST
+        _sched_once(job_queue, digest_midday_alert, (16, 30), "digest_midday", "Midday digest")   # 12:30pm EDT / 11:30am EST, gated on a >=1% move
+        _sched_once(job_queue, digest_evening_alert, (21, 15), "digest_evening", "Evening digest")  # 5:15pm EDT / 4:15pm EST, post-close in both
+        _sched_once(job_queue, wrap_alert, (21, 15), "wrap_alert", "Market wrap")     # same instant as digest_evening: 5:15pm EDT / 4:15pm EST
         _sched_once(job_queue, catalyst_alert, (13, 20), "catalyst_alert", "Catalyst Radar")  # 9:20am EDT / 8:20am EST, pre-open in both
         _sched_once(job_queue, action_board_alert, (13, 35), "action_board", "Action Board") # 9:35am EDT / 8:35am EST (EDT = AFTER the open, see ID 249)
         _sched_once(job_queue, earnings_alert, (13, 45), "earnings_alert", "Earnings Radar") # 9:45am EDT / 8:45am EST (EDT = AFTER the open, see ID 249)
-        job_queue.run_daily(rotate_alert, time=dt_time(13, 50, 0), days=(0,))  # Mondays 9:50am EDT / 8:50am EST
+        _sched_once(job_queue, rotate_alert, (13, 50), "rotate_alert", "Sector rotation", days=(1,))  # Mondays (PTB 1=Mon; was (0,)=SUNDAY) 9:50am EDT / 8:50am EST
         # India news ~08:00 IST (02:30 UTC) — before the NSE 09:15 open, so the overnight
         # material news lands before the session rather than after it. ONE job serves all
         # three horizons: it picks weekly on Fridays and monthly on the last weekday.
-        job_queue.run_daily(india_news_job, time=dt_time(2, 30, 0))
+        _sched_once(job_queue, india_news_job, (2, 30), "india_news", "India news")
         job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
         job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs 5:30pm EDT / 4:30pm EST
         job_queue.run_daily(record_short_interest, time=dt_time(21, 40, 0))  # SI snapshot 5:40pm EDT / 4:40pm EST
         job_queue.run_daily(record_earnings_history, time=dt_time(21, 45, 0))  # est/actual EPS 5:45pm EDT / 4:45pm EST
         job_queue.run_daily(record_transcripts, time=dt_time(22, 5, 0))     # transcripts 6:05pm EDT / 5:05pm EST
         job_queue.run_once(riskoff_alert, when=25)                    # Risk-Off Radar readout ~on startup
-        job_queue.run_daily(riskoff_alert, time=dt_time(21, 20, 0), data={"gate": True})  # 5:20pm EDT / 4:20pm EST, only if caution+
+        _sched_once(job_queue, riskoff_alert, (21, 20), "riskoff_daily", "Market Radar", data={"gate": True})  # 5:20pm EDT / 4:20pm EST, only if caution+
         job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # 5:35pm EDT / 4:35pm EST — silently log anti-bubble baskets
-        job_queue.run_daily(data_health_alert, time=dt_time(13, 10, 0))  # data-health 9:10am EDT / 8:10am EST (nags until acked)
-        job_queue.run_daily(data_health_alert, time=dt_time(23, 30, 0))  # and post-EOD-lane 7:30pm EDT / 6:30pm EST
-        job_queue.run_daily(data_audit_alert, time=dt_time(23, 35, 0))   # EOD audit verdict 7:35pm EDT / 6:35pm EST
+        _sched_once(job_queue, data_health_alert, (13, 10), "data_health_am", "Data health (AM)")  # 9:10am EDT / 8:10am EST (nags until acked)
+        _sched_once(job_queue, data_health_alert, (23, 30), "data_health_pm", "Data health (PM)")  # post-EOD-lane 7:30pm EDT / 6:30pm EST
+        _sched_once(job_queue, data_audit_alert, (23, 35), "data_audit", "EOD data audit")   # 7:35pm EDT / 6:35pm EST
         log.info("Scheduled Risk-Off Radar (startup + post-close)")
         log.info("Scheduled morning alert 14:00 UTC (10:00am EDT / 9:00am EST)")
         # 15-min intraday alert (fires every 15 min; function checks market hours internally)

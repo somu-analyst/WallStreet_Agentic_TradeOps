@@ -1,5 +1,41 @@
 # LOG
 
+## 2026-08-17 — Measured the whole ensemble. Nothing qualifies. (ID 243)
+
+`_signal_writeup()` refuses to print a base rate it was not given, so converting a signal's
+prose means **measuring it first**. Did that across all 18,100 graded fires in
+`signal_accuracy` (46 dates, 2026-05-13 → 08-14). Tool: `tools/measure_signal_base_rates.py`
+(gitignored with the rest of `tools/`, so the finding is recorded here).
+
+**Result: no model clears the bar. Nothing was converted.** Every signal correctly keeps
+rendering "Not measured here". That is the template working, not a failure.
+
+### Three traps, all of which I walked into
+
+1. **Wrong baseline.** `_score_signal` grades by call type *with a dead zone*:
+   BULL needs `ret > +0.3%`, BEAR needs `ret < −0.3%`, and **SELL_PREMIUM is a volatility
+   call**, correct when `|ret| < 1.2%`. My first pass compared all three against the
+   unconditional *up-rate* and reported **8 inverse models, 0 edges**. With baselines matched
+   to the grading rule, the *same data* gives **0 inverse, 3 nominal edges**. Identical
+   numbers, opposite conclusion — the baseline was doing all the work.
+2. **Pooled t-stats are banned here** (700+ tickers on a day are not 700 draws). Significance
+   is computed on **daily differences** — model hit-rate that day minus the baseline hit-rate
+   on that same day — so n is days, not rows.
+3. **Multiplicity + correlation.** 21 model×call combos tested at once → ~0.5 nominal hits
+   expected from noise alone. Bonferroni critical **t = 3.03**; best observed **2.63**. And
+   the three nominal hits are *all* SELL_PREMIUM, overlapping on **63–92%** of their
+   (date, ticker) fires — one finding counted three times, not three edges.
+
+### Worth remembering
+
+`scn_building` BULL has **n = 3,651** and a raw +6.9pp gap over baseline, yet **t = 0.57**.
+Large row counts prove nothing once day-level variance is respected — which is exactly what
+the pooled-t ban exists to prevent.
+
+The tool prints the Bonferroni column and the overlap warning by design, so the next reader
+cannot glance at the nominal column and ship noise as a signal. Re-run it when the sample is
+materially larger; three months is thin.
+
 ## 2026-08-14 (later) — Schedule comments (ID 248), and a DST behaviour bug found under them (ID 249)
 
 Handed over from the session that fixed ID 245, which flagged "six comment lines written in EST"

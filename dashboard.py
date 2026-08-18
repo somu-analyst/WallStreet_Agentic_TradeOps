@@ -376,6 +376,113 @@ def _hist_for(tk, period="90d"):
     return _cached_history(alias, period=period, interval="1d") if alias else h
 
 
+# Ranges offered above the since-added charts. None = "everything since you added it",
+# which is the whole point of the chart; the fixed windows are for comparing names that
+# were added years apart on the same footing (user 2026-08-14, ID 254).
+_ADDED_RANGES = {"Since added": None, "1M": 21, "3M": 63, "6M": 126, "1Y": 252}
+
+
+def _ccy_sym_of(tk):
+    """Currency SYMBOL for a ticker ($ / ₹ / …), via the bot's resolver so the dashboard
+    and Telegram never disagree about what a number is denominated in. Falls back to $."""
+    try:
+        return _TB_ENGINE._ccy_of(tk)[1] if _TB_ENGINE else "$"
+    except Exception:
+        return "$"
+
+
+def _added_price_chart(tk, added_date, spot=None, entry=None, ccy="$",
+                       rng="Since added", title=None):
+    """Price since the day a name entered the sheet. Returns a plotly Figure, or None.
+
+    Anchored on the ADD DATE, not a rolling window: the question this answers is "what has
+    it done since I started caring about it", which a fixed 3-month chart cannot show for a
+    position opened two years ago. The add date is drawn as a marker and, when an entry
+    price is known (paper book), the entry level is drawn too so the gap between the line
+    and that level IS the P&L.
+
+    History is fetched to cover the add date rather than the default 90d window -- the
+    oldest paper lot here dates to 2024, and a 90-day pull would have silently started the
+    chart long after the position was opened.
+    """
+    import datetime as _dt
+    try:
+        # errors="coerce" + an explicit NaT check: an EMPTY cell (a watchlist row with no
+        # added date) parses to NaT without raising, and only blows up later on the date
+        # subtraction. Catch it here rather than at the arithmetic.
+        _added = pd.to_datetime(str(added_date), errors="coerce")
+        if pd.isna(_added):
+            return None
+        add = _added.date()
+    except Exception:
+        return None
+    days = (_dt.date.today() - add).days
+    if days < 0:
+        return None
+    need = days + 10
+    period = "max" if need > 3600 else f"{max(need, 45)}d"
+    h = _hist_for(tk, period=period)
+    if h is None or not len(h) or "Close" not in h:
+        return None
+    s = h["Close"].dropna()
+    if not len(s):
+        return None
+    idx = pd.to_datetime(s.index)
+    try:
+        idx = idx.tz_localize(None)
+    except (TypeError, AttributeError):
+        pass
+    s = pd.Series(s.values, index=idx)
+    n = _ADDED_RANGES.get(rng)
+    view = s.tail(int(n)) if n else s[s.index >= pd.Timestamp(add)]
+    if len(view) < 2:
+        view = s.tail(45)
+    if len(view) < 2:
+        return None
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=view.index, y=view.values, mode="lines",
+                             line=dict(width=1.6), showlegend=False, name=tk,
+                             hovertemplate="%{x|%d %b %Y}<br>" + ccy + "%{y:,.2f}<extra></extra>"))
+    add_ts = pd.Timestamp(add)
+    if view.index[0] <= add_ts <= view.index[-1]:
+        # add_shape + add_annotation, NOT add_vline(annotation_text=...). To place the label
+        # plotly averages the shape's x-coords, and on a DATE axis that means summing them:
+        # a Timestamp raises "Addition/subtraction of integers ... no longer supported" and an
+        # ISO string raises "unsupported operand type(s) for +: 'int' and 'str'". Either one
+        # crashes the whole page, not just the chart. Splitting the two calls avoids that
+        # code path entirely.
+        fig.add_shape(type="line", x0=add_ts, x1=add_ts, y0=0, y1=1, yref="paper",
+                      line=dict(color="#8e44ad", width=1, dash="dot"))
+        fig.add_annotation(x=add_ts, y=1.0, yref="paper", text=f"added {add:%d %b %y}",
+                           showarrow=False, xanchor="left", yanchor="bottom",
+                           font=dict(size=9, color="#8e44ad"))
+    if entry:
+        fig.add_hline(y=float(entry), line_dash="dash", line_color="#95a5a6", line_width=1,
+                      annotation_text=f"entry {ccy}{float(entry):,.2f}",
+                      annotation_position="bottom right",
+                      annotation_font=dict(size=9, color="#7f8c8d"))
+    if spot:
+        fig.add_hline(y=float(spot), line_dash="solid", line_color="#3498db", line_width=1.2,
+                      annotation_text=f"now {ccy}{float(spot):,.2f}",
+                      annotation_position="top right",
+                      annotation_font=dict(size=9, color="#3498db"))
+    # Colour the title by performance against the anchor that matters: entry price for a
+    # real lot, else the first price in view.
+    base = float(entry) if entry else float(view.iloc[0])
+    last = float(spot) if spot else float(view.iloc[-1])
+    chg = (last / base - 1) * 100 if base else 0.0
+    fig.update_layout(
+        height=230, margin=dict(l=4, r=4, t=28, b=22),
+        title=dict(text=(title or f"{tk}  {ccy}{last:,.2f}  ({chg:+.1f}%)"),
+                   font=dict(size=11, color=("#2ecc71" if chg >= 0 else "#e74c3c"))),
+        xaxis=dict(visible=True, showgrid=False, title=None, tickfont=dict(size=8)),
+        yaxis=dict(visible=True, side="right", tickfont=dict(size=9), showgrid=False),
+        hovermode="x unified",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    return fig
+
+
 def _close_n_ago(hist, n, close_col="Close"):
     """Close n SESSIONS back, or None. Sessions, not calendar days — a 7-day lookback
     silently spans a weekend the market was shut and compares Friday with Friday."""
@@ -24980,50 +25087,69 @@ if page == "👀 Watchlist":
             _cls_chart_rows = [r for r in _cls_rows
                                if r.get("_52hi") and r.get("_52lo") and r.get("_hist") is not None]
             if _cls_chart_rows:
+                # Price SINCE ADDED (ID 254). One range selector drives every chart in the
+                # section -- a per-chart control would mean a dozen widgets doing the same job.
+                _wl_rng = st.radio("Chart range", list(_ADDED_RANGES), horizontal=True,
+                                   index=0, key=f"wl_rng_{_wcls}",
+                                   help="'Since added' starts each chart the day you put the "
+                                        "ticker on the watchlist; the fixed windows compare "
+                                        "names added years apart on the same footing.")
                 _wl_chart_cols = st.columns(min(len(_cls_chart_rows), 3) or 1)
                 for _wi, _wrow in enumerate(_cls_chart_rows):
                     with _wl_chart_cols[_wi % len(_wl_chart_cols)]:
-                        _wfig = go.Figure()
-                        _wfig.add_trace(go.Scatter(y=_wrow["_hist"]["Close"], mode="lines",
-                                                   line=dict(width=1.5), showlegend=False))
+                        _wl_nm = str(_wrow.get("Name") or _wrow["Ticker"])
+                        _wl_nm = (_wl_nm[:20] + "…") if len(_wl_nm) > 21 else _wl_nm
+                        _wfig = _added_price_chart(
+                            _wrow["Ticker"], _wrow.get("Added"), spot=_wrow.get("Spot"),
+                            ccy=_ccy_sym_of(_wrow["Ticker"]), rng=_wl_rng,
+                            title=f"{_wrow['Ticker']} · {_wl_nm}")
+                        _wl_since = _wfig is not None
+                        if not _wl_since:
+                            # No add date or no history -- fall back to the old undated line
+                            # rather than dropping the ticker's chart entirely.
+                            _wfig = go.Figure()
+                            _wfig.add_trace(go.Scatter(y=_wrow["_hist"]["Close"], mode="lines",
+                                                       line=dict(width=1.5), showlegend=False))
+                        _wl_ccy = _ccy_sym_of(_wrow["Ticker"])
                         # Label the lines with their actual prices. Previously both axes were
                         # hidden, so the chart showed a shape with no numbers on it at all
                         # (user 2026-08-03).
                         _wfig.add_hline(y=_wrow["_52hi"], line_dash="dot", line_color="#e74c3c",
-                                        line_width=1, annotation_text=f"52w high ${_wrow['_52hi']:,.2f}",
+                                        line_width=1, annotation_text=f"52w high {_wl_ccy}{_wrow['_52hi']:,.2f}",
                                         annotation_position="top left",
                                         annotation_font=dict(size=9, color="#e74c3c"))
                         _wfig.add_hline(y=_wrow["_52lo"], line_dash="dot", line_color="#2ecc71",
-                                        line_width=1, annotation_text=f"52w low ${_wrow['_52lo']:,.2f}",
+                                        line_width=1, annotation_text=f"52w low {_wl_ccy}{_wrow['_52lo']:,.2f}",
                                         annotation_position="bottom left",
                                         annotation_font=dict(size=9, color="#2ecc71"))
-                        if _wrow.get("Spot"):
-                            _wfig.add_hline(y=float(_wrow["Spot"]), line_dash="solid",
-                                            line_color="#3498db", line_width=1.2,
-                                            annotation_text=f"now ${float(_wrow['Spot']):,.2f}",
-                                            annotation_position="top right",
-                                            annotation_font=dict(size=9, color="#3498db"))
-                        _wl_chart_name = str(_wrow.get("Name") or _wrow["Ticker"])
-                        _wl_chart_name = (_wl_chart_name[:22] + "…") if len(_wl_chart_name) > 23 else _wl_chart_name
-                        # Taller, with a visible price axis pinned to the three levels that
-                        # matter (low / spot / high) instead of an unlabelled sparkline.
-                        _wt_vals = sorted({round(float(_wrow["_52lo"]), 2),
-                                           round(float(_wrow["Spot"] or _wrow["_52lo"]), 2),
-                                           round(float(_wrow["_52hi"]), 2)})
-                        _wfig.update_layout(height=210, margin=dict(l=4, r=4, t=26, b=20),
-                                            title=dict(text=f"{_wrow['Ticker']} · {_wl_chart_name}  ${_wrow['Spot']:,.2f}",
-                                                       font=dict(size=11)),
-                                            xaxis=dict(visible=True, showticklabels=False,
-                                                       showgrid=False, title=None, ticks=""),
-                                            yaxis=dict(visible=True, side="right",
-                                                       tickmode="array", tickvals=_wt_vals,
-                                                       ticktext=[f"${v:,.2f}" for v in _wt_vals],
-                                                       tickfont=dict(size=9), showgrid=False),
-                                            hovermode="x unified",
-                                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                        if not _wl_since:
+                            # The since-added chart already draws its own "now" line, axes and
+                            # performance-coloured title -- only the fallback needs them here.
+                            if _wrow.get("Spot"):
+                                _wfig.add_hline(y=float(_wrow["Spot"]), line_dash="solid",
+                                                line_color="#3498db", line_width=1.2,
+                                                annotation_text=f"now {_wl_ccy}{float(_wrow['Spot']):,.2f}",
+                                                annotation_position="top right",
+                                                annotation_font=dict(size=9, color="#3498db"))
+                            _wt_vals = sorted({round(float(_wrow["_52lo"]), 2),
+                                               round(float(_wrow["Spot"] or _wrow["_52lo"]), 2),
+                                               round(float(_wrow["_52hi"]), 2)})
+                            _wfig.update_layout(height=210, margin=dict(l=4, r=4, t=26, b=20),
+                                                title=dict(text=f"{_wrow['Ticker']} · {_wl_nm}  {_wl_ccy}{_wrow['Spot']:,.2f}",
+                                                           font=dict(size=11)),
+                                                xaxis=dict(visible=True, showticklabels=False,
+                                                           showgrid=False, title=None, ticks=""),
+                                                yaxis=dict(visible=True, side="right",
+                                                           tickmode="array", tickvals=_wt_vals,
+                                                           ticktext=[f"{_wl_ccy}{v:,.2f}" for v in _wt_vals],
+                                                           tickfont=dict(size=9), showgrid=False),
+                                                hovermode="x unified",
+                                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
                         st.plotly_chart(_wfig, use_container_width=True, config={"displayModeBar": False},
                                         key=f"wl_chart_{_wrow['Ticker']}_{_wrow.get('id', _wi)}")
-                        st.caption(f"52w ${_wrow['_52lo']:,.0f}–${_wrow['_52hi']:,.0f}")
+                        _wl_add_txt = (f" · added {_wrow.get('Added')}" if (_wl_since and _wrow.get("Added"))
+                                       else " · no add date on file")
+                        st.caption(f"52w {_wl_ccy}{_wrow['_52lo']:,.0f}–{_wl_ccy}{_wrow['_52hi']:,.0f}{_wl_add_txt}")
             st.markdown("---")
 
         with st.expander("✏️ Edit a ticker (asset class / target price / note)"):
@@ -25574,6 +25700,39 @@ if page == "📝 Paper Trading":
             except Exception:
                 _pinned_df(_grpdf, use_container_width=True, hide_index=True)
             st.caption(f"Prices and P&L in **{_cy}** ({_cs or _cy}).")
+
+        # ── Price SINCE ADDED, per position (ID 254) ────────────────────────────────────
+        # Same helper and the same range control as the Watchlist, anchored on entry_date so
+        # the line starts the day the lot was opened. For a STOCK the entry price is drawn,
+        # which makes the gap between the line and that level the P&L itself. For an OPTION
+        # it is not: the entry there is a premium and the chart is the UNDERLYING, so drawing
+        # it would put two different quantities on one axis.
+        _pt_chart_rows = [r for r in _pt_rows if r.get("Entry Date")]
+        if _pt_chart_rows:
+            st.markdown("#### 📈 Price since you added each position")
+            _pt_rng = st.radio("Chart range", list(_ADDED_RANGES), horizontal=True, index=0,
+                               key="pt_rng",
+                               help="'Since added' starts each chart on that lot's entry date; "
+                                    "the fixed windows compare positions opened years apart.")
+            _pt_cols = st.columns(min(len(_pt_chart_rows), 3) or 1)
+            for _pi, _pr in enumerate(_pt_chart_rows):
+                with _pt_cols[_pi % len(_pt_cols)]:
+                    _p_stock = str(_pr.get("Type", "")).strip().lower() == "stock"
+                    _p_fig = _added_price_chart(
+                        _pr["Ticker"], _pr.get("Entry Date"),
+                        spot=(_pr.get("Current Price") if _p_stock else _pr.get("Spot")),
+                        entry=(_pr.get("Entry") if _p_stock else None),
+                        ccy=_ccy_sym_of(_pr["Ticker"]), rng=_pt_rng,
+                        title=f"{_pr['Ticker']} · {_pr.get('Type', '')}")
+                    if _p_fig is None:
+                        st.caption(f"{_pr['Ticker']} — no price history for this range.")
+                        continue
+                    st.plotly_chart(_p_fig, use_container_width=True,
+                                    config={"displayModeBar": False},
+                                    key=f"pt_chart_{_pr['Ticker']}_{_pi}")
+                    st.caption(f"added {_pr.get('Entry Date')}" if _p_stock else
+                               f"added {_pr.get('Entry Date')} · underlying price; entry line "
+                               f"omitted (entry was a premium, not a share price)")
 
         st.markdown("---")
         st.markdown("**Close a demo position** (closing a multi-lot stock position closes ALL its lots)")

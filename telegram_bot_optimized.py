@@ -3827,7 +3827,79 @@ def _signal_writeup(state, do, outcome=None, n=None, hit=None, base=None,
     return "\n".join(lines)
 
 
-def _pipe_table(header_cols, rows_data, right_cols=None, title=None, legend=None):
+_NAME_CACHE = {}          # in-process memo, on top of the DB table
+_NAME_NET_BUDGET = 6      # max yfinance lookups per rendered table (see below)
+
+
+def _company_name(tk, allow_net=True, _budget=None):
+    """Company name for a ticker, cached in `ticker_names` (ID 264).
+
+    Generalises `_india_name_for` to the whole book. Two hard constraints shape it:
+
+      * A `.info` call costs 1-2s, so a 20-row table doing one per row would take ~40s and
+        blow the Telegram timeout. Network lookups are therefore BUDGETED per render
+        (`_NAME_NET_BUDGET`); rows past the budget render blank now and get filled on a later
+        pass, so a table always returns fast and the cache warms itself over a few renders.
+      * An empty result is CACHED. A failed lookup usually means a delisted or odd symbol,
+        and retrying it every render would pay the penalty forever. Same reasoning as
+        `_india_name_for` and `ticker_country`.
+    """
+    base = str(tk or "").upper().strip()
+    if not base:
+        return ""
+    if base in _NAME_CACHE:
+        return _NAME_CACHE[base]
+    try:
+        conn = get_conn()
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS ticker_names ("
+                         "ticker TEXT PRIMARY KEY, name TEXT, updated TEXT)")
+            row = conn.execute("SELECT name FROM ticker_names WHERE ticker=?",
+                               (base,)).fetchone()
+            if row is not None:
+                _NAME_CACHE[base] = row[0] or ""
+                return _NAME_CACHE[base]
+            if not allow_net or (_budget is not None and _budget[0] <= 0):
+                return ""
+            if _budget is not None:
+                _budget[0] -= 1
+            name = ""
+            try:
+                info = _yf_ticker(_yf_alias(base) or base).info or {}
+                name = str(info.get("longName") or info.get("shortName") or "").strip()
+            except Exception:
+                log.debug("name lookup failed for %s", base, exc_info=True)
+            conn.execute("INSERT OR REPLACE INTO ticker_names VALUES (?,?,?)",
+                         (base, name, _et_now().date().isoformat()))
+            conn.commit()
+            _NAME_CACHE[base] = name
+            return name
+        finally:
+            conn.close()
+    except Exception:
+        log.debug("company name cache failed for %s", base, exc_info=True)
+        return ""
+
+
+def _short_name(tk, _budget=None, width=14):
+    """Display form of the company name: legal suffixes dropped, then truncated.
+
+    "Samvardhana Motherson International Ltd" is 39 characters -- wider than the entire rest
+    of the row -- so the suffix noise goes first ("Ltd", "Inc", "Corp" ... carry no
+    information when every row has one) and only then is it cut.
+    """
+    n = _company_name(tk, _budget=_budget)
+    if not n:
+        return "—"
+    import re as _re
+    n = _re.sub(r"\b(Ltd|Limited|Inc|Inc\.|Corp|Corporation|Co|Company|PLC|plc|SA|NV|AG|"
+                r"Holdings|Holding|Group|The)\b\.?", "", n).strip(" .,-&")
+    n = _re.sub(r"\s{2,}", " ", n)
+    return (n[:width - 1] + "…") if len(n) > width else n
+
+
+def _pipe_table(header_cols, rows_data, right_cols=None, title=None, legend=None,
+                names=True):
     """Excel-style fixed-width table in <pre> — columns align at the same index.
 
     Best practices baked in (Telegram <pre> = monospace):
@@ -3860,6 +3932,34 @@ def _pipe_table(header_cols, rows_data, right_cols=None, title=None, legend=None
             return v
 
     rows_data = [[_cap2(c) for c in r] for r in rows_data]
+
+    # Company name as the LAST column, wherever a table identifies rows by ticker (ID 264).
+    # Done HERE, in the one primitive every table passes through, rather than at the ~60
+    # call sites -- the user asked for "all places you have Ticker", and editing that many
+    # sites by hand guarantees some get missed and then drift.
+    #
+    # Skipped when the caller already shows a name, when the cell is clearly not a plain
+    # ticker (option legs like "GOOG375C", TOTAL rows), or when the caller opts out.
+    _hdrs = [str(h).strip().lower() for h in header_cols]
+    if (names and not {"name", "company"} & set(_hdrs)
+            and any(h in ("ticker", "sym", "symbol") for h in _hdrs)):
+        _ti = next(i for i, h in enumerate(_hdrs) if h in ("ticker", "sym", "symbol"))
+        import re as _re3
+        _budget = [_NAME_NET_BUDGET]
+        _names_col = []
+        for r in rows_data:
+            cell = str(r[_ti] if _ti < len(r) else "").strip()
+            _name = ""
+            if cell and _re3.fullmatch(r"[A-Za-z0-9.\-]{1,15}", cell) and not cell.isdigit():
+                try:
+                    _name = _short_name(cell, _budget=_budget)
+                except Exception:
+                    _name = ""
+            _names_col.append(_name or "")
+        if any(_names_col):
+            header_cols = list(header_cols) + ["Name"]
+            rows_data = [list(r) + [_names_col[i]] for i, r in enumerate(rows_data)]
+
     n = len(header_cols)
     all_rows = [list(header_cols)] + [list(r) for r in rows_data]
     widths = [max(_disp_w(r[c]) for r in all_rows) for c in range(n)]
@@ -35821,6 +35921,72 @@ def _pt_mark(row, conn):
                                  fallback=float(row["entry_price"] or 0))
 
 
+_CHG_WINDOWS = (("1D", 1), ("1W", 5), ("1M", 21), ("3M", 63))
+
+
+def _chg_windows(tk, conn=None):
+    """Percent price change over 1d/1w/1m/3m TRADING-day windows (ID 263).
+
+    DB first via `_daily_history`, then yfinance -- and the yfinance leg tries `_yf_alias`,
+    because the India book stores BARE NSE symbols (MOTHERSON, not MOTHERSON.NS) and a plain
+    call returns nothing for every one of them. Missing horizons come back None rather than
+    0.0, so "no data" can never be rendered as "flat".
+    """
+    out = {k: None for k, _ in _CHG_WINDOWS}
+    vals = []
+    try:
+        h = _daily_history(tk, 1, conn)
+        if h is not None and len(h):
+            vals = [float(x) for x in list(h) if x == x]
+    except Exception:
+        log.debug("chg_windows db leg failed for %s", tk, exc_info=True)
+    if len(vals) < 2:
+        try:
+            _alias = _yf_alias(tk)
+        except Exception:
+            _alias = None
+        for sym in [s for s in (tk, _alias) if s]:
+            try:
+                hh = _yf_ticker(sym).history(period="6mo", interval="1d")
+                if hh is not None and len(hh) >= 2:
+                    vals = [float(x) for x in hh["Close"].dropna()]
+                    break
+            except Exception:
+                continue
+    if len(vals) < 2:
+        return out
+    last = vals[-1]
+    for k, n in _CHG_WINDOWS:
+        if len(vals) > n and vals[-1 - n]:
+            out[k] = (last / vals[-1 - n] - 1) * 100
+    return out
+
+
+def _chg_table(tickers, conn=None):
+    """Narrow 1D/1W/1M/3M table for a set of holdings, or "" if nothing resolved.
+
+    Deliberately a SECOND table rather than four more columns on the positions grid: nine
+    columns will not fit a phone (ID 204 measured the wide version at 61 cells), and two
+    narrow tables read better than one that wraps.
+    """
+    rows = []
+    for tk in tickers:
+        c = _chg_windows(tk, conn)
+        if all(v is None for v in c.values()):
+            continue
+        rows.append((tk[:9],) + tuple(
+            (f"{c[k]:+.1f}" if c[k] is not None else "—") for k, _ in _CHG_WINDOWS))
+    if not rows:
+        return ""
+    # names=False: this table sits directly under the positions grid, which already carries
+    # the company name for the same tickers. Repeating it would spend ~15 cells on a column
+    # the reader just read.
+    return "\n" + _pipe_table(("Ticker",) + tuple(k for k, _ in _CHG_WINDOWS), rows,
+                              right_cols={1, 2, 3, 4}, title="📈 PRICE CHANGE %",
+                              legend="price move only — not your position P&amp;L",
+                              names=False)
+
+
 def _fmt_paper_india(conn):
     """India-only view of the paper book, rendered for its OWN push (ID 253).
 
@@ -35854,7 +36020,7 @@ def _fmt_paper_india(conn):
         cost += abs(entry * qty)
         pct = pnl / (abs(entry * qty) or 1.0) * 100
         rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
-                     tk[:9], f"{mark:,.2f}", f"{pnl:+,.0f}"))
+                     tk[:9], f"{mark:,.2f}", f"{pnl:+,.0f}", f"{pct:+.1f}%"))
         details.append(f"{_ticker_flag(tk, conn)} <b>{tk}</b> {qty:+g}sh @ ₹{entry:,.2f} → "
                        f"₹{mark:,.2f} · <b>₹{pnl:+,.0f}</b> ({pct:+.1f}%)")
     if not rows:
@@ -35862,10 +36028,11 @@ def _fmt_paper_india(conn):
     tot_pct = (net / cost * 100) if cost else 0.0
     em = "🟢" if net >= 0 else "🔴"
     return (_report(f"🇮🇳 INDIA PAPER BOOK · NSE",
-                    ("ST", "Ticker", "Mark", "P&L₹"), rows, right_cols={2, 3},
+                    ("ST", "Ticker", "Mark", "P&L₹", "P&L%"), rows, right_cols={2, 3, 4},
                     legend="Prices and P&amp;L in ₹ — never blended with the USD book",
                     details=details,
                     notes="Demo book (paper_trades), not your real portfolio.")
+            + _chg_table([r[1] for r in rows], conn)
             + f"\n{em} <b>Net: ₹{net:+,.0f} ({tot_pct:+.1f}%)</b>")
 
 
@@ -35907,7 +36074,7 @@ def _fmt_paper_us(conn):
         cost += abs(entry * qty)
         pct = pnl / (abs(entry * qty) or 1.0) * 100
         rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
-                     tk[:9], f"{mark:,.2f}", f"{pnl:+,.0f}"))
+                     tk[:9], f"{mark:,.2f}", f"{pnl:+,.0f}", f"{pct:+.1f}%"))
         details.append(f"{_ticker_flag(tk, conn)} <b>{tk}</b> {qty:+g}sh @ ${entry:,.2f} → "
                        f"${mark:,.2f} · <b>${pnl:+,.0f}</b> ({pct:+.1f}%)")
 
@@ -35935,7 +36102,7 @@ def _fmt_paper_us(conn):
         pct = pnl / (abs(entry * qty * 100) or 1.0) * 100
         rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
                      f"{tk[:5]}{_kfb(r['strike'])}{typ[0]}"[:9],
-                     f"{mark:,.2f}", f"{pnl:+,.0f}"))
+                     f"{mark:,.2f}", f"{pnl:+,.0f}", f"{pct:+.1f}%"))
         details.append(f"{_ticker_flag(tk, conn)} <b>{tk} {_kfb(r['strike'])}{typ[0]}</b> "
                        f"{qty:+d}x @ ${entry:,.2f} → ${mark:,.2f} · "
                        f"<b>${pnl:+,.0f}</b> ({pct:+.1f}%)")
@@ -35948,9 +36115,10 @@ def _fmt_paper_us(conn):
     if expired:
         _note = f"{expired} expired leg(s) hidden (still in the DB) · " + _note
     return (_report("🇺🇸 US PAPER BOOK · NYSE",
-                    ("ST", "Ticker", "Mark", "P&L$"), rows, right_cols={2, 3},
+                    ("ST", "Ticker", "Mark", "P&L$", "P&L%"), rows, right_cols={2, 3, 4},
                     legend="Prices and P&amp;L in $ — never blended with the INR book",
                     details=details, notes=_note)
+            + _chg_table([r[1] for r in rows], conn)
             + f"\n{em} <b>Net: ${net:+,.0f} ({tot_pct:+.1f}%)</b>")
 
 
@@ -38001,6 +38169,21 @@ def _india_news_advice(digest, horizon):
         "Rules: use ONLY the headlines given; never invent numbers, prices or events. If a "
         "stock's news is not decision-relevant, say 'no action' and move on. Be direct and "
         "specific — no hedging boilerplate. Plain text, no markdown headers.")
+    # FREE FIRST (user 2026-08-18, ID 262). This used to go straight to paid Anthropic, so a
+    # zero credit balance took the whole advisor down even though a working free lane was
+    # sitting right there.
+    #
+    # But free-first is NOT "any free provider": this prompt names the user's holdings, and
+    # Google AI Studio's free tier trains on prompts. So it is restricted to _LLM_NO_TRAIN
+    # (Groq — documented no-training, 14,400 req/day) rather than the full free pool, and
+    # Anthropic stays as a paid LAST resort instead of the first stop.
+    txt, prov = _llm_chat(prompt, max_tokens=1200, temperature=0.3, only=_LLM_NO_TRAIN)
+    if txt:
+        return txt.strip(), f"{prov} (free)"
+    key = _load_ai_key()
+    if not key:
+        return None, ("free LLM lane unavailable and no ANTHROPIC_API_KEY to fall back on "
+                      "— set GROQ_API_KEY (free, no-training) via /llm")
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=key)
@@ -38008,10 +38191,10 @@ def _india_news_advice(digest, horizon):
             model="claude-haiku-4-5-20251001", max_tokens=1200,
             messages=[{"role": "user", "content": prompt}])
         txt = "".join(b.text for b in resp.content if b.type == "text").strip()
-        return (txt or None), ("Claude Haiku 4.5" if txt else "empty response")
+        return (txt or None), ("Claude Haiku 4.5 (paid fallback)" if txt else "empty response")
     except Exception as e:
         log.warning(f"india news advice failed: {e}")
-        return None, _llm_err_msg(e)
+        return None, f"free lane returned nothing; paid fallback: {_llm_err_msg(e)}"
 
 
 def _fmt_india_news(horizon="daily"):
@@ -39099,13 +39282,24 @@ def _llm_status():
     return [(n, model, bool(_llm_key(keys))) for n, keys, _u, model in _LLM_PROVIDERS]
 
 
+# Free providers that do NOT train on prompts. Groq's free tier is documented no-training;
+# Google AI Studio's free tier explicitly DOES train on prompts, and OpenRouter's terms vary
+# per upstream model. Any prompt that names the user's positions must be restricted to this
+# set (pass `only=_LLM_NO_TRAIN`) -- "free first" must not mean "hand the book to a trainer".
+_LLM_NO_TRAIN = ("groq",)
+
+
 def _llm_chat(prompt, system=None, max_tokens=700, temperature=0.3,
-              provider=None, timeout=45, model=None):
+              provider=None, timeout=45, model=None, only=None):
     """Ask the first configured provider. Returns (text, provider_name); (None, None) on
     total failure — callers must treat "no LLM" as normal, never as an error path.
 
     Falls through to the NEXT provider on any failure, because free tiers rate-limit: a 429
     from one is an ordinary Tuesday, not an outage.
+
+    `only` is a HARD restriction to the named providers (unlike `provider`, which is merely a
+    preference and still falls through to everything else). Use it when the prompt contains
+    data that must not reach a provider that trains on it -- see `_LLM_NO_TRAIN`.
     """
     import urllib.request as _u, json as _j
     msgs = ([{"role": "system", "content": system}] if system else []) + \
@@ -39113,7 +39307,8 @@ def _llm_chat(prompt, system=None, max_tokens=700, temperature=0.3,
     # `provider` is a PREFERENCE, not a pin: try it first, then fall through to the rest.
     # Hard-pinning meant one bad request killed the call with no fallback (caught when a
     # Groq model slug was sent to Google and /insight went dark).
-    order = sorted(_LLM_PROVIDERS, key=lambda p: 0 if p[0] == provider else 1)
+    _pool = [p for p in _LLM_PROVIDERS if p[0] in only] if only else list(_LLM_PROVIDERS)
+    order = sorted(_pool, key=lambda p: 0 if p[0] == provider else 1)
     for name, keys, base, _default_model in order:
         key = _llm_key(keys)
         if not key:

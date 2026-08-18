@@ -28393,15 +28393,41 @@ async def catchup_command(update, ctx):
             await update.message.reply_text(f"⚠️ {_lbl} failed — see the log.", parse_mode=H)
 
 
-async def catchup_alert(ctx):
-    """Send any of today's scheduled alerts that were missed (machine asleep / late start).
+async def catchup_startup_alert(ctx):
+    """The sweep that runs shortly after START -- a FULL replay (ID 258)."""
+    await catchup_alert(ctx, replay=True)
 
-    Only fires alerts whose scheduled time has ALREADY passed, and only on a weekday --
-    catching up Monday's briefings on Saturday would be noise, not service.
+
+async def catchup_alert(ctx, replay=False):
+    """Send today's scheduled alerts. Only fires slots whose time has ALREADY passed, and
+    only on a weekday -- catching up Monday's briefings on Saturday would be noise.
+
+    `replay=True` (the START sweep) sends EVERY alert due so far today, including ones that
+    already went out. The user asked for the full set on start (ID 258): the default sweep
+    dedups per calendar day, so restarting mid-afternoon delivered only the two or three
+    slots that happened to be genuinely missed, which reads like the catch-up is broken.
+
+    The HOURLY sweep keeps the dedup. Replaying everything every hour would mean sixteen
+    messages an hour, which is the opposite of the ask.
+
+    Replay is throttled to once per 30 min: the watchdog restarts this bot automatically, so
+    an unthrottled full replay would fire the whole set again on every bounce. Inside the
+    throttle window it silently degrades to missed-only rather than sending nothing.
     """
     now = _et_now()
     if now.weekday() >= 5:
         return
+    if replay:
+        try:
+            _c = get_conn()
+            _last = _app_setting(_c, "catchup_replay_ts")
+            if _last and (time.time() - float(_last)) < 1800:
+                replay = False                  # rapid restart -> missed-only
+            else:
+                _set_app_setting(_c, "catchup_replay_ts", f"{time.time():.0f}")
+            _c.close()
+        except Exception:
+            log.debug("catchup replay throttle check failed", exc_info=True)
     now_utc = datetime.now(timezone.utc)
     sent = []
     for key, mins, fn, label, days, tz in _CATCHUP_JOBS:
@@ -28416,18 +28442,35 @@ async def catchup_alert(ctx):
         if days is not None and ((ref.weekday() + 1) % 7) not in tuple(days):
             continue                      # e.g. a Monday-only weekly push, on a Wednesday
         try:
-            if await _run_alert_once(ctx, key, fn, label):
+            if replay:
+                await fn(ctx)
+                sent.append(label or key)
+                # Stamp the dedup row anyway: _alert_already_sent INSERTs and reports whether
+                # the key existed, so calling it here stops the HOURLY sweep re-sending what
+                # this replay just delivered.
+                try:
+                    _c2 = get_conn()
+                    _ensure_alert_dedup_table(_c2)
+                    _alert_already_sent(_c2, now.strftime("%Y-%m-%d"), key, "sched")
+                    _c2.close()
+                except Exception:
+                    log.debug("catchup dedup stamp failed for %s", key, exc_info=True)
+            elif await _run_alert_once(ctx, key, fn, label):
                 sent.append(label or key)
         except Exception:
             log.debug("catchup %s failed", key, exc_info=True)
     if sent:
-        log.info("catchup: sent %d missed alert(s): %s", len(sent), ", ".join(sent))
+        log.info("catchup: sent %d alert(s) [%s]: %s", len(sent),
+                 "full replay" if replay else "missed only", ", ".join(sent))
         try:
             _, chat_id = load_creds()
+            _head = ("🔄 <b>Catch-up — everything scheduled so far today</b>\n"
+                     if replay else
+                     "🔄 <b>Catch-up</b> — you were offline when these were scheduled, so "
+                     "they are arriving now:\n")
             await ctx.bot.send_message(
                 chat_id=int(chat_id), parse_mode=H,
-                text=("🔄 <b>Catch-up</b> — you were offline when these were scheduled, so "
-                      "they are arriving now:\n" + "\n".join(f"• {x}" for x in sent) +
+                text=(_head + "\n".join(f"• {x}" for x in sent) +
                       "\n\n<i>Times are as-of now, not as-of the original slot.</i>"))
         except Exception:
             log.debug("catchup notice failed", exc_info=True)
@@ -35812,7 +35855,7 @@ def _fmt_paper_india(conn):
         pct = pnl / (abs(entry * qty) or 1.0) * 100
         rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
                      tk[:9], f"{mark:,.2f}", f"{pnl:+,.0f}"))
-        details.append(f"{_flag_tk(tk, conn)} <b>{tk}</b> {qty:+g}sh @ ₹{entry:,.2f} → "
+        details.append(f"{_ticker_flag(tk, conn)} <b>{tk}</b> {qty:+g}sh @ ₹{entry:,.2f} → "
                        f"₹{mark:,.2f} · <b>₹{pnl:+,.0f}</b> ({pct:+.1f}%)")
     if not rows:
         return None
@@ -35824,6 +35867,107 @@ def _fmt_paper_india(conn):
                     details=details,
                     notes="Demo book (paper_trades), not your real portfolio.")
             + f"\n{em} <b>Net: ₹{net:+,.0f} ({tot_pct:+.1f}%)</b>")
+
+
+def _fmt_paper_us(conn):
+    """US-only view of the paper book, for its OWN post-close push (ID 257).
+
+    Mirror of `_fmt_paper_india`, on the New York clock instead of the NSE one -- same reason
+    the India stream is separate: each book should arrive just after ITS market closes, not
+    bundled into the other's push hours stale.
+
+    Two things this handles that the India version does not, because the US book has them:
+      * OPTION legs as well as stock, priced per contract (x100).
+      * EXPIRED legs, which are hidden rather than counted -- a settled leg left in the net
+        would quietly drag the running total (same rule as `_fmt_paper`).
+
+    Returns None when nothing US is open, so the caller sends nothing at all rather than a
+    daily "no positions" message.
+    """
+    _pt_setup(conn)
+    df = pd.read_sql("SELECT * FROM paper_trades WHERE status='OPEN'", conn)
+    if df.empty:
+        return None
+    rows, details, net, cost, expired = [], [], 0.0, 0.0, 0
+    _typ = df["option_type"].astype(str).str.upper()
+
+    for tk, grp in df[_typ == "STOCK"].groupby(df["ticker"].str.upper()):
+        if _ccy_of(tk)[0] != "USD":
+            continue
+        qty = float(grp["quantity"].sum())
+        if qty == 0:
+            continue
+        entry = float((grp["entry_price"] * grp["quantity"]).sum() / qty)
+        try:
+            mark = _last_price(tk) or entry
+        except Exception:
+            mark = entry
+        pnl = (mark - entry) * qty
+        net += pnl
+        cost += abs(entry * qty)
+        pct = pnl / (abs(entry * qty) or 1.0) * 100
+        rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
+                     tk[:9], f"{mark:,.2f}", f"{pnl:+,.0f}"))
+        details.append(f"{_ticker_flag(tk, conn)} <b>{tk}</b> {qty:+g}sh @ ${entry:,.2f} → "
+                       f"${mark:,.2f} · <b>${pnl:+,.0f}</b> ({pct:+.1f}%)")
+
+    for _, r in df[_typ != "STOCK"].iterrows():
+        tk = str(r["ticker"]).upper()
+        if _ccy_of(tk)[0] != "USD":
+            continue
+        try:
+            if (datetime.strptime(str(r["expiry"])[:10], "%Y-%m-%d").date()
+                    - datetime.now().date()).days < 0:
+                expired += 1
+                continue
+        except Exception:
+            pass
+        typ = str(r["option_type"]).upper()
+        qty = int(r["quantity"])
+        entry = float(r["entry_price"] or 0)
+        try:
+            mark = _pt_mark(r, conn) or entry
+        except Exception:
+            mark = entry
+        pnl = (mark - entry) * qty * 100          # listed options are per-100
+        net += pnl
+        cost += abs(entry * qty * 100)
+        pct = pnl / (abs(entry * qty * 100) or 1.0) * 100
+        rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
+                     f"{tk[:5]}{_kfb(r['strike'])}{typ[0]}"[:9],
+                     f"{mark:,.2f}", f"{pnl:+,.0f}"))
+        details.append(f"{_ticker_flag(tk, conn)} <b>{tk} {_kfb(r['strike'])}{typ[0]}</b> "
+                       f"{qty:+d}x @ ${entry:,.2f} → ${mark:,.2f} · "
+                       f"<b>${pnl:+,.0f}</b> ({pct:+.1f}%)")
+
+    if not rows:
+        return None
+    tot_pct = (net / cost * 100) if cost else 0.0
+    em = "🟢" if net >= 0 else "🔴"
+    _note = "Demo book (paper_trades), not your real portfolio."
+    if expired:
+        _note = f"{expired} expired leg(s) hidden (still in the DB) · " + _note
+    return (_report("🇺🇸 US PAPER BOOK · NYSE",
+                    ("ST", "Ticker", "Mark", "P&L$"), rows, right_cols={2, 3},
+                    legend="Prices and P&amp;L in $ — never blended with the INR book",
+                    details=details, notes=_note)
+            + f"\n{em} <b>Net: ${net:+,.0f} ({tot_pct:+.1f}%)</b>")
+
+
+async def paper_us_alert(ctx):
+    """Push the US paper book just after the NYSE close (ID 257). Silent when nothing open."""
+    conn = get_conn()
+    try:
+        msg = _fmt_paper_us(conn)
+    finally:
+        conn.close()
+    if not msg:
+        return
+    _, chat_id = load_creds()
+    try:
+        await ctx.bot.send_message(chat_id=int(chat_id), text=msg[:4000], parse_mode=H)
+    except Exception as e:
+        log.warning(f"paper_us_alert send failed: {e}")
 
 
 async def paper_india_alert(ctx):
@@ -35893,8 +36037,14 @@ def _fmt_paper(conn):
         lots_txt = f" ({len(grp)} lots)" if len(grp) > 1 else ""
         leg = f"{_flag_tk(tk, conn)} {qty:+g}sh{lots_txt}"
         _cost_by[_cc] = _cost_by.get(_cc, 0.0) + abs(entry * qty)
-        rows.setdefault(_cc, []).append(
-            (em, leg, f"{entry:,.2f}", f"{mark:,.2f}", f"{pnl:+,.0f}"))
+        # GRID = identity + the one number being ranked (ID 204). Size, entry and mark move
+        # to the detail line below: "🇮🇳MOTHERSON +3000sh (2 lots)" is 28 display cells on its
+        # own, so with Entry/Mark/P&L beside it the table reached 61 and wrapped on a phone.
+        # Nothing is lost -- it moves, which is the house scanner format (_send_spreads).
+        # No per-row flag: each table is ALREADY one currency under a country heading
+        # ("🇮🇳 India NSE · INR"), so the flag repeated every row bought nothing and cost the
+        # 2 cells that were forcing MOTHERSON to truncate to "MOTHERSO" (ID 204).
+        rows.setdefault(_cc, []).append((em, tk[:9], f"{pnl:+,.0f}"))
         earliest = grp["entry_date"].min()
         try:
             days_held = (datetime.now().date() - datetime.strptime(str(earliest), "%Y-%m-%d").date()).days
@@ -35903,7 +36053,7 @@ def _fmt_paper(conn):
         ids_txt = "/".join(str(int(x)) for x in grp["trade_id"])
         note_txt = "; ".join(n for n in grp["notes"].dropna().unique() if n)
         note_txt = f" — {note_txt}" if note_txt else ""
-        details.append(f"• #{ids_txt} {leg} · entry {earliest}"
+        details.append(f"• #{ids_txt} {leg} · {entry:,.2f} → {mark:,.2f} · entry {earliest}"
                         + (f" ({days_held}d held)" if days_held is not None else "")
                         + f" · {pnl_pct:+.0f}%" + _earn_txt(tk) + note_txt)
     _expired = 0
@@ -35932,8 +36082,10 @@ def _fmt_paper(conn):
         leg = f"{_flag_tk(tk, conn)} {_kfb(r['strike'])}{typ[0]} {qty:+d}x"
         _by_ccy["$"] = _by_ccy.get("$", 0.0) + pnl      # listed options here are US
         _cost_by["USD"] = _cost_by.get("USD", 0.0) + abs(entry * qty * 100)
+        # Same trim as the stock rows (ID 204): strike/side/size and entry->mark live in the
+        # detail line, so an option row cannot push the grid past a phone's width either.
         rows.setdefault("USD", []).append(
-            (em, leg, f"{entry:,.2f}", f"{mark:,.2f}", f"{pnl:+,.0f}"))
+            (em, f"{tk[:5]}{_kfb(r['strike'])}{typ[0]}"[:11], f"{pnl:+,.0f}"))
         note_txt = f" — {r['note']}" if r.get("note") else ""
         try:
             days_held = (datetime.now().date() - datetime.strptime(str(r["entry_date"]), "%Y-%m-%d").date()).days
@@ -35946,7 +36098,8 @@ def _fmt_paper(conn):
                 dte_txt = f" · exp {r['expiry']} ({dte}d)"
             except Exception:
                 dte_txt = f" · exp {r['expiry']}"
-        details.append(f"• #{int(r['trade_id'])} {leg} · entry {r['entry_date']}"
+        details.append(f"• #{int(r['trade_id'])} {leg} · {entry:,.2f} → {mark:,.2f}"
+                        + f" · entry {r['entry_date']}"
                         + (f" ({days_held}d held)" if days_held is not None else "")
                         + f" · {pnl_pct:+.0f}%" + dte_txt + _earn_txt(tk) + note_txt)
     _note = "/paper add ... (grammar of /add) · /paper close ID [@price]"
@@ -35970,16 +36123,21 @@ def _fmt_paper(conn):
     parts = [hdr(f"PAPER TRADING (demo) · Net {_net_txt}")]
     for _cy in _order:
         _rr = list(rows[_cy])
-        _sub = sum(float(str(r[4]).replace(",", "")) for r in _rr)
+        # P&L is column 2 since the ID 204 trim (was 4 when the grid carried Entry/Mark).
+        _sub = sum(float(str(r[2]).replace(",", "")) for r in _rr)
         # Blended return on capital deployed, not the mean of the per-row percentages —
         # that would weight a 1-share lot like a 3,000-share one (user 2026-08-10).
         _cst = _cost_by.get(_cy, 0.0)
-        _rr.append(("", "TOTAL", "", f"{_sub / _cst * 100:+.2f}%" if _cst > 0 else "",
-                    f"{_sub:+,.0f}"))
-        parts.append("\n" + _pipe_table(("", "Leg", "Entry", "Mark", "P&L"), _rr,
-                                        right_cols={2, 3, 4},
+        _rr.append(("", "TOTAL", f"{_sub:+,.0f}"))
+        # The blended return moves to the legend rather than a 4th column -- it is ONE number
+        # for the whole table, so spending a column on it (blank for every row but the last)
+        # was the least efficient possible use of the width (ID 204).
+        _blend = f" · return on capital {_sub / _cst * 100:+.2f}%" if _cst > 0 else ""
+        parts.append("\n" + _pipe_table(("", "Leg", "P&L"), _rr,
+                                        right_cols={2},
                                         title=_CCY_TITLE.get(_cy, _cy),
-                                        legend=f"all values in {_cy}"))
+                                        legend=f"all values in {_cy}{_blend} · size, entry "
+                                               f"and mark are in the lines below"))
     if details:
         parts.append("\n" + "\n".join(details))
     parts.append(f"\n<i>{_note}</i>")
@@ -37790,6 +37948,29 @@ def _india_news_digest(horizon="daily", max_syms=12):
     return {s: _india_news_for(s, when=when) for s in syms}, syms
 
 
+def _llm_err_msg(e, limit=240):
+    """The actionable sentence out of a provider exception (ID 259).
+
+    Anthropic puts the useful text in `error.message`; `str(e)` buries it inside a dict repr
+    that begins "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error'"
+    -- 79 characters of boilerplate. The old `str(e)[:80]` therefore truncated EXACTLY before
+    the reason, and a plain out-of-credit account was reported to the user as an opaque 400
+    that looked like a bug in the request. Surface the reason, not the envelope.
+    """
+    msg = ""
+    try:
+        body = getattr(e, "body", None)
+        if isinstance(body, dict):
+            msg = str((body.get("error") or {}).get("message") or "").strip()
+    except Exception:
+        msg = ""
+    if not msg:
+        import re as _re
+        m = _re.search(r"['\"]message['\"]:\s*['\"]([^'\"]+)", str(e))
+        msg = (m.group(1) if m else str(e)).strip()
+    return msg[:limit]
+
+
 def _india_news_advice(digest, horizon):
     """Advisor view + recommendation per name. Returns (text, engine) or (None, reason).
 
@@ -37830,7 +38011,7 @@ def _india_news_advice(digest, horizon):
         return (txt or None), ("Claude Haiku 4.5" if txt else "empty response")
     except Exception as e:
         log.warning(f"india news advice failed: {e}")
-        return None, f"advice call failed: {str(e)[:80]}"
+        return None, _llm_err_msg(e)
 
 
 def _fmt_india_news(horizon="daily"):
@@ -41081,7 +41262,7 @@ def main():
         # Catch-up (user 2026-08-07): run_daily fires once, so a sleeping laptop loses
         # that push for the day. Sweep 90s after startup and then hourly; each alert is
         # dedup-guarded, so a normal day sends nothing extra.
-        job_queue.run_once(catchup_alert, when=90)
+        job_queue.run_once(catchup_startup_alert, when=90)   # full replay on start (ID 258)
         job_queue.run_repeating(catchup_alert, interval=3600, first=3600)  # hourly sweep, NOT a fixed hour
         _sched_once(job_queue, briefing_alert, (9, 5), "briefing_alert", "Daily briefing")     # 9:05am ET
         _sched_once(job_queue, plan_alert, (8, 30), "plan_alert", "Next-day game plan")       # 8:30am ET, pre-market
@@ -41107,6 +41288,11 @@ def main():
         # (PTB days: 1=Mon..5=Fri); silent when nothing Indian is open.
         _sched_once(job_queue, paper_india_alert, (10, 15), "paper_india",
                     "India paper book", days=(1, 2, 3, 4, 5), tz="UTC")
+        # US mirror of the India book (ID 257) — its own stream on the NEW YORK clock, 30 min
+        # after the 16:00 close so marks have settled. Same reasoning as the India one: each
+        # book arrives just after ITS market closes rather than bundled into the other's push.
+        _sched_once(job_queue, paper_us_alert, (16, 30), "paper_us",
+                    "US paper book", days=(1, 2, 3, 4, 5))
         job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
         job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs 5:30pm EDT / 4:30pm EST
         job_queue.run_daily(record_short_interest, time=dt_time(21, 40, 0))  # SI snapshot 5:40pm EDT / 4:40pm EST

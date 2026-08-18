@@ -35760,6 +35760,70 @@ def _pt_mark(row, conn):
                                  fallback=float(row["entry_price"] or 0))
 
 
+def _fmt_paper_india(conn):
+    """India-only view of the paper book, rendered for its OWN push (ID 253).
+
+    Why a separate stream rather than a section inside the US message: the NSE trades on a
+    different calendar and closes 15:30 IST, hours before the US open, so an India update
+    bundled into the US post-close push arrives ~6h stale and lands when the user is asleep.
+    The book also holds no FX rate, so rupee rows can never join a dollar total (`_ccy_of`).
+
+    Returns None when there is nothing Indian open -- the caller then sends nothing at all
+    rather than a daily "no positions" message.
+    """
+    _pt_setup(conn)
+    df = pd.read_sql("SELECT * FROM paper_trades WHERE status='OPEN'", conn)
+    if df.empty:
+        return None
+    rows, details, net, cost = [], [], 0.0, 0.0
+    for tk, grp in df[df["option_type"].astype(str).str.upper() == "STOCK"].groupby(
+            df["ticker"].str.upper()):
+        if _ccy_of(tk)[0] != "INR":
+            continue
+        qty = float(grp["quantity"].sum())
+        if qty == 0:
+            continue
+        entry = float((grp["entry_price"] * grp["quantity"]).sum() / qty)
+        try:
+            mark = _last_price(tk) or entry
+        except Exception:
+            mark = entry
+        pnl = (mark - entry) * qty
+        net += pnl
+        cost += abs(entry * qty)
+        pct = pnl / (abs(entry * qty) or 1.0) * 100
+        rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
+                     tk[:9], f"{mark:,.2f}", f"{pnl:+,.0f}"))
+        details.append(f"{_flag_tk(tk, conn)} <b>{tk}</b> {qty:+g}sh @ ₹{entry:,.2f} → "
+                       f"₹{mark:,.2f} · <b>₹{pnl:+,.0f}</b> ({pct:+.1f}%)")
+    if not rows:
+        return None
+    tot_pct = (net / cost * 100) if cost else 0.0
+    em = "🟢" if net >= 0 else "🔴"
+    return (_report(f"🇮🇳 INDIA PAPER BOOK · NSE",
+                    ("ST", "Ticker", "Mark", "P&L₹"), rows, right_cols={2, 3},
+                    legend="Prices and P&amp;L in ₹ — never blended with the USD book",
+                    details=details,
+                    notes="Demo book (paper_trades), not your real portfolio.")
+            + f"\n{em} <b>Net: ₹{net:+,.0f} ({tot_pct:+.1f}%)</b>")
+
+
+async def paper_india_alert(ctx):
+    """Push the India paper book on the NSE clock (ID 253). Silent when nothing is open."""
+    conn = get_conn()
+    try:
+        msg = _fmt_paper_india(conn)
+    finally:
+        conn.close()
+    if not msg:
+        return
+    _, chat_id = load_creds()
+    try:
+        await ctx.bot.send_message(chat_id=int(chat_id), text=msg[:4000], parse_mode=H)
+    except Exception as e:
+        log.warning(f"paper_india_alert send failed: {e}")
+
+
 def _fmt_paper(conn):
     """DEMO positions — a separate `paper_trades` table (never touches the real `trades`
     book, so it can't contaminate live P&L, the tax clock, or Exit Planner). Same one-line
@@ -41020,6 +41084,11 @@ def main():
         # material news lands before the session rather than after it. ONE job serves all
         # three horizons: it picks weekly on Fridays and monthly on the last weekday.
         _sched_once(job_queue, india_news_job, (2, 30), "india_news", "India news")
+        # India paper book on the NSE clock, not the NYSE one (ID 253). 10:15 UTC = 15:45 IST,
+        # just after the 15:30 close -- a US-timed push would arrive ~6h stale. Weekdays only
+        # (PTB days: 1=Mon..5=Fri); silent when nothing Indian is open.
+        _sched_once(job_queue, paper_india_alert, (10, 15), "paper_india",
+                    "India paper book", days=(1, 2, 3, 4, 5))
         job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
         job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs 5:30pm EDT / 4:30pm EST
         job_queue.run_daily(record_short_interest, time=dt_time(21, 40, 0))  # SI snapshot 5:40pm EDT / 4:40pm EST

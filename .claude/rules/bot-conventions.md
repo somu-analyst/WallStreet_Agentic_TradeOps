@@ -8,7 +8,7 @@ paths:
 
 ## Bot commands (registered in telegram_bot_optimized.py)
 - `/start` `/menu` entry · `/gex` signed GEX (walls, zero-gamma flip) · `/vanna` · `/opex` max pain · `/regime` risk-on/off read · `/squeeze`.
-- Scanners: `/spreads` · `/wheel` (CSP) · `/cc` covered-call income · `/hiprob` ensemble · `/momentum` · `/earnvol` pre-earnings IV-crush · `/pead` post-earnings drift (needs FINNHUB_API_KEY; 8:45am ET `earnings_alert` pushes both) · `/pairs` sector stat mean-reversion · `/season` seasonality · `/rotate` sector RS · `/revert` 5d reversal z · `/condor` iron condor · `/calendar` ATM calendars · `/divcap` dividend calendar · `/pwindex` put-write backtest (BS approx, educational).
+- Scanners: `/spreads` · `/wheel` (CSP) · `/cc` covered-call income · `/hiprob` ensemble · `/momentum` · `/earnvol` pre-earnings IV-crush · `/pead` post-earnings drift (needs FINNHUB_API_KEY; `earnings_alert` pushes both at 13:45 UTC = 9:45am EDT / 8:45am EST — the EDT firing is AFTER the open despite the "pre-market" label, see tracker ID 249) · `/pairs` sector stat mean-reversion · `/season` seasonality · `/rotate` sector RS · `/revert` 5d reversal z · `/condor` iron condor · `/calendar` ATM calendars · `/divcap` dividend calendar · `/pwindex` put-write backtest (BS approx, educational).
 - Narratives: `/wrap` · `/briefing` · `/macro` (BLS+yields, keyless) · `/earnings` · `/event` · `/logevent`.
 - DB-first singles: `/rs` (vs SPY) · `/breakout` 52wk · `/zrev` price z · `/vrp` (ATM IV vs MAD realized vol; high→sell premium).
 - `/ratings [TICKERS]` — analyst up/downgrades + PT moves 45d (keyless yf `upgrades_downgrades`, Benzinga-via-Yahoo). Net = ups−dns + ½·(PT±). Benzinga RSS also feeds briefing + News page.

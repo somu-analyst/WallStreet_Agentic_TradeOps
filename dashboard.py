@@ -24811,12 +24811,16 @@ if page == "👀 Watchlist":
                     "Day%": (round(_wchg, 2) if _wchg is not None else None),
                     "Day L-H": (f"${_wdl:,.2f}-${_wdh:,.2f}" if (_wdh and _wdl) else "—"),
                     "52w L-H": (f"${_w52lo:,.2f}-${_w52hi:,.2f}" if (_w52hi and _w52lo) else "—"),
-                    # 0 = sitting on the 52w low, 1 = on the high. Rendered as a bar so the
-                    # position in the range is readable at a glance (user 2026-08-03).
-                    "52w Pos": (round(max(0.0, min(1.0, (_wspot - _w52lo) / (_w52hi - _w52lo))), 3)
+                    # PERCENT of the way up the range: 0 = on the 52w low, 100 = on the high.
+                    # Stored 0-100, NOT 0-1 (ID 251). ProgressColumn's `format` is printf on the
+                    # RAW value and does not multiply by 100, so a 0-1 fraction under "%.0f%%"
+                    # could only ever print 0% or 1% -- 0.55 rendered as "1%". Paper Trading
+                    # stored the same fraction but formatted it "%.2f", which is why the two
+                    # grids disagreed (1% vs 0.55) for identical underlying data.
+                    "52w Pos": (round(max(0.0, min(1.0, (_wspot - _w52lo) / (_w52hi - _w52lo))) * 100, 1)
                                 if (_w52hi and _w52lo and _w52hi > _w52lo and _wspot) else None),
-                    # same idea on TODAY's range: 0 = printed the day's low, 1 = the day's high
-                    "Day Pos": (round(max(0.0, min(1.0, (_wspot - _wdl) / (_wdh - _wdl))), 3)
+                    # same idea on TODAY's range: 0 = printed the day's low, 100 = the day's high
+                    "Day Pos": (round(max(0.0, min(1.0, (_wspot - _wdl) / (_wdh - _wdl))) * 100, 1)
                                 if (_wdh and _wdl and _wdh > _wdl and _wspot) else None),
                     "Day line": None,          # filled after the intraday map is built
                     "Call Wall": (f"${_wcw:,.0f}" if _wcw else "—"),
@@ -24911,14 +24915,14 @@ if page == "👀 Watchlist":
                     "3M", width="small",
                     help="Closing price over the last 63 sessions (a trading quarter)."),
                 "Day Pos": st.column_config.ProgressColumn("Day position", min_value=0.0,
-                    max_value=1.0, format="%.0f%%",
+                    max_value=100.0, format="%.0f%%",
                     help="Where the current price sits inside TODAY's low-high range. "
                          "0%% = trading at the session low, 100%% = at the session high. "
                          "Closing near the high or low is what the number is telling you."),
                 "52w L-H": st.column_config.TextColumn("52-week low–high",
                     help="Lowest and highest price over the past 252 trading days."),
                 "52w Pos": st.column_config.ProgressColumn("52w position", min_value=0.0,
-                    max_value=1.0, format="%.0f%%",
+                    max_value=100.0, format="%.0f%%",
                     help="Percent of the way UP the 52-week range, not a return. "
                          "0%% = trading at the 52-week LOW, 50%% = exactly midway between "
                          "low and high, 100%% = at the 52-week HIGH. "
@@ -25279,7 +25283,11 @@ if page == "📝 Paper Trading":
                              "Qty": _pqty, "Lots": len(_grp), "Status": "🟢 Live",
                              "Entry": round(_pentry, 2), "Current Price": round(_pmark, 2),
                              "52w L-H": (f"{_p52lo:,.2f}-{_p52hi:,.2f}" if _p52hi else "—"),
-                             "52w Pos": (round((_pmark - _p52lo) / (_p52hi - _p52lo), 4)
+                             # 0-100 and CLAMPED, matching the Watchlist grid (ID 251). Was a
+                             # raw 0-1 fraction, so the same holding read "0.55" here and "1%"
+                             # there. Unclamped it could also exceed 1 on a fresh 52w high and
+                             # overflow the bar.
+                             "52w Pos": (round(max(0.0, min(1.0, (_pmark - _p52lo) / (_p52hi - _p52lo))) * 100, 1)
                                          if _p52hi and _p52hi > _p52lo else None),
                              # Capital at risk, carried so the TOTAL row can show a REAL
                              # blended return instead of a blank (user 2026-08-10). Averaging
@@ -25329,7 +25337,7 @@ if page == "📝 Paper Trading":
                              "Entry": round(_pentry, 2), "Current Price": round(_pmark, 2),
                              "Spot": (round(_pspot, 2) if _pspot else None),
                              "52w L-H": (f"{_p52lo:,.2f}-{_p52hi:,.2f}" if _p52hi else "—"),
-                             "52w Pos": (round((_pspot - _p52lo) / (_p52hi - _p52lo), 4)
+                             "52w Pos": (round(max(0.0, min(1.0, (_pspot - _p52lo) / (_p52hi - _p52lo))) * 100, 1)
                                          if _p52hi and _pspot and _p52hi > _p52lo else None),
                              "_cost": abs(_pentry * _pqty * 100),   # options: 100x multiplier
                              "P&L": round(_ppnl), "P&L %": round(_ppnl_pct, 2),
@@ -25530,9 +25538,10 @@ if page == "📝 Paper Trading":
                     help="Return on the capital this position tied up. Bar spans -100% to +100%.")
                 if "52w Pos" in _grpdf.columns:
                     _pcfg["52w Pos"] = st.column_config.ProgressColumn(
-                        "52w position", format="%.2f", min_value=0.0, max_value=1.0,
-                        help="Where the price sits in its 52-week range: empty = at the low, "
-                             "full = at the high.")
+                        "52w position", format="%.0f%%", min_value=0.0, max_value=100.0,
+                        help="Percent of the way UP the 52-week range, not a return. "
+                             "0% = at the 52-week LOW, 50% = midway, 100% = at the HIGH. "
+                             "Same definition and scale as the Watchlist column.")
                 # Thousands separators on the money column. "localized" is newer Streamlit;
                 # fall back to a plain integer format rather than lose the column.
                 try:

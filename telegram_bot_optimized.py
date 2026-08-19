@@ -36036,6 +36036,154 @@ def _fmt_paper_india(conn):
             + f"\n{em} <b>Net: ₹{net:+,.0f} ({tot_pct:+.1f}%)</b>")
 
 
+def _pct01(v):
+    """Render a probability that may arrive as a FRACTION or as a PERCENT.
+
+    The scanners disagree: `_spreads_scan_bot` returns pop=95.47 (already a percent) while
+    `_hiprob_scan` returns pop=0.90 (a fraction). Multiplying blindly printed 9547%, and
+    NOT multiplying printed 0% -- both were visible in the first render of this digest.
+    Anything above 1.5 is already a percentage; nothing legitimately sits between.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{(f if f > 1.5 else f * 100):.0f}%"
+
+
+def _fmt_oi_flow(conn, top=10):
+    """Scheduled OI / options-flow read (ID 261). Returns the message, or None if nothing.
+
+    HONESTY CONSTRAINT. This is a POSITIONING report, not a signal. The ensemble's own UOA
+    model was measured on 2026-08-17 over 18,100 graded fires and scored 38.3% vs a 47.9%
+    baseline on BULL calls (t=-1.64) -- i.e. no measured edge in either direction. So this
+    block states what was traded and never claims what follows from it; the wording is the
+    same discipline `_signal_writeup` enforces for signals with no base rate.
+    """
+    try:
+        rows_raw = _uoa_scan(conn, top=top)
+    except Exception:
+        log.debug("uoa scan failed in oi flow digest", exc_info=True)
+        rows_raw = []
+    if not rows_raw:
+        return None
+    rows, details = [], []
+    for r in rows_raw:
+        side = "CALL" if str(r.get("side", "")).upper().startswith("C") else "PUT"
+        em = "🟢" if side == "CALL" else "🔴"
+        rows.append((em, str(r.get("ticker", ""))[:6],
+                     f"{_kfb(r.get('strike', 0))}{side[0]}",
+                     f"{int(r.get('dte', 0))}d",
+                     f"{float(r.get('ratio', 0)):.1f}x",
+                     _fmt_notional(float(r.get("notional", 0)))))
+        details.append(
+            f"{em} <b>{r.get('ticker')}</b> {_kfb(r.get('strike', 0))}{side[0]} "
+            f"exp {r.get('expiry')} — volume {float(r.get('vol', 0)):,.0f} on OI "
+            f"{float(r.get('oi', 0)):,.0f} ({float(r.get('ratio', 0)):.1f}x), "
+            f"{_fmt_notional(float(r.get('notional', 0)))} notional")
+    return _report(
+        "🛰️ OI & FLOW — what got traded today",
+        ("ST", "Ticker", "Leg", "DTE", "Vol/OI", "Notional"), rows,
+        right_cols={3, 4, 5},
+        legend="🟢 call flow · 🔴 put flow · Vol/OI ≥2 = unusual",
+        details=details,
+        notes=("POSITIONING, NOT A SIGNAL. Measured on 18,100 graded fires, unusual-activity "
+               "calls scored 38.3% vs a 47.9% baseline — no measured edge in either "
+               "direction. Read this as what was traded, never as what happens next."))
+
+
+def _fmt_trade_ideas(conn, top=6):
+    """Scheduled trade-suggestion digest (ID 261). Returns the message, or None.
+
+    Every lane is guarded SEPARATELY and the message always says which lanes came back empty
+    -- the `/insight` lesson: a silently-missing lane is how a reader (or a model) fills the
+    gap by inventing one. An empty scan is a real answer here; conditions genuinely do not
+    always offer a high-probability structure.
+    """
+    parts, empty = [], []
+    universe = _universe_tickers(conn) if callable(globals().get("_universe_tickers")) else []
+    universe = (universe or ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"])[:40]
+
+    try:
+        hp = _hiprob_scan(universe) or []
+    except Exception:
+        log.debug("hiprob failed in ideas digest", exc_info=True)
+        hp = []
+    if hp:
+        rows = [(str(h.get("tk", ""))[:6], str(h.get("strat", ""))[:10],
+                 str(h.get("legs", ""))[:9], _pct01(h.get("pop")),
+                 f"{float(h.get('rr', 0) or 0):.2f}", f"{int(h.get('dte', 0) or 0)}d")
+                for h in hp[:top]]
+        parts.append(_report("🎯 HIGH-PROBABILITY STRUCTURES",
+                             ("Ticker", "Strategy", "Legs", "POP", "R/R", "DTE"), rows,
+                             right_cols={3, 4, 5},
+                             legend="POP = modelled probability of profit at expiry",
+                             notes="Modelled from live chains — POP is a model output, "
+                                   "not a measured hit-rate."))
+    else:
+        empty.append("high-probability structures (none cleared the POP filter)")
+
+    try:
+        sp = _spreads_scan_bot(universe[:20]) or []
+    except Exception:
+        log.debug("spreads failed in ideas digest", exc_info=True)
+        sp = []
+    if sp:
+        rows = [(str(x.get("tk", ""))[:6], str(x.get("strat", ""))[:10],
+                 str(x.get("legs", ""))[:9], _pct01(x.get("pop")),
+                 f"{float(x.get('net', 0) or 0):.2f}", f"{int(x.get('dte', 0) or 0)}d")
+                for x in sp[:top]]
+        parts.append(_report("↕️ VERTICAL SPREADS",
+                             ("Ticker", "Strategy", "Legs", "POP", "Net", "DTE"), rows,
+                             right_cols={3, 4, 5},
+                             legend="Net = credit(+)/debit per spread, before commission",
+                             notes="Modelled from live chains, not a measured hit-rate."))
+    else:
+        empty.append("vertical spreads")
+
+    if not parts:
+        return None
+    if empty:
+        parts.append(f"<i>No candidates from: {', '.join(empty)}.</i>")
+    parts.append("<i>Educational scans, not advice. Nothing here is position-sized for you.</i>")
+    return f"{hdr('💡 TRADE IDEAS — pre-open')}\n\n" + "\n\n".join(parts)
+
+
+async def oi_flow_alert(ctx):
+    """Push the OI/flow read after the close (ID 261). Silent when nothing unusual."""
+    conn = get_conn()
+    try:
+        msg = _fmt_oi_flow(conn)
+    finally:
+        conn.close()
+    if not msg:
+        return
+    _, chat_id = load_creds()
+    try:
+        await ctx.bot.send_message(chat_id=int(chat_id), text=msg[:4000], parse_mode=H)
+    except Exception as e:
+        log.warning(f"oi_flow_alert send failed: {e}")
+
+
+async def trade_ideas_alert(ctx):
+    """Push concrete trade suggestions pre-open (ID 261). Silent when nothing qualifies."""
+    conn = get_conn()
+    try:
+        msg = await asyncio.to_thread(_fmt_trade_ideas, conn)
+    except Exception as e:
+        log.warning(f"trade_ideas_alert build failed: {e}")
+        return
+    finally:
+        conn.close()
+    if not msg:
+        return
+    _, chat_id = load_creds()
+    try:
+        await ctx.bot.send_message(chat_id=int(chat_id), text=msg[:4000], parse_mode=H)
+    except Exception as e:
+        log.warning(f"trade_ideas_alert send failed: {e}")
+
+
 def _fmt_paper_us(conn):
     """US-only view of the paper book, for its OWN post-close push (ID 257).
 
@@ -41488,6 +41636,19 @@ def main():
         # book arrives just after ITS market closes rather than bundled into the other's push.
         _sched_once(job_queue, paper_us_alert, (16, 30), "paper_us",
                     "US paper book", days=(1, 2, 3, 4, 5))
+        # Pre-open slot as well (ID 260). The India book lands in the morning batch because
+        # 10:15 UTC is 06:15 ET; the US book at 16:30 ET was correctly "not due yet" at 08:39
+        # and so never appeared beside the morning briefings. Two slots, one book.
+        _sched_once(job_queue, paper_us_alert, (8, 40), "paper_us_am",
+                    "US paper book (pre-open)", days=(1, 2, 3, 4, 5))
+        # OI/flow + trade ideas on a schedule (ID 261). TWO digests rather than pushing the
+        # ~40 unscheduled scanners individually -- forty messages a day is spam, not service.
+        # Ideas land pre-open so they can be acted on at the bell; the flow read lands after
+        # the close, when the day's OI has actually settled.
+        _sched_once(job_queue, trade_ideas_alert, (8, 55), "trade_ideas",
+                    "Trade ideas", days=(1, 2, 3, 4, 5))
+        _sched_once(job_queue, oi_flow_alert, (16, 50), "oi_flow",
+                    "OI & flow", days=(1, 2, 3, 4, 5))
         job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
         job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs 5:30pm EDT / 4:30pm EST
         job_queue.run_daily(record_short_interest, time=dt_time(21, 40, 0))  # SI snapshot 5:40pm EDT / 4:40pm EST

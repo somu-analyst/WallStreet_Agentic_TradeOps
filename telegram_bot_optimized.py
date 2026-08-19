@@ -9068,16 +9068,78 @@ async def tech_signals_detail(query, ticker):
     await _safe_reply(query.message, "\n".join(parts), reply_markup=kb)
 
 
+# Asset classes accepted in the one-line grammar (ID 211). All of them are share-like
+# instruments, so any of them also implies a STOCK leg when no option was given -- but the
+# class is tracked SEPARATELY from the leg type, because "SPY 600C ... etf" is an option ON
+# an ETF and must stay an option.
+_ASSET_CLASSES = {
+    "stock": "Stock", "shares": "Stock", "sh": "Stock", "stk": "Stock", "equity": "Stock",
+    "etf": "ETF", "fund": "Fund", "mf": "Fund", "bond": "Bond", "gilt": "Bond",
+    "commodity": "Commodity", "comdty": "Commodity", "gold": "Commodity",
+    "crypto": "Crypto", "reit": "REIT",
+}
+# Explicit country, which OVERRIDES the symbol-suffix inference. Inference is right almost
+# always, but it cannot know that a bare NSE symbol is Indian without the cache being warm.
+_COUNTRY_ALIASES = {
+    "us": "US", "usa": "US", "america": "US", "nyse": "US", "nasdaq": "US",
+    "india": "India", "in": "India", "nse": "India", "bse": "India",
+    "uk": "UK", "gb": "UK", "britain": "UK", "lse": "UK",
+    "japan": "Japan", "jp": "Japan", "hk": "HK", "hongkong": "HK",
+    "canada": "Canada", "ca": "Canada", "australia": "Australia", "au": "Australia",
+    "germany": "Germany", "de": "Germany", "france": "France", "fr": "France",
+}
+
+
+def _ensure_pos_meta(conn, table):
+    """Idempotent asset_class / country columns on a positions table (ID 211).
+
+    Added rather than threaded through the big INSERT in `_insert_new_trade`: two optional
+    metadata fields do not justify touching a 40-column insert, and a post-insert UPDATE
+    cannot half-write the row the way a mis-ordered positional insert can.
+    """
+    try:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col in ("asset_class", "country"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+        conn.commit()
+    except Exception:
+        log.debug("pos meta columns failed on %s", table, exc_info=True)
+
+
+def _set_pos_meta(conn, table, trade_id, asset_class=None, country=None):
+    """Store the explicit class/country for one row. No-ops when neither was given, so an
+    ordinary /add never writes empty strings over an inferred value."""
+    if not (asset_class or country):
+        return
+    _ensure_pos_meta(conn, table)
+    try:
+        sets, vals = [], []
+        if asset_class:
+            sets.append("asset_class=?"); vals.append(asset_class)
+        if country:
+            sets.append("country=?"); vals.append(country)
+        vals.append(trade_id)
+        conn.execute(f"UPDATE {table} SET {', '.join(sets)} WHERE trade_id=?", vals)
+        conn.commit()
+    except Exception:
+        log.debug("pos meta write failed on %s#%s", table, trade_id, exc_info=True)
+
+
 def _parse_add_args(args):
     """One-line position grammar (deterministic, order-free):
       ticker   = first alpha token (NVDA, BRK.B)
       option   = STRIKE+C/P combined (375P, 190c) + expiry YYYY-MM-DD
       stock    = the word 'stock'/'shares' (strike/expiry not needed)
+      class    = etf / bond / commodity / crypto / reit / fund (ID 211) — implies a stock
+                 leg on its own, but stays independent of an option given alongside it
+      country  = country=india / cc=in — OVERRIDES the symbol-suffix inference (ID 211)
       qty      = signed int (-1, +2, 100); default +1
       price    = @-prefixed (@19.25); omitted → live/estimated mark
       2nd date = entry date (options) / 1st date = entry date (stock)
     Returns (dict, None) or (None, error_string)."""
     tk = typ = strike = qty = px = None
+    acls = ctry = None
     dates = []
     for a in args:
         s = str(a).strip().rstrip(",")
@@ -9087,8 +9149,25 @@ def _parse_add_args(args):
         if m and strike is None:
             strike, typ = float(m.group(1)), ("CALL" if m.group(2).lower() == "c" else "PUT")
             continue
-        if s.lower() in ("stock", "shares", "sh", "stk") and typ is None:
-            typ = "STOCK"
+        low = s.lower()
+        # Explicit country / class, prefixed so they can never be mistaken for a ticker.
+        if low.startswith(("country=", "country:", "cc=", "cc:")) and ctry is None:
+            _v = re.split(r"[=:]", low, 1)[1].strip()
+            if not _v:
+                return None, "empty country (try country=india)"
+            ctry = _COUNTRY_ALIASES.get(_v, _v.title())
+            continue
+        if low.startswith(("class=", "class:", "type=", "type:")) and acls is None:
+            _v = re.split(r"[=:]", low, 1)[1].strip()
+            if _v not in _ASSET_CLASSES:
+                return None, (f"unknown class '{_v}' — try "
+                              f"{'/'.join(sorted(set(_ASSET_CLASSES.values())))}")
+            acls = _ASSET_CLASSES[_v]
+            continue
+        # Bare class keyword. Consumed BEFORE the ticker rule, so 'etf' is a class and not a
+        # symbol; anyone holding a ticker literally named ETF can still write class=... .
+        if low in _ASSET_CLASSES and acls is None:
+            acls = _ASSET_CLASSES[low]
             continue
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
             dates.append(s)
@@ -9118,25 +9197,37 @@ def _parse_add_args(args):
         return None, f"can't parse '{s}' — see /add usage"
     if not tk:
         return None, "missing ticker"
+    # A class keyword on its own means a share-like position, but only when no option leg
+    # was given -- "SPY 600C ... etf" stays a CALL on an ETF (ID 211).
+    if typ is None and acls:
+        typ = "STOCK"
+    _extra = {"asset_class": acls, "country": ctry}
     if typ == "STOCK":
         if not qty:
             return None, "stock needs a share count (e.g. 100)"
         return {"tk": tk, "typ": "STOCK", "strike": 0.0, "expiry": "",
-                "qty": qty, "px": px, "entry_date": (dates[0] if dates else None)}, None
+                "qty": qty, "px": px, "entry_date": (dates[0] if dates else None),
+                **_extra}, None
     if typ is None or strike is None:
         return None, "missing STRIKE+C/P (e.g. 375P) — or say 'stock'"
     if not dates:
         return None, "missing expiry YYYY-MM-DD"
     return {"tk": tk, "typ": typ, "strike": strike, "expiry": dates[0],
             "qty": qty if qty is not None else 1, "px": px,
-            "entry_date": (dates[1] if len(dates) > 1 else None)}, None
+            "entry_date": (dates[1] if len(dates) > 1 else None), **_extra}, None
 
 
 _ADD_USAGE = (f"{hdr('⚡ /add — one-line position')}\n"
               "Option:  <code>/add GOOGL 375P 2026-08-21 -1 @4.35</code>\n"
               "Stock:   <code>/add GOOG stock 100 @167 2025-06-24</code>\n"
+              "ETF:     <code>/add VGT etf 12 @79.21</code>\n"
+              "Foreign: <code>/add MOTHERSON stock 3000 @103.21 country=india</code>\n"
               "<i>Order-free · qty default +1 (negative = short) · omit @price for live mark · "
-              "2nd date = entry date. Buttons still available via Menu → Positions.</i>")
+              "2nd date = entry date.\nClass: stock/etf/fund/bond/commodity/crypto/reit — "
+              "on its own it means shares, so <code>etf</code> and <code>375P</code> together "
+              "is still an option ON an ETF.\nCountry: <code>country=india</code> or "
+              "<code>cc=in</code> — overrides the symbol-suffix guess. "
+              "Buttons still available via Menu → Positions.</i>")
 
 
 async def add_command(update, ctx):
@@ -9158,12 +9249,21 @@ async def add_command(update, ctx):
     if not ok:
         await update.message.reply_text(f"❌ {msg}", parse_mode=H)
         return
+    if p.get("asset_class") or p.get("country"):
+        _c = get_conn()
+        try:
+            _set_pos_meta(_c, "trades", new_id, p.get("asset_class"), p.get("country"))
+        finally:
+            _c.close()
     if p["typ"] == "STOCK":
         line = f"#{new_id}: {p['tk']} {p['qty']:+d} shares @ ${float(p['px'] or 0):.2f}"
         if p["entry_date"]:
             line += f" · entry {p['entry_date']} (tax clock)"
     else:
         line = msg
+    _meta = " · ".join(x for x in (p.get("asset_class"), p.get("country")) if x)
+    if _meta:
+        line += f" · {_meta}"
     await update.message.reply_text(
         f"✅ <b>Added</b> {line}\n<i>/plan for the game plan · /tax for tax view · "
         "edit/close in dashboard Portfolio</i>", parse_mode=H)
@@ -35668,12 +35768,52 @@ def _flag_setup(conn):
     conn.commit()
 
 
+# Explicit country (ID 211) -> flag. Consulted BEFORE any inference, because a country the
+# user typed is a fact and a suffix rule is a guess.
+_COUNTRY_FLAG = {
+    "US": "🇺🇸", "India": "🇮🇳", "UK": "🇬🇧", "Japan": "🇯🇵", "HK": "🇭🇰",
+    "Canada": "🇨🇦", "Australia": "🇦🇺", "Germany": "🇩🇪", "France": "🇫🇷",
+}
+_POS_COUNTRY = {}          # ticker -> explicit country, memoised per process
+
+
+def _explicit_country(tk, conn=None):
+    """Country the USER set on a position, or None. Cached; empty tables are normal."""
+    tk = str(tk or "").upper().strip()
+    if tk in _POS_COUNTRY:
+        return _POS_COUNTRY[tk]
+    val = None
+    try:
+        c = conn or get_conn()
+        try:
+            for tbl in ("trades", "paper_trades"):
+                cols = {r[1] for r in c.execute(f"PRAGMA table_info({tbl})")}
+                if "country" not in cols:
+                    continue
+                row = c.execute(
+                    f"SELECT country FROM {tbl} WHERE UPPER(ticker)=? AND country IS NOT NULL "
+                    f"AND country<>'' LIMIT 1", (tk,)).fetchone()
+                if row and row[0]:
+                    val = row[0]
+                    break
+        finally:
+            if conn is None:
+                c.close()
+    except Exception:
+        log.debug("explicit country lookup failed for %s", tk, exc_info=True)
+    _POS_COUNTRY[tk] = val
+    return val
+
+
 def _ticker_flag(tk, conn=None):
     """Country flag for one symbol. Never touches the network — see the note above."""
     global _FLAG_STATIC, _FLAG_DB
     tk = str(tk or "").upper().strip()
     if not tk:
         return "🇺🇸"
+    _exp = _explicit_country(tk, conn)
+    if _exp and _exp in _COUNTRY_FLAG:
+        return _COUNTRY_FLAG[_exp]
     if _FLAG_STATIC is None:
         m = {}
         for _name, _d in _CROSS_MARKET.items():
@@ -36487,7 +36627,12 @@ async def paper_command(update, ctx):
                          p["entry_date"] or datetime.now().strftime("%Y-%m-%d")))
                     conn.commit()
                     new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                    msg = f"✅ <b>Demo #{new_id}</b> added: {p['tk']} {p['qty']:+d} @ ${float(px):.2f}. /paper for live P&L."
+                    _set_pos_meta(conn, "paper_trades", new_id,
+                                  p.get("asset_class"), p.get("country"))
+                    _meta = " · ".join(x for x in (p.get("asset_class"), p.get("country")) if x)
+                    msg = (f"✅ <b>Demo #{new_id}</b> added: {p['tk']} {p['qty']:+d} @ "
+                           f"${float(px):.2f}{(' · ' + _meta) if _meta else ''}. "
+                           f"/paper for live P&L.")
         elif args and args[0].lower() == "close" and len(args) >= 2:
             try:
                 pid = int(args[1])

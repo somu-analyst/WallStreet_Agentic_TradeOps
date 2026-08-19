@@ -319,8 +319,17 @@ def _updown_img(closes, n=5):
     if not rets:
         return None
     import base64 as _b64          # local: the flag helper imports it inside its own body
-    W, H, BH = 96.0, 32.0, 19.0
-    gap = 1.6 if len(rets) <= 8 else 0.7
+    # Boxes fill the canvas (user 2026-08-19: "1w red green blocks are small, not fitting
+    # whole cell"). They used to be 19 of 32px tall -- 59% -- so once the column went to
+    # medium for the labels, the strip rendered as small blocks floating in white space.
+    # The canvas IS the cell, so the boxes should occupy essentially all of it.
+    # ImageColumn draws at NATURAL size rather than stretching to the cell, so the canvas
+    # width IS the on-screen width: a 96px strip sat in a ~200px "medium" column with ~100px
+    # of dead space to its right. Sized to the column instead (~168px), which also gives the
+    # labels roughly 33px per box rather than 18.
+    W, H = 168.0, 32.0
+    BH = H - 2.0
+    gap = 2.0 if len(rets) <= 8 else 0.8
     bw = max((W - gap * (len(rets) - 1)) / len(rets), 0.8)
     body, x = [], 0.0
     # Magnitude printed INSIDE each box (ID 266). The user asked for the percentage on hover,
@@ -350,7 +359,7 @@ def _updown_img(closes, n=5):
             body.append(
                 f'<text x="{x + bw / 2:.2f}" y="{H / 2:.1f}" text-anchor="middle" '
                 f'dominant-baseline="central" font-family="Helvetica,Arial,sans-serif" '
-                f'font-size="7.5" font-weight="600" '
+                f'font-size="9.5" font-weight="700" '
                 f'fill="{"#ffffff" if dark else "#0f172a"}">{lab}</text>')
         x += bw + gap
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W:.0f} {H:.0f}" '

@@ -39681,8 +39681,15 @@ async def feed_command(update, ctx):
 # Order matters -- it is the fallback chain. Groq first for speed, Google for the big free
 # context window, OpenRouter last as the catch-all that reaches many free models on one key.
 _LLM_PROVIDERS = [
+    # Groq's catalogue CHURNS like OpenRouter's: the whole llama-3.3 family was retired and
+    # `llama-3.3-70b-versatile` began returning 404 "model does not exist" (caught 2026-08-19
+    # while verifying the free-first advisor lane, ID 262 -- the lane had been shipped
+    # pointing at a dead model). Verify against GET /models before changing this.
+    # NOTE a raw request here 403s with Cloudflare "error code: 1010" under the default
+    # urllib User-Agent; the Mozilla UA set in _llm_chat is what gets past it, so do not
+    # "simplify" that header away.
     ("groq",   ("GROQ_API_KEY",),
-     "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+     "https://api.groq.com/openai/v1", "openai/gpt-oss-120b"),
     # gemini-2.0-flash / 2.5-flash are RETIRED for new projects: 2.5 returns 404 "no longer
     # available to new users" and the 2.0 family returns 429 with no free quota. A NEW AI
     # Studio project only gets the current generation, so use the moving alias rather than a
@@ -39778,7 +39785,11 @@ def _llm_chat(prompt, system=None, max_tokens=700, temperature=0.3,
         # Gemini spends part of the budget REASONING before it emits anything, so a small
         # cap returns finish_reason="length" with content=None -- which looks exactly like a
         # dead key. Measured 2026-08-08: max_tokens=10 -> None, 200 -> "OK". Floor it.
-        _mt = max(int(max_tokens), 256) if name == "google" else int(max_tokens)
+        # GROQ NEEDS THIS TOO since its default became openai/gpt-oss-120b, which is also a
+        # reasoning model: measured 2026-08-19, max_tokens=20 returned empty while the same
+        # call at 1200 answered fine. Without the floor a short prompt looks like a dead
+        # provider and silently falls through.
+        _mt = max(int(max_tokens), 256) if name in ("google", "groq") else int(max_tokens)
         body = _j.dumps({"model": use_model, "messages": msgs,
                          "max_tokens": _mt,
                          "temperature": float(temperature)}).encode()

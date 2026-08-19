@@ -36222,7 +36222,10 @@ def _fmt_oi_flow(conn, top=10):
             f"{float(r.get('oi', 0)):,.0f} ({float(r.get('ratio', 0)):.1f}x), "
             f"{_fmt_notional(float(r.get('notional', 0)))} notional")
     return _report(
-        "🛰️ OI & FLOW — what got traded today",
+        # &amp; not & -- Telegram rejects a bare ampersand under parse_mode=HTML, and this is
+        # a SCHEDULED push, so the rejection would have been invisible: no message, no error
+        # the user ever sees, just a 16:50 slot that quietly never arrives.
+        "🛰️ OI &amp; FLOW — what got traded today",
         ("ST", "Ticker", "Leg", "DTE", "Vol/OI", "Notional"), rows,
         right_cols={3, 4, 5},
         legend="🟢 call flow · 🔴 put flow · Vol/OI ≥2 = unusual",

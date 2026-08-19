@@ -2849,6 +2849,24 @@ async def news_refresh(context=None):
     semis complex). Deduped on (ticker, headline) so re-runs are idempotent.
     """
     import urllib.request, json as _json, datetime as _dt
+    # Warm the company-name cache out of band (ID 264). Names are rendered OFFLINE from
+    # `ticker_names`, exactly like flags -- so something has to fill it, and a background job
+    # already running every 30 min is the right place. Bounded per run; never in a render.
+    try:
+        _c = get_conn()
+        try:
+            _tks = list(dict.fromkeys(
+                [str(t).upper() for t in (_positions_tickers() or [])]
+                + [r[0] for r in _c.execute(
+                    "SELECT DISTINCT UPPER(ticker) FROM paper_trades WHERE status='OPEN'")]
+                + [r[0] for r in _c.execute("SELECT DISTINCT UPPER(ticker) FROM watchlist")]))
+            n = _seed_ticker_names(_c, _tks)
+            if n:
+                log.info("ticker_names: resolved %d new company name(s)", n)
+        finally:
+            _c.close()
+    except Exception:
+        log.debug("ticker name seeding failed", exc_info=True)
     try:
         tks = (_positions_tickers() or []) + ["SPY", "QQQ", "NVDA", "AMD", "MU", "GOOG", "SMH"]
         tks = list(dict.fromkeys(str(t).upper() for t in tks))[:15]
@@ -3827,68 +3845,122 @@ def _signal_writeup(state, do, outcome=None, n=None, hit=None, base=None,
     return "\n".join(lines)
 
 
-_NAME_CACHE = {}          # in-process memo, on top of the DB table
-_NAME_NET_BUDGET = 6      # max yfinance lookups per rendered table (see below)
+# Max display cells for a Telegram <pre> table before a phone wraps it. CLAUDE.md has long
+# carried "<=28 chars wide" as a guideline; this is the enforced ceiling, with 2 cells of
+# slack because the guideline was never actually applied and several tables sat far past it.
+_TG_TABLE_BUDGET = 30
 
 
-def _company_name(tk, allow_net=True, _budget=None):
-    """Company name for a ticker, cached in `ticker_names` (ID 264).
+def _trunc_cell(v, keep):
+    """Truncate a cell to `keep` display cells, ellipsis included. Never touches numbers --
+    callers must only pass text columns, since a shortened number is simply wrong."""
+    s = str(v)
+    if _disp_w(s) <= keep or keep < 2:
+        return s
+    out = ""
+    for ch in s:
+        if _disp_w(out + ch) > keep - 1:
+            break
+        out += ch
+    return out + "…"
 
-    Generalises `_india_name_for` to the whole book. Two hard constraints shape it:
 
-      * A `.info` call costs 1-2s, so a 20-row table doing one per row would take ~40s and
-        blow the Telegram timeout. Network lookups are therefore BUDGETED per render
-        (`_NAME_NET_BUDGET`); rows past the budget render blank now and get filled on a later
-        pass, so a table always returns fast and the cache warms itself over a few renders.
-      * An empty result is CACHED. A failed lookup usually means a delisted or odd symbol,
-        and retrying it every render would pay the penalty forever. Same reasoning as
-        `_india_name_for` and `ticker_country`.
+_NAME_CACHE = None        # ticker -> name, loaded ONCE from the DB per process
+
+
+def _name_cache(conn=None):
+    """Whole `ticker_names` table as a dict, read once per process.
+
+    One query instead of one-per-row: the first version opened a fresh connection inside the
+    row loop, so a 20-row table did 20 connects.
+    """
+    global _NAME_CACHE
+    if _NAME_CACHE is not None:
+        return _NAME_CACHE
+    _NAME_CACHE = {}
+    try:
+        c = conn or get_conn()
+        try:
+            c.execute("CREATE TABLE IF NOT EXISTS ticker_names ("
+                      "ticker TEXT PRIMARY KEY, name TEXT, updated TEXT)")
+            _NAME_CACHE = {r[0]: (r[1] or "") for r in
+                           c.execute("SELECT ticker, name FROM ticker_names")}
+        finally:
+            if conn is None:
+                c.close()
+    except Exception:
+        log.debug("name cache load failed", exc_info=True)
+    return _NAME_CACHE
+
+
+def _company_name(tk, allow_net=False, conn=None):
+    """Company name for a ticker (ID 264). OFFLINE BY DEFAULT — see below.
+
+    RENDER PATH IS OFFLINE, like `_ticker_flag`. The first version did up to 6 yfinance
+    lookups inside `_pipe_table`, which measured 8.5s on a cold table -- and 9.9s on the
+    NEXT render, because rows past the budget were never cached and so paid the network
+    again every single time. That is the exact trap CLAUDE.md already records for flags:
+    "a .info call is 1-2s; a 20-name book would blow the Telegram timeout", which is why
+    `ticker_country` is filled out of band and never during a render.
+
+    So this reads the cache only. `_seed_ticker_names()` fills it from a background job.
+    Pass allow_net=True ONLY from that job, never from a render.
     """
     base = str(tk or "").upper().strip()
     if not base:
         return ""
-    if base in _NAME_CACHE:
-        return _NAME_CACHE[base]
-    try:
-        conn = get_conn()
-        try:
-            conn.execute("CREATE TABLE IF NOT EXISTS ticker_names ("
-                         "ticker TEXT PRIMARY KEY, name TEXT, updated TEXT)")
-            row = conn.execute("SELECT name FROM ticker_names WHERE ticker=?",
-                               (base,)).fetchone()
-            if row is not None:
-                _NAME_CACHE[base] = row[0] or ""
-                return _NAME_CACHE[base]
-            if not allow_net or (_budget is not None and _budget[0] <= 0):
-                return ""
-            if _budget is not None:
-                _budget[0] -= 1
-            name = ""
-            try:
-                info = _yf_ticker(_yf_alias(base) or base).info or {}
-                name = str(info.get("longName") or info.get("shortName") or "").strip()
-            except Exception:
-                log.debug("name lookup failed for %s", base, exc_info=True)
-            conn.execute("INSERT OR REPLACE INTO ticker_names VALUES (?,?,?)",
-                         (base, name, _et_now().date().isoformat()))
-            conn.commit()
-            _NAME_CACHE[base] = name
-            return name
-        finally:
-            conn.close()
-    except Exception:
-        log.debug("company name cache failed for %s", base, exc_info=True)
+    cache = _name_cache(conn)
+    if base in cache:
+        return cache[base]
+    if not allow_net:
         return ""
+    name = ""
+    try:
+        info = _yf_ticker(_yf_alias(base) or base).info or {}
+        name = str(info.get("longName") or info.get("shortName") or "").strip()
+    except Exception:
+        log.debug("name lookup failed for %s", base, exc_info=True)
+    try:
+        c = conn or get_conn()
+        try:
+            c.execute("CREATE TABLE IF NOT EXISTS ticker_names ("
+                      "ticker TEXT PRIMARY KEY, name TEXT, updated TEXT)")
+            # An empty result is cached too: a miss is usually a delisted or odd symbol, and
+            # retrying it forever costs 1-2s every time.
+            c.execute("INSERT OR REPLACE INTO ticker_names VALUES (?,?,?)",
+                      (base, name, _et_now().date().isoformat()))
+            c.commit()
+        finally:
+            if conn is None:
+                c.close()
+    except Exception:
+        log.debug("name cache write failed for %s", base, exc_info=True)
+    cache[base] = name
+    return name
 
 
-def _short_name(tk, _budget=None, width=14):
+def _seed_ticker_names(conn, tickers, limit=25):
+    """Resolve missing company names OUT OF BAND (ID 264). Returns how many were added.
+
+    Bounded per run so a background job never turns into a long stall; the cache fills over
+    a few runs instead. Mirrors tools/seed_ticker_country.py for flags.
+    """
+    cache = _name_cache(conn)
+    todo = [t for t in dict.fromkeys(str(x).upper().strip() for x in tickers if x)
+            if t and t not in cache][:limit]
+    for t in todo:
+        _company_name(t, allow_net=True, conn=conn)
+    return len(todo)
+
+
+def _short_name(tk, width=14, conn=None):
     """Display form of the company name: legal suffixes dropped, then truncated.
 
     "Samvardhana Motherson International Ltd" is 39 characters -- wider than the entire rest
     of the row -- so the suffix noise goes first ("Ltd", "Inc", "Corp" ... carry no
     information when every row has one) and only then is it cut.
     """
-    n = _company_name(tk, _budget=_budget)
+    n = _company_name(tk, conn=conn)
     if not n:
         return "—"
     import re as _re
@@ -3945,20 +4017,88 @@ def _pipe_table(header_cols, rows_data, right_cols=None, title=None, legend=None
             and any(h in ("ticker", "sym", "symbol") for h in _hdrs)):
         _ti = next(i for i, h in enumerate(_hdrs) if h in ("ticker", "sym", "symbol"))
         import re as _re3
-        _budget = [_NAME_NET_BUDGET]
         _names_col = []
         for r in rows_data:
             cell = str(r[_ti] if _ti < len(r) else "").strip()
             _name = ""
             if cell and _re3.fullmatch(r"[A-Za-z0-9.\-]{1,15}", cell) and not cell.isdigit():
                 try:
-                    _name = _short_name(cell, _budget=_budget)
+                    _name = _short_name(cell)
                 except Exception:
                     _name = ""
             _names_col.append(_name or "")
-        if any(_names_col):
+        # "—" is what _short_name returns for an unresolved ticker, and it is TRUTHY -- so a
+        # table where nothing resolved still gained a full column of dashes. Require a real
+        # name before spending the width (ID 269).
+        if any(x and x != "—" for x in _names_col):
             header_cols = list(header_cols) + ["Name"]
             rows_data = [list(r) + [_names_col[i]] for i, r in enumerate(rows_data)]
+
+    # ── MOBILE WIDTH BUDGET (ID 269) ────────────────────────────────────────────────────
+    # Telegram wraps a <pre> block wider than roughly 30 display cells on a phone, and a
+    # wrapped fixed-width table is worse than no table -- every column falls out of line.
+    # Enforced HERE because it is the one choke point every table passes through; fixing it
+    # at ~178 call sites individually would guarantee some are missed.
+    #
+    # Shrink order is deliberate, cheapest information first:
+    #   1. the Name column, which is decoration bolted on last (ID 264) -> truncate, then drop
+    #   2. the widest remaining TEXT column -> truncate with an ellipsis
+    # Numeric columns are never touched: a truncated number is a WRONG number, whereas a
+    # truncated name is still recognisable.
+    def _wide(hdrs, rows):
+        cols = [list(hdrs)] + [list(r) for r in rows]
+        w = [max(_disp_w(r[c]) for r in cols) for c in range(len(hdrs))]
+        return sum(w) + 3 * (len(hdrs) - 1), w
+
+    total, _w = _wide(header_cols, rows_data)
+    if total > _TG_TABLE_BUDGET and len(header_cols) > 1:
+        # 1. Name first: shrink to fit, drop it if it cannot earn its space.
+        if str(header_cols[-1]).lower() == "name":
+            room = _TG_TABLE_BUDGET - (total - _w[-1])
+            if room >= 8:
+                rows_data = [list(r[:-1]) + [_trunc_cell(r[-1], room)] for r in rows_data]
+            else:
+                header_cols = list(header_cols)[:-1]
+                rows_data = [list(r)[:-1] for r in rows_data]
+            total, _w = _wide(header_cols, rows_data)
+        # 2. Large numbers get COMPACTED, not truncated: 1,564,441,600 -> 1.56B keeps the
+        #    magnitude and the sign, whereas chopping digits would state a different number.
+        #    Only touches values wide enough to be worth it, so small figures stay exact.
+        if total > _TG_TABLE_BUDGET:
+            for c in sorted(right_cols, key=lambda i: -_w[i] if i < len(_w) else 0):
+                if total <= _TG_TABLE_BUDGET or c >= len(header_cols) or _w[c] <= 6:
+                    continue
+                new_rows = []
+                for r in rows_data:
+                    v = str(r[c]) if c < len(r) else ""
+                    m = _re2.fullmatch(r"([+-]?)([$₹€£]?)([\d,]+)(\.\d+)?([%x×]?)", v.strip())
+                    if m and len(m.group(3).replace(",", "")) >= 5:
+                        sign, cur, whole, _frac, suf = m.groups()
+                        f = float(whole.replace(",", ""))
+                        for div, tag in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+                            if f >= div:
+                                v = f"{sign}{cur}{f / div:.2f}".rstrip("0").rstrip(".") + tag + (suf or "")
+                                break
+                    new_rows.append([v if i == c else x for i, x in enumerate(r)])
+                rows_data = new_rows
+                total, _w = _wide(header_cols, rows_data)
+
+        # 3. Then the widest text column, repeatedly, never below a readable floor.
+        guard = 0
+        while total > _TG_TABLE_BUDGET and guard < 6:
+            guard += 1
+            cand = [c for c in range(len(header_cols))
+                    if c not in right_cols and _w[c] > 6]
+            if not cand:
+                break
+            c = max(cand, key=lambda i: _w[i])
+            keep = max(6, _w[c] - (total - _TG_TABLE_BUDGET))
+            rows_data = [[_trunc_cell(v, keep) if i == c else v for i, v in enumerate(r)]
+                         for r in rows_data]
+            new_total, _w = _wide(header_cols, rows_data)
+            if new_total >= total:
+                break                      # cannot shrink further; stop rather than loop
+            total = new_total
 
     n = len(header_cols)
     all_rows = [list(header_cols)] + [list(r) for r in rows_data]
@@ -36115,7 +36255,7 @@ def _chg_table(tickers, conn=None):
         if all(v is None for v in c.values()):
             continue
         rows.append((tk[:9],) + tuple(
-            (f"{c[k]:+.1f}" if c[k] is not None else "—") for k, _ in _CHG_WINDOWS))
+            (f"{c[k]:+.0f}" if c[k] is not None else "—") for k, _ in _CHG_WINDOWS))
     if not rows:
         return ""
     # names=False: this table sits directly under the positions grid, which already carries
@@ -36123,8 +36263,29 @@ def _chg_table(tickers, conn=None):
     # the reader just read.
     return "\n" + _pipe_table(("Ticker",) + tuple(k for k, _ in _CHG_WINDOWS), rows,
                               right_cols={1, 2, 3, 4}, title="📈 PRICE CHANGE %",
-                              legend="price move only — not your position P&amp;L",
+                              legend="price move % — not your position P&amp;L",
                               names=False)
+
+
+def _compact_money(v):
+    """Signed money in as few cells as possible: +201,240 -> +201K (ID 269).
+
+    The grid is width-starved on a phone and "+201,240" costs 8 cells; the EXACT figure is
+    on the detail line directly beneath, so the grid only has to convey magnitude. Shrinking
+    the number beats shrinking the ticker -- "MOTHE..." is unreadable, "+201K" is not.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    a = abs(f)
+    if a >= 1_000_000:
+        return f"{f / 1_000_000:+.1f}M"
+    if a >= 10_000:
+        return f"{f / 1000:+.0f}K"
+    if a >= 1_000:
+        return f"{f / 1000:+.1f}K"
+    return f"{f:+,.0f}"
 
 
 def _fmt_paper_india(conn):
@@ -36160,7 +36321,7 @@ def _fmt_paper_india(conn):
         cost += abs(entry * qty)
         pct = pnl / (abs(entry * qty) or 1.0) * 100
         rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
-                     tk[:9], f"{mark:,.2f}", f"{pnl:+,.0f}", f"{pct:+.1f}%"))
+                     tk[:9], _compact_money(pnl), f"{pct:+.0f}%"))
         details.append(f"{_ticker_flag(tk, conn)} <b>{tk}</b> {qty:+g}sh @ ₹{entry:,.2f} → "
                        f"₹{mark:,.2f} · <b>₹{pnl:+,.0f}</b> ({pct:+.1f}%)")
     if not rows:
@@ -36168,7 +36329,7 @@ def _fmt_paper_india(conn):
     tot_pct = (net / cost * 100) if cost else 0.0
     em = "🟢" if net >= 0 else "🔴"
     return (_report(f"🇮🇳 INDIA PAPER BOOK · NSE",
-                    ("ST", "Ticker", "Mark", "P&L₹", "P&L%"), rows, right_cols={2, 3, 4},
+                    ("ST", "Ticker", "P&L₹", "%"), rows, right_cols={2, 3},
                     legend="Prices and P&amp;L in ₹ — never blended with the USD book",
                     details=details,
                     notes="Demo book (paper_trades), not your real portfolio.")
@@ -36212,8 +36373,6 @@ def _fmt_oi_flow(conn, top=10):
         side = "CALL" if str(r.get("side", "")).upper().startswith("C") else "PUT"
         em = "🟢" if side == "CALL" else "🔴"
         rows.append((em, str(r.get("ticker", ""))[:6],
-                     f"{_kfb(r.get('strike', 0))}{side[0]}",
-                     f"{int(r.get('dte', 0))}d",
                      f"{float(r.get('ratio', 0)):.1f}x",
                      _fmt_notional(float(r.get("notional", 0)))))
         details.append(
@@ -36226,9 +36385,9 @@ def _fmt_oi_flow(conn, top=10):
         # a SCHEDULED push, so the rejection would have been invisible: no message, no error
         # the user ever sees, just a 16:50 slot that quietly never arrives.
         "🛰️ OI &amp; FLOW — what got traded today",
-        ("ST", "Ticker", "Leg", "DTE", "Vol/OI", "Notional"), rows,
-        right_cols={3, 4, 5},
-        legend="🟢 call flow · 🔴 put flow · Vol/OI ≥2 = unusual",
+        ("ST", "Ticker", "Vol/OI", "Notnl"), rows,
+        right_cols={2, 3},
+        legend="🟢 call flow · 🔴 put flow · Vol/OI ≥2 = unusual · Notnl = notional",
         details=details,
         notes=("POSITIONING, NOT A SIGNAL. Measured on 18,100 graded fires, unusual-activity "
                "calls scored 38.3% vs a 47.9% baseline — no measured edge in either "
@@ -36253,13 +36412,15 @@ def _fmt_trade_ideas(conn, top=6):
         log.debug("hiprob failed in ideas digest", exc_info=True)
         hp = []
     if hp:
-        rows = [(str(h.get("tk", ""))[:6], str(h.get("strat", ""))[:10],
-                 str(h.get("legs", ""))[:9], _pct01(h.get("pop")),
-                 f"{float(h.get('rr', 0) or 0):.2f}", f"{int(h.get('dte', 0) or 0)}d")
+        rows = [(str(h.get("tk", ""))[:6], str(h.get("strat", ""))[:9],
+                 _pct01(h.get("pop")), f"{int(h.get('dte', 0) or 0)}d")
                 for h in hp[:top]]
+        _det = [f"<b>{h.get('tk')}</b> {h.get('strat')} {h.get('legs','')} · "
+                f"POP {_pct01(h.get('pop'))} · R/R {float(h.get('rr',0) or 0):.2f} · "
+                f"{int(h.get('dte',0) or 0)}d" for h in hp[:top]]
         parts.append(_report("🎯 HIGH-PROBABILITY STRUCTURES",
-                             ("Ticker", "Strategy", "Legs", "POP", "R/R", "DTE"), rows,
-                             right_cols={3, 4, 5},
+                             ("Ticker", "Strategy", "POP", "DTE"), rows,
+                             right_cols={2, 3}, details=_det,
                              legend="POP = modelled probability of profit at expiry",
                              notes="Modelled from live chains — POP is a model output, "
                                    "not a measured hit-rate."))
@@ -36272,13 +36433,15 @@ def _fmt_trade_ideas(conn, top=6):
         log.debug("spreads failed in ideas digest", exc_info=True)
         sp = []
     if sp:
-        rows = [(str(x.get("tk", ""))[:6], str(x.get("strat", ""))[:10],
-                 str(x.get("legs", ""))[:9], _pct01(x.get("pop")),
-                 f"{float(x.get('net', 0) or 0):.2f}", f"{int(x.get('dte', 0) or 0)}d")
+        rows = [(str(x.get("tk", ""))[:6], str(x.get("strat", ""))[:9],
+                 _pct01(x.get("pop")), f"{int(x.get('dte', 0) or 0)}d")
                 for x in sp[:top]]
+        _det2 = [f"<b>{x.get('tk')}</b> {x.get('strat')} {x.get('legs','')} · "
+                 f"POP {_pct01(x.get('pop'))} · net {float(x.get('net',0) or 0):.2f} · "
+                 f"{int(x.get('dte',0) or 0)}d" for x in sp[:top]]
         parts.append(_report("↕️ VERTICAL SPREADS",
-                             ("Ticker", "Strategy", "Legs", "POP", "Net", "DTE"), rows,
-                             right_cols={3, 4, 5},
+                             ("Ticker", "Strategy", "POP", "DTE"), rows,
+                             right_cols={2, 3}, details=_det2,
                              legend="Net = credit(+)/debit per spread, before commission",
                              notes="Modelled from live chains, not a measured hit-rate."))
     else:
@@ -36365,7 +36528,7 @@ def _fmt_paper_us(conn):
         cost += abs(entry * qty)
         pct = pnl / (abs(entry * qty) or 1.0) * 100
         rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
-                     tk[:9], f"{mark:,.2f}", f"{pnl:+,.0f}", f"{pct:+.1f}%"))
+                     tk[:9], _compact_money(pnl), f"{pct:+.0f}%"))
         details.append(f"{_ticker_flag(tk, conn)} <b>{tk}</b> {qty:+g}sh @ ${entry:,.2f} → "
                        f"${mark:,.2f} · <b>${pnl:+,.0f}</b> ({pct:+.1f}%)")
 
@@ -36393,7 +36556,7 @@ def _fmt_paper_us(conn):
         pct = pnl / (abs(entry * qty * 100) or 1.0) * 100
         rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
                      f"{tk[:5]}{_kfb(r['strike'])}{typ[0]}"[:9],
-                     f"{mark:,.2f}", f"{pnl:+,.0f}", f"{pct:+.1f}%"))
+                     _compact_money(pnl), f"{pct:+.0f}%"))
         details.append(f"{_ticker_flag(tk, conn)} <b>{tk} {_kfb(r['strike'])}{typ[0]}</b> "
                        f"{qty:+d}x @ ${entry:,.2f} → ${mark:,.2f} · "
                        f"<b>${pnl:+,.0f}</b> ({pct:+.1f}%)")
@@ -36406,7 +36569,7 @@ def _fmt_paper_us(conn):
     if expired:
         _note = f"{expired} expired leg(s) hidden (still in the DB) · " + _note
     return (_report("🇺🇸 US PAPER BOOK · NYSE",
-                    ("ST", "Ticker", "Mark", "P&L$", "P&L%"), rows, right_cols={2, 3, 4},
+                    ("ST", "Ticker", "P&L$", "%"), rows, right_cols={2, 3},
                     legend="Prices and P&amp;L in $ — never blended with the INR book",
                     details=details, notes=_note)
             + _chg_table([r[1] for r in rows], conn)

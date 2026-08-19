@@ -323,15 +323,35 @@ def _updown_img(closes, n=5):
     gap = 1.6 if len(rets) <= 8 else 0.7
     bw = max((W - gap * (len(rets) - 1)) / len(rets), 0.8)
     body, x = [], 0.0
+    # Magnitude printed INSIDE each box (ID 266). The user asked for the percentage on hover,
+    # but these cells are a data-URI SVG in a Streamlit ImageColumn, which is rasterised into
+    # the canvas grid: an SVG <title> never surfaces, and there is no per-cell tooltip API for
+    # image columns. So the number is drawn instead of hidden behind a hover -- which also
+    # works on a phone, where there is no hover at all.
+    #
+    # Only when the boxes are wide enough to read: past ~8 the strip is 4px slivers and text
+    # would be illegible mush, so those keep the colour-only form. The 1W strip is 5 boxes.
+    show_txt = len(rets) <= 6 and bw >= 12
     for r in rets:
         a = abs(r)
         if a < 0.05:
             fill = _UD_FLAT
+            dark = False
         else:
             ramp = _UD_UP if r > 0 else _UD_DOWN
             fill = ramp[2] if a >= 3 else (ramp[1] if a >= 1 else ramp[0])
+            dark = a >= 1                      # mid/strong ramp stops are dark -> white text
         body.append(f'<rect x="{x:.2f}" y="{(H - BH) / 2:.1f}" width="{bw:.2f}" '
                     f'height="{BH:.0f}" rx="{min(1.4, bw / 3):.1f}" fill="{fill}"/>')
+        if show_txt:
+            # Sign is already carried by colour, so only the magnitude is drawn -- "12.3"
+            # would not fit an 18px box at a legible size, but "12" and "1.2" do.
+            lab = f"{a:.1f}" if a < 10 else f"{a:.0f}"
+            body.append(
+                f'<text x="{x + bw / 2:.2f}" y="{H / 2:.1f}" text-anchor="middle" '
+                f'dominant-baseline="central" font-family="Helvetica,Arial,sans-serif" '
+                f'font-size="7.5" font-weight="600" '
+                f'fill="{"#ffffff" if dark else "#0f172a"}">{lab}</text>')
         x += bw + gap
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W:.0f} {H:.0f}" '
            f'width="{W:.0f}" height="{H:.0f}">{"".join(body)}</svg>')
@@ -25008,7 +25028,7 @@ if page == "👀 Watchlist":
                          "behind the low-high range, not just its endpoints. Blank when the "
                          "ticker is outside the intraday lane (~31 names)."),
                 "1W": st.column_config.ImageColumn(
-                    "1W", width="small",
+                    "1W", width="medium",
                     help="One box per session for the last trading WEEK — green closed up, "
                          "red closed down. Shade carries size: pale under 1%, mid 1-3%, "
                          "deep 3%+. Drawn as a picture so it scales to the row height and "
@@ -25676,7 +25696,7 @@ if page == "📝 Paper Trading":
                     _pcfg["P&L"] = st.column_config.NumberColumn("P&L", format="%d")
                 if "1W" in _grpdf.columns:
                     _pcfg["1W"] = st.column_config.ImageColumn(
-                        "1W", width="small",
+                        "1W", width="medium",
                         help="One box per session for the last trading week of the "
                              "UNDERLYING — green closed up, red down, shade by size. "
                              "Scales to the row height, so it never makes the row taller.")

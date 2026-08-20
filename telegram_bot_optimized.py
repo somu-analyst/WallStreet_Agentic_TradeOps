@@ -3246,26 +3246,18 @@ def _debate_polish(html_text: str) -> str:
     Claude only rewrites the SAME facts as flowing prose, never asked to add or change any
     number. Falls back to the original deterministic text on any failure (no key, no network,
     rate limit) so this is strictly additive, never a point of failure for /debate itself."""
-    api_key = _load_ai_key()
-    if not api_key:
-        return html_text
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=500,
+        # Free no-training lane first (ID 275); this report names the user's positions.
+        out, _who = _llm_ask(
+            html_text, max_tokens=500,
             system=("Rewrite the following Telegram HTML trading report as 3-4 short flowing "
                     "paragraphs of natural prose, for a trader reading on their phone. "
                     "CRITICAL: do not invent, change, or drop a single number, price, ticker, "
                     "or the Action/Entry/Stop/Target verdict — every figure in your rewrite "
                     "must come from the input, verbatim. Keep the same <b>/<i> HTML tags for "
                     "emphasis where natural. No markdown. Output ONLY the rewritten report, "
-                    "no preamble."),
-            messages=[{"role": "user", "content": html_text}],
-        )
-        out = "".join(b.text for b in resp.content if b.type == "text").strip()
-        return out if out else html_text
+                    "no preamble."))
+        return (out or "").strip() or html_text
     except Exception as e:
         log.debug(f"_debate_polish failed, falling back to deterministic: {e}")
         return html_text
@@ -17725,18 +17717,19 @@ async def ai_chat_handler(update, context):
     typing_msg = await update.message.reply_text("🤖 Thinking…")
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        msgs = [{"role": "user", "content": text}]
+        # Free no-training lane first (ID 275). `_llm_ask` takes one prompt rather than a
+        # message list, so the SQL round-trip is flattened into the prompt each round -- the
+        # loop only ever appends (assistant output + query result), so a transcript carries
+        # exactly the same information the message list did.
+        convo = text
         answer = None
         for _round in range(3):                      # up to 2 SQL lookups, then final answer
-            resp = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=800,
-                system=system_prompt,
-                messages=msgs,
-            )
-            out = "".join(b.text for b in resp.content if b.type == "text").strip()
+            out, _who = _llm_ask(convo, system=system_prompt, max_tokens=800)
+            out = (out or "").strip()
+            if not out:
+                answer = ("⚠️ No LLM available right now — the free lane failed and there is "
+                          "no Anthropic credit. /llm shows provider status.")
+                break
             m = re.search(r"```sql\s*(.*?)```", out, re.S | re.I)
             if not m:                                # no query -> that's the answer
                 answer = out
@@ -17744,10 +17737,9 @@ async def ai_chat_handler(update, context):
             sql = m.group(1).strip()
             result = _ai_run_sql(sql)
             log.info(f"AI chat SQL: {sql[:100]} -> {result[:60]}")
-            msgs += [{"role": "assistant", "content": out},
-                     {"role": "user", "content":
-                      f"Query result:\n{result}\n\nNow answer the original question for Telegram "
-                      "(HTML, concise). If you truly need ONE more lookup, emit exactly one ```sql block."}]
+            convo += (f"\n\nAssistant:\n{out}\n\nQuery result:\n{result}\n\n"
+                      "Now answer the original question for Telegram (HTML, concise). "
+                      "If you truly need ONE more lookup, emit exactly one ```sql block.")
         if answer is None:                           # still asking for SQL after limit
             answer = "⚠️ Couldn't finish the data lookup — try asking more specifically."
         log.info(f"AI chat: Q='{text[:60]}' → {len(answer)} chars")
@@ -39818,6 +39810,44 @@ def _llm_status():
 _LLM_NO_TRAIN = ("groq",)
 
 
+def _llm_ask(prompt, system=None, max_tokens=700, temperature=0.3):
+    """FREE, no-training lane first; paid Anthropic only if that fails (ID 275).
+
+    House order is free-first everywhere (user 2026-08-20). Restricted to `_LLM_NO_TRAIN`
+    rather than the full pool because every caller of this helper passes position or book
+    data, and Google's free tier trains on prompts -- "use the free one" must not quietly
+    mean "give the book to a trainer".
+
+    Anthropic stays as a fallback, not the default. It is also the lane that goes dark when
+    the account runs out of credit, which is exactly how three features died silently.
+    """
+    # FREE MODELS NEED FAR MORE HEADROOM THAN ANTHROPIC. Callers' max_tokens were tuned
+    # against Haiku, where 160 is plenty for a 3-line verdict. Groq's default is now
+    # `openai/gpt-oss-120b`, a REASONING model that spends budget before emitting anything,
+    # so a tight cap returns an empty string that looks exactly like a dead provider --
+    # `_llm_chat` already floors it at 256 for this reason and that is still not enough with
+    # a system prompt (measured 2026-08-20: empty at 160 AND at 400, fine at 1200).
+    # Brevity is enforced by the prompt, never by starving the budget.
+    _mt = max(int(max_tokens or 0), 1200)
+    txt, who = _llm_chat(prompt, system=system, max_tokens=_mt,
+                         temperature=temperature, only=_LLM_NO_TRAIN)
+    if txt:
+        return txt, who
+    key = _load_ai_key()
+    if not key:
+        return None, None
+    try:
+        import anthropic
+        kw = {"system": system} if system else {}
+        r = anthropic.Anthropic(api_key=key).messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}], **kw)
+        return "".join(b.text for b in r.content if b.type == "text").strip(), "Claude Haiku 4.5"
+    except Exception as e:
+        log.warning("anthropic fallback failed: %s", _llm_err_msg(e))
+        return None, None
+
+
 def _llm_chat(prompt, system=None, max_tokens=700, temperature=0.3,
               provider=None, timeout=45, model=None, only=None):
     """Ask the first configured provider. Returns (text, provider_name); (None, None) on
@@ -41661,17 +41691,15 @@ def _ai_risk_check(conn, sig):
             _pcr = sd.iloc[0]["pcr_oi"]
             if _pcr is not None and not pd.isna(_pcr):
                 ev.append(f"PCR(OI): {float(_pcr):.2f}")
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001", max_tokens=160,
+        # Free no-training lane first (ID 275) — this prompt carries signal/position context.
+        out, _who = _llm_ask(
+            f"Signal on {tk} ({side}).\n" + "\n".join(ev), max_tokens=160,
             system=("You are the risk manager reviewing a quant signal before it is traded. "
                     "Using ONLY the evidence given (never invent numbers), reply in EXACTLY 3 lines:\n"
                     "BULL: <strongest bullish point, <=15 words>\n"
                     "BEAR: <strongest bearish point, <=15 words>\n"
-                    "VERDICT: PROCEED or CAUTION - <reason, <=12 words>"),
-            messages=[{"role": "user", "content": f"Signal on {tk} ({side}).\n" + "\n".join(ev)}])
-        out = "".join(b.text for b in resp.content if b.type == "text").strip()
+                    "VERDICT: PROCEED or CAUTION - <reason, <=12 words>"))
+        out = (out or "").strip()
         if "VERDICT:" not in out.upper():
             return None
         out = (out.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

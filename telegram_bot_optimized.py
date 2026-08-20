@@ -700,6 +700,29 @@ def open_dashboard_on_startup() -> None:
             # there, and Streamlit reconnects on its own.
             log.info("Dashboard already open - left it alone (could not take foreground)")
         return
+    # Prefer Chrome's APP MODE (ID 277). `webbrowser.open` hands the URL to the default
+    # browser as an ordinary tab, which is why an installed Streamlit PWA never appeared --
+    # webbrowser has no concept of installed apps. `--app=URL` opens the same standalone,
+    # chrome-less window the PWA uses, without needing to discover its app id (which is a
+    # generated hash and not stable enough to hardcode).
+    _chrome = None
+    for _p in (os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+                            "Google", "Chrome", "Application", "chrome.exe"),
+               os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+                            "Google", "Chrome", "Application", "chrome.exe"),
+               os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                            "Google", "Chrome", "Application", "chrome.exe")):
+        if _p and os.path.exists(_p):
+            _chrome = _p
+            break
+    if _chrome:
+        try:
+            subprocess.Popen([_chrome, f"--app={local_url}"],
+                             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+            log.info("Opened dashboard as a Chrome app window: %s", local_url)
+            return
+        except Exception as e:
+            log.debug("chrome --app launch failed, falling back to default browser: %s", e)
     try:
         if webbrowser.open(local_url, new=2):
             log.info(f"Opened dashboard in browser: {local_url}")

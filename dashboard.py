@@ -18713,7 +18713,7 @@ ${_mc_expected_val:.2f}
             </div>
             <div>
                 <b>P(Profit)</b>
-                    = 50 else "#c62828"}};'>{_mc_prob_profit:.0f}%
+= 50 else '#c62828'};font-weight:700;">{_mc_prob_profit:.0f}%
             </div>
         </div>
         {'<p>' + _vix_warning + '</p>' if _vix_warning else ''}

@@ -1920,6 +1920,62 @@ def _market_state():
     return "CLOSED"
 
 
+def _ah_quote(info=None, fast_info=None, spot=None, session=None):
+    """THE extended-hours resolver (ID 278). Returns dict:
+        {price, chg_pct, source, session, label}  -- price/chg_pct None when there is none.
+
+    One place for this, because each card was deciding for itself and getting it wrong.
+
+    THE BUG THIS REPLACES: the exit planner only accepted an after-hours price when it
+    differed from the regular close by more than **$0.50 absolute**. GOOGL closed 340.67 and
+    traded 340.94 after the bell -- a real 27-cent move -- so the quote was discarded and the
+    card printed "N/A / Market open" while the market was shut. An absolute cut-off is also
+    scale-blind: $0.50 is 0.15% of a $340 stock and 2.5% of a $20 one.
+
+    Yahoo only populates postMarketPrice/preMarketPrice when that session actually traded, so
+    presence IS the signal. The only thing worth filtering is a literal echo of the close,
+    which a tiny relative epsilon catches without discarding genuine small moves.
+
+    `label` is derived from the REAL session (`_market_state`), never hardcoded -- the old
+    card said "Market open" whenever the price was missing, which was the one time it was
+    most likely to be false.
+    """
+    EPS_PCT = 0.02          # 0.02% -> a literal echo of the close, not a move
+    sess = session or _market_state()
+    out = {"price": None, "chg_pct": None, "source": "", "session": sess,
+           "label": {"OPEN": "Market open", "PRE": "Pre-market",
+                     "AFTER": "After-hours", "CLOSED": "Market closed"}.get(sess, "—")}
+    try:
+        spot = float(spot or 0)
+    except (TypeError, ValueError):
+        spot = 0.0
+    if spot <= 0:
+        return out
+
+    def _take(px, src):
+        try:
+            px = float(px or 0)
+        except (TypeError, ValueError):
+            return False
+        if px <= 0 or abs(px - spot) / spot * 100 < EPS_PCT:
+            return False
+        out["price"], out["source"] = px, src
+        out["chg_pct"] = (px - spot) / spot * 100
+        return True
+
+    info = info or {}
+    # Prefer the session we are actually IN, rather than always preferring pre-market.
+    order = ([("preMarketPrice", "Pre-Market"), ("postMarketPrice", "After-Hours")]
+             if sess == "PRE" else
+             [("postMarketPrice", "After-Hours"), ("preMarketPrice", "Pre-Market")])
+    for k, src in order:
+        if _take(info.get(k), src):
+            return out
+    if fast_info is not None:
+        _take(getattr(fast_info, "last_price", 0), "Last Tick")
+    return out
+
+
 @st.fragment(run_every=5)
 def _gp_live_strip():
     """THE live-values block — a RENDERING fragment, which is what makes the page behave like a
@@ -17982,36 +18038,25 @@ elif page == "🎯 Next-Day Exit Planner":
         # ── After-hours / Pre-market detection ──
         # Only treat as AH if the AH price differs significantly from the best spot
         # AND data is not stale (otherwise AH price is also from the previous day)
+        # Resolved in ONE place now (_ah_quote, ID 278) instead of inline per card.
         _ep_ah_price = None
         _ep_ah_chg_pct = None
         _ep_ah_source = ""
+        _ep_ah_label = "Market open"
         if not _ep_data_stale:
             try:
-                _ep_post_price = float(_ep_info.get("postMarketPrice", 0) or 0)
-                _ep_pre_price = float(_ep_info.get("preMarketPrice", 0) or 0)
-                # Pre-market takes priority (it's more recent than post-market)
-                if _ep_pre_price > 0 and abs(_ep_pre_price - _ep_spot) > 0.50:
-                    _ep_ah_price = _ep_pre_price
-                    _ep_ah_chg_pct = (_ep_ah_price - _ep_spot) / _ep_spot * 100
-                    _ep_ah_source = "Pre-Market"
-                elif _ep_post_price > 0 and abs(_ep_post_price - _ep_spot) > 0.50:
-                    _ep_ah_price = _ep_post_price
-                    _ep_ah_chg_pct = (_ep_ah_price - _ep_spot) / _ep_spot * 100
-                    _ep_ah_source = "After-Hours"
+                _ep_fi = None
+                try:
+                    _ep_fi = _ep_tk_obj.fast_info
+                except Exception:
+                    _ep_fi = None
+                _ahq = _ah_quote(info=_ep_info, fast_info=_ep_fi, spot=_ep_spot)
+                _ep_ah_price = _ahq["price"]
+                _ep_ah_chg_pct = _ahq["chg_pct"]
+                _ep_ah_source = _ahq["source"]
+                _ep_ah_label = _ahq["label"]
             except Exception:
                 pass
-
-            # Also check fast_info.last_price as a live source
-            if _ep_ah_price is None:
-                try:
-                    _ep_fast_info = _ep_tk_obj.fast_info
-                    _ep_last_price = float(getattr(_ep_fast_info, 'last_price', 0) or 0)
-                    if _ep_last_price > 0 and abs(_ep_last_price - _ep_spot) > 0.50:
-                        _ep_ah_price = _ep_last_price
-                        _ep_ah_chg_pct = (_ep_ah_price - _ep_spot) / _ep_spot * 100
-                        _ep_ah_source = "Last Tick"
-                except Exception:
-                    pass
 
         # Use AH price as live reference — always when toggle is on, else only if available
         _use_ah_now = st.session_state.get("use_ah", False)
@@ -18274,7 +18319,7 @@ elif page == "🎯 Next-Day Exit Planner":
         _ah_col_clr = "normal" if _ep_ah_chg_pct >= 0 else "inverse"
         _mi_cols[1].metric(f"🌙 {_ep_ah_source}", f"${_ep_ah_price:.2f}", f"{_ep_ah_chg_pct:+.2f}% vs close", delta_color=_ah_col_clr)
     else:
-        _mi_cols[1].metric("🌙 After-Hours", "N/A", "Market open")
+        _mi_cols[1].metric("🌙 After-Hours", "N/A", _ep_ah_label)
     _mi_cols[2].metric("ES Futures", f"{_es_pct:+.2f}%")
     _mi_cols[3].metric("NQ Futures", f"{_nq_pct:+.2f}%")
     _mi_lbl, _mi_v = _vix_vxn(_vix_val)
@@ -18713,7 +18758,7 @@ ${_mc_expected_val:.2f}
             </div>
             <div>
                 <b>P(Profit)</b>
-= 50 else '#c62828'};font-weight:700;">{_mc_prob_profit:.0f}%
+{_mc_prob_profit:.0f}%
             </div>
         </div>
         {'<p>' + _vix_warning + '</p>' if _vix_warning else ''}

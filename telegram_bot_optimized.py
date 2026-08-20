@@ -14573,6 +14573,14 @@ def _data_audit(conn, day=None):
     checks.append(("derive=capture", cap > 0 and der >= cap * 0.9, f"derive covers {der}/{cap}"))
     checks.append(("stock", stk >= 300, f"stock_daily: {stk} tickers"))
     checks.append(("skew", skw >= 300, f"skew_snapshot: {skw} tickers"))
+    # stock_history was NOT audited, and that is why it drifted 2 sessions behind in silence
+    # while this same audit reported 7/7 green (ID 274). It is the multi-year series every
+    # row-counted window is built on, so a gap there shifts trend numbers without any error
+    # anywhere. Compared against stock_daily for the SAME day: the sync is a pure-SQL fold of
+    # one into the other, so anything less than near-parity means the fold did not run.
+    hst = _nt("stock_history", "trade_date")
+    checks.append(("history", stk == 0 or hst >= stk * 0.9,
+                   f"stock_history: {hst} tickers vs stock_daily {stk}"))
     try:
         tot, nul = conn.execute(
             "SELECT COUNT(*), SUM(CASE WHEN openInt_Call_now IS NULL THEN 1 ELSE 0 END) "
@@ -36601,6 +36609,36 @@ def _fmt_paper_us(conn):
             + f"\n{em} <b>Net: ${net:+,.0f} ({tot_pct:+.1f}%)</b>")
 
 
+async def history_sync_job(ctx=None):
+    """Fold new stock_daily rows into stock_history on a SCHEDULE (ID 274).
+
+    This maintenance existed but ran only by accident. `_daily_history` calls
+    `_sync_history_from_daily` solely when the caller did NOT pass a connection -- and 10 of
+    its 14 call sites do pass one. So keeping years of history current depended on some
+    incidental code path happening to open its own connection that day.
+
+    It drifted 2 sessions behind without a single error: on 2026-08-19 `stock_history` held 3
+    rows for 08-18 and none for 08-19, while `stock_daily` had 731 and 730. Nothing failed --
+    nothing ran. That silently shifted every row-counted window built on it (ID 273).
+
+    The sync itself is pure SQL over data already captured: no API calls, idempotent, and it
+    filled both missing days instantly when finally invoked. There was never a reason for it
+    to be conditional.
+    """
+    conn = get_conn()
+    try:
+        before = conn.execute("SELECT COUNT(*) FROM stock_history").fetchone()[0]
+        _ensure_stock_history(conn)
+        _sync_history_from_daily(conn)
+        added = conn.execute("SELECT COUNT(*) FROM stock_history").fetchone()[0] - before
+        if added:
+            log.info("history_sync: folded %d stock_daily row(s) into stock_history", added)
+    except Exception:
+        log.warning("history_sync_job failed", exc_info=True)
+    finally:
+        conn.close()
+
+
 async def paper_us_alert(ctx):
     """Push the US paper book just after the NYSE close (ID 257). Silent when nothing open."""
     conn = get_conn()
@@ -42006,6 +42044,9 @@ def main():
         job_queue.run_daily(antibubble_daily, time=dt_time(21, 35, 0))  # 5:35pm EDT / 4:35pm EST — silently log anti-bubble baskets
         _sched_once(job_queue, data_health_alert, (8, 10), "data_health_am", "Data health (AM)")  # 8:10am ET (nags until acked)
         _sched_once(job_queue, data_health_alert, (18, 30), "data_health_pm", "Data health (PM)")  # 6:30pm ET, post-EOD-lane
+        # Runs BEFORE the audit at 18:35 so the audit judges freshly-synced history (ID 274).
+        _sched_once(job_queue, history_sync_job, (18, 20), "history_sync",
+                    "History sync (stock_daily → stock_history)")   # 6:20pm ET, post-EOD
         _sched_once(job_queue, data_audit_alert, (18, 35), "data_audit", "EOD data audit")     # 6:35pm ET
         log.info("Scheduled Risk-Off Radar (startup + post-close)")
         log.info("Scheduled morning alert 14:00 UTC (10:00am EDT / 9:00am EST)")

@@ -36204,7 +36204,7 @@ def _pt_mark(row, conn):
 _CHG_WINDOWS = (("1D", 1), ("1W", 5), ("1M", 21), ("3M", 63))
 
 
-def _chg_windows(tk, conn=None):
+def _chg_windows(tk, conn=None, last=None):
     """Percent price change over 1d/1w/1m/3m TRADING-day windows (ID 263).
 
     DB first via `_daily_history`, then yfinance -- and the yfinance leg tries `_yf_alias`,
@@ -36214,35 +36214,53 @@ def _chg_windows(tk, conn=None):
     """
     out = {k: None for k, _ in _CHG_WINDOWS}
     vals = []
+    # yfinance is PRIMARY here, unlike everywhere else in this file, and the reason is that
+    # these windows count back N ROWS rather than N dates. Any gap shifts every window
+    # silently: measured 2026-08-19, stock_history ended 08-17 and was missing 08-18, so the
+    # "1D" box was really a 3-day change and TGT read -2.25% on a day it was up 4%. A wrong
+    # number beside a live P&L is worse than a slow one, and this runs for at most a dozen
+    # tickers on two scheduled cards. The DB stays as the fallback when the network is down.
     try:
-        h = _daily_history(tk, 1, conn)
-        if h is not None and len(h):
-            vals = [float(x) for x in list(h) if x == x]
+        _alias = _yf_alias(tk)
     except Exception:
-        log.debug("chg_windows db leg failed for %s", tk, exc_info=True)
+        _alias = None
+    for sym in [s for s in (tk, _alias) if s]:
+        try:
+            hh = _yf_ticker(sym).history(period="6mo", interval="1d")
+            if hh is not None and len(hh) >= 2:
+                vals = [float(x) for x in hh["Close"].dropna()]
+                break
+        except Exception:
+            continue
     if len(vals) < 2:
         try:
-            _alias = _yf_alias(tk)
+            h = _daily_history(tk, 1, conn)
+            if h is not None and len(h):
+                vals = [float(x) for x in list(h) if x == x]
         except Exception:
-            _alias = None
-        for sym in [s for s in (tk, _alias) if s]:
-            try:
-                hh = _yf_ticker(sym).history(period="6mo", interval="1d")
-                if hh is not None and len(hh) >= 2:
-                    vals = [float(x) for x in hh["Close"].dropna()]
-                    break
-            except Exception:
-                continue
+            log.debug("chg_windows db fallback failed for %s", tk, exc_info=True)
     if len(vals) < 2:
         return out
-    last = vals[-1]
+    # Anchor on the LIVE mark when the caller has one. `_daily_history` is DB-first and the
+    # DB ends at the last EOD capture, so without this the trend excluded today entirely --
+    # measured 2026-08-19, TGT's 1D box read -2.25% while the same card's live Mark was
+    # +4.28% on the day. A card that contradicts itself is worse than one without a trend.
+    # The live point REPLACES the stale last bar rather than being appended, so the window
+    # lengths stay honest (1D is still one session, not two).
+    if last:
+        try:
+            if float(last) > 0:
+                vals = vals[:-1] + [float(last)]
+        except (TypeError, ValueError):
+            pass
+    ref = vals[-1]
     for k, n in _CHG_WINDOWS:
         if len(vals) > n and vals[-1 - n]:
-            out[k] = (last / vals[-1 - n] - 1) * 100
+            out[k] = (ref / vals[-1 - n] - 1) * 100
     return out
 
 
-def _chg_table(tickers, conn=None):
+def _chg_table(rows_in, conn=None):
     """Narrow 1D/1W/1M/3M table for a set of holdings, or "" if nothing resolved.
 
     Deliberately a SECOND table rather than four more columns on the positions grid: nine
@@ -36250,8 +36268,11 @@ def _chg_table(tickers, conn=None):
     narrow tables read better than one that wraps.
     """
     rows = []
-    for tk in tickers:
-        c = _chg_windows(tk, conn)
+    # rows_in is (ticker, live_mark) so the trend is computed off the SAME price the
+    # grid shows; a bare ticker list silently reverted to the stale DB close.
+    for _item in rows_in:
+        tk, _mk = (_item if isinstance(_item, (tuple, list)) else (_item, None))
+        c = _chg_windows(tk, conn, last=_mk)
         if all(v is None for v in c.values()):
             continue
         rows.append((tk[:9],) + tuple(
@@ -36304,6 +36325,7 @@ def _fmt_paper_india(conn):
     if df.empty:
         return None
     rows, details, net, cost = [], [], 0.0, 0.0
+    _chg_src = []          # (ticker, live mark) for the trend table
     for tk, grp in df[df["option_type"].astype(str).str.upper() == "STOCK"].groupby(
             df["ticker"].str.upper()):
         if _ccy_of(tk)[0] != "INR":
@@ -36322,6 +36344,7 @@ def _fmt_paper_india(conn):
         pct = pnl / (abs(entry * qty) or 1.0) * 100
         rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
                      tk[:9], _compact_money(pnl), f"{pct:+.0f}%"))
+        _chg_src.append((tk, mark))
         details.append(f"{_ticker_flag(tk, conn)} <b>{tk}</b> {qty:+g}sh @ ₹{entry:,.2f} → "
                        f"₹{mark:,.2f} · <b>₹{pnl:+,.0f}</b> ({pct:+.1f}%)")
     if not rows:
@@ -36333,7 +36356,7 @@ def _fmt_paper_india(conn):
                     legend="Prices and P&amp;L in ₹ — never blended with the USD book",
                     details=details,
                     notes="Demo book (paper_trades), not your real portfolio.")
-            + _chg_table([r[1] for r in rows], conn)
+            + _chg_table(_chg_src, conn)
             + f"\n{em} <b>Net: ₹{net:+,.0f} ({tot_pct:+.1f}%)</b>")
 
 
@@ -36510,6 +36533,7 @@ def _fmt_paper_us(conn):
     if df.empty:
         return None
     rows, details, net, cost, expired = [], [], 0.0, 0.0, 0
+    _chg_src = []          # (ticker, live mark), STOCK rows only
     _typ = df["option_type"].astype(str).str.upper()
 
     for tk, grp in df[_typ == "STOCK"].groupby(df["ticker"].str.upper()):
@@ -36529,6 +36553,7 @@ def _fmt_paper_us(conn):
         pct = pnl / (abs(entry * qty) or 1.0) * 100
         rows.append((("🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")),
                      tk[:9], _compact_money(pnl), f"{pct:+.0f}%"))
+        _chg_src.append((tk, mark))
         details.append(f"{_ticker_flag(tk, conn)} <b>{tk}</b> {qty:+g}sh @ ${entry:,.2f} → "
                        f"${mark:,.2f} · <b>${pnl:+,.0f}</b> ({pct:+.1f}%)")
 
@@ -36572,7 +36597,7 @@ def _fmt_paper_us(conn):
                     ("ST", "Ticker", "P&L$", "%"), rows, right_cols={2, 3},
                     legend="Prices and P&amp;L in $ — never blended with the INR book",
                     details=details, notes=_note)
-            + _chg_table([r[1] for r in rows], conn)
+            + _chg_table(_chg_src, conn)
             + f"\n{em} <b>Net: ${net:+,.0f} ({tot_pct:+.1f}%)</b>")
 
 

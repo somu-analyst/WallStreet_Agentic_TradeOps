@@ -8755,8 +8755,11 @@ def analyze_mean_reversion(ticker, conn):
 
     # ── 4. Net OI Extreme (us_analytics_daily) ──
     # Net OI = call_oi - put_oi. Extreme negative = peak bearish positioning = floor likely
+    # RETIRED SOURCE (ID 276): nothing writes this table any more, so an unguarded read
+    # scored the composite off February data. Skipped when stale -- one component missing
+    # is honest, a six-month-old component pretending to be current is not.
     try:
-        an = pd.read_sql("""
+        an = pd.DataFrame() if not _analytics_fresh(conn) else pd.read_sql("""
             SELECT trade_date, net_notional_oi as net_oi,
                    call_notional_oi as call_oi, put_notional_oi as put_oi
             FROM us_analytics_daily WHERE ticker = ?
@@ -15550,6 +15553,10 @@ async def global_market_view(query):
 async def prop_trading_view(query):
     conn = get_conn()
     try:
+        # Guarded: this selects MAX(trade_date), which on a retired table means February
+        # rendered as today (ID 276).
+        if not _analytics_fresh(conn):
+            raise ValueError("us_analytics_daily is stale/retired")
         df = pd.read_sql(
             """
             SELECT ticker, trade_date, bull_score, bear_score, avg_spot,
@@ -31297,6 +31304,32 @@ def _ensure_stock_history(conn):
         )
     """)
     conn.commit()
+
+
+_ANALYTICS_MAX_AGE_DAYS = 5
+
+
+def _analytics_fresh(conn, max_age=_ANALYTICS_MAX_AGE_DAYS):
+    """Is `us_analytics_daily` current enough to be worth reading? (ID 276)
+
+    It is a RETIRED table. Nothing in the live codebase writes it -- the only writers left
+    are in `archive/` and `deleted/`, from the pre-`telegram_bot_optimized` architecture --
+    and it stopped on 2026-02-06 holding just 34 tickers against a 733-name universe.
+
+    The danger is not that it is empty, it is that it is NOT. Eight live readers still query
+    it, and the ones using `WHERE trade_date = MAX(trade_date)` happily return February rows
+    as if they were today's, so a signal reads as current when it is six months old. Failing
+    loudly is impossible here; the only safe move is to treat stale as absent.
+    """
+    try:
+        row = conn.execute("SELECT MAX(trade_date) FROM us_analytics_daily").fetchone()
+        if not row or not row[0]:
+            return False
+        age = (datetime.now(timezone.utc).replace(tzinfo=None).date()
+               - datetime.strptime(str(row[0])[:10], "%Y-%m-%d").date()).days
+        return age <= max_age
+    except Exception:
+        return False
 
 
 def _sync_history_from_daily(conn):

@@ -89,12 +89,19 @@ def open_window():
     except Exception as e:
         print(f"[app] pywebview failed ({e}), falling back")
 
-    # 1b. The INSTALLED PWA shortcut, if the user installed it. This is what carries OUR
+    # 1b. The INSTALLED PWA shortcut. DISABLED BY DEFAULT (ID 287): the app was installed
+    # while the manifest declared `"start_url": "./"`, which resolves against the manifest's
+    # own location (/app/static/) rather than the app root -- so launching by app-id opened
+    # http://localhost:8502/app/static/ and Streamlit answered 403 Forbidden. The manifest is
+    # fixed, but the bad start_url is baked into the INSTALLED copy until it is reinstalled.
+    # Pass --use-installed once the PWA has been reinstalled to get the real logo back.
+    # 1b(cont). The INSTALLED PWA shortcut, if the user installed it. This is what carries OUR
     # icon: a plain `--app=URL` window keeps the browser's own icon, because Chrome only
     # adopts the site icon for an installed app (which is why the taskbar showed Chrome).
     # Launching the .lnk uses the real app id and therefore the real logo.
     appdata = os.environ.get("APPDATA", "")
-    for name in ("RUDRARJUN Analytics.lnk", "WallStreet_Agentic_TradeOps.lnk"):
+    for name in (("RUDRARJUN Analytics.lnk", "WallStreet_Agentic_TradeOps.lnk")
+                 if "--use-installed" in sys.argv else ()):
         lnk = os.path.join(appdata, "Microsoft", "Windows", "Start Menu",
                            "Programs", "Chrome Apps", name)
         if os.path.exists(lnk):

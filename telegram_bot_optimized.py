@@ -3863,7 +3863,12 @@ def _signal_writeup(state, do, outcome=None, n=None, hit=None, base=None,
 # Max display cells for a Telegram <pre> table before a phone wraps it. CLAUDE.md has long
 # carried "<=28 chars wide" as a guideline; this is the enforced ceiling, with 2 cells of
 # slack because the guideline was never actually applied and several tables sat far past it.
-_TG_TABLE_BUDGET = 30
+# Raised 30 -> 38 (user 2026-08-20). 30 was compacting ordinary tables: the world-markets
+# grid got squeezed to "Shang…" and "USD/J…", which destroys the very thing the row is for --
+# you cannot tell which country you are looking at. The user asked for columns sized to the
+# DATA, so the budget is now a guard against runaway tables rather than a target every table
+# is pushed down to. Tables that already fit are untouched either way.
+_TG_TABLE_BUDGET = 38
 
 
 def _trunc_cell(v, keep):
@@ -4102,8 +4107,10 @@ def _pipe_table(header_cols, rows_data, right_cols=None, title=None, legend=None
         guard = 0
         while total > _TG_TABLE_BUDGET and guard < 6:
             guard += 1
+            # Floor raised 6 -> 10: six cells turns "Shanghai" into "Shang…" and a truncated
+            # identifier is worse than a slightly wide table.
             cand = [c for c in range(len(header_cols))
-                    if c not in right_cols and _w[c] > 6]
+                    if c not in right_cols and _w[c] > 10]
             if not cand:
                 break
             c = max(cand, key=lambda i: _w[i])
@@ -4127,7 +4134,12 @@ def _pipe_table(header_cols, rows_data, right_cols=None, title=None, legend=None
     def _fmt(r):
         return " | ".join(_pad(r[c], c) for c in range(n))
 
-    sep = "-+-".join("-" * w for w in widths)
+    # HEADER EMPHASIS (ID 285). Bold is IMPOSSIBLE here: Telegram strips <b> inside <pre> --
+    # probed against the live API 2026-08-20, the message came back carrying only a `pre`
+    # entity and no `bold`, so the tags would be silently dropped. A heavier rule under the
+    # header is the strongest emphasis available that does not disturb the grid: box-drawing
+    # `═` is a single display cell, so column widths are unchanged.
+    sep = "═╪═".join("═" * w for w in widths)
     body = "<pre>" + _html.escape("\n".join([_fmt(header_cols), sep] + [_fmt(r) for r in rows_data])) + "</pre>"
     out = []
     if title:
@@ -12173,8 +12185,8 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE, force=False):
     _, chat_id = load_creds()
     conn = get_conn()
     try:
-        trades = pd.read_sql(
-            "SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' ORDER BY trade_id", conn)
+        # BOTH books (ID 270) -- the real one is empty, the holdings are in paper.
+        trades = _open_positions(conn)
     except Exception:
         conn.close(); return
     conn.close()
@@ -13692,6 +13704,61 @@ def _closed_today_block(conn, today, spot_of):
                        legend=f"Now = worth if still held (scores the exit) · realised {_tk}"), tot
 
 
+def _open_positions(conn, options_only=True, include_paper=True):
+    """Open positions across BOTH books, each row tagged `_book` = 'REAL' or 'DEMO' (ID 270).
+
+    The real `trades` book is currently empty -- 81 closed, zero open -- while 13 live
+    holdings sit in `paper_trades`. Every position lane queried `trades` alone, so
+    position_monitor returned early, position_alerts returned early, and the card rendered
+    blank: the ID 217 material-change re-send was correct but firing on nothing. Same shape
+    as ID 250, where /indianews read trades+watchlist and missed the India book.
+
+    SCOPE IS DELIBERATELY NARROW. CLAUDE.md draws the paper/real boundary on purpose, so this
+    union is ONLY for monitoring and alerting. The tax clock, Exit Planner, realised P&L and
+    capital effect still read `trades` directly and are untouched -- a DEMO row must never
+    reach them. Callers render `_book` so a paper alert cannot be mistaken for real money
+    (the user's explicit condition when approving this).
+    """
+    frames = []
+    try:
+        q = "SELECT * FROM trades WHERE status='OPEN'"
+        if options_only:
+            q += " AND UPPER(option_type)<>'STOCK'"
+        real = pd.read_sql(q + " ORDER BY trade_id", conn)
+        if not real.empty:
+            real["_book"] = "REAL"
+            frames.append(real)
+    except Exception:
+        log.debug("open_positions: real book read failed", exc_info=True)
+    if include_paper:
+        try:
+            _pt_setup(conn)
+            q = "SELECT * FROM paper_trades WHERE status='OPEN'"
+            if options_only:
+                q += " AND UPPER(option_type)<>'STOCK'"
+            demo = pd.read_sql(q + " ORDER BY trade_id", conn)
+            if not demo.empty:
+                demo["_book"] = "DEMO"
+                frames.append(demo)
+        except Exception:
+            log.debug("open_positions: paper book read failed", exc_info=True)
+    if not frames:
+        return pd.DataFrame()
+    # trade_id is only unique WITHIN a book, so a bare id would collide across them --
+    # alert dedup keys and card labels both need the book to disambiguate.
+    out = pd.concat(frames, ignore_index=True, sort=False)
+    out["_uid"] = out["_book"].str[0] + out["trade_id"].astype(str)
+    return out
+
+
+def _book_tag(row):
+    """Marker for a position row: empty for real money, an explicit flag for paper."""
+    try:
+        return "" if str(row.get("_book", "REAL")).upper() == "REAL" else " 🧪"
+    except Exception:
+        return ""
+
+
 def _positions_card_parts(trades, now_s, today):
     """Build the POSITIONS health card (table + advice + urgent + HP engine) —
     SHARED by the 10-min position_monitor push and the menu positions_view
@@ -13884,7 +13951,12 @@ def _positions_card_parts(trades, now_s, today):
             prob = 100 - prob
 
         pnl     = (cur_px - entry) * qty * 100
-        pnl_pct = (pnl / abs(entry * qty * 100) * 100) if entry > 0 else 0
+        # Guard the DENOMINATOR, not just `entry`. `_safe_int` truncates a fractional-share
+        # quantity to 0 (a real 0.044-share SOXX lot exists in the book), so entry>0 was not
+        # enough and this raised ZeroDivisionError -- inside a scheduled job, where a throw
+        # is silent. Same failure class as ID 217.
+        _cost = abs(entry * qty * 100)
+        pnl_pct = (pnl / _cost * 100) if _cost > 0 else 0.0
         total_pnl += pnl
         total_cost += abs(entry * qty * 100)
 
@@ -14722,7 +14794,7 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
     try:
         _ensure_alert_dedup_table(conn)
-        trades = pd.read_sql("SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK'", conn)
+        trades = _open_positions(conn)          # both books (ID 270)
     except Exception:
         conn.close(); return
     if trades.empty:
@@ -14734,7 +14806,11 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
     today_str = today.isoformat()
 
     # Group legs by ticker + expiry — same group = one strategy
-    trades["_grp"] = trades["ticker"].str.upper() + "|" + trades["expiry"].astype(str).str[:10]
+    # Book is part of the key (ID 270): the same ticker+expiry can exist in BOTH books, and
+    # a shared alert_dedup key would let a paper alert suppress the real one, or vice versa.
+    trades["_grp"] = (trades.get("_book", "REAL").astype(str) + "|"
+                      + trades["ticker"].str.upper() + "|"
+                      + trades["expiry"].astype(str).str[:10])
     alert_msgs = []
 
     for grp_key, grp in trades.groupby("_grp"):
@@ -14797,14 +14873,21 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
         dte_s       = str(dte) if dte is not None else "?"
         spot_line   = f"${stock_px:.2f}" if stock_px else "—"
 
+        # Book label (ID 270). The user's condition for alerting on paper at all was that a
+        # DEMO alert can never read as real money, so it is stated in the headline, not
+        # inferred from a subtle glyph.
+        _book = str(grp["_book"].iloc[0]).upper() if "_book" in grp.columns else "REAL"
+        book_lbl = "" if _book == "REAL" else " · 🧪 <b>PAPER</b>"
+
         def _alert(atype, icon, headline, detail,
                    _gk=grp_key, _tk=tk, _es=expiry_s, _ds=dte_s, _sl=strat_label,
-                   _sp=spot_line, _lt=legs_tbl, _nl=net_pnl, _np=net_pnl_pct):
+                   _sp=spot_line, _lt=legs_tbl, _nl=net_pnl, _np=net_pnl_pct,
+                   _bk=book_lbl):
             if _alert_already_sent(conn, today_str, _gk, atype):
                 return
             _pnl_em = "🟢" if _nl >= 0 else "🔴"
             alert_msgs.append(
-                f"{icon} <b>ALERT — {_tk}</b> · {_sl} · exp {_es} (D{_ds}) · spot {_sp}\n"
+                f"{icon} <b>ALERT — {_tk}</b>{_bk} · {_sl} · exp {_es} (D{_ds}) · spot {_sp}\n"
                 f"<b>{headline}</b>\n{detail}\n\n"
                 f"{_lt}\n"
                 f"<b>{_pnl_em} Net: ${_nl:+,.0f} ({_np:+.1f}%)</b>"
@@ -36491,12 +36574,23 @@ def _fmt_trade_ideas(conn, top=6):
         log.debug("hiprob failed in ideas digest", exc_info=True)
         hp = []
     if hp:
-        rows = [(str(h.get("tk", ""))[:6], str(h.get("strat", ""))[:9],
+        # `_hiprob_scan` returns tk/kind/setup/pop/dte/credit/risk/ret/be -- NOT strat/legs/rr,
+        # which is why Strategy rendered blank and R/R as 0.00 (ID 284). `kind` is the
+        # structure code (CS = credit spread), `setup` the strikes, `ret` the return on risk.
+        _KIND = {"CS": "Call spr", "PS": "Put spr", "IC": "Iron cdr", "CSP": "Cash put",
+                 "CC": "Cov call", "PMCC": "PMCC"}
+        rows = [(str(h.get("tk", ""))[:6],
+                 _KIND.get(str(h.get("kind", "")).upper(), str(h.get("kind", ""))[:9]),
                  _pct01(h.get("pop")), f"{int(h.get('dte', 0) or 0)}d")
                 for h in hp[:top]]
-        _det = [f"<b>{h.get('tk')}</b> {h.get('strat')} {h.get('legs','')} · "
-                f"POP {_pct01(h.get('pop'))} · R/R {float(h.get('rr',0) or 0):.2f} · "
-                f"{int(h.get('dte',0) or 0)}d" for h in hp[:top]]
+        _det = []
+        for h in hp[:top]:
+            _kind = _KIND.get(str(h.get("kind", "")).upper(), str(h.get("kind", "")))
+            _credit, _risk = float(h.get("credit") or 0), float(h.get("risk") or 0)
+            _det.append(
+                f"<b>{h.get('tk')}</b> {_kind} <b>{h.get('setup', '')}</b> · "
+                f"POP {_pct01(h.get('pop'))} · credit ${_credit:,.2f} on ${_risk:,.0f} risk "
+                f"· return {float(h.get('ret') or 0):.1f}% · {int(h.get('dte', 0) or 0)}d")
         parts.append(_report("🎯 HIGH-PROBABILITY STRUCTURES",
                              ("Ticker", "Strategy", "POP", "DTE"), rows,
                              right_cols={2, 3}, details=_det,

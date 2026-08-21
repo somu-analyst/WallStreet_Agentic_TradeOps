@@ -89,6 +89,19 @@ def open_window():
     except Exception as e:
         print(f"[app] pywebview failed ({e}), falling back")
 
+    # 1b. The INSTALLED PWA shortcut, if the user installed it. This is what carries OUR
+    # icon: a plain `--app=URL` window keeps the browser's own icon, because Chrome only
+    # adopts the site icon for an installed app (which is why the taskbar showed Chrome).
+    # Launching the .lnk uses the real app id and therefore the real logo.
+    appdata = os.environ.get("APPDATA", "")
+    for name in ("RUDRARJUN Analytics.lnk", "WallStreet_Agentic_TradeOps.lnk"):
+        lnk = os.path.join(appdata, "Microsoft", "Windows", "Start Menu",
+                           "Programs", "Chrome Apps", name)
+        if os.path.exists(lnk):
+            print(f"[app] opening installed app: {name}")
+            os.startfile(lnk)
+            return True
+
     pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
     pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
     lad = os.environ.get("LOCALAPPDATA", "")
@@ -112,7 +125,35 @@ def open_window():
     return webbrowser.open(URL, new=2)
 
 
+def ensure_bot():
+    """Start the Telegram bot if it is not already polling (ID 283).
+
+    One icon should start everything, rather than the user remembering which of several .bat
+    files to click. The bot opens its own dashboard on startup, so this is the single entry
+    point that `run_bot.bat` was.
+    """
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match "
+             "'telegram_bot_optimized' } | Measure-Object).Count"],
+            capture_output=True, text=True, timeout=30)
+        if (out.stdout or "").strip().startswith("0"):
+            print("[app] starting the Telegram bot…")
+            subprocess.Popen([sys.executable, "telegram_bot_optimized.py"], cwd=ROOT,
+                             creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                                            | getattr(subprocess, "DETACHED_PROCESS", 0)),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL)
+        else:
+            print("[app] bot already running")
+    except Exception as e:
+        print(f"[app] could not check/start the bot: {e}")
+
+
 if __name__ == "__main__":
+    if "--with-bot" in sys.argv:
+        ensure_bot()
     if "--no-serve" not in sys.argv:
         if not ensure_server():
             sys.exit(1)

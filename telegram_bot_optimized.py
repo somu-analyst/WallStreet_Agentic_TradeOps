@@ -3757,6 +3757,60 @@ def _report(title, headers, rows, right_cols=None, legend=None, notes=None, deta
     return "\n".join(parts)
 
 
+# ── ONE glossary for every acronym the bot prints (ID 296) ────────────────────────────
+# The user could not follow the outputs because the tables are dense with initialisms and
+# each one was, at best, defined in the single place it appeared. Full name AND a plain
+# sentence saying what it tells you -- an expansion alone ("POC = Point of Control") still
+# does not answer "so what". Used by /glossary and by table legends via `_gloss_legend`.
+_GLOSSARY = {
+    "POP":  ("Probability of Profit",
+             "modelled odds the trade finishes above breakeven. A model output, not a measured hit-rate"),
+    "EV":   ("Expected Value",
+             "probability-weighted average P&L. Priced fairly it sits near zero, so it measures "
+             "mispricing versus the model, not expected earnings"),
+    "POC":  ("Point of Control",
+             "the price with the most traded volume in range — a magnet, not a target"),
+    "OI":   ("Open Interest", "contracts still open. Rising OI = new positions, not just churn"),
+    "DTE":  ("Days To Expiry", "calendar days until the option expires"),
+    "IV":   ("Implied Volatility", "the move the option's price implies, annualised"),
+    "IVR":  ("IV Rank", "where today's IV sits in its own past year — high means options are dear"),
+    "PCR":  ("Put/Call Ratio", "puts divided by calls. Above 1 = more puts, often hedging not bearishness"),
+    "GEX":  ("Gamma Exposure", "dealer hedging pressure. Positive damps moves, negative amplifies them"),
+    "VRP":  ("Variance Risk Premium",
+             "implied vol minus realised. Positive = options overpriced versus what actually happened"),
+    "RS":   ("Relative Strength", "performance against the benchmark, not an absolute return"),
+    "SI":   ("Short Interest", "percent of float sold short"),
+    "DTC":  ("Days To Cover", "days of average volume needed to buy back every short"),
+    "MC":   ("Monte Carlo", "thousands of simulated price paths, summarised"),
+    "VaR":  ("Value at Risk", "the loss you exceed only X% of the time"),
+    "ATM":  ("At The Money", "strike sitting closest to the current price"),
+    "OTM":  ("Out of The Money", "no intrinsic value yet — needs the move to happen"),
+    "ITM":  ("In The Money", "already carries intrinsic value"),
+    "R/R":  ("Risk/Reward", "max win divided by max loss"),
+    "XIRR": ("Annualised Return", "return per year, adjusted for when money went in and out"),
+}
+
+
+def _gloss_legend(*keys):
+    """Legend fragment defining the acronyms a table actually uses (ID 296)."""
+    out = []
+    for k in keys:
+        e = _GLOSSARY.get(k.upper())
+        if e:
+            out.append(f"{k} = {e[0]}, {e[1]}")
+    return " · ".join(out)
+
+
+async def glossary_command(update, ctx):
+    """/glossary — what every acronym in the reports means, in plain English."""
+    lines = [f"<b>{k}</b> — {v[0]}\n   <i>{v[1]}</i>"
+             for k, v in sorted(_GLOSSARY.items())]
+    await update.message.reply_text(
+        f"{hdr('📖 GLOSSARY')}\n\n" + "\n".join(lines) +
+        "\n\n<i>Ask about any of these and I'll explain it against your own positions.</i>",
+        parse_mode=H)
+
+
 def _p_txt(p):
     """p-value as a reader-facing string; anything under 0.001 is reported as a
     bound, never as a suspiciously precise decimal."""
@@ -36644,16 +36698,61 @@ def _fmt_trade_ideas(conn, top=6):
         log.debug("spreads failed in ideas digest", exc_info=True)
         sp = []
     if sp:
-        rows = [(str(x.get("tk", ""))[:6], str(x.get("strat", ""))[:9],
-                 _pct01(x.get("pop")), f"{int(x.get('dte', 0) or 0)}d")
-                for x in sp[:top]]
-        _det2 = [f"<b>{x.get('tk')}</b> {x.get('strat')} {x.get('legs','')} · "
-                 f"POP {_pct01(x.get('pop'))} · net {float(x.get('net',0) or 0):.2f} · "
-                 f"{int(x.get('dte',0) or 0)}d" for x in sp[:top]]
+        # STRIKES belong in the grid, not only in the prose underneath (ID 299) -- the table
+        # was unreadable on its own: you could not tell WHICH spread a row referred to. Spot
+        # and the distance from it answer the next question ("how far away is that?") without
+        # the user opening a chart. `_spot_cache` keeps it to one price lookup per ticker.
+        _spot_cache = {}
+
+        def _sp_spot(tk):
+            if tk not in _spot_cache:
+                try:
+                    _spot_cache[tk] = float(_last_price(tk) or 0)
+                except Exception:
+                    _spot_cache[tk] = 0.0
+            return _spot_cache[tk]
+
+        def _dist(tk, legs):
+            """Distance from spot to the SHORT strike, as a percentage."""
+            s = _sp_spot(tk)
+            try:
+                ks = [float(v) for v in str(legs).replace("C", "").replace("P", "").split("/")]
+            except Exception:
+                return "—", 0.0
+            if not s or not ks:
+                return "—", 0.0
+            k = max(ks) if "C" in str(legs).upper() else min(ks)
+            return f"{(k - s) / s * 100:+.1f}%", s
+
+        rows = []
+        _det2 = []
+        for x in sp[:top]:
+            tk = str(x.get("tk", ""))[:6]
+            legs = str(x.get("legs", ""))
+            dpct, s = _dist(tk, legs)
+            # Direction as a marker, not a word: "Bull Call"/"Bear Put" cost 9 cells and
+            # pushed the grid to 45, past the mobile budget. The full strategy name is on
+            # the detail line right below, where there is room for it.
+            _up = str(x.get("strat", "")).lower().startswith("bull")
+            rows.append((("🟢" if _up else "🔴"), tk, legs[:9],
+                         _pct01(x.get("pop")), dpct))
+            _net = float(x.get("net", 0) or 0)
+            # `net` on a DEBIT structure is what you PAY. The old legend said "credit(+)",
+            # which read as income on exactly the spreads that cost money (ID 300).
+            _side = "debit" if str(x.get("strat", "")).lower().startswith(("bull call", "bear put")) else "credit"
+            _det2.append(
+                f"<b>{tk}</b> {x.get('strat')} <b>{legs}</b> · spot ${s:,.2f} → short strike "
+                f"{dpct} away · POP {_pct01(x.get('pop'))} · {_side} ${abs(_net):.2f} · "
+                f"max win ${float(x.get('maxp', 0) or 0):.2f} / max loss "
+                f"${float(x.get('maxl', 0) or 0):.2f} · {int(x.get('dte', 0) or 0)}d")
         parts.append(_report("↕️ VERTICAL SPREADS",
-                             ("Ticker", "Strategy", "POP", "DTE"), rows,
-                             right_cols={2, 3}, details=_det2,
-                             legend="Net = credit(+)/debit per spread, before commission",
+                             ("", "Ticker", "Strikes", "POP", "vs spot"), rows,
+                             right_cols={3, 4}, details=_det2,
+                             legend="🟢 bullish · 🔴 bearish · "
+                                    "POP = Probability Of Profit, modelled odds the spread "
+                                    "finishes above breakeven · vs spot = how far the SHORT "
+                                    "strike sits from the current price · debit = you pay, "
+                                    "credit = you receive (before commission)",
                              notes="Modelled from live chains, not a measured hit-rate."))
     else:
         empty.append("vertical spreads")
@@ -42160,6 +42259,7 @@ def main():
     app.add_handler(CommandHandler("insight", insight_command))   # cross-lane LLM synthesis
     app.add_handler(CommandHandler("feed", feed_command))         # public channel + LLM read
     app.add_handler(CommandHandler("llm", llm_command))           # free-LLM provider status
+    app.add_handler(CommandHandler("glossary", glossary_command))  # plain-English acronyms
     app.add_handler(CommandHandler("dealer", dealer_command))     # CFTC dealer futures book
     app.add_handler(CommandHandler("heatmap", heatmap_command))   # sector treemap
     app.add_handler(CommandHandler("breaking", breaking_command))  # news on your book

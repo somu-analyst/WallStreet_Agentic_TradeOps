@@ -13356,7 +13356,8 @@ elif page == "\U0001f9e0 Smart Money Hub":
             )
             try:
                 _df_reg = pd.read_sql(
-                    "SELECT bull_score, bear_score FROM us_analytics_daily ORDER BY rowid DESC LIMIT 20", conn)
+                    # us_analytics_daily dropped (ID 281): retired table, stale since Feb.
+                    "SELECT 0 AS bull_score, 0 AS bear_score WHERE 0", conn)
                 if not _df_reg.empty:
                     _ab = _df_reg["bull_score"].mean()
                     _ae = _df_reg["bear_score"].mean()

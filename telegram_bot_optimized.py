@@ -4346,8 +4346,8 @@ def _ticker_universe(limit=500):
     out = []
     try:
         q = """
-            SELECT DISTINCT ticker FROM us_analytics_daily WHERE ticker IS NOT NULL
-            UNION
+            -- us_analytics_daily removed (ID 281): retired table, last written 2026-02-06
+            -- and only ever 34 tickers, so it could only ever ADD stale names here.
             SELECT DISTINCT ticker FROM stock_daily WHERE ticker IS NOT NULL
             ORDER BY ticker
         """
@@ -8281,13 +8281,10 @@ def analyze_inst_signals(ticker, conn):
     # Institutions think in dollars not contracts.
     # $500M notional call OI outweighs $100M put OI even if put contract count is higher.
     try:
-        an = pd.read_sql("""
-            SELECT call_notional_oi, put_notional_oi, net_notional_oi,
-                   bull_score, bear_score, avg_spot, avg_dte
-            FROM us_analytics_daily WHERE ticker = ?
-            ORDER BY trade_date DESC
-            LIMIT 1
-        """, conn, params=(tk,))
+        # us_analytics_daily RETIRED (ID 281) -- no writer since 2026-02-06. Reading it fed
+        # February numbers into a live read; an empty frame keeps the caller's existing
+        # "no data" path instead.
+        an = pd.DataFrame()
         if not an.empty:
             c_not  = float(an["call_notional_oi"].iloc[0] or 0)
             p_not  = float(an["put_notional_oi"].iloc[0] or 0)
@@ -8848,13 +8845,12 @@ def analyze_mean_reversion(ticker, conn):
     # scored the composite off February data. Skipped when stale -- one component missing
     # is honest, a six-month-old component pretending to be current is not.
     try:
-        an = pd.DataFrame() if not _analytics_fresh(conn) else pd.read_sql("""
-            SELECT trade_date, net_notional_oi as net_oi,
-                   call_notional_oi as call_oi, put_notional_oi as put_oi
-            FROM us_analytics_daily WHERE ticker = ?
-            ORDER BY trade_date DESC
-            LIMIT 30
-        """, conn, params=(tk,))
+        # SOURCE RETIRED AND DROPPED (ID 281). us_analytics_daily had no writer since
+        # 2026-02-06 and only ever covered 34 of 733 names, so this component was scoring the
+        # composite off six-month-old data for a handful of tickers. It now contributes
+        # nothing rather than something false. Rebuild from options_daily/options_change if
+        # the signal is wanted back -- both are current and cover the full universe.
+        an = pd.DataFrame()
         if len(an) >= 10:
             an["net_oi"] = pd.to_numeric(an["net_oi"], errors="coerce").fillna(0)
             net_today = float(an["net_oi"].iloc[0])
@@ -15722,23 +15718,8 @@ async def global_market_view(query):
 
 async def prop_trading_view(query):
     conn = get_conn()
-    try:
-        # Guarded: this selects MAX(trade_date), which on a retired table means February
-        # rendered as today (ID 276).
-        if not _analytics_fresh(conn):
-            raise ValueError("us_analytics_daily is stale/retired")
-        df = pd.read_sql(
-            """
-            SELECT ticker, trade_date, bull_score, bear_score, avg_spot,
-                   (bull_score - bear_score) AS net_signal,
-                   (CAST(put_oi AS REAL) / NULLIF(call_oi, 0)) as pcr
-            FROM us_analytics_daily
-            WHERE trade_date = {max_dt}
-            """.format(max_dt=_max_date_sql('trade_date', 'us_analytics_daily')),
-            conn,
-        )
-    except Exception:
-        df = pd.DataFrame()
+    # Source table dropped (ID 281) -- this view had been rendering February rows as today.
+    df = pd.DataFrame()
     conn.close()
 
     if df.empty:
@@ -15762,10 +15743,8 @@ async def prop_trading_view(query):
 async def backtest_lab_view(query):
     conn = get_conn()
     try:
-        sig = pd.read_sql(
-            "SELECT ticker, trade_date, bull_score, bear_score FROM us_analytics_daily",
-            conn,
-        )
+        # us_analytics_daily dropped (ID 281) -- retired, 34 tickers, stale since February.
+        sig = pd.DataFrame(columns=["ticker", "trade_date", "bull_score", "bear_score"])
         px = pd.read_sql("SELECT ticker, trade_date, close FROM stock_daily", conn)
     except Exception:
         sig = pd.DataFrame()
@@ -17693,7 +17672,6 @@ Tables (only these):
 - trades(trade_id, ticker, strategy, entry_date, expiry [YYYY-MM-DD], status OPEN/CLOSED,
   strike, option_type, quantity [neg=short], entry_price, pnl, notes)             -- user's positions
 - signal_accuracy(model, ticker, fire_date, direction, horizon_days, outcome, fwd_ret)
-- us_analytics_daily(trade_date, call_notional_oi, put_notional_oi, bull_score, bear_score, avg_spot)
 RULES: date formats vary by table (YYYY-MM-DD sorts naturally; MM-DD-YYYY sorts ONLY via
 substr(d,7,4)||substr(d,1,2)||substr(d,4,2)) — if unsure, SELECT a sample date first.
 Always add LIMIT (<=50). One SELECT per block, no other statements. NEVER use columns
@@ -24205,8 +24183,10 @@ async def smart_money_hub_report(query):
         # Is the market in BULL (rising), BEAR (falling), or CHOPPY mode?
         # This tells you which strategies work right now.
         try:
-            q7 = "SELECT bull_score, bear_score FROM us_analytics_daily ORDER BY rowid DESC LIMIT 20"
-            df_reg = pd.read_sql(q7, conn)
+            # Regime read used us_analytics_daily, now dropped (ID 281). An empty frame
+            # falls through to the existing "no regime data" branch instead of scoring the
+            # market off February.
+            df_reg = pd.DataFrame(columns=["bull_score", "bear_score"])
             parts.append("\n<b>🌡️ 7. MARKET REGIME (What mode are we in?)</b>")
             parts.append("<i>💡 BULL = buy dips. BEAR = sell rallies.</i>")
             parts.append("<i>   CHOPPY = stay small, wait for clarity.</i>")
@@ -31512,32 +31492,6 @@ def _ensure_stock_history(conn):
         )
     """)
     conn.commit()
-
-
-_ANALYTICS_MAX_AGE_DAYS = 5
-
-
-def _analytics_fresh(conn, max_age=_ANALYTICS_MAX_AGE_DAYS):
-    """Is `us_analytics_daily` current enough to be worth reading? (ID 276)
-
-    It is a RETIRED table. Nothing in the live codebase writes it -- the only writers left
-    are in `archive/` and `deleted/`, from the pre-`telegram_bot_optimized` architecture --
-    and it stopped on 2026-02-06 holding just 34 tickers against a 733-name universe.
-
-    The danger is not that it is empty, it is that it is NOT. Eight live readers still query
-    it, and the ones using `WHERE trade_date = MAX(trade_date)` happily return February rows
-    as if they were today's, so a signal reads as current when it is six months old. Failing
-    loudly is impossible here; the only safe move is to treat stale as absent.
-    """
-    try:
-        row = conn.execute("SELECT MAX(trade_date) FROM us_analytics_daily").fetchone()
-        if not row or not row[0]:
-            return False
-        age = (datetime.now(timezone.utc).replace(tzinfo=None).date()
-               - datetime.strptime(str(row[0])[:10], "%Y-%m-%d").date()).days
-        return age <= max_age
-    except Exception:
-        return False
 
 
 def _sync_history_from_daily(conn):

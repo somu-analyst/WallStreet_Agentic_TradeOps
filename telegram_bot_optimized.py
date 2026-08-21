@@ -30009,10 +30009,33 @@ def _spreads_scan_bot(tickers, dte_lo=20, dte_hi=45, r=0.045, top_per=4):
             T = max(dte, 1) / 365.0
             ch = t.option_chain(exp)
             calls = ch.calls.copy(); puts = ch.puts.copy()
-            for df in (calls, puts):
+            for df, _is_call in ((calls, True), (puts, False)):
                 df["mid"] = ((df["bid"].fillna(0) + df["ask"].fillna(0)) / 2).where(
                     (df["bid"] > 0) & (df["ask"] > 0), df["lastPrice"])
                 df["oi"] = df["openInterest"].fillna(0) if "openInterest" in df.columns else 0
+                # A RECOMMENDED LEG MUST HAVE A LIVE TWO-SIDED MARKET (ID 300).
+                #
+                # The mid above falls back to lastPrice when a strike has no bid/ask, and for
+                # deep-ITM strikes there often IS no market: measured on SPY 2026-09-11 with
+                # spot 765, strikes 680/685/690/694 all had bid=0 ask=0, and their stale
+                # lastPrice prints were 88.46 / 85.65 / 85.63 / 85.26 -- four strikes spanning
+                # 14 points, all priced within 3 of each other, because each print is from a
+                # different moment. Differencing two of those gave a 680/690 "debit" of 2.83
+                # for a 10-wide payoff at ~100% POP: free money that does not exist. The POP
+                # was correct; the price was fiction.
+                #
+                # An intrinsic-value floor does NOT catch this -- every one of those prints is
+                # above intrinsic. The honest test is whether anyone is quoting the strike at
+                # all. lastPrice stays fine for DISPLAY; it must never price a trade.
+                _live = (df["bid"].fillna(0) > 0) & (df["ask"].fillna(0) > 0)
+                # Belt and braces: a call can never trade below max(0, S-K), nor a put below
+                # max(0, K-S). Anything that does is stale even with a quote present.
+                _intr = ((spot - df["strike"]) if _is_call else (df["strike"] - spot)).clip(lower=0.0)
+                _bad = (~_live) | (df["mid"] < _intr * 0.98)
+                if _bad.any():
+                    log.debug("spreads: dropped %d unquoted/stale %s leg(s) on %s %s",
+                              int(_bad.sum()), "call" if _is_call else "put", tk, exp)
+                df.loc[_bad, "mid"] = 0.0                    # falls out at the mid > 0.02 gate
 
             def _near(df):
                 d = df[(df["mid"] > 0.02) & (df["strike"] >= spot * 0.85) & (df["strike"] <= spot * 1.15)]

@@ -36721,6 +36721,18 @@ def _fmt_trade_ideas(conn, top=6):
     else:
         empty.append("vertical spreads")
 
+    # Earnings by implied move (ID 302): for a premium seller the implied move IS the trade,
+    # so the richest-paying prints belong beside the spread ideas rather than in a separate
+    # command nobody remembers to run.
+    try:
+        _emc = _fmt_earnings_implied(conn, universe, within_days=10)
+        if _emc:
+            parts.append(_emc)
+        else:
+            empty.append("earnings by implied move (nothing reporting with a usable straddle)")
+    except Exception:
+        log.debug("implied-move calendar failed in ideas digest", exc_info=True)
+
     if not parts:
         return None
     if empty:
@@ -41716,6 +41728,195 @@ def _earnvol_em(conn, ticker, spot):
         return (None, None, None)
 
 
+def _earnings_implied_calendar(conn, tickers, within_days=10, limit=14):
+    """Upcoming earnings ranked by IMPLIED MOVE (ID 302).
+
+    The implied move is the ATM straddle as a percentage of spot: literally what the options
+    market will PAY you to carry the event. For a premium seller that number is the whole
+    trade, so ranking the calendar by it puts the richest-paying events on top.
+
+    Returns rows: {tk, days, date, em_pct, straddle, dte, csp_strike, csp_pct}.
+      * `csp_strike` is spot minus the implied move -- the strike the market itself says is
+        roughly a one-sigma event away, which is where a cash-secured put stops being a
+        coin flip on the print.
+
+    DELIBERATELY NOT CALLED AN EDGE. Selling the implied move only pays if implied exceeds
+    realised on THIS universe, which is a measurable claim and is NOT asserted here -- see
+    `_earnings_im_backtest` for the measurement.
+    """
+    out = []
+    for tk in list(dict.fromkeys(str(t).upper() for t in tickers))[:80]:
+        try:
+            nx = _next_earnings(tk)
+            if not nx:
+                continue
+            # `_next_earnings` returns a DICT {"date": "Aug 26", "days": 5}. Assuming a tuple
+            # here silently dropped every single row -- the calendar came back empty with no
+            # error at all, which is the failure mode worth guarding against.
+            if isinstance(nx, dict):
+                days, edate = nx.get("days"), nx.get("date")
+            elif isinstance(nx, (tuple, list)) and len(nx) > 1:
+                days, edate = nx[1], nx[0]
+            else:
+                days, edate = None, nx
+            if days is None or not (0 <= days <= within_days):
+                continue
+            spot = _last_price(tk) or 0.0
+            if spot <= 0:
+                continue
+            em_pct, straddle, dte = _earnvol_em(conn, tk, spot)
+            if not em_pct or em_pct <= 0:
+                continue
+            csp = spot * (1 - em_pct / 100.0)
+            out.append({"tk": tk, "days": int(days), "date": str(edate)[:10],
+                        "em_pct": float(em_pct), "straddle": float(straddle or 0),
+                        "dte": dte, "spot": spot,
+                        "csp_strike": csp, "csp_pct": -em_pct})
+        except Exception:
+            log.debug("implied calendar failed for %s", tk, exc_info=True)
+    out.sort(key=lambda r: -r["em_pct"])
+    return out[:limit]
+
+
+def _fmt_earnings_implied(conn, tickers=None, within_days=10):
+    """Telegram block: the earnings calendar ranked by what the market pays for the event."""
+    tks = tickers or (_positions_tickers() or []) + list(SCAN_UNIVERSE or [])[:60]
+    rows = _earnings_implied_calendar(conn, tks, within_days=within_days)
+    if not rows:
+        return None
+    tbl = _pipe_table(
+        ("Ticker", "In", "Implied", "CSP @"),
+        [(r["tk"][:6], f"{r['days']}d", f"{r['em_pct']:.1f}%", f"{r['csp_strike']:,.0f}")
+         for r in rows],
+        right_cols={1, 2, 3},
+        legend="Implied = what the ATM straddle pays for the event · "
+               "CSP @ = spot less the implied move, i.e. the strike the market itself "
+               "calls roughly one sigma away")
+    det = [f"<b>{r['tk']}</b> reports {r['date']} (in {r['days']}d) · implied "
+           f"<b>±{r['em_pct']:.1f}%</b> (straddle ${r['straddle']:.2f}) · "
+           f"spot ${r['spot']:,.2f} → a put at ${r['csp_strike']:,.0f} sits on the "
+           f"implied-move edge" for r in rows]
+    _body = "\n".join(det)
+    _note = ("<i>Implied move is what you are PAID to carry the print, not a forecast. "
+             "Selling it only wins if implied exceeds realised — /emtest measures that on "
+             "our own history rather than assuming it.</i>")
+    return f"{hdr('📅 EARNINGS BY IMPLIED MOVE')}\n{tbl}\n{_body}\n{_note}"
+
+
+def _ensure_earnings_implied(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS earnings_implied (
+            ticker TEXT, earn_date TEXT, snap_date TEXT,
+            spot REAL, straddle REAL, implied_pct REAL, dte INTEGER,
+            realised_pct REAL, settled_date TEXT,
+            PRIMARY KEY (ticker, earn_date))""")
+    conn.commit()
+
+
+async def earnings_implied_job(ctx=None):
+    """Snapshot the implied move BEFORE each print, then settle it after (ID 302).
+
+    THE EDGE CANNOT BE BACKTESTED, ONLY ACCRUED. Selling an earnings straddle only pays if
+    implied exceeds realised, and we have never stored the historical implied move -- it is
+    a live quote that is gone the moment the print lands. `earnings_history` holds 75 rows
+    across 3 tickers, so there is nothing to mine either. This is therefore an ACCRUING
+    table in the sense CLAUDE.md already defines: worthless until it accumulates, and
+    impossible to backfill. Judge it when it has a distribution, not before.
+
+    Snapshot rule: the last observation at 1-3 days before the print, which is when the
+    straddle is richest and when a seller would actually be putting the trade on.
+    """
+    conn = get_conn()
+    try:
+        _ensure_earnings_implied(conn)
+        tks = (_positions_tickers() or []) + list(SCAN_UNIVERSE or [])[:60]
+        rows = _earnings_implied_calendar(conn, tks, within_days=3, limit=40)
+        n = 0
+        for r in rows:
+            conn.execute(
+                "INSERT OR REPLACE INTO earnings_implied "
+                "(ticker, earn_date, snap_date, spot, straddle, implied_pct, dte) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (r["tk"], r["date"], _et_now().date().isoformat(), r["spot"],
+                 r["straddle"], r["em_pct"], r["dte"]))
+            n += 1
+        # Settle anything whose print has passed: realised = |move| from snapshot to now.
+        due = conn.execute(
+            "SELECT ticker, earn_date, spot FROM earnings_implied "
+            "WHERE realised_pct IS NULL AND date(earn_date) < date('now','-1 day')").fetchall()
+        s = 0
+        for tk, ed, sp in due:
+            try:
+                px = _last_price(tk)
+                if px and sp:
+                    conn.execute(
+                        "UPDATE earnings_implied SET realised_pct=?, settled_date=? "
+                        "WHERE ticker=? AND earn_date=?",
+                        (abs(px / float(sp) - 1) * 100, _et_now().date().isoformat(), tk, ed))
+                    s += 1
+            except Exception:
+                log.debug("settle failed for %s", tk, exc_info=True)
+        conn.commit()
+        if n or s:
+            log.info("earnings_implied: snapped %d, settled %d", n, s)
+    except Exception:
+        log.warning("earnings_implied_job failed", exc_info=True)
+    finally:
+        conn.close()
+
+
+async def emtest_command(update, ctx):
+    """/emtest — implied vs realised on the events we have actually observed."""
+    conn = get_conn()
+    try:
+        _ensure_earnings_implied(conn)
+        df = pd.read_sql("SELECT * FROM earnings_implied WHERE realised_pct IS NOT NULL", conn)
+    finally:
+        conn.close()
+    if df.empty:
+        conn2 = get_conn()
+        try:
+            pend = conn2.execute("SELECT COUNT(*) FROM earnings_implied").fetchone()[0]
+        except Exception:
+            pend = 0
+        finally:
+            conn2.close()
+        await update.message.reply_text(
+            f"{hdr('📐 IMPLIED vs REALISED')}\n\n"
+            f"<b>Nothing settled yet.</b> {pend} print(s) snapshotted and waiting.\n\n"
+            "<i>This cannot be backfilled: the implied move is a live quote that is gone once "
+            "the print lands, and it was never stored. So the question \"does selling earnings "
+            "pay?\" stays genuinely open here until enough events accrue — I would rather say "
+            "that than quote someone else's backtest as if it were ours.</i>", parse_mode=H)
+        return
+    df["edge"] = df["implied_pct"] - df["realised_pct"]
+    won = int((df["edge"] > 0).sum())
+    await update.message.reply_text(
+        _report("📐 IMPLIED vs REALISED",
+                ("Ticker", "Implied", "Realised", "Edge"),
+                [(r["ticker"][:6], f"{r['implied_pct']:.1f}%", f"{r['realised_pct']:.1f}%",
+                  f"{r['edge']:+.1f}") for _, r in df.tail(12).iterrows()],
+                right_cols={1, 2, 3},
+                legend="Edge = implied minus realised. Positive = the seller kept the difference",
+                notes=(f"{won}/{len(df)} prints paid the seller · median edge "
+                       f"{df['edge'].median():+.1f}pp. Thin samples lie — treat under ~30 "
+                       "events as a sighting, not a result.")), parse_mode=H)
+
+
+async def emcal_command(update, ctx):
+    """/emcal - upcoming earnings ranked by the implied move (what selling the event pays)."""
+    await update.message.reply_text("Reading straddles...", parse_mode=H)
+    conn = get_conn()
+    try:
+        tks = (_positions_tickers() or []) + list(SCAN_UNIVERSE or [])[:60]
+        msg = _fmt_earnings_implied(conn, tks, within_days=10)
+    finally:
+        conn.close()
+    await update.message.reply_text(
+        msg or "No names reporting in the next 10 days have a usable ATM straddle.",
+        parse_mode=H)
+
+
 def _earnvol_scan(conn, tickers, within_days=EARNVOL_WITHIN_DAYS):
     """Rank names reporting within `within_days` by an IV-crush score
     (rich IV rank + fat implied move = better short-premium candidate)."""
@@ -42224,6 +42425,8 @@ def main():
     app.add_handler(CommandHandler("feed", feed_command))         # public channel + LLM read
     app.add_handler(CommandHandler("llm", llm_command))           # free-LLM provider status
     app.add_handler(CommandHandler("glossary", glossary_command))  # plain-English acronyms
+    app.add_handler(CommandHandler("emcal", emcal_command))       # earnings by implied move
+    app.add_handler(CommandHandler("emtest", emtest_command))     # implied vs realised, as it accrues
     app.add_handler(CommandHandler("dealer", dealer_command))     # CFTC dealer futures book
     app.add_handler(CommandHandler("heatmap", heatmap_command))   # sector treemap
     app.add_handler(CommandHandler("breaking", breaking_command))  # news on your book
@@ -42325,6 +42528,10 @@ def main():
         _sched_once(job_queue, data_health_alert, (8, 10), "data_health_am", "Data health (AM)")  # 8:10am ET (nags until acked)
         _sched_once(job_queue, data_health_alert, (18, 30), "data_health_pm", "Data health (PM)")  # 6:30pm ET, post-EOD-lane
         # Runs BEFORE the audit at 18:35 so the audit judges freshly-synced history (ID 274).
+        # Snapshot implied move before the bell (ID 302) -- it is a live quote that cannot be
+        # recovered after the print, so missing the window loses the observation permanently.
+        _sched_once(job_queue, earnings_implied_job, (9, 15), "earnings_implied",
+                    "Earnings implied-move snapshot", days=(1, 2, 3, 4, 5))
         _sched_once(job_queue, history_sync_job, (18, 20), "history_sync",
                     "History sync (stock_daily → stock_history)")   # 6:20pm ET, post-EOD
         _sched_once(job_queue, data_audit_alert, (18, 35), "data_audit", "EOD data audit")     # 6:35pm ET

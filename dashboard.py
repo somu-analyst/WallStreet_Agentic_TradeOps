@@ -7031,9 +7031,22 @@ if page == "🌍 Market Overview":
         _wmf = go.Figure(go.Choropleth(
             locations=[r["iso"] for r in _wm_geo], z=[r["pct"] for r in _wm_geo],
             text=[f"{r['name']} {r['pct']:+.2f}%" for r in _wm_geo],
-            hovertemplate="%{text}<extra></extra>", zmid=0,
-            colorscale=[[0, "#c0392b"], [0.5, "#f4f4f4"], [1, "#1e8449"]],
-            marker_line_color="#888", marker_line_width=0.4,
+            hovertemplate="%{text}<extra></extra>",
+            # FIXED BAND, not auto-range (ID 298). Two faults compounded: the midpoint was
+            # #f4f4f4, near-white, so a flat market looked MISSING rather than flat; and with
+            # no zmin/zmax plotly scaled to the day's own range, so one 1.2% mover pushed
+            # every other country to within 0.05 of the midpoint. Measured: 8 of 11 countries
+            # sat between 0.46 and 0.62 on a 0-1 scale, i.e. all the same colour.
+            #
+            # The band is ±2%, matching a TYPICAL index day rather than the worst case. A
+            # ±10% band would technically cover a crash but would leave an ordinary ±0.3%
+            # day washed out again — the exact bug. Bigger moves simply saturate, which is
+            # the right read: -8% and -12% are both "very bad" and do not need separate hues.
+            zmid=0, zmin=-2.0, zmax=2.0,
+            colorscale=[[0.0, "#7f1d1d"], [0.25, "#dc2626"], [0.45, "#fca5a5"],
+                        [0.5, "#e5e7eb"],
+                        [0.55, "#86efac"], [0.75, "#16a34a"], [1.0, "#14532d"]],
+            marker_line_color="#5a6673", marker_line_width=0.8,
             colorbar=dict(title="% chg", thickness=12, len=0.7)))
         _wm_lab = [r for r in _wm_geo if r["iso"] in _WM_LATLON]
         if _wm_lab:
@@ -7500,9 +7513,16 @@ if page == "🌍 Market Overview":
             st.error(f"Market heatmap error: {_tme}")
 
         # ── Timestamp ──
+        # "Pulled at" alone was misleading: it is when WE fetched, not how old the DATA is,
+        # so a 15-minute-delayed quote looked current (ID 295). Measured 2026-08-21 09:05 ET:
+        # FTSE last bar 15 min old, futures/gold 10 min, Bitcoin 0 min, Nikkei 396 min
+        # because Tokyo had closed. State that instead of implying real-time.
         st.markdown(
-            f"<div>"
-            f"🕐 Data pulled at: <b>{_pulled_at}</b></div>",
+            f"<div>🕐 Fetched <b>{_pulled_at}</b> · "
+            f"quotes are <b>delayed ~10–15 min</b> (Yahoo feed), cached 60s · "
+            f"a closed market shows its <b>last print</b>, not a stale quote · "
+            f"crypto is live. Turn on <b>Auto-refresh</b> above, or this page keeps the same "
+            f"snapshot until you interact with it.</div>",
             unsafe_allow_html=True)
 
     # ── Interactive Instrument Detail Panel ──

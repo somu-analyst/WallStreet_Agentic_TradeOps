@@ -28878,11 +28878,21 @@ async def catchup_alert(ctx, replay=False):
     if replay:
         try:
             _c = get_conn()
-            _last = _app_setting(_c, "catchup_replay_ts")
-            if _last and (time.time() - float(_last)) < 1800:
-                replay = False                  # rapid restart -> missed-only
+            # ONCE PER DAY, not once per 30 minutes (ID 301). The 30-minute throttle still
+            # let every restart beyond that window replay the WHOLE day: the log showed
+            # "full replay" twice in one day, re-sending Morning alert, Game plan, Morning
+            # digest, Catalyst Radar, Action Board, Earnings Radar and India news a second
+            # time. That is the duplicate flood the user reported, and alert_dedup could not
+            # catch it because the replay path bypasses the guard by design.
+            # First start of the day still delivers everything due so far, which was the
+            # point of ID 258; later restarts fall back to sending only what was missed.
+            _last_day = _app_setting(_c, "catchup_replay_day")
+            _today = now.strftime("%Y-%m-%d")
+            if _last_day == _today:
+                replay = False                  # already replayed today -> missed-only
+                log.info("catchup: full replay already done today, sending missed only")
             else:
-                _set_app_setting(_c, "catchup_replay_ts", f"{time.time():.0f}")
+                _set_app_setting(_c, "catchup_replay_day", _today)
             _c.close()
         except Exception:
             log.debug("catchup replay throttle check failed", exc_info=True)

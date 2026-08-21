@@ -6892,9 +6892,84 @@ def _cap_2dp(data):
         return data
 
 
+# Columns whose SIGN carries meaning, so they earn red/green. Matched case-insensitively on
+# a substring, because the same idea is spelled a dozen ways across 60 tables.
+_SIGNED_COLS = ("p&l", "pnl", "chg", "change", "%", "edge", "net", "return", "ret",
+                "move", "drift", "surprise", "vs spot", "delta", "gap")
+# Columns where a number is NOT a gain/loss and must never be coloured: prices, counts,
+# strikes, identifiers. Colouring these was the trap -- a red "Entry 166.80" reads as a loss.
+_UNSIGNED_COLS = ("entry", "strike", "spot", "price", "qty", "lots", "oi", "volume",
+                  "dte", "days", "id", "count", "ticker", "date", "expiry", "limit", "theo")
+
+
+def _colour_signed(df):
+    """Red/green wash on the columns where sign means gain or loss (ID 297).
+
+    A pandas Styler, so it only affects DISPLAY -- values are untouched. Deliberately NOT a
+    gradient: a gradient re-scales to whatever happens to be in the frame, so a table of
+    small losses would paint its least-bad row bright green. Sign decides the hue and
+    MAGNITUDE only decides the strength, capped, so the colour means the same thing in every
+    table on every page.
+
+    Returns the frame unchanged when nothing qualifies, so callers never need to check.
+    """
+    try:
+        import pandas as _pd
+        if not isinstance(df, _pd.DataFrame) or df.empty:
+            return df
+        cols = []
+        for c in df.columns:
+            lc = str(c).lower()
+            if any(u in lc for u in _UNSIGNED_COLS):
+                continue
+            if not any(k in lc for k in _SIGNED_COLS):
+                continue
+            if _pd.to_numeric(df[c], errors="coerce").notna().any():
+                cols.append(c)
+        if not cols:
+            return df
+
+        # SCALE PER COLUMN, not with one global cap. A fixed cap saturates instantly on
+        # dollars: P&L of 18,045 / 8,379 / 2,010 / 463 all came out the identical green, so
+        # the column was still a monolith -- the exact complaint. The 90th percentile of
+        # |value| gives each column its own sensible top end whatever the unit, and the
+        # floor stops a column of near-zeros being amplified into noise.
+        _scale = {}
+        for c in cols:
+            v = _pd.to_numeric(df[c], errors="coerce").abs().dropna()
+            hi = float(v.quantile(0.90)) if len(v) else 0.0
+            _scale[c] = max(hi, 1e-9)
+
+        def _cell(v, col=None):
+            n = _pd.to_numeric(v, errors="coerce")
+            if n is None or _pd.isna(n) or n == 0:
+                return ""
+            a = min(abs(float(n)) / _scale.get(col, 1.0), 1.0)
+            # Sign picks the hue and always shows; magnitude only modulates the strength, so
+            # a small gain never reads as a loss just because it is the column's weakest.
+            rgb = "22,163,74" if float(n) > 0 else "220,38,38"
+            return f"background-color: rgba({rgb},{0.08 + 0.30 * a:.2f})"
+
+        sty = df.style
+        for c in cols:
+            sty = sty.map(lambda v, _c=c: _cell(v, _c), subset=[c])
+        return sty
+    except Exception:
+        return df
+
+
 def _pinned_df(data, *args, **kwargs):
     """st.dataframe with identity columns pinned. Falls back silently on older Streamlit."""
     data = _cap_2dp(data)
+    # Sign colouring at the same choke point as the 2dp cap (ID 297), so every grid in
+    # the app gets it without 60 call sites remembering to. Skipped when the caller
+    # already supplied a Styler -- their formatting wins.
+    try:
+        import pandas as _pd0
+        if isinstance(data, _pd0.DataFrame):
+            data = _colour_signed(data)
+    except Exception:
+        pass
     try:
         import pandas as _pd
         # A Styler hides its columns behind .data — read through it, or every styled table

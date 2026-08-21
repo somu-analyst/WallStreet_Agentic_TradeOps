@@ -4079,6 +4079,40 @@ def _pipe_table(header_cols, rows_data, right_cols=None, title=None, legend=None
 
     rows_data = [[_cap2(c) for c in r] for r in rows_data]
 
+    # AUTO SIGN-DOT (ID 297). Telegram <pre> supports no colour at all -- <b> is stripped
+    # inside it, proven by API probe -- so an emoji is the ONLY colour available. 99 of the
+    # bot's tables already lead with a status dot; this gives one to those that carry a
+    # signed number and do not, at the single choke point rather than across 81 call sites.
+    # Skipped when: a status column already exists, nothing is signed, or the extra 3 cells
+    # would push the table past the mobile budget -- readability beats decoration.
+    try:
+        _hdr0 = str(header_cols[0]).strip() if header_cols else ""
+        if _hdr0 not in ("", "ST", "St", "S") and rows_data:
+            _sig_i = None
+            for _i, _h in enumerate(header_cols):
+                if any(k in str(_h).lower() for k in ("chg", "%", "p&l", "pnl", "net", "edge", "ret")):
+                    _vals = [str(r[_i]) for r in rows_data if _i < len(r)]
+                    if any(v.strip().startswith(("+", "-")) for v in _vals):
+                        _sig_i = _i
+                        break
+            if _sig_i is not None:
+                _w_now = sum(max(_disp_w(str(r[c])) for r in ([list(header_cols)] + [list(x) for x in rows_data])
+                                 if c < len(r)) for c in range(len(header_cols))) + 3 * (len(header_cols) - 1)
+                if _w_now + 5 <= _TG_TABLE_BUDGET:
+                    def _dot(v):
+                        t = str(v).strip()
+                        if t.startswith("+"):
+                            return "🟢"
+                        if t.startswith("-"):
+                            return "🔴"
+                        return "⚪"
+                    header_cols = [""] + list(header_cols)
+                    rows_data = [[_dot(r[_sig_i] if _sig_i < len(r) else "")] + list(r)
+                                 for r in rows_data]
+                    right_cols = {c + 1 for c in (right_cols or set())}
+    except Exception:
+        log.debug("sign-dot decoration skipped", exc_info=True)
+
     # Company name as the LAST column, wherever a table identifies rows by ticker (ID 264).
     # Done HERE, in the one primitive every table passes through, rather than at the ~60
     # call sites -- the user asked for "all places you have Ticker", and editing that many

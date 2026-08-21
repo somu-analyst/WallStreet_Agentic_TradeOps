@@ -13808,7 +13808,7 @@ def _open_positions(conn, options_only=True, include_paper=True):
 def _book_tag(row):
     """Marker for a position row: empty for real money, an explicit flag for paper."""
     try:
-        return "" if str(row.get("_book", "REAL")).upper() == "REAL" else " 🧪"
+        return "" if str(row.get("_book", "REAL")).upper() == "REAL" else "🧪"
     except Exception:
         return ""
 
@@ -13844,6 +13844,10 @@ def _positions_card_parts(trades, now_s, today):
     # ── Per-position data collection ─────────────────────────────
     rows       = []
     _eod_list  = []                  # EOD mark per leg, parallel to rows (2nd loop builds table)
+    _book_list = []                  # book tag per leg, parallel to rows -- MUST be parallel:
+                                     # the 2nd loop unpacks `rows` and never rebinds `tr`, so
+                                     # reading tr there gave every leg the LAST row's book and
+                                     # marked real money as paper (ID 270).
     total_pnl  = 0.0
     total_cost = 0.0                 # basis, so the card can report P&L as a % (ID 217)
     urgent_lines = []
@@ -14086,6 +14090,7 @@ def _positions_card_parts(trades, now_s, today):
         # qty + expiry carried through so the card can show LONG/SHORT and the expiry date
         # (user 2026-07-21: "which is long and which is short not showing also expiry" —
         # on a spread the side IS the risk, so a leg list without it is unreadable).
+        _book_list.append(_book_tag(tr))
         rows.append((em, tk, otype[:4], strike, entry, cur_px, pnl_pct, pnl, dte_s, prob_s, oi_s,
                      action, qty, expiry_s[:10]))
         _eod_list.append(eod_px)     # parallel to rows; consumed by the table loop below
@@ -14141,7 +14146,12 @@ def _positions_card_parts(trades, now_s, today):
 
         # +/- prefix = long/short. One char, and it is the single most important fact on a
         # spread (which leg you are short determines the whole risk profile).
-        _leg = f"{_ticker_flag(tk)}{'+' if _is_long else '-'}{tk[:4]}{int(strike)}{otype[:1]}"
+        # 🧪 marks a PAPER leg (ID 270). The user allowed position alerts to cover the demo
+        # book only on condition that a demo row can never be mistaken for real money, and
+        # the card is the surface they actually read -- labelling the alert headline alone
+        # was not enough.
+        _leg = (f"{(_book_list[_ri] if _ri < len(_book_list) else '')}{_ticker_flag(tk)}"
+                f"{'+' if _is_long else '-'}{tk[:4]}{int(strike)}{otype[:1]}")
         _pnl_s = f"{pnl:+,.0f}" if abs(pnl) < 1000 else f"{'+' if pnl >= 0 else '-'}{abs(pnl)/1000:.1f}K"
         # 3-state colored circle (user wants real green/yellow/red 2026-07-17;
         # this is the only way to get genuine color in Telegram — solid emoji

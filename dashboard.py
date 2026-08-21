@@ -2259,6 +2259,49 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Force a REAL icon for the window/taskbar (ID 290). `page_icon` above works for the browser
+# tab, but Streamlit re-encodes whatever it is given into a JPEG and serves it as
+# /media/<hash>.jpg — verified: Content-Type image/jpeg, actual bytes JPEG, from a PNG source.
+# Windows will not use a JPEG as a window icon, so a Chrome `--app` window falls back to
+# Chrome's own icon in the taskbar. Pointing at a genuine .ico (the same file the desktop
+# shortcut uses) gives the window our logo with nothing to install.
+st.markdown(
+    '<link rel="icon" type="image/x-icon" href="./app/static/app.ico">'
+    '<link rel="shortcut icon" type="image/x-icon" href="./app/static/app.ico">'
+    '<link rel="apple-touch-icon" href="./app/static/icon-192.png">',
+    unsafe_allow_html=True,
+)
+# ADDING our icon is not enough: Streamlit's own /media/<hash>.jpg link is emitted FIRST and
+# can win, which is why the window showed the Streamlit logo rather than ours. This drops the
+# competing links and re-appends ours last, so there is exactly one candidate.
+# It runs through components.html because st.markdown STRIPS <script>; the component is an
+# iframe, hence window.parent.
+try:
+    import streamlit.components.v1 as _components
+    _components.html(
+        """<script>
+        (function () {
+          const doc = window.parent.document;
+          const swap = () => {
+            doc.querySelectorAll('link[rel~="icon"], link[rel="shortcut icon"]')
+               .forEach(l => { if (!l.href.endsWith('app.ico')) l.remove(); });
+            if (!doc.querySelector('link[href$="app.ico"]')) {
+              const l = doc.createElement('link');
+              l.rel = 'shortcut icon'; l.type = 'image/x-icon';
+              l.href = './app/static/app.ico';
+              doc.head.appendChild(l);
+            }
+          };
+          swap();
+          // Streamlit re-injects its favicon on rerun, so keep watching the head.
+          new MutationObserver(swap).observe(doc.head, {childList: true});
+        })();
+        </script>""",
+        height=0, width=0,
+    )
+except Exception:
+    pass
+
 # ── Access gate (Telegram Mini App / tunnel exposure) ─────────────────────────
 # Active ONLY when dash_token.txt exists (the bot creates it when it opens a
 # public cloudflared tunnel). Token comes via ?token=… and then sticks to the
@@ -16668,10 +16711,30 @@ elif page == "🎯 Next-Day Exit Planner":
                     "Open P&L": round(_sppnl), "Max P": "Unlimited" if _spup else f"${_spmaxp:,.0f}",
                     "Max L": "Unlimited" if _spdn else f"${_spmaxl:,.0f}", "POP": "—",
                     "EV": round(_spev), "Breakeven": "—"})
-                st.markdown("**📊 Summary — ticker & portfolio level** (max profit/loss to expiry, POP, EV)")
+                st.markdown(
+                    "**📊 Summary — ticker & portfolio level** (max profit/loss to expiry · "
+                    "**POP** = probability of profit · **EV** = expected value)")
                 _pinned_df(pd.DataFrame(_sumrows), hide_index=True, use_container_width=True,
-                             column_config={"Open P&L": st.column_config.NumberColumn(format="$%d"),
-                                            "EV": st.column_config.NumberColumn(format="$%d")})
+                             column_config={
+                                 "Open P&L": st.column_config.NumberColumn(format="$%d"),
+                                 # Acronyms carry their full name in hover help too (ID 291) --
+                                 # the caption scrolls away, the column header does not.
+                                 "POP": st.column_config.Column(
+                                     "POP",
+                                     help="Probability of Profit — modelled chance the position "
+                                          "finishes above breakeven at expiry. A model output, "
+                                          "not a measured hit-rate."),
+                                 "EV": st.column_config.NumberColumn(
+                                     "EV", format="$%d",
+                                     help="Expected Value — probability-weighted average P&L at "
+                                          "expiry across the modelled outcomes. Positive does not "
+                                          "mean likely; a small chance of a large gain can carry "
+                                          "it."),
+                                 "Max P": st.column_config.Column(
+                                     "Max P", help="Maximum profit if the position is held to expiry."),
+                                 "Max L": st.column_config.Column(
+                                     "Max L", help="Maximum loss if the position is held to expiry."),
+                             })
 
                 st.markdown("**🧾 Per-leg detail**")
                 # WHEN was this priced? The Now column can be a stale mark: yfinance was still
@@ -18042,21 +18105,33 @@ elif page == "🎯 Next-Day Exit Planner":
         _ep_ah_price = None
         _ep_ah_chg_pct = None
         _ep_ah_source = ""
-        _ep_ah_label = "Market open"
-        if not _ep_data_stale:
+        # Derive the label from the REAL session even on the stale path. The first pass at
+        # ID 278 only set it inside `if not _ep_data_stale`, so whenever the quote was stale
+        # -- exactly when the market is shut, which is when a user reads this -- it fell back
+        # to the hardcoded "Market open" and said the opposite of the truth.
+        _ep_ah_label = {"OPEN": "Market open", "PRE": "Pre-market",
+                        "AFTER": "After-hours", "CLOSED": "Market closed"}.get(
+                            _market_state(), "—")
+        # NOT gated on staleness any more (ID 292). The old guard reasoned that a stale quote
+        # means the after-hours price is stale too -- but both come from the SAME session, so
+        # comparing them is valid either way, and the guard fired exactly when the market was
+        # shut, which is when someone actually wants the after-hours number. Measured
+        # 2026-08-21 00:09 ET: postMarketPrice 340.80 against a 340.67 close was published and
+        # available, while the card printed "N/A / Market open". Staleness is already
+        # communicated by the "Close" label and the separate staleness warning.
+        try:
+            _ep_fi = None
             try:
-                _ep_fi = None
-                try:
-                    _ep_fi = _ep_tk_obj.fast_info
-                except Exception:
-                    _ep_fi = None
-                _ahq = _ah_quote(info=_ep_info, fast_info=_ep_fi, spot=_ep_spot)
-                _ep_ah_price = _ahq["price"]
-                _ep_ah_chg_pct = _ahq["chg_pct"]
-                _ep_ah_source = _ahq["source"]
-                _ep_ah_label = _ahq["label"]
+                _ep_fi = _ep_tk_obj.fast_info
             except Exception:
-                pass
+                _ep_fi = None
+            _ahq = _ah_quote(info=_ep_info, fast_info=_ep_fi, spot=_ep_spot)
+            _ep_ah_price = _ahq["price"]
+            _ep_ah_chg_pct = _ahq["chg_pct"]
+            _ep_ah_source = _ahq["source"]
+            _ep_ah_label = _ahq["label"]
+        except Exception:
+            pass
 
         # Use AH price as live reference — always when toggle is on, else only if available
         _use_ah_now = st.session_state.get("use_ah", False)
@@ -18731,39 +18806,39 @@ elif page == "🎯 Next-Day Exit Planner":
 
     _rec_border = "#2e7d32" if "🟢" in _rec_action else "#c62828" if "🔴" in _rec_action else "#e65100"
     st.markdown(f"""
-    <div style='background:var(--panel-solid);color:var(--text);border-left:6px solid {_rec_border};
-                padding:22px 26px;border-radius:12px;margin:12px 0;box-shadow:0 3px 12px rgba(0,0,0,0.12);'>
-        <h3>{_rec_action}</h3>
-        <p>{_rec_reason}</p>
-        <div>
-            <div>
-                <b>Suggested Limit</b>
+<div style='background:var(--panel-solid);color:var(--text);border-left:6px solid {_rec_border};
+padding:22px 26px;border-radius:12px;margin:12px 0;box-shadow:0 3px 12px rgba(0,0,0,0.12);'>
+<h3>{_rec_action}</h3>
+<p>{_rec_reason}</p>
+<div>
+<div>
+<b>Suggested Limit</b>
 ${_rec_price:.2f}
-            </div>
-            <div>
-                <b>Current Theo</b>
+</div>
+<div>
+<b>Current Theo</b>
 ${_ep_current_value:.2f}
-            </div>
-            <div>
-                <b>DTE</b>
+</div>
+<div>
+<b>DTE</b>
 {_ep_dte}
-            </div>
-            <div>
-                <b>Theta/Day</b>
+</div>
+<div>
+<b>Theta/Day</b>
 -${_ep_theta_decay * 100:.2f}
-            </div>
-            <div>
-                <b>MC Expected</b>
+</div>
+<div>
+<b>MC Expected</b>
 ${_mc_expected_val:.2f}
-            </div>
-            <div>
-                <b>P(Profit)</b>
+</div>
+<div>
+<b>P(Profit)</b>
 {_mc_prob_profit:.0f}%
-            </div>
-        </div>
-        {'<p>' + _vix_warning + '</p>' if _vix_warning else ''}
-    </div>
-    """, unsafe_allow_html=True)
+</div>
+</div>
+{'<p>' + _vix_warning + '</p>' if _vix_warning else ''}
+</div>
+""", unsafe_allow_html=True)
 
     # ═══════════════════════════════════════════════════════════════
     # 5) ORDER STRATEGY TABLE

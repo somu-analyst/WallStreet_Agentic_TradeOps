@@ -16980,9 +16980,14 @@ async def morning_alert(ctx: ContextTypes.DEFAULT_TYPE):
                 log.debug(f"ma hp {_htk}: {_e_hp}")
         if _hp_rows:
             parts.append("\n<b>🧠 HP Engine — Positions:</b>")
+            # The legend explained the emoji but never the two column names, so POC in
+            # particular was a bare acronym with no way to look it up (ID 293).
             parts.append(_pipe_table(("ST", "Tkr", "Prob", "POC"), _hp_rows,
                                      right_cols={2, 3},
-                                     legend="💰 sell-prem · 🟢 bull · 🔴 bear · ⚪ neutral"))
+                                     legend="💰 sell-prem · 🟢 bull · 🔴 bear · ⚪ neutral · "
+                                            "Prob = model confidence in the call · "
+                                            "POC = Point of Control, the price with the most "
+                                            "traded volume in range (a magnet, not a target)"))
             parts.extend(_hp_details)
         conn_hp_ma.close()
     except Exception as _e_hp_ma: log.debug(f"ma hp block: {_e_hp_ma}")

@@ -990,31 +990,117 @@ def _compute_oi_vol_change(trade_day, db_path=OB_DB):
     return len(df_out)
 
 
+def _finnhub_eod(tickers, timeout=10):
+    """{ticker: OHLC} from Finnhub /quote. Empty dict when no key.
+
+    THE POINT OF THIS LANE: yfinance is scraped, and a DATACENTER IP gets flagged by Yahoo
+    within roughly 50 requests -- this step makes ~730 a night, so the whole EOD pipeline is
+    unrunnable from any cloud host on yfinance alone. Finnhub is a keyed, official API, so
+    IP reputation does not apply. Measured 0.13s per quote; the binding limit is the free
+    tier's 60 calls/min, so ~730 tickers costs ~12 min.
+
+    /quote returns o/h/l/c but NO volume -- volume comes back NaN here, deliberately, rather
+    than being faked from another source.
+    """
+    key = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_KEY")
+    if not key:
+        return {}
+    import urllib.request as _u, json as _j, time as _t
+    out, budget = {}, 60.0 / 60.0        # free tier: 60/min -> 1s spacing
+    for i, tk in enumerate(tickers):
+        try:
+            with _u.urlopen(f"https://finnhub.io/api/v1/quote?symbol={tk}&token={key}",
+                            timeout=timeout) as r:
+                d = _j.loads(r.read())
+            if d.get("c"):
+                out[tk] = {"open": d.get("o"), "high": d.get("h"),
+                           "low": d.get("l"), "close": d.get("c"), "volume": np.nan}
+        except Exception:
+            pass
+        if i % 55 == 54:                  # stay under the per-minute cap
+            _t.sleep(60 * budget)
+    return out
+
+
+def _capture_eod(trade_day_str, db_path=OB_DB):
+    """{ticker: OHLC} from the spot ALREADY captured in options_openbb — zero API calls.
+
+    `underlying_price` was persisted for exactly this (2026-07-30). It covers ~99.6% of the
+    universe. IT IS NOT THE OFFICIAL CLOSE: it is the spot at chain-capture time, measured
+    0.00-0.87% from the settled close. That is why this is the LAST resort and not the
+    default -- writing an intraday value into a `close` column is the same class of error
+    that corrupted stock_history on 2026-07-30 (AAPL 312.33 vs a true 333.43).
+    """
+    try:
+        conn = sqlite3.connect(db_path, timeout=30)
+        df = pd.read_sql(
+            "SELECT ticker, MAX(underlying_price) AS px FROM options_openbb "
+            "WHERE trade_date=? AND underlying_price IS NOT NULL GROUP BY ticker",
+            conn, params=(trade_day_str,))
+        conn.close()
+    except Exception:
+        return {}
+    return {r["ticker"]: {"open": np.nan, "high": np.nan, "low": np.nan,
+                          "close": float(r["px"]), "volume": np.nan}
+            for _, r in df.iterrows() if r["px"] and r["px"] == r["px"]}
+
+
 def _build_stock_daily(trade_day, all_tickers, db_path=OB_DB):
-    if yf is None:
-        print("  yfinance unavailable — skip stock_daily"); return None
     trade_day_str = trade_day.strftime("%Y-%m-%d")
     print(f"Building stock_daily for {trade_day_str}...")
-    session = curl_requests.Session(impersonate="chrome") if curl_requests else None
+    # Source order is env-selectable so a cloud host can avoid yfinance entirely without a
+    # code change, and so the local nightly run keeps its existing behaviour by default.
+    #   NYSE_PRICE_SOURCE = yfinance (default) | finnhub | capture
+    src = (os.environ.get("NYSE_PRICE_SOURCE") or "yfinance").strip().lower()
+    prices = {}
+    if src == "finnhub":
+        prices = _finnhub_eod(all_tickers)
+        print(f"  price source: finnhub ({len(prices)}/{len(all_tickers)})")
+    elif src == "capture":
+        prices = _capture_eod(trade_day_str, db_path)
+        print(f"  price source: captured spot ({len(prices)}/{len(all_tickers)}) "
+              f"— NOT the official close, see _capture_eod")
+    if not prices and src != "yfinance":
+        prices = _capture_eod(trade_day_str, db_path)
+        print(f"  falling back to captured spot ({len(prices)})")
+    if not prices and yf is None:
+        print("  no price source available — skip stock_daily"); return None
+
+    # ONE query for the whole day's OI instead of one per ticker. The old loop opened a new
+    # sqlite connection per ticker -- 730 connects a night (~4s/date, ID 229).
+    try:
+        _c = sqlite3.connect(db_path, timeout=30)
+        _oi = pd.read_sql(
+            "SELECT ticker, SUM(COALESCE(openInt_Call,0)) AS coi, "
+            "SUM(COALESCE(openInt_Put,0)) AS poi FROM options_daily "
+            "WHERE trade_date=? GROUP BY ticker", _c, params=(trade_day_str,))
+        _c.close()
+        oi_map = {r["ticker"]: (r["coi"], r["poi"]) for _, r in _oi.iterrows()}
+    except Exception:
+        oi_map = {}
+
+    session = curl_requests.Session(impersonate="chrome") if (curl_requests and yf) else None
     records = []
     for ticker in all_tickers:
         try:
-            tk  = yf.Ticker(ticker, session=session)
-            end = (trade_day + timedelta(days=1)).strftime("%Y-%m-%d")
-            hist = tk.history(start=trade_day_str, end=end, interval="1d")
-            if hist.empty: hist = tk.history(period="1d")
-            if hist.empty: continue
-            r = hist.iloc[-1]
-            conn = sqlite3.connect(db_path, timeout=30)
-            df_opt = pd.read_sql("SELECT openInt_Call, openInt_Put FROM options_daily "
-                                 "WHERE ticker=? AND trade_date=?", conn, params=(ticker, trade_day_str))
-            conn.close()
-            coi = df_opt["openInt_Call"].fillna(0).sum() if not df_opt.empty else 0
-            poi = df_opt["openInt_Put"].fillna(0).sum()  if not df_opt.empty else 0
+            px = prices.get(ticker)
+            if px is None:
+                if yf is None:
+                    continue
+                tk  = yf.Ticker(ticker, session=session)
+                end = (trade_day + timedelta(days=1)).strftime("%Y-%m-%d")
+                hist = tk.history(start=trade_day_str, end=end, interval="1d")
+                if hist.empty: hist = tk.history(period="1d")
+                if hist.empty: continue
+                r = hist.iloc[-1]
+                px = {"open": float(r.get("Open", np.nan)), "high": float(r.get("High", np.nan)),
+                      "low": float(r.get("Low", np.nan)), "close": float(r.get("Close", np.nan)),
+                      "volume": float(r.get("Volume", np.nan))}
+            coi, poi = oi_map.get(ticker, (0, 0))
             records.append({"ticker": ticker, "trade_date": trade_day_str,
-                            "open": float(r.get("Open", np.nan)), "high": float(r.get("High", np.nan)),
-                            "low":  float(r.get("Low",  np.nan)), "close": float(r.get("Close", np.nan)),
-                            "volume": float(r.get("Volume", np.nan)),
+                            "open": px["open"], "high": px["high"],
+                            "low": px["low"], "close": px["close"],
+                            "volume": px["volume"],
                             "pcr_oi": (poi / coi if coi > 0 else np.nan),
                             "load_date": _current_load_date()})
         except Exception as e:

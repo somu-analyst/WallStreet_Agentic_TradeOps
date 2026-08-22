@@ -90,22 +90,35 @@ def gate_c(limit=3):
     # takes FOUR args (obb, ticker, provider, trade_dt), so every call threw and the gate
     # reported 0/3 on a machine where the capture demonstrably works. A false FAIL on the
     # deciding gate is worse than no gate at all, hence the note.
-    got, rows, tried = 0, 0, ["SPY", "AAPL", "MSFT"][:limit]
-    err = ""
+    tried = ["SPY", "AAPL", "MSFT"][:limit]
+    # BOTH capture paths, reported separately -- they fail independently and the distinction
+    # is the whole answer. If the PRIMARY is blocked from a datacenter but the CDN fallback
+    # holds, the migration still works; if both die, it does not.
+    prim_ok = prim_rows = 0
+    try:
+        from openbb import obb
+        for tk in tried:
+            try:
+                df = N.fetch_chain_openbb(obb, tk, "cboe", datetime.now())
+                if df is not None and len(df):
+                    prim_ok += 1; prim_rows += len(df)
+            except Exception:
+                pass
+    except Exception:
+        prim_ok = -1                                   # openbb not importable here
+    cdn_ok = cdn_rows = 0
     for tk in tried:
         try:
             df = N._fetch_chain_cdn(tk, datetime.now())
             if df is not None and len(df):
-                got += 1
-                rows += len(df)
-        except Exception as e:
-            err = f"{type(e).__name__}: {e}"[:50]
-    where = ("THIS IS A DATACENTER IP — result is authoritative" if _is_cloud()
+                cdn_ok += 1; cdn_rows += len(df)
+        except Exception:
+            pass
+    where = ("DATACENTER IP — authoritative" if _is_cloud()
              else "residential IP — NOT proof for a datacenter")
-    detail = f"{got}/{len(tried)} chains, {rows:,} rows · {where}"
-    if not got and err:
-        detail += f" · last error {err}"
-    return got > 0, detail
+    prim_txt = "openbb not installed" if prim_ok < 0 else f"primary {prim_ok}/{len(tried)} ({prim_rows:,} rows)"
+    detail = f"{prim_txt} · CDN fallback {cdn_ok}/{len(tried)} ({cdn_rows:,} rows) · {where}"
+    return (max(prim_ok, 0) + cdn_ok) > 0, detail
 
 
 @gate("D. Database read/write")

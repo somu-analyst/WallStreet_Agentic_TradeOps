@@ -445,7 +445,14 @@ def _fetch_chain_cdn(ticker, trade_dt):
             return None
         d = js["data"]
         spot = d.get("current_price") or d.get("close")
-        cutoff = trade_dt + timedelta(days=MAX_HORIZON_DAYS)
+        # .date() matters: `exp` below is a date, and comparing date > datetime raises
+        # TypeError. That exception was swallowed by the outer handler, so this CDN
+        # fallback returned None for EVERY ticker, always -- silently. Nothing noticed
+        # because it is only a fallback and the primary OpenBB path was succeeding; it
+        # would have surfaced the first night the vanilla client got throttled, which is
+        # exactly the situation this "throttle-buster" exists to rescue (found 2026-08-22
+        # while probing whether the capture survives a datacenter IP).
+        cutoff = (trade_dt + timedelta(days=MAX_HORIZON_DAYS)).date()
         rows = []
         for o in d["options"]:
             m = re.match(r"^(.+?)(\d{6})([CP])(\d{8})$", str(o.get("option") or ""))

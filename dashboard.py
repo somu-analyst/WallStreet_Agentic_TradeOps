@@ -24223,14 +24223,24 @@ if page == "💧 Money Flow (Sankey)":
         try:
             with st.spinner(f"Pulling {_sk_tk}'s income statement…"):
                 _sk_fig, _sk_s = _sk_build(_sk_tk, _sk_per == "Quarter")
+            import telegram_bot_optimized as _tb_fmt
+            # Same unit as the diagram, chosen from the largest line, so the metric row and
+            # the chart agree instead of one saying 117,885M and the other $118B.
+            _dv, _un = _tb_fmt._sk_unit(max(_sk_s["revenue"], _sk_s["gross"],
+                                            _sk_s["net"], _sk_s["opex"]))
+            _fm = lambda v: _tb_fmt._sk_money(v, _un, "$", _dv)
             _m = _sk_s["net"] / _sk_s["revenue"] * 100
             _k = st.columns(4)
-            _k[0].metric("Revenue", f"${_sk_s['revenue']:,.0f}M")
-            _k[1].metric("Gross profit", f"${_sk_s['gross']:,.0f}M",
-                         f"{_sk_s['gross'] / _sk_s['revenue'] * 100:.0f}% margin")
-            _k[2].metric("Operating income", f"${_sk_s['opinc']:,.0f}M",
+            _k[0].metric("Revenue", _fm(_sk_s["revenue"]))
+            # Banks and insurers file no cost-of-revenue line, so gross equals revenue and a
+            # "100% margin" caption would assert something the filing never said.
+            _no_cogs = _sk_s["cogs"] <= 0.5
+            _k[1].metric("Gross profit", "—" if _no_cogs else _fm(_sk_s["gross"]),
+                         "not reported" if _no_cogs
+                         else f"{_sk_s['gross'] / _sk_s['revenue'] * 100:.0f}% margin")
+            _k[2].metric("Operating income", _fm(_sk_s["opinc"]),
                          f"{_sk_s['opinc'] / _sk_s['revenue'] * 100:.0f}% margin")
-            _k[3].metric("Net income", f"${_sk_s['net']:,.0f}M", f"{_m:.0f}% margin")
+            _k[3].metric("Net income", _fm(_sk_s["net"]), f"{_m:.0f}% margin")
             st.plotly_chart(_sk_fig, use_container_width=True,
                             config={"displayModeBar": False})
             st.caption(f"**{_sk_s['company']}** · {_sk_s['period']} · $ millions. Hover any "

@@ -27653,21 +27653,66 @@ _SK_YF_ROWS = {
     "rnd":     ("Research And Development", "ResearchAndDevelopment"),
     "sga":     ("Selling General And Administration", "SellingGeneralAndAdministration"),
     "opex":    ("Operating Expense", "OperatingExpense", "Total Operating Expenses"),
+    "pretax":  ("Pretax Income", "PretaxIncome", "Income Before Tax"),
+    "cogs_only": ("Cost Of Revenue", "CostOfRevenue", "Reconciled Cost Of Revenue"),
 }
 
 
-def _sk_money(v, unit="M", cur="$"):
-    return f"{cur}{v:,.0f}{unit}"
+def _sk_unit(max_millions):
+    """(divisor, suffix) for a statement whose largest line is `max_millions` millions.
+
+    Chosen from the LARGEST value in the statement, not per node, for two reasons: a diagram
+    mixing "109,417M" against "$2.4B" is unreadable, and scaling each node independently
+    would print a $15M tax line as "0.0B" beside a "$109.4B" revenue. One unit per diagram
+    keeps the flows visually comparable, which is the whole point of a Sankey.
+    """
+    m = abs(float(max_millions or 0))
+    if m >= 1_000_000:
+        return 1_000_000.0, "T"
+    if m >= 1_000:
+        return 1_000.0, "B"
+    if m < 1:
+        return 0.001, "K"
+    return 1.0, "M"
 
 
-def _sk_label(name, value, yoy, unit="M", cur="$"):
+def _sk_money(v, unit="M", cur="$", div=1.0):
+    """Money at the statement's chosen unit. Sub-unit values keep one decimal so a small line
+    does not collapse to $0B next to a large one."""
+    x = float(v) / (div or 1.0)
+    return f"{cur}{x:,.1f}{unit}" if (abs(x) < 100 and unit in ("B", "T")) else f"{cur}{x:,.0f}{unit}"
+
+
+def _sk_label(name, value, yoy, unit="M", cur="$", div=1.0):
     """Node label: name, amount, and the year-over-year move beneath it. The level says how
     big the business is; the change says what is happening to it."""
-    out = f"<b>{name}</b><br>{_sk_money(value, unit, cur)}"
+    out = f"<b>{name}</b><br>{_sk_money(value, unit, cur, div)}"
     if yoy is not None:
         out += (f"<br><span style='font-size:11px'>"
                 f"{'▲' if yoy >= 0 else '▼'} {yoy:+.0f}% Y/Y</span>")
     return out
+
+
+# Exchange suffixes that legitimately follow a dot. Anything else after a dot is a SHARE
+# CLASS, which Yahoo writes with a hyphen -- BRK.B is BRK-B there, and asking for the dotted
+# form returns no statement at all. RELIANCE.NS and BP.L must NOT be touched, which is why
+# this is a known-suffix list rather than a blanket dot-to-hyphen swap.
+_YF_EXCH_SUFFIX = {
+    "NS", "BO", "L", "T", "TO", "V", "AX", "DE", "F", "PA", "AS", "BR", "MI", "MC",
+    "LS", "VI", "ST", "OL", "CO", "HE", "IC", "SW", "HK", "SS", "SZ", "KS", "KQ",
+    "TW", "TWO", "SI", "JK", "BK", "NZ", "SA", "MX", "BA", "IL", "TA", "IS", "WA",
+    "PR", "AT", "CR", "JO", "QA", "SR", "AE", "KL",
+}
+
+
+def _yf_symbol(ticker):
+    """Yahoo's spelling of a symbol. BRK.B -> BRK-B, RELIANCE.NS -> unchanged."""
+    tk = str(ticker or "").upper().strip()
+    if "." in tk:
+        head, _, tail = tk.rpartition(".")
+        if head and tail not in _YF_EXCH_SUFFIX:
+            return f"{head}-{tail}"
+    return tk
 
 
 def _income_stmt(ticker, quarterly=True, unit_div=1e6):
@@ -27680,8 +27725,14 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
     every headline figure is the one the company actually reported, instead of a recomputed
     number that disagrees with their own press release.
     """
-    t = _yf_ticker(ticker)
+    sym = _yf_symbol(ticker)                      # BRK.B -> BRK-B; NSE suffixes untouched
+    t = _yf_ticker(sym)
     df = t.quarterly_income_stmt if quarterly else t.income_stmt
+    if (df is None or df.empty) and quarterly:
+        # Plenty of issuers file only annually, or Yahoo carries no quarterly frame for them.
+        # Falling back beats telling the user the company publishes nothing.
+        df = t.income_stmt
+        quarterly = False
     if df is None or df.empty:
         raise ValueError(f"no income statement published for {ticker}")
 
@@ -27696,10 +27747,24 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
                     continue
         return None
 
-    rev, gross = pick("revenue"), pick("gross")
-    opinc, net, tax = pick("opinc"), pick("net"), pick("tax") or 0.0
-    if None in (rev, gross, opinc, net):
-        raise ValueError(f"{ticker}: the filed statement is missing a required line")
+    rev, net, tax = pick("revenue"), pick("net"), pick("tax") or 0.0
+    if rev is None or net is None:
+        raise ValueError(f"{ticker}: the filed statement has no revenue or net income line")
+    # BANKS AND INSURERS DO NOT REPORT GROSS PROFIT OR OPERATING INCOME. Berkshire's statement
+    # carries Total Revenue, Pretax Income, Tax and Net Income and nothing in between, so
+    # demanding the standard chain refused a company that obviously files. Degrade instead:
+    #   gross  -> reported, else revenue minus cost of revenue, else revenue (no cost breakout)
+    #   opinc  -> reported, else pretax income, else net + tax
+    # The picture stays truthful; it just has fewer stages for a business that reports fewer.
+    gross = pick("gross")
+    if gross is None:
+        _cost = pick("cogs_only")
+        gross = (rev - _cost) if _cost is not None else rev
+    opinc = pick("opinc")
+    if opinc is None:
+        opinc = pick("pretax")
+    if opinc is None:
+        opinc = net + tax
     rnd, sga = pick("rnd"), pick("sga")
     opex = {}
     if sga:
@@ -27710,7 +27775,7 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
     if residual > 0.5:
         opex["Other opex"] = residual
     if not opex:
-        opex["Operating expenses"] = max(gross - opinc, 0.0)
+        opex["Costs & expenses"] = max(gross - opinc, 0.0)
 
     # Year-over-year against the SAME quarter a year ago (4 columns back). Comparing Q2 with
     # Q1 would read seasonality as growth.
@@ -27744,6 +27809,8 @@ def _sankey_fig(s, width=1150, height=620):
         raise ValueError(f"cannot draw a flow: {', '.join(bad)} is zero or negative "
                          f"(a Sankey has no way to show a negative flow)")
 
+    # ONE unit for the whole diagram, picked from the largest line (ID 325).
+    _div, _unit = _sk_unit(max(s["revenue"], s["gross"], s["net"], s["opex"]))
     labels, colors, idx = [], [], {}
 
     def node(key, value, color):
@@ -27752,7 +27819,7 @@ def _sankey_fig(s, width=1150, height=620):
         written by hand."""
         if key not in idx:
             idx[key] = len(labels)
-            labels.append(_sk_label(key, value, s["yoy"].get(key)))
+            labels.append(_sk_label(key, value, s["yoy"].get(key), _unit, "$", _div))
             colors.append(color)
         return idx[key]
 

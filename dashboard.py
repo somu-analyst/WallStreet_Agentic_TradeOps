@@ -386,6 +386,30 @@ def _updown_pair(hist, close_col="Close"):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _tg_md(text):
+    """Convert the engine's TELEGRAM HTML into Streamlit Markdown.
+
+    The engine emits HTML because Telegram renders HTML — `_signal_writeup`, the scanners and
+    the radar all return `<b>…</b>`. Streamlit's `st.markdown` does NOT render raw HTML unless
+    `unsafe_allow_html=True`, and `st.warning`/`st.error`/`st.success` cannot take that flag at
+    all. So engine text interpolated into a markdown call renders its tags as literal
+    characters: the Market Radar showed "<b>What followed, measured on 38 days:</b>" on screen.
+
+    Converting is the right fix rather than switching those calls to unsafe HTML — it keeps the
+    coloured status boxes, and it means engine text can be dropped into any Streamlit markdown
+    context without thinking about it.
+    """
+    import html as _h
+    import re as _re
+    s = str(text or "")
+    s = _re.sub(r"</?(?:b|strong)>", "**", s)
+    s = _re.sub(r"</?(?:i|em)>", "*", s)
+    s = _re.sub(r"</?code>", "`", s)
+    s = _re.sub(r"<br\s*/?>", "  \n", s)
+    s = _re.sub(r"</?[a-zA-Z][^>]*>", "", s)          # drop any remaining tag
+    return _h.unescape(s)                              # &gt; -> >, &amp; -> &
+
+
 def _hist_for(tk, period="90d"):
     """Daily history for a symbol, resolving a BARE foreign ticker to its Yahoo alias.
 
@@ -7054,12 +7078,16 @@ if page == "🌍 Market Overview":
         _t = _ro["turbulence"]; _d = _ro["direction"]
         _rfn = st.error if _t["level"] == "HIGH" else (st.warning if _t["level"] == "ELEVATED" else st.success)
         _rfn(f"{_ro['remoji']} **Market Radar — {_ro['headline']}**")
-        st.markdown(f"🌪️ **Big-move risk (next ~week): {_t['level']}** — {_t['text']}")
-        st.markdown(f"🧭 **Direction lean: {_d['lean']}** _(low confidence)_ — {_d['text']}")
-        st.markdown(f"👉 **Bottom line:** {_ro['action']}")
+        # Engine text is Telegram HTML; these are Markdown calls. Without _tg_md the tags
+        # render as literal characters on screen (user report: "<b>What followed, measured
+        # on 38 days:</b>"). st.warning/error/success cannot take unsafe_allow_html, so
+        # converting at the boundary is the fix, not switching to raw HTML.
+        st.markdown(f"🌪️ **Big-move risk (next ~week): {_t['level']}**\n\n{_tg_md(_t['text'])}")
+        st.markdown(f"🧭 **Direction lean: {_d['lean']}** _(low confidence)_ — {_tg_md(_d['text'])}")
+        st.markdown(f"👉 **Bottom line:** {_tg_md(_ro['action'])}")
         _nd = _ro.get("nextday")
         if _nd:
-            st.markdown(f"📅 **Next session — {_nd['lean']}**  \n{_nd['text']}")
+            st.markdown(f"📅 **Next session — {_nd['lean']}**  \n{_tg_md(_nd['text'])}")
         with st.expander("Context (not proven predictive)", expanded=False):
             _pinned_df(pd.DataFrame([{"": p["emoji"], "Signal": p["label"],
                                         "Reading": p["reading"], "Note": p["why"]} for p in _ro["pillars"]]),

@@ -27631,13 +27631,187 @@ async def heatmap_command(update, ctx):
 
 
 
+# ── Company money-flow (Sankey) ──────────────────────────────────────────────────────
+# Lives HERE, in the engine, not in a helper module: house rule is that this file and
+# dashboard.py are the canonical ones, and the dashboard reaches the engine through
+# _TB_ENGINE rather than importing side modules.
+#
+# Colour is convention, not decoration: money kept is green, money spent is red, and links
+# take their destination's hue at low alpha so a flow reads as "where this went". Revenue is
+# GREY on purpose -- it is not yet profit or cost, and colouring it green would prejudge the
+# statement. `_money` is already taken twice in this file, hence the _sk_ prefix throughout.
+_SK_GREEN, _SK_GREEN_L = "#16a34a", "rgba(22,163,74,0.38)"
+_SK_RED, _SK_RED_L = "#dc2626", "rgba(220,38,38,0.30)"
+_SK_GREY, _SK_GREY_L = "#6b7280", "rgba(156,163,175,0.32)"
+
+_SK_YF_ROWS = {
+    "revenue": ("Total Revenue", "TotalRevenue", "Operating Revenue"),
+    "gross":   ("Gross Profit", "GrossProfit"),
+    "opinc":   ("Operating Income", "OperatingIncome", "Total Operating Income As Reported"),
+    "net":     ("Net Income", "NetIncome", "Net Income Common Stockholders"),
+    "tax":     ("Tax Provision", "TaxProvision", "Income Tax Expense"),
+    "rnd":     ("Research And Development", "ResearchAndDevelopment"),
+    "sga":     ("Selling General And Administration", "SellingGeneralAndAdministration"),
+    "opex":    ("Operating Expense", "OperatingExpense", "Total Operating Expenses"),
+}
+
+
+def _sk_money(v, unit="M", cur="$"):
+    return f"{cur}{v:,.0f}{unit}"
+
+
+def _sk_label(name, value, yoy, unit="M", cur="$"):
+    """Node label: name, amount, and the year-over-year move beneath it. The level says how
+    big the business is; the change says what is happening to it."""
+    out = f"<b>{name}</b><br>{_sk_money(value, unit, cur)}"
+    if yoy is not None:
+        out += (f"<br><span style='font-size:11px'>"
+                f"{'▲' if yoy >= 0 else '▼'} {yoy:+.0f}% Y/Y</span>")
+    return out
+
+
+def _income_stmt(ticker, quarterly=True, unit_div=1e6):
+    """A company's income statement, shaped for the flow diagram.
+
+    REPORTED SUBTOTALS WIN; RESIDUALS ARE DERIVED. A filing's gross profit and operating
+    income are authoritative, but rounded to millions they rarely reconcile to the cent
+    against the other lines -- so cost of revenue is taken as revenue minus gross profit, and
+    other income as net plus tax minus operating income. The diagram then always balances AND
+    every headline figure is the one the company actually reported, instead of a recomputed
+    number that disagrees with their own press release.
+    """
+    t = _yf_ticker(ticker)
+    df = t.quarterly_income_stmt if quarterly else t.income_stmt
+    if df is None or df.empty:
+        raise ValueError(f"no income statement published for {ticker}")
+
+    def pick(key, col=0):
+        for name in _SK_YF_ROWS[key]:
+            if name in df.index:
+                try:
+                    v = float(df.loc[name].iloc[col])
+                    if v == v:
+                        return v / unit_div
+                except Exception:
+                    continue
+        return None
+
+    rev, gross = pick("revenue"), pick("gross")
+    opinc, net, tax = pick("opinc"), pick("net"), pick("tax") or 0.0
+    if None in (rev, gross, opinc, net):
+        raise ValueError(f"{ticker}: the filed statement is missing a required line")
+    rnd, sga = pick("rnd"), pick("sga")
+    opex = {}
+    if sga:
+        opex["SG&A"] = sga
+    if rnd:
+        opex["R&D"] = rnd
+    residual = (gross - opinc) - sum(opex.values())
+    if residual > 0.5:
+        opex["Other opex"] = residual
+    if not opex:
+        opex["Operating expenses"] = max(gross - opinc, 0.0)
+
+    # Year-over-year against the SAME quarter a year ago (4 columns back). Comparing Q2 with
+    # Q1 would read seasonality as growth.
+    yoy, back = {}, (4 if quarterly else 1)
+    if df.shape[1] > back:
+        for key, lbl in (("revenue", "Total revenue"), ("gross", "Gross profit"),
+                         ("opinc", "Operating income"), ("net", "Net income"),
+                         ("tax", "Taxes"), ("rnd", "R&D"), ("sga", "SG&A")):
+            now, then = pick(key), pick(key, back)
+            if now is not None and then not in (None, 0):
+                yoy[lbl] = (now / then - 1) * 100
+
+    name = str(ticker).upper()
+    try:
+        name = (t.info or {}).get("shortName") or name
+    except Exception:
+        pass
+    period = str(df.columns[0])[:10]
+    return {"company": name, "period": (f"quarter ending {period}" if quarterly
+                                        else f"FY {period}"),
+            "revenue": rev, "cogs": rev - gross, "gross": gross,
+            "opex_parts": opex, "opex": gross - opinc, "opinc": opinc,
+            "other": max(net + tax - opinc, 0.0), "tax": tax, "net": net, "yoy": yoy}
+
+
+def _sankey_fig(s, width=1150, height=620):
+    """Plotly figure for one income statement. Raises if the flows do not balance."""
+    import plotly.graph_objects as _go
+    bad = [k for k in ("revenue", "gross", "opinc", "net") if (s.get(k) or 0) <= 0]
+    if bad:
+        raise ValueError(f"cannot draw a flow: {', '.join(bad)} is zero or negative "
+                         f"(a Sankey has no way to show a negative flow)")
+
+    labels, colors, idx = [], [], {}
+
+    def node(key, value, color):
+        """Allocate each node's index ONCE. Every link is (source_index, target_index) and
+        Plotly draws a confidently wrong diagram when one is off by one, so indices are never
+        written by hand."""
+        if key not in idx:
+            idx[key] = len(labels)
+            labels.append(_sk_label(key, value, s["yoy"].get(key)))
+            colors.append(color)
+        return idx[key]
+
+    src, tgt, val, lnk = [], [], [], []
+
+    def link(a, b, v, color):
+        if v and v > 0:
+            src.append(a); tgt.append(b); val.append(v); lnk.append(color)
+
+    total = node("Total revenue", s["revenue"], _SK_GREY)
+    gross = node("Gross profit", s["gross"], _SK_GREEN)
+    link(total, gross, s["gross"], _SK_GREEN_L)
+    link(total, node("Cost of revenue", s["cogs"], _SK_RED), s["cogs"], _SK_RED_L)
+    opinc = node("Operating income", s["opinc"], _SK_GREEN)
+    link(gross, opinc, s["opinc"], _SK_GREEN_L)
+    opex = node("Operating expenses", s["opex"], _SK_RED)
+    link(gross, opex, s["opex"], _SK_RED_L)
+    for nm, amt in s["opex_parts"].items():
+        link(opex, node(nm, amt, _SK_RED), amt, _SK_RED_L)
+    net = node("Net income", s["net"], _SK_GREEN)
+    link(opinc, net, s["opinc"] - s["tax"], _SK_GREEN_L)
+    link(opinc, node("Taxes", s["tax"], _SK_RED), s["tax"], _SK_RED_L)
+    if s["other"] > 0:
+        # Other income joins at the END: it never passed through gross profit, and routing it
+        # earlier would overstate operating performance.
+        link(node("Other income", s["other"], _SK_GREEN), net, s["other"], _SK_GREEN_L)
+
+    margin = s["net"] / s["revenue"] * 100
+    fig = _go.Figure(_go.Sankey(
+        arrangement="snap",
+        # textfont set explicitly: Plotly's default draws labels with a halo meant to lift
+        # them off a light ground, and over the coloured node bars it reads as smudged
+        # doubled text.
+        textfont=dict(color="#111827", size=11.5,
+                      family="IBM Plex Sans, Segoe UI, sans-serif"),
+        node=dict(pad=34, thickness=15, line=dict(color="rgba(0,0,0,0)", width=0),
+                  label=labels, color=colors,
+                  hovertemplate="%{label}<br>%{value:,.0f}M<extra></extra>"),
+        link=dict(source=src, target=tgt, value=val, color=lnk,
+                  hovertemplate="%{source.label} → %{target.label}"
+                                "<br><b>%{value:,.0f}M</b><extra></extra>")))
+    fig.update_layout(
+        title=dict(text=f"<b>{s['company']}</b> — how the money flows &nbsp;·&nbsp; "
+                        f"<span style='font-size:14px;color:#6b7280'>{s['period']}"
+                        f" &nbsp;·&nbsp; net margin {margin:.0f}%</span>",
+                   x=0.02, xanchor="left", font=dict(size=20)),
+        font=dict(family="IBM Plex Sans, Segoe UI, sans-serif", size=12.5, color="#171d24"),
+        paper_bgcolor="white", width=width, height=height,
+        margin=dict(l=14, r=14, t=72, b=22))
+    return fig
+
+
 async def sankey_command(update, ctx):
     """/sankey TICKER [annual] — how a company's money flows, revenue through to net income.
 
     The browser tools for this (SankeyMATIC, Sankey Open Studio) all make you TYPE the
     figures in. Pulling them from the filing is the only part worth automating -- and it is
     where the mistakes are, since a Sankey renders unbalanced numbers without complaint.
-    `sankey_income.from_yfinance` takes the reported subtotals and derives the residuals, so
+    `_income_stmt` takes the reported subtotals and derives the residuals, so
     the picture always balances and still matches the company's own headline numbers.
     """
     args = [a for a in (getattr(ctx, "args", []) or [])]
@@ -27653,9 +27827,8 @@ async def sankey_command(update, ctx):
     quarterly = not any(str(a).lower() in ("annual", "yearly", "fy", "year") for a in args[1:])
     wait = await update.message.reply_text(f"💧 Building {tk} money flow…", parse_mode=H)
     try:
-        from sankey_income import from_yfinance, build_sankey
-        stmt = from_yfinance(tk, quarterly=quarterly)
-        fig = build_sankey(stmt, width=1180, height=620)
+        stmt = _income_stmt(tk, quarterly=quarterly)
+        fig = _sankey_fig(stmt, width=1180, height=620)
         png = fig.to_image(format="png", scale=2)      # kaleido
     except Exception as e:
         try:
@@ -27671,26 +27844,26 @@ async def sankey_command(update, ctx):
         await wait.delete()
     except Exception:
         pass
-    m = stmt.net_income / stmt.total_revenue * 100
+    m = stmt["net"] / stmt["revenue"] * 100
     await update.message.reply_photo(
         png, caption=(f"💧 <b>{stmt.company}</b> — {stmt.period}\n"
-                      f"Revenue ${stmt.total_revenue:,.0f}M → net ${stmt.net_income:,.0f}M "
+                      f"Revenue ${stmt['revenue']:,.0f}M → net ${stmt['net']:,.0f}M "
                       f"({m:.0f}% margin)"), parse_mode=H)
     await update.message.reply_text(
         _report(f"💧 {tk} INCOME FLOW",
                 ("Line", "Amount", "of rev"),
-                [("Revenue", f"{stmt.total_revenue:,.0f}", "100%"),
-                 ("Cost of rev", f"-{stmt.cost_of_revenue:,.0f}",
-                  f"{stmt.cost_of_revenue / stmt.total_revenue * 100:.0f}%"),
-                 ("Gross profit", f"{stmt.gross_profit:,.0f}",
-                  f"{stmt.gross_profit / stmt.total_revenue * 100:.0f}%"),
-                 ("Op expenses", f"-{stmt.total_opex:,.0f}",
-                  f"{stmt.total_opex / stmt.total_revenue * 100:.0f}%"),
-                 ("Op income", f"{stmt.operating_income:,.0f}",
-                  f"{stmt.operating_income / stmt.total_revenue * 100:.0f}%"),
-                 ("Taxes", f"-{stmt.taxes:,.0f}",
-                  f"{stmt.taxes / stmt.total_revenue * 100:.0f}%"),
-                 ("Net income", f"{stmt.net_income:,.0f}", f"{m:.0f}%")],
+                [("Revenue", f"{stmt["revenue"]:,.0f}", "100%"),
+                 ("Cost of rev", f"-{stmt["cogs"]:,.0f}",
+                  f"{stmt["cogs"] / stmt["revenue"] * 100:.0f}%"),
+                 ("Gross profit", f"{stmt["gross"]:,.0f}",
+                  f"{stmt["gross"] / stmt["revenue"] * 100:.0f}%"),
+                 ("Op expenses", f"-{stmt["opex"]:,.0f}",
+                  f"{stmt["opex"] / stmt["revenue"] * 100:.0f}%"),
+                 ("Op income", f"{stmt["opinc"]:,.0f}",
+                  f"{stmt["opinc"] / stmt["revenue"] * 100:.0f}%"),
+                 ("Taxes", f"-{stmt["tax"]:,.0f}",
+                  f"{stmt["tax"] / stmt["revenue"] * 100:.0f}%"),
+                 ("Net income", f"{stmt["net"]:,.0f}", f"{m:.0f}%")],
                 right_cols={1, 2}, legend="$ millions · figures as filed",
                 notes="Subtotals are the company's reported ones; residuals derived so the "
                       "flow balances."), parse_mode=H)

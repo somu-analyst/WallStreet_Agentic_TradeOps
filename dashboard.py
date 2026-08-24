@@ -6268,6 +6268,7 @@ _PAGE_HELP = {
     "🔄 Rotation Tracker":       "Where money is rotating, high→low: Macro (CROSS-ASSET — equities vs bonds, gold, commodities, crypto, $) → Sectors → Themes/Industries → Stocks. RRG logic vs SPY on two axes — leadership (3mo excess) and momentum (improving vs fading) — placing each into Leading / Weakening (money leaving) / Improving (money entering) / Lagging. Visual rotation map + IN/OUT calls + a risk-on/off tilt, with daily transition tracking.",
     "🫧 Anti-Bubble Radar":      "Khoo-style 'great repricing' screen for ANY tickers — flags 🔴 cyclical traps (crowded, vertical, peak-earnings names like memory/semis) to avoid, and 🟢 anti-bubble quality (wide moat, durable earnings, below intrinsic value, not overextended) to accumulate. Picks are auto-tracked so you can see whether quality is beating cyclicals over time.",
     "🎛️ Command Center":         "Your whole system on ONE screen — market weather (Radar turbulence + direction + next-session SPY levels), your open book (live P&L, expiring soon), the top ⭐ consensus trade ideas, and what fired today. Start here; drill into other pages only when needed.",
+    "💧 Money Flow (Sankey)":    "How a company turns revenue into profit, as a flow diagram — revenue splits into gross profit and cost of sales, gross profit into operating income and expenses, operating income into net income and tax. Figures come from the company's own filed statement rather than being typed in, and every subtotal is checked to balance before anything is drawn.",
     "🌍 Market Overview":        "Big-picture market snapshot. VIX, sector rotation, Fear & Greed, macro correlations, and top OI movers. Start here every morning.",
     "🔬 OI Comparison Charts":   "Deep-dive OI analysis per ticker and expiry. Compare Open Interest changes between two dates to spot institutional positioning, gamma walls, and money flow direction.",
     "🔥 OI Analytics & Prediction": "AI-style OI signal engine. Runs 5-factor composite scoring (OI bias, PCR, volume, flow pattern, GEX) to generate BULLISH/BEARISH/NEUTRAL signals with next-day backtest.",
@@ -6339,6 +6340,7 @@ with st.sidebar:
             "🎯 Signal Accuracy",
         ],
         "🏛 Smart Money & News": [
+            "💧 Money Flow (Sankey)",
             "📈 Insider / Congress / Whales",
             "🏆 Legendary Investors (13F)",
             "🧠 Smart Money Hub",
@@ -24186,7 +24188,72 @@ def _macro_playbook(slope2s10s, infl_dir, fed_dir):
     return " · ".join(bits), events, ideas
 
 
-if page == "📡 Macro/Event Hub":
+if page == "💧 Money Flow (Sankey)":
+    _page_header("💧 Money Flow (Sankey)", _PAGE_HELP["💧 Money Flow (Sankey)"])
+    _sk_c1, _sk_c2, _sk_c3 = st.columns([2, 1, 1])
+    with _sk_c1:
+        _sk_tk = st.text_input("Ticker", value="PLTR", key="sk_tk",
+                               help="Any listed company with a filed income statement. "
+                                    "ETFs and indices have none, so they will not work.").strip().upper()
+    with _sk_c2:
+        _sk_per = st.radio("Period", ["Quarter", "Full year"], horizontal=True, key="sk_per")
+    with _sk_c3:
+        st.write("")
+        _sk_go = st.button("Build flow", key="sk_go", type="primary")
+
+    if _sk_tk:
+        @st.cache_data(ttl=3600, show_spinner=False)
+        def _sk_build(tk, quarterly):
+            """Cached an hour: a filed statement does not change intraday, and the fetch is
+            the slow part. Returns (figure, summary) or raises."""
+            # Through the ENGINE, like every other bot-backed page here — the house rule is
+            # that telegram_bot_optimized.py and this file are the canonical two, and the
+            # dashboard reaches the engine via _TB_ENGINE rather than side modules.
+            import telegram_bot_optimized as _tb_sk
+            stmt = _tb_sk._income_stmt(tk, quarterly=quarterly)
+            return _tb_sk._sankey_fig(stmt, width=1150, height=620), stmt
+        try:
+            with st.spinner(f"Pulling {_sk_tk}'s income statement…"):
+                _sk_fig, _sk_s = _sk_build(_sk_tk, _sk_per == "Quarter")
+            _m = _sk_s["net"] / _sk_s["revenue"] * 100
+            _k = st.columns(4)
+            _k[0].metric("Revenue", f"${_sk_s['revenue']:,.0f}M")
+            _k[1].metric("Gross profit", f"${_sk_s['gross']:,.0f}M",
+                         f"{_sk_s['gross'] / _sk_s['revenue'] * 100:.0f}% margin")
+            _k[2].metric("Operating income", f"${_sk_s['opinc']:,.0f}M",
+                         f"{_sk_s['opinc'] / _sk_s['revenue'] * 100:.0f}% margin")
+            _k[3].metric("Net income", f"${_sk_s['net']:,.0f}M", f"{_m:.0f}% margin")
+            st.plotly_chart(_sk_fig, use_container_width=True,
+                            config={"displayModeBar": False})
+            st.caption(f"**{_sk_s['company']}** · {_sk_s['period']} · $ millions. Hover any "
+                       "flow for its value. Reported subtotals are the company's own; cost of "
+                       "revenue and other income are derived as residuals so the diagram "
+                       "balances — a Sankey will happily draw numbers that do not add up.")
+            with st.expander("The numbers behind it"):
+                _pinned_df(pd.DataFrame([
+                    {"Line": "Revenue", "Amount ($M)": round(_sk_s["revenue"]), "% of revenue": 100.0},
+                    {"Line": "Cost of revenue", "Amount ($M)": -round(_sk_s["cogs"]),
+                     "% of revenue": round(_sk_s["cogs"] / _sk_s["revenue"] * 100, 1)},
+                    {"Line": "Gross profit", "Amount ($M)": round(_sk_s["gross"]),
+                     "% of revenue": round(_sk_s["gross"] / _sk_s["revenue"] * 100, 1)},
+                    {"Line": "Operating expenses", "Amount ($M)": -round(_sk_s["opex"]),
+                     "% of revenue": round(_sk_s["opex"] / _sk_s["revenue"] * 100, 1)},
+                    {"Line": "Operating income", "Amount ($M)": round(_sk_s["opinc"]),
+                     "% of revenue": round(_sk_s["opinc"] / _sk_s["revenue"] * 100, 1)},
+                    {"Line": "Other income", "Amount ($M)": round(_sk_s["other"]),
+                     "% of revenue": round(_sk_s["other"] / _sk_s["revenue"] * 100, 1)},
+                    {"Line": "Taxes", "Amount ($M)": -round(_sk_s["tax"]),
+                     "% of revenue": round(_sk_s["tax"] / _sk_s["revenue"] * 100, 1)},
+                    {"Line": "Net income", "Amount ($M)": round(_sk_s["net"]),
+                     "% of revenue": round(_m, 1)},
+                ]), hide_index=True, use_container_width=True)
+        except Exception as _ske:
+            st.warning(f"Couldn't build **{_sk_tk}** — {_ske}")
+            st.caption("Needs a filed income statement. ETFs, indices and funds have none. "
+                       "Also try the full-year period: some companies do not file quarterly.")
+    st.caption("Also in Telegram: `/sankey PLTR` · `/sankey AAPL annual`")
+
+elif page == "📡 Macro/Event Hub":
     _page_header("📡 Macro / Event Hub")
     try:
         import telegram_bot_optimized as _tbmod

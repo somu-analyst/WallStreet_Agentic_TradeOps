@@ -207,6 +207,92 @@ def build_sankey(stmt: IncomeStatement, *, width: int = 1180, height: int = 640)
     return fig
 
 
+_YF_ROWS = {
+    "revenue":  ("Total Revenue", "TotalRevenue", "Operating Revenue"),
+    "gross":    ("Gross Profit", "GrossProfit"),
+    "opinc":    ("Operating Income", "OperatingIncome", "Total Operating Income As Reported"),
+    "net":      ("Net Income", "NetIncome", "Net Income Common Stockholders"),
+    "tax":      ("Tax Provision", "TaxProvision", "Income Tax Expense"),
+    "rnd":      ("Research And Development", "ResearchAndDevelopment"),
+    "sga":      ("Selling General And Administration", "SellingGeneralAndAdministration"),
+    "opex":     ("Operating Expense", "OperatingExpense", "Total Operating Expenses"),
+}
+
+
+def from_yfinance(ticker: str, quarterly: bool = True, unit_div: float = 1e6):
+    """Build an IncomeStatement straight from a company's filed figures.
+
+    Every browser tool for this (SankeyMATIC, Sankey Open Studio) makes you TYPE the numbers.
+    Pulling them is the only part worth automating, and it is also where the errors live.
+
+    REPORTED SUBTOTALS WIN, RESIDUALS ARE DERIVED. A filing's gross profit and operating
+    income are authoritative, but they rarely reconcile to the cent against the other lines
+    once everything is rounded to millions -- so cost of revenue is taken as
+    revenue − gross profit, and other income as net + tax − operating income. That way the
+    diagram always balances AND every headline figure is the one the company actually
+    reported, instead of a recomputed number that disagrees with their press release.
+    """
+    import yfinance as yf
+    t = yf.Ticker(ticker)
+    df = t.quarterly_income_stmt if quarterly else t.income_stmt
+    if df is None or df.empty:
+        raise ValueError(f"no income statement available for {ticker}")
+
+    def pick(key, col=0):
+        for name in _YF_ROWS[key]:
+            if name in df.index:
+                try:
+                    v = float(df.loc[name].iloc[col])
+                    if v == v:                       # not NaN
+                        return v / unit_div
+                except Exception:
+                    continue
+        return None
+
+    rev, gross = pick("revenue"), pick("gross")
+    opinc, net, tax = pick("opinc"), pick("net"), pick("tax") or 0.0
+    if rev is None or gross is None or opinc is None or net is None:
+        raise ValueError(f"{ticker}: income statement is missing a required line")
+
+    rnd, sga, opex_tot = pick("rnd"), pick("sga"), pick("opex")
+    opex = {}
+    if sga:
+        opex["SG&A"] = sga
+    if rnd:
+        opex["R&D"] = rnd
+    residual = (gross - opinc) - sum(opex.values())
+    if residual > 0.5:                                # whatever the breakdown misses
+        opex["Other opex"] = residual
+    if not opex:
+        opex["Operating expenses"] = max(gross - opinc, 0.0)
+
+    # Year-over-year against the SAME quarter a year ago (4 columns back), not the previous
+    # quarter -- comparing Q2 with Q1 would read seasonality as growth.
+    yoy, back = {}, 4 if quarterly else 1
+    if df.shape[1] > back:
+        for key, lbl in (("revenue", "Total revenue"), ("gross", "Gross profit"),
+                         ("opinc", "Operating income"), ("net", "Net income"),
+                         ("tax", "Taxes"), ("rnd", "R&D"), ("sga", "SG&A")):
+            now, then = pick(key), pick(key, back)
+            if now is not None and then not in (None, 0):
+                yoy[lbl] = (now / then - 1) * 100
+
+    period = str(df.columns[0])[:10]
+    name = ticker.upper()
+    try:
+        name = (t.info or {}).get("shortName") or name
+    except Exception:
+        pass
+    return IncomeStatement(
+        company=name, period=f"quarter ending {period}" if quarterly else f"FY {period}",
+        revenue_sources={"Revenue": rev},
+        cost_of_revenue=rev - gross,                  # residual: guarantees the flow balances
+        operating_expenses=opex,
+        other_income=max(net + tax - opinc, 0.0),     # residual
+        taxes=tax, yoy=yoy,
+    )
+
+
 # ── Example: Palantir Q2 2026, from the reference figures ────────────────────────────
 EXAMPLE = IncomeStatement(
     company="Palantir", period="Q2 2026",

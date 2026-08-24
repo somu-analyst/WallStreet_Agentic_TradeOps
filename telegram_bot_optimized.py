@@ -27631,6 +27631,71 @@ async def heatmap_command(update, ctx):
 
 
 
+async def sankey_command(update, ctx):
+    """/sankey TICKER [annual] — how a company's money flows, revenue through to net income.
+
+    The browser tools for this (SankeyMATIC, Sankey Open Studio) all make you TYPE the
+    figures in. Pulling them from the filing is the only part worth automating -- and it is
+    where the mistakes are, since a Sankey renders unbalanced numbers without complaint.
+    `sankey_income.from_yfinance` takes the reported subtotals and derives the residuals, so
+    the picture always balances and still matches the company's own headline numbers.
+    """
+    args = [a for a in (getattr(ctx, "args", []) or [])]
+    if not args:
+        await update.message.reply_text(
+            f"{hdr('💧 /sankey — company money flow')}\n\n"
+            "<code>/sankey PLTR</code> — latest quarter\n"
+            "<code>/sankey AAPL annual</code> — full year\n\n"
+            "<i>Revenue → gross profit → operating income → net income, with costs branching "
+            "off. Figures come from the company's filed statement.</i>", parse_mode=H)
+        return
+    tk = str(args[0]).upper().strip()
+    quarterly = not any(str(a).lower() in ("annual", "yearly", "fy", "year") for a in args[1:])
+    wait = await update.message.reply_text(f"💧 Building {tk} money flow…", parse_mode=H)
+    try:
+        from sankey_income import from_yfinance, build_sankey
+        stmt = from_yfinance(tk, quarterly=quarterly)
+        fig = build_sankey(stmt, width=1180, height=620)
+        png = fig.to_image(format="png", scale=2)      # kaleido
+    except Exception as e:
+        try:
+            await wait.delete()
+        except Exception:
+            pass
+        await update.message.reply_text(
+            f"⚠️ Couldn't build {tk}: {_llm_err_msg(e) or e}\n"
+            f"<i>Needs a filed income statement — works for most listed companies, but not "
+            f"for ETFs, indices or names with no published financials.</i>", parse_mode=H)
+        return
+    try:
+        await wait.delete()
+    except Exception:
+        pass
+    m = stmt.net_income / stmt.total_revenue * 100
+    await update.message.reply_photo(
+        png, caption=(f"💧 <b>{stmt.company}</b> — {stmt.period}\n"
+                      f"Revenue ${stmt.total_revenue:,.0f}M → net ${stmt.net_income:,.0f}M "
+                      f"({m:.0f}% margin)"), parse_mode=H)
+    await update.message.reply_text(
+        _report(f"💧 {tk} INCOME FLOW",
+                ("Line", "Amount", "of rev"),
+                [("Revenue", f"{stmt.total_revenue:,.0f}", "100%"),
+                 ("Cost of rev", f"-{stmt.cost_of_revenue:,.0f}",
+                  f"{stmt.cost_of_revenue / stmt.total_revenue * 100:.0f}%"),
+                 ("Gross profit", f"{stmt.gross_profit:,.0f}",
+                  f"{stmt.gross_profit / stmt.total_revenue * 100:.0f}%"),
+                 ("Op expenses", f"-{stmt.total_opex:,.0f}",
+                  f"{stmt.total_opex / stmt.total_revenue * 100:.0f}%"),
+                 ("Op income", f"{stmt.operating_income:,.0f}",
+                  f"{stmt.operating_income / stmt.total_revenue * 100:.0f}%"),
+                 ("Taxes", f"-{stmt.taxes:,.0f}",
+                  f"{stmt.taxes / stmt.total_revenue * 100:.0f}%"),
+                 ("Net income", f"{stmt.net_income:,.0f}", f"{m:.0f}%")],
+                right_cols={1, 2}, legend="$ millions · figures as filed",
+                notes="Subtotals are the company's reported ones; residuals derived so the "
+                      "flow balances."), parse_mode=H)
+
+
 # ── Fear & Greed history (user 2026-08-07) ───────────────────────────────────────────
 # The composite is a deterministic function of VIX and 5-day momentum, and stock_history
 # holds VIX back to 1990 and SPY to 2016 — so the whole series is RECONSTRUCTABLE rather
@@ -42524,6 +42589,7 @@ def main():
     app.add_handler(CommandHandler("emtest", emtest_command))     # implied vs realised, as it accrues
     app.add_handler(CommandHandler("dealer", dealer_command))     # CFTC dealer futures book
     app.add_handler(CommandHandler("heatmap", heatmap_command))   # sector treemap
+    app.add_handler(CommandHandler("sankey", sankey_command))     # company money-flow diagram
     app.add_handler(CommandHandler("breaking", breaking_command))  # news on your book
     app.add_handler(CommandHandler("catchup", catchup_command))   # resend today's briefings
     app.add_handler(CommandHandler("whymoved", whymoved_command))  # why did it move

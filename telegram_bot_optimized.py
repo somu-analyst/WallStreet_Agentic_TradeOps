@@ -27680,7 +27680,15 @@ def _sk_money(v, unit="M", cur="$", div=1.0):
     """Money at the statement's chosen unit. Sub-unit values keep one decimal so a small line
     does not collapse to $0B next to a large one."""
     x = float(v) / (div or 1.0)
-    return f"{cur}{x:,.1f}{unit}" if (abs(x) < 100 and unit in ("B", "T")) else f"{cur}{x:,.0f}{unit}"
+    if unit in ("B", "T"):
+        # A tax line of 15M against 1.9B of revenue rounds to "$0.0B", which reads as zero
+        # and is worse than useless on a diagram about where the money went. Small values
+        # keep enough precision to stay a number.
+        if abs(x) < 0.1:
+            return f"{cur}{x:,.2f}{unit}"
+        if abs(x) < 100:
+            return f"{cur}{x:,.1f}{unit}"
+    return f"{cur}{x:,.0f}{unit}"
 
 
 def _sk_label(name, value, yoy, unit="M", cur="$", div=1.0):
@@ -27713,6 +27721,149 @@ def _yf_symbol(ticker):
         if head and tail not in _YF_EXCH_SUFFIX:
             return f"{head}-{tail}"
     return tk
+
+
+_SEC_UA = {"User-Agent": "srinivas.analystsas@gmail.com options-research"}
+_SEC_CIK_CACHE = {}
+
+
+def _sec_cik(ticker):
+    """SEC CIK for a ticker, or None. The map is ~10k entries, fetched once per process."""
+    global _SEC_CIK_CACHE
+    tk = str(ticker or "").upper().strip().replace(".", "-")
+    if not _SEC_CIK_CACHE:
+        try:
+            import urllib.request as _u, json as _j
+            d = _j.loads(_u.urlopen(_u.Request(
+                "https://www.sec.gov/files/company_tickers.json",
+                headers=_SEC_UA), timeout=25).read())
+            _SEC_CIK_CACHE = {v["ticker"].upper(): str(v["cik_str"]).zfill(10)
+                              for v in d.values()}
+        except Exception:
+            log.debug("SEC ticker map fetch failed", exc_info=True)
+            _SEC_CIK_CACHE = {"__failed__": ""}
+    return _SEC_CIK_CACHE.get(tk)
+
+
+def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None):
+    """{segment: revenue} from the company's own filing, or {} — NEVER raises.
+
+    SEC renders every filing's segment tables as plain HTML (the "R" reports listed in
+    FilingSummary.xml), so this needs no PDF parsing and no raw XBRL: the disaggregation
+    table SEC has already built is read directly. Verified against PLTR's 2026-08-04 10-Q,
+    which yields United States 1,573,047 and Rest of world 362,417 against a 1,935,464 total.
+
+    RETURNS {} ON ANY FAILURE, BY DESIGN. The caller falls back to a single revenue node —
+    exactly the behaviour before this existed — so a missing filing, a renamed report or a
+    non-US issuer costs nothing. EDGAR is US-only, so Indian and other foreign listings will
+    always land here.
+    """
+    try:
+        import urllib.request as _u, json as _j, re as _re
+        cik = _sec_cik(ticker)
+        if not cik:
+            return {}
+        subs = _j.loads(_u.urlopen(_u.Request(
+            f"https://data.sec.gov/submissions/CIK{cik}.json",
+            headers=_SEC_UA), timeout=25).read())
+        rec = subs.get("filings", {}).get("recent", {})
+        forms = rec.get("form", [])
+        want = ("10-Q", "10-K") if quarterly else ("10-K", "10-Q")
+        idx = next((i for i, f in enumerate(forms) if f in want), None)
+        if idx is None:
+            return {}
+        acc = rec["accessionNumber"][idx].replace("-", "")
+        base = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc}"
+        fs = _u.urlopen(_u.Request(f"{base}/FilingSummary.xml",
+                                   headers=_SEC_UA), timeout=25).read().decode("utf-8", "ignore")
+        # Prefer a geography/disaggregation report; segment tables carry profit lines too and
+        # are messier to read as a pure revenue split.
+        best = None
+        for rep in _re.findall(r"<Report[^>]*>.*?</Report>", fs, _re.S):
+            nm = _re.search(r"<ShortName>(.*?)</ShortName>", rep, _re.S)
+            fn = _re.search(r"<HtmlFileName>(.*?)</HtmlFileName>", rep, _re.S)
+            if not nm or not fn:
+                continue
+            name = nm.group(1)
+            # Names vary a lot by filer: PLTR "Summary of Revenue by Geography", AAPL
+            # "Revenue - Disaggregated Net Sales", XOM "Schedule of Geographic Sales".
+            # Prefer a details table; the "(Tables)" variants are empty templates.
+            if _re.search(r"\(tables\)", name, _re.I):
+                continue
+            if _re.search(r"disaggregat|revenue by geograph|geographic (sales|revenue)",
+                          name, _re.I):
+                best = fn.group(1); break
+            if best is None and _re.search(
+                    r"segment.*(revenue|sales)|(revenue|sales).*segment", name, _re.I):
+                best = fn.group(1)
+        if not best:
+            return {}
+        html = _u.urlopen(_u.Request(f"{base}/{best}", headers=_SEC_UA), timeout=25).read()
+        tbl = pd.read_html(io.BytesIO(html))[0]
+        header = " ".join(str(c) for c in tbl.columns)
+        tbl.columns = [str(i) for i in range(tbl.shape[1])]
+
+        # THE TABLE STATES ITS OWN SCALE and filers disagree: PLTR reports "$ in Thousands",
+        # AAPL "$ in Millions". Reading it is not optional -- assuming one would put every
+        # Apple segment out by a factor of a thousand.
+        scale = 1.0
+        if _re.search(r"in\s+thousands", header, _re.I):
+            scale = 1e3
+        elif _re.search(r"in\s+millions", header, _re.I):
+            scale = 1e6
+        elif _re.search(r"in\s+billions", header, _re.I):
+            scale = 1e9
+
+        # Two row shapes in the wild, sharing one rule: a LABEL row carrying no value names
+        # the segment, and the next revenue row holds its money.
+        #   PLTR: "United States | Geographic Concentration Risk"  then  "Revenue  $1,573,047"
+        #   AAPL: "iPhone"                                          then  "Net sales  54,252"
+        # Boilerplate line-item headers and percentage "Benchmark" rows are not segments.
+        _BOILER = _re.compile(r"line items|\[|benchmark|abstract|^total$|^revenues?$|"
+                              r"^net sales$|percentage|portion of", _re.I)
+        _MONEY = _re.compile(r"^(net sales|revenues?|total revenues?|net revenues?)$", _re.I)
+        out, cur = {}, None
+        for _, r in tbl.iterrows():
+            lab = str(r["0"]).strip()
+            val = str(r["1"]).strip()
+            has_val = bool(_re.search(r"\d", val)) and val.lower() != "nan"
+            if not lab or lab.lower() == "nan":
+                continue
+            if _MONEY.match(lab) and has_val:
+                if cur:                                   # belongs to the segment above it
+                    try:
+                        out[cur] = float(_re.sub(r"[^\d.]", "", val)) * scale / unit_div
+                    except ValueError:
+                        pass
+                    cur = None
+                continue                                  # a bare total, no segment -> skip
+            if not has_val and not _BOILER.search(lab):
+                cur = lab.split("|")[0].strip() if "|" in lab else lab
+        # A TOTAL ROW OFTEN LOOKS LIKE A SEGMENT. PLTR's axis label "Geographic
+        # Concentration Risk" and XOM's "Sales and other operating revenue" both carry the
+        # consolidated figure, so taking them at face value double-counted the business:
+        # PLTR summed to 3,871M against a real 1,935M. Drop any entry that equals the sum of
+        # the others -- that is arithmetically a total, whatever it is called.
+        # Match against the KNOWN revenue, not against "the sum of the others". That earlier
+        # test dropped iPhone from Apple's split, because iPhone is coincidentally about half
+        # of total revenue and so looked like a total. A real total equals the revenue line;
+        # a large segment merely resembles the rest of the business.
+        if total:
+            for k in [k for k, v in out.items()
+                      if v > 0 and abs(v - total) / total < 0.02]:
+                out.pop(k)
+        # Reconcile against the statement's own revenue when the caller supplied it: a split
+        # that does not add up is worse than no split, because it looks authoritative.
+        if total and out:
+            gap = abs(sum(out.values()) - total) / total
+            if gap > 0.05:
+                log.debug("segments for %s miss the total by %.1f%% — discarding",
+                          ticker, gap * 100)
+                return {}
+        return out if len(out) >= 2 else {}
+    except Exception:
+        log.debug("revenue segment lookup failed for %s", ticker, exc_info=True)
+        return {}
 
 
 def _income_stmt(ticker, quarterly=True, unit_div=1e6):
@@ -27794,8 +27945,16 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
     except Exception:
         pass
     period = str(df.columns[0])[:10]
+    # Where the business actually comes from. Best-effort and never fatal: no filing, a
+    # foreign issuer or an unparseable table simply leaves this empty and the diagram shows
+    # one revenue node, exactly as before.
+    try:
+        segments = _revenue_segments(ticker, quarterly=quarterly, unit_div=unit_div, total=rev)
+    except Exception:
+        segments = {}
     return {"company": name, "period": (f"quarter ending {period}" if quarterly
                                         else f"FY {period}"),
+            "segments": segments,
             "revenue": rev, "cogs": rev - gross, "gross": gross,
             "opex_parts": opex, "opex": gross - opinc, "opinc": opinc,
             "other": max(net + tax - opinc, 0.0), "tax": tax, "net": net, "yoy": yoy}
@@ -27830,6 +27989,12 @@ def _sankey_fig(s, width=1150, height=620):
             src.append(a); tgt.append(b); val.append(v); lnk.append(color)
 
     total = node("Total revenue", s["revenue"], _SK_GREY)
+    # Revenue SOURCES feed the total, largest first so the diagram reads top-down. Grey like
+    # the total: revenue is not yet profit or cost, and colouring it green would prejudge it.
+    for _nm, _amt in sorted((s.get("segments") or {}).items(),
+                            key=lambda kv: -kv[1]):
+        if _amt > 0:
+            link(node(_nm, _amt, _SK_GREY), total, _amt, _SK_GREY_L)
     gross = node("Gross profit", s["gross"], _SK_GREEN)
     link(total, gross, s["gross"], _SK_GREEN_L)
     link(total, node("Cost of revenue", s["cogs"], _SK_RED), s["cogs"], _SK_RED_L)

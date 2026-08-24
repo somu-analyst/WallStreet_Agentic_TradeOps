@@ -24243,7 +24243,9 @@ if page == "💧 Money Flow (Sankey)":
             _k[3].metric("Net income", _fm(_sk_s["net"]), f"{_m:.0f}% margin")
             st.plotly_chart(_sk_fig, use_container_width=True,
                             config={"displayModeBar": False})
-            st.caption(f"**{_sk_s['company']}** · {_sk_s['period']} · $ millions. Hover any "
+            st.caption(f"**{_sk_s['company']}** · {_sk_s['period']} · figures in "
+                       f"{'billions' if _un == 'B' else ('trillions' if _un == 'T' else 'millions')}"
+                       f". Hover any "
                        "flow for its value. Reported subtotals are the company's own; cost of "
                        "revenue and other income are derived as residuals so the diagram "
                        "balances — a Sankey will happily draw numbers that do not add up.")

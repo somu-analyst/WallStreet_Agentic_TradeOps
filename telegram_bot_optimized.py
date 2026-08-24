@@ -36371,6 +36371,30 @@ def _fmt_watchlist(conn):
     return "\n".join(parts)
 
 
+# Country -> Yahoo exchange suffix. Exists to DISAMBIGUATE, not to label: BSE, TITAN and
+# MMTC are real tickers on BOTH the NSE and a US exchange, so "TITAN" alone is genuinely
+# ambiguous and the alias lane has to guess. Naming the country removes the guess.
+_COUNTRY_SUFFIX = {
+    "US": "", "India": ".NS", "UK": ".L", "Japan": ".T", "HK": ".HK",
+    "Canada": ".TO", "Australia": ".AX", "Germany": ".DE", "France": ".PA",
+}
+
+
+def _wl_resolve(tk, country=None):
+    """(symbol_to_store, resolved_country). Applies the country's suffix when one is given.
+
+    An explicit country WINS over inference -- that is the whole point of asking for it. With
+    no country, the symbol is left exactly as typed and the existing alias lane handles it.
+    """
+    tk = str(tk or "").upper().strip()
+    if not country:
+        return tk, None
+    suf = _COUNTRY_SUFFIX.get(country)
+    if suf and not tk.endswith(suf) and "." not in tk and not tk.startswith("^"):
+        return tk + suf, country
+    return tk, country
+
+
 def _wl_valid_ticker(tk, conn):
     """True if `tk` resolves to a real, currently-quoted symbol. Checked before insert
     (user 2026-07-23: AAOK — a typo — got added and just showed dashes everywhere)."""
@@ -36395,6 +36419,27 @@ def _wl_valid_ticker(tk, conn):
             return True
     except Exception:
         pass
+    # BARE foreign symbol (MOTHERSON, not MOTHERSON.NS). Everything above asked yfinance for
+    # the symbol EXACTLY as typed, and yfinance does not know an unsuffixed NSE name -- so the
+    # watchlist rejected the whole Indian book while happily accepting RELIANCE.NS, ^NSEI,
+    # 7203.T and BP.L (measured 2026-08-23). Resolve through the same alias the rest of the
+    # engine uses. Ordered LAST on purpose: a US ticker never pays for this lookup, and a
+    # genuine typo still fails, so the guard that caught "AAOK" is untouched.
+    try:
+        alt = _yf_alias(tk)
+        if alt and alt != tk:
+            fi = _yf_ticker(alt).fast_info
+            for _a in ("last_price", "previous_close"):
+                try:
+                    if float(getattr(fi, _a, 0) or 0) > 0:
+                        return True
+                except Exception:
+                    pass
+            _h = _yf_ticker(alt).history(period="5d")
+            if _h is not None and len(_h):
+                return True
+    except Exception:
+        log.debug("watchlist alias check failed for %s", tk, exc_info=True)
     try:
         h = _daily_history(tk, years=1, conn=conn)
         return h is not None and len(h) > 0
@@ -37202,6 +37247,19 @@ async def watchlist_command(update, ctx):
             target = None
             asset_class = "Stock"
             note_words = args[2:]
+            # Country token, same grammar as /add (ID 211/321): country=india or cc=in,
+            # anywhere in the line. Pulled out BEFORE the target/class/note parsing so it
+            # cannot be mistaken for a note word.
+            _country = None
+            _rest = []
+            for _w in note_words:
+                _lw = str(_w).lower()
+                if _lw.startswith(("country=", "country:", "cc=", "cc:")):
+                    _v = re.split(r"[=:]", _lw, 1)[1].strip()
+                    _country = _COUNTRY_ALIASES.get(_v, _v.title() if _v else None)
+                else:
+                    _rest.append(_w)
+            note_words = _rest
             if note_words:
                 try:
                     target = float(note_words[0]); note_words = note_words[1:]
@@ -37213,6 +37271,9 @@ async def watchlist_command(update, ctx):
                     asset_class = _norm.title(); note_words = note_words[1:]
             note = " ".join(note_words) or None
             _wl_setup(conn)
+            # Apply the country BEFORE the duplicate check and validation, so TITAN cc=in is
+            # stored and checked as TITAN.NS rather than colliding with the US listing.
+            tk, _country = _wl_resolve(tk, _country)
             dupe = pd.read_sql("SELECT id FROM watchlist WHERE ticker=? AND status='ACTIVE'",
                                 conn, params=(tk,))
             if not dupe.empty:

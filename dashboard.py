@@ -24209,9 +24209,21 @@ if page == "💧 Money Flow (Sankey)":
         st.write("")
         _sk_go = st.button("Build flow", key="sk_go", type="primary")
 
+    _sk_basis = st.radio(
+        "Split revenue by", ["Geography / product", "Customer type (segment)", "Don't split"],
+        horizontal=True, key="sk_basis",
+        help="Both come from the company's own filing. Geography answers WHERE the money is; "
+             "customer type answers WHO is paying — for Palantir that is Government vs "
+             "Commercial. Not every filer publishes both.")
+
     if _sk_tk:
         @st.cache_data(ttl=3600, show_spinner=False)
-        def _sk_build(tk, quarterly):
+        def _sk_build(tk, quarterly, _shape=2):
+            # _shape is a CACHE-BUSTER, not a parameter. st.cache_data keys on the arguments,
+            # so changing what this function RETURNS leaves old-shaped entries live and the
+            # caller crashes on them -- this shipped once as "'float' object is not
+            # subscriptable" when segments went from {name: float} to {name: {now, prior}}.
+            # Bump it whenever the returned shape changes.
             """Cached an hour: a filed statement does not change intraday, and the fetch is
             the slow part. Returns (figure, summary) or raises."""
             # Through the ENGINE, like every other bot-backed page here — the house rule is
@@ -24243,6 +24255,23 @@ if page == "💧 Money Flow (Sankey)":
             _k[3].metric("Net income", _fm(_sk_s["net"]), f"{_m:.0f}% margin")
             st.plotly_chart(_sk_fig, use_container_width=True,
                             config={"displayModeBar": False})
+            # Where the business comes from, and which part is actually carrying it. A
+            # consolidated growth number hides this: Apple grew 22% on iPhone while iPad
+            # FELL 6%, and those are different businesses having different quarters.
+            _seg = (_sk_s.get("segments_by") if _sk_basis.startswith("Customer")
+                    else _sk_s.get("segments")) or {}
+            if _seg:
+                _rows = []
+                for _n, _v in sorted(_seg.items(), key=lambda kv: -kv[1]["now"]):
+                    _gr = ((_v["now"] / _v["prior"] - 1) * 100) if _v.get("prior") else None
+                    _rows.append({"Source": _n,
+                                  f"Revenue ({_un})": round(_v["now"] / _dv, 2),
+                                  "Share": f"{_v['now'] / _sk_s['revenue'] * 100:.0f}%",
+                                  "Y/Y": (f"{_gr:+.0f}%" if _gr is not None else "—"),
+                                  "": ("📈 growing" if (_gr or 0) > 5 else
+                                       "📉 falling" if (_gr or 0) < -2 else "flat")})
+                st.markdown("**Where the revenue comes from**")
+                _pinned_df(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
             st.caption(f"**{_sk_s['company']}** · {_sk_s['period']} · figures in "
                        f"{'billions' if _un == 'B' else ('trillions' if _un == 'T' else 'millions')}"
                        f". Hover any "

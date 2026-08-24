@@ -27745,7 +27745,8 @@ def _sec_cik(ticker):
     return _SEC_CIK_CACHE.get(tk)
 
 
-def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None):
+def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
+                      basis="geography"):
     """{segment: revenue} from the company's own filing, or {} — NEVER raises.
 
     SEC renders every filing's segment tables as plain HTML (the "R" reports listed in
@@ -27790,12 +27791,25 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None):
             # Prefer a details table; the "(Tables)" variants are empty templates.
             if _re.search(r"\(tables\)", name, _re.I):
                 continue
-            if _re.search(r"disaggregat|revenue by geograph|geographic (sales|revenue)",
-                          name, _re.I):
-                best = fn.group(1); break
-            if best is None and _re.search(
-                    r"segment.*(revenue|sales)|(revenue|sales).*segment", name, _re.I):
-                best = fn.group(1)
+            # Two DIFFERENT disaggregations live in the same filing and answer different
+            # questions: geography (where customers are) and operating segment (who they
+            # are -- government vs commercial). The caller picks.
+            if basis == "segment":
+                # Must be a DETAIL table. "Segment and Geographic Information" on its own is
+                # the narrative text block -- it matches every segment word and contains no
+                # data, and breaking on it returned nothing at all.
+                if not _re.search(r"\(detail", name, _re.I):
+                    continue
+                if _re.search(r"financial information for each reportable segment|"
+                              r"segment.*(revenue|financial info)", name, _re.I):
+                    best = fn.group(1); break
+            else:
+                if _re.search(r"disaggregat|revenue by geograph|geographic (sales|revenue)",
+                              name, _re.I):
+                    best = fn.group(1); break
+                if best is None and _re.search(
+                        r"segment.*(revenue|sales)|(revenue|sales).*segment", name, _re.I):
+                    best = fn.group(1)
         if not best:
             return {}
         html = _u.urlopen(_u.Request(f"{base}/{best}", headers=_SEC_UA), timeout=25).read()
@@ -27820,7 +27834,11 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None):
         #   AAPL: "iPhone"                                          then  "Net sales  54,252"
         # Boilerplate line-item headers and percentage "Benchmark" rows are not segments.
         _BOILER = _re.compile(r"line items|\[|benchmark|abstract|^total$|^revenues?$|"
-                              r"^net sales$|percentage|portion of", _re.I)
+                              r"^net sales$|percentage|portion of|flag$", _re.I)
+        # Axis labels are the DIMENSION, never the member: they name how the business is cut,
+        # not a piece of it.
+        _AXIS = _re.compile(r"^(operating|reportable)? ?segments?$|concentration risk|"
+                            r"revenue benchmark|axis$|\[member\]", _re.I)
         _MONEY = _re.compile(r"^(net sales|revenues?|total revenues?|net revenues?)$", _re.I)
         out, cur = {}, None
         for _, r in tbl.iterrows():
@@ -27832,13 +27850,29 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None):
             if _MONEY.match(lab) and has_val:
                 if cur:                                   # belongs to the segment above it
                     try:
-                        out[cur] = float(_re.sub(r"[^\d.]", "", val)) * scale / unit_div
+                        now = float(_re.sub(r"[^\d.]", "", val)) * scale / unit_div
+                        # The PRIOR-PERIOD column sits right beside it, so per-segment growth
+                        # costs no extra request -- and "which part is growing" is the whole
+                        # question a single consolidated number cannot answer.
+                        prior = None
+                        if tbl.shape[1] > 2:
+                            pv = str(r["2"]).strip()
+                            if _re.search(r"\d", pv) and pv.lower() != "nan":
+                                prior = float(_re.sub(r"[^\d.]", "", pv)) * scale / unit_div
+                        out[cur] = {"now": now, "prior": prior}
                     except ValueError:
                         pass
                     cur = None
                 continue                                  # a bare total, no segment -> skip
             if not has_val and not _BOILER.search(lab):
-                cur = lab.split("|")[0].strip() if "|" in lab else lab
+                # The name sits on EITHER side of the pipe depending on the report:
+                #   "United States | Geographic Concentration Risk"  -> name first
+                #   "Operating Segments | Government"                -> name LAST
+                # Taking [0] blindly collapsed Government and Commercial into one bucket
+                # called "Operating Segments". Drop the axis parts and keep what remains.
+                parts = [q.strip() for q in lab.split("|") if q.strip()]
+                keep = [q for q in parts if not _AXIS.search(q)]
+                cur = keep[0] if keep else None
         # A TOTAL ROW OFTEN LOOKS LIKE A SEGMENT. PLTR's axis label "Geographic
         # Concentration Risk" and XOM's "Sales and other operating revenue" both carry the
         # consolidated figure, so taking them at face value double-counted the business:
@@ -27850,12 +27884,12 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None):
         # a large segment merely resembles the rest of the business.
         if total:
             for k in [k for k, v in out.items()
-                      if v > 0 and abs(v - total) / total < 0.02]:
+                      if v["now"] > 0 and abs(v["now"] - total) / total < 0.02]:
                 out.pop(k)
         # Reconcile against the statement's own revenue when the caller supplied it: a split
         # that does not add up is worse than no split, because it looks authoritative.
         if total and out:
-            gap = abs(sum(out.values()) - total) / total
+            gap = abs(sum(v["now"] for v in out.values()) - total) / total
             if gap > 0.05:
                 log.debug("segments for %s miss the total by %.1f%% — discarding",
                           ticker, gap * 100)
@@ -27949,12 +27983,15 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
     # foreign issuer or an unparseable table simply leaves this empty and the diagram shows
     # one revenue node, exactly as before.
     try:
-        segments = _revenue_segments(ticker, quarterly=quarterly, unit_div=unit_div, total=rev)
+        segments = _revenue_segments(ticker, quarterly=quarterly, unit_div=unit_div,
+                                     total=rev, basis="geography")
+        seg_by = _revenue_segments(ticker, quarterly=quarterly, unit_div=unit_div,
+                                   total=rev, basis="segment")
     except Exception:
-        segments = {}
+        segments, seg_by = {}, {}
     return {"company": name, "period": (f"quarter ending {period}" if quarterly
                                         else f"FY {period}"),
-            "segments": segments,
+            "segments": segments, "segments_by": seg_by,
             "revenue": rev, "cogs": rev - gross, "gross": gross,
             "opex_parts": opex, "opex": gross - opinc, "opinc": opinc,
             "other": max(net + tax - opinc, 0.0), "tax": tax, "net": net, "yoy": yoy}
@@ -27991,9 +28028,14 @@ def _sankey_fig(s, width=1150, height=620):
     total = node("Total revenue", s["revenue"], _SK_GREY)
     # Revenue SOURCES feed the total, largest first so the diagram reads top-down. Grey like
     # the total: revenue is not yet profit or cost, and colouring it green would prejudge it.
-    for _nm, _amt in sorted((s.get("segments") or {}).items(),
-                            key=lambda kv: -kv[1]):
+    for _nm, _v in sorted((s.get("segments") or {}).items(),
+                          key=lambda kv: -kv[1]["now"]):
+        _amt = _v["now"]
         if _amt > 0:
+            # Per-segment growth on the label: the level says how big this source is, the
+            # change says whether it is the part carrying the business or the part fading.
+            if _v.get("prior"):
+                s["yoy"][_nm] = (_amt / _v["prior"] - 1) * 100
             link(node(_nm, _amt, _SK_GREY), total, _amt, _SK_GREY_L)
     gross = node("Gross profit", s["gross"], _SK_GREEN)
     link(total, gross, s["gross"], _SK_GREEN_L)

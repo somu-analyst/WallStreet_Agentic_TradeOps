@@ -7887,7 +7887,7 @@ if page == "🌍 Market Overview":
                                 template="plotly_white", height=180, title="Volume",
                                 margin=dict(t=30, b=20), yaxis_title="Volume",
                             )
-                            st.plotly_chart(fig_vol)
+                            st.plotly_chart(fig_vol, use_container_width=True)
 
                         # ── Key Stats ──
                         st.markdown("<div>📊 Key Statistics</div>", unsafe_allow_html=True)
@@ -8568,7 +8568,7 @@ elif page == "🔥 OI Analytics & Prediction":
     fig.update_layout(barmode="group", template="plotly_white",
                       xaxis_title="Strike", yaxis_title="OI Change",
                       height=400, margin=dict(t=30, b=40))
-    st.plotly_chart(fig)
+    st.plotly_chart(fig, use_container_width=True)
 
     # ── Multi-Day OI Accumulation & Conviction ──
     st.markdown("<div>📈 Multi-Day OI Accumulation & Strike Conviction</div>", unsafe_allow_html=True)
@@ -9656,7 +9656,7 @@ elif page == "🎯 Prop Trading Screen":
                             yaxis_title="P&L ($)",
                             margin=dict(t=20, b=40),
                         )
-                        st.plotly_chart(fig_payoff)
+                        st.plotly_chart(fig_payoff, use_container_width=True)
 
                         # P&L Heatmap
                         pivot = scenarios.pivot(index="timeframe", columns="scenario", values="pnl")
@@ -9667,7 +9667,7 @@ elif page == "🎯 Prop Trading Screen":
                                              labels=dict(x="Scenario", y="Timeframe", color="P&L ($)"),
                                              title="P&L Heatmap")
                         fig_heat.update_layout(template="plotly_white", height=250)
-                        st.plotly_chart(fig_heat)
+                        st.plotly_chart(fig_heat, use_container_width=True)
 
                         # Bottom-line
                         prob = risk["prob_itm"]
@@ -11506,7 +11506,7 @@ This creates a self-reinforcing ceiling — the wall repels price.
                              color_continuous_scale="RdYlGn", title="OI Signal Accuracy by Ticker")
                 fig.add_hline(y=50, line_dash="dash", line_color="white", annotation_text="Random (50%)")
                 fig.update_layout(template="plotly_white", height=350)
-                st.plotly_chart(fig)
+                st.plotly_chart(fig, use_container_width=True)
 
 
 # ===================================================================
@@ -11883,7 +11883,7 @@ elif page == "🔮 Live Position Predictor":
                 _fig_wl.update_layout(template="plotly_white", height=280,
                                        xaxis_title="Stock Price", yaxis_title="P&L ($)",
                                        legend=dict(orientation="h", y=1.12), margin=dict(t=40, b=30))
-                st.plotly_chart(_fig_wl)
+                st.plotly_chart(_fig_wl, use_container_width=True)
 
                 # Quick backtest
                 bt_result = backtest_oi_signals(tk, lookback=10)
@@ -12300,7 +12300,7 @@ elif page == "📈 Insider / Congress / Whales":
                 fig = px.bar(x=by_tk.index, y=by_tk.values, labels={"x": "Ticker", "y": "Value ($)"},
                              color=by_tk.values, color_continuous_scale="Blues")
                 fig.update_layout(template="plotly_white", title="Insider Activity by Ticker", height=350)
-                st.plotly_chart(fig)
+                st.plotly_chart(fig, use_container_width=True)
 
     with tab2:
         congress = q("SELECT * FROM congress_trades ORDER BY transaction_date DESC")
@@ -15672,7 +15672,7 @@ elif page == "⚡ Trade Risk Calculator":
                            labels=dict(x="Scenario", y="Timeframe", color="P&L ($)"),
                            title="P&L Heatmap")
             fig.update_layout(template="plotly_white", height=300)
-            st.plotly_chart(fig)
+            st.plotly_chart(fig, use_container_width=True)
 
             # Bottom-line recommendation
             st.markdown("---")
@@ -15884,7 +15884,7 @@ elif page == "⚡ Trade Risk Calculator":
         legend=dict(orientation="h", y=1.12),
         margin=dict(t=50, b=40),
     )
-    st.plotly_chart(fig_sim)
+    st.plotly_chart(fig_sim, use_container_width=True)
 
     # ── P&L Heatmap: Date vs Stock Price ──
     st.markdown("<div>🗺️ P&L Heatmap — Days vs Stock Price</div>", unsafe_allow_html=True)
@@ -15910,7 +15910,7 @@ elif page == "⚡ Trade Risk Calculator":
         labels=dict(x="Stock Price", y="Days Forward", color="P&L ($)"),
     )
     fig_hm.update_layout(template="plotly_white", height=380, margin=dict(t=30, b=40))
-    st.plotly_chart(fig_hm)
+    st.plotly_chart(fig_hm, use_container_width=True)
 
     # ── Breakeven Analysis ──
     st.markdown("<div>🎯 Key Levels</div>", unsafe_allow_html=True)
@@ -18480,7 +18480,15 @@ elif page == "🎯 Next-Day Exit Planner":
         _mc_S = _mc_sim_prices
         _mc_K = float(ep_strike)
         _mc_r = 0.045
-        _mc_sig = _mc_sim_ivs
+        # NaN IV IS WHAT BLANKS THE CHART, and it is worth being precise about which case:
+        #   IV = 0   -> d1 divides by zero -> +/-inf -> norm.cdf(inf) = 1 -> FINITE intrinsic
+        #               value. Ugly, but it still draws. (Measured, not assumed.)
+        #   IV = NaN -> every value NaN -> a histogram of NaNs draws NOTHING, which is exactly
+        #               how "the chart is missing" presents on screen.
+        # An illiquid strike with no quote legitimately yields NaN, so this is a real path.
+        # nan_to_num handles the blanking case; the 1% floor keeps a zero IV from producing a
+        # degenerate single-bar histogram, and is too low to distort a genuine vol.
+        _mc_sig = np.maximum(np.nan_to_num(_mc_sim_ivs, nan=0.0), 0.01)
         _mc_sqrt_T = np.sqrt(_mc_T_tomorrow)
         _mc_d1 = (np.log(_mc_S / _mc_K) + (_mc_r + 0.5 * _mc_sig**2) * _mc_T_tomorrow) / (_mc_sig * _mc_sqrt_T)
         _mc_d2 = _mc_d1 - _mc_sig * _mc_sqrt_T
@@ -18661,7 +18669,7 @@ elif page == "🎯 Next-Day Exit Planner":
             xaxis_title="Option Value ($)", yaxis_title="Frequency",
             margin=dict(t=50, b=30), showlegend=False,
         )
-        st.plotly_chart(_fig_mc_opt)
+        st.plotly_chart(_fig_mc_opt, use_container_width=True)
 
     with _mc_fig_col2:
         _fig_mc_stk = go.Figure()
@@ -18682,7 +18690,7 @@ elif page == "🎯 Next-Day Exit Planner":
             xaxis_title=f"{ep_ticker} Price ($)", yaxis_title="Frequency",
             margin=dict(t=50, b=30), showlegend=False,
         )
-        st.plotly_chart(_fig_mc_stk)
+        st.plotly_chart(_fig_mc_stk, use_container_width=True)
 
     # Probability table
     _mc_prob_data = []
@@ -18847,7 +18855,7 @@ elif page == "🎯 Next-Day Exit Planner":
         yaxis_title="P&L ($)", xaxis_title="",
         margin=dict(t=50, b=30),
     )
-    st.plotly_chart(_fig_sc)
+    st.plotly_chart(_fig_sc, use_container_width=True)
 
     # ═══════════════════════════════════════════════════════════════
     # 4) RECOMMENDED SELL ORDERS
@@ -19154,7 +19162,7 @@ ${_mc_expected_val:.2f}
         xaxis_title=f"{ep_ticker} Stock Price", yaxis_title="P&L ($)",
         margin=dict(t=50, b=30),
     )
-    st.plotly_chart(_fig_ep)
+    st.plotly_chart(_fig_ep, use_container_width=True)
 
     # Closed Positions — deliberately LAST on the page (user 2026-07-24): today's live
     # analysis (whichever Analysis Mode is selected above) is why you're here; closed
@@ -20270,7 +20278,7 @@ reveals where smart money is building or liquidating positions.
         )
         fig.update_xaxes(fixedrange=False)
         fig.update_yaxes(fixedrange=False)
-        st.plotly_chart(fig, config={'scrollZoom': True})
+        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
         # ── Analysis panel: color legend + trade overlay + outlook ──
         _an1, _an2 = st.columns([1, 1])
@@ -20535,7 +20543,7 @@ reveals where smart money is building or liquidating positions.
             fig_acc.update_layout(template="plotly_white", height=250,
                                   yaxis_title="Accuracy %", xaxis_title="Date",
                                   margin=dict(t=20, b=30))
-            st.plotly_chart(fig_acc)
+            st.plotly_chart(fig_acc, use_container_width=True)
     else:
         st.info("Not enough data to backtest.")
 

@@ -13156,9 +13156,61 @@ elif page == "📈 Insider / Congress / Whales":
 # ──  LEGENDARY INVESTORS — Standalone page
 # ===================================================================
 elif page == "🏆 Legendary Investors (13F)":
-    st.markdown("## 🏆 Legendary Investors — Q1 2026 13F Tracker")
-    st.caption("Filed 2026-05-15  |  Period: Mar 31 2026  |  Source: SEC 13F (45-day lag)")
-    st.info("Navigate to **📈 Insider / Congress / Whales → 🏆 Legendary Investors (13F)** tab for the full interactive dashboard.", icon="💡")
+    # Was a stub that redirected elsewhere and hardcoded "Q1 2026 / filed 2026-05-15" -- a
+    # date that went stale the moment Q2 landed. It now reads the stored history, so the
+    # quarter shown is whatever has actually been filed.
+    st.markdown("## 🏆 Legendary Investors — what they actually did")
+    _lg_conn = get_conn()
+    try:
+        import edgar_13f as _E13
+        _lg_conn.execute(_E13.DDL); _lg_conn.commit()
+        _lg_funds = [r[0] for r in _lg_conn.execute(
+            "SELECT fund, COUNT(DISTINCT quarter) q FROM edgar_13f GROUP BY fund "
+            "HAVING q >= 2 ORDER BY fund")]
+        if not _lg_funds:
+            st.info("No 13F history stored yet. The bot refreshes this weekly, or you can "
+                    "backfill from the **📜 13F History (EDGAR)** tab.", icon="📭")
+        else:
+            _lg_c1, _lg_c2 = st.columns([2, 1])
+            _lg_fund = _lg_c1.selectbox("Investor", _lg_funds, key="lg_fund")
+            _lg_q, _lg_prev, _lg_rows = _E13.changes(_lg_conn, _lg_fund)
+            _lg_c2.metric("Quarter", _lg_q or "—",
+                          f"vs {_lg_prev}" if _lg_prev else "no prior quarter")
+            if not _lg_rows:
+                st.warning("Only one quarter stored for this fund — nothing to compare yet.")
+            else:
+                from collections import Counter as _Ctr
+                _cnt = _Ctr(r["action"] for r in _lg_rows)
+                _k = st.columns(5)
+                for _i, (_a, _lbl) in enumerate([("NEW", "🆕 New"), ("ADD", "➕ Added"),
+                                                 ("TRIM", "➖ Trimmed"), ("EXIT", "🚪 Exited"),
+                                                 ("HOLD", "⏸️ Held")]):
+                    _k[_i].metric(_lbl, _cnt.get(_a, 0))
+                _only = st.radio("Show", ["Moves only", "Everything"], horizontal=True,
+                                 key="lg_only",
+                                 help="Moves only hides HOLD — the positions that did not "
+                                      "change are rarely the interesting part.")
+                _show = [r for r in _lg_rows
+                         if _only == "Everything" or r["action"] != "HOLD"]
+                _tot = sum(r["value"] for r in _lg_rows) or 1
+                _pinned_df(pd.DataFrame([{
+                    "Action": r["action"], "Company": r["issuer"][:34],
+                    "Value ($M)": round(r["value"] / 1e6, 1),
+                    "% of book": round(r["value"] / _tot * 100, 1),
+                    "Shares Δ": (f"{r['shares_chg_pct']:+.0f}%"
+                                 if r["shares_chg_pct"] is not None else "—"),
+                } for r in _show[:60]]), hide_index=True, use_container_width=True)
+                st.caption(
+                    f"**{_lg_fund}** · {_lg_prev} → {_lg_q}. A 13F is filed **45 days after "
+                    "quarter end** and covers **US-listed long equity and options only** — no "
+                    "shorts, no bonds, no cash, no foreign listings. A fund that looks "
+                    "concentrated here may be hedged in instruments that never appear. "
+                    "Share changes under 2% are treated as HOLD, since a split or a rounding "
+                    "difference is not a decision.")
+    except Exception as _lge:
+        st.warning(f"Couldn't read 13F history — {_lge}")
+    finally:
+        _lg_conn.close()
 
 
 # ===================================================================

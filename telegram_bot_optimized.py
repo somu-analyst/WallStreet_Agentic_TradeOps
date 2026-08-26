@@ -40098,6 +40098,41 @@ async def why_command(update, ctx):
         await update.message.reply_text(p, parse_mode=H, disable_web_page_preview=True)
 
 
+async def edgar_13f_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Keep the tracked investors' 13F history current (ID 331). Silent unless it finds
+    something new.
+
+    Runs WEEKLY rather than quarterly on purpose. 13Fs are due 45 days after quarter end,
+    but funds file whenever they like inside that window, so a fixed quarterly date either
+    fires too early and finds nothing or too late and sits stale for weeks. `build_history`
+    skips quarters already stored, so a weekly pass costs almost nothing and picks up each
+    filing within seven days of it appearing.
+    """
+    def _go():
+        import edgar_13f as _E
+        c = get_conn()
+        try:
+            return _E.refresh_all(c, n=8, log=log)
+        finally:
+            c.close()
+    try:
+        res = await asyncio.to_thread(_go)
+        added = {k: v for k, v in res.items() if isinstance(v, int) and v > 0}
+        if not added:
+            return                                    # nothing new filed — normal, stay quiet
+        log.info("13F refresh: %s", ", ".join(f"{k} +{v}q" for k, v in added.items()))
+        _, chat_id = load_creds()
+        lines = [f"• <b>{k}</b> — {v} new quarter(s)" for k, v in added.items()]
+        await ctx.bot.send_message(
+            chat_id=int(chat_id), parse_mode=H,
+            text=(f"{hdr('🏛 13F FILINGS UPDATED')}\n\n" + "\n".join(lines) +
+                  "\n\n<i>See what they bought and sold in the dashboard → "
+                  "Legendary Investors. 13F is filed 45 days after quarter end and covers "
+                  "US-listed long equity only.</i>"))
+    except Exception as e:
+        log.warning(f"edgar_13f_job failed: {e}")
+
+
 async def reddit_snapshot_job(ctx: ContextTypes.DEFAULT_TYPE):
     """Persist the retail-crowding snapshot. Silent: it collects, it never alerts."""
     def _go():
@@ -43173,6 +43208,11 @@ def main():
         # Measured 2026-08-08: mention LEVELS are reactive (rho +0.27 vs trailing 5d move,
         # p=0.007), so nothing alerts on this -- it is collected purely to become testable.
         job_queue.run_repeating(reddit_snapshot_job, interval=6 * 3600, first=300)
+        # 13F history, weekly (ID 331). Not quarterly: funds file anywhere inside the 45-day
+        # window, so a fixed date is either early and empty or late and stale. Already-stored
+        # quarters are skipped, so this is cheap; `first` is offset so it never collides with
+        # the reddit snapshot on startup.
+        job_queue.run_repeating(edgar_13f_job, interval=7 * 24 * 3600, first=900)
         _spawn_watchdog()
         log.info("Scheduled intraday-lane supervisor (auto-start during market hours)")
 

@@ -38,6 +38,23 @@ paths:
     ⚠️ **The advisor layer is PAID-Anthropic-only by design**: its prompt names the user's
     holdings, and the free tier trains on prompts. No key ⇒ news without advice, never a
     silent downgrade to the free lane.
+- **Added 2026-08-23/25**:
+  - `/sankey TICKER [annual]` — company money flow as a Sankey. Figures come from the
+    company's own SEC filing, never typed. Every subtotal is DERIVED and checked to balance
+    before anything renders: a Sankey will happily draw numbers that do not add up and look
+    convincing doing it. Revenue splits by **geography** or **customer segment** (`basis=`),
+    each source carrying its own Y/Y, so you can see which PART of the business is growing —
+    Apple grew 22% on iPhone while iPad FELL 6%, which one consolidated number hides.
+    Dashboard equivalent: the **💧 Money Flow (Sankey)** page.
+  - **Legendary Investors (13F)** — 185,043 holdings, quarter-over-quarter moves, weekly refresh.
+  - Segment names sit on EITHER side of the pipe in SEC tables: `"United States | Geographic
+    Concentration Risk"` (name first) vs `"Operating Segments | Government"` (name LAST).
+    Taking `[0]` collapsed Government and Commercial into one bucket. Drop the axis parts,
+    keep what remains.
+  - The segment matcher must require a `(Detail` table — `"Segment and Geographic
+    Information"` alone is the narrative text block, matches every segment word, and contains
+    no data.
+
 - **Added 2026-08-10**:
   - `/positions` — the REAL book. It never existed before: the open book was menu-button-only,
     so typing `/positions` did nothing. The command delegates to `positions_view`, which only

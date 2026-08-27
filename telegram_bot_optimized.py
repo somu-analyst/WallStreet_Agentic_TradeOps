@@ -27839,7 +27839,13 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         # not a piece of it.
         _AXIS = _re.compile(r"^(operating|reportable)? ?segments?$|concentration risk|"
                             r"revenue benchmark|axis$|\[member\]", _re.I)
-        _MONEY = _re.compile(r"^(net sales|revenues?|total revenues?|net revenues?)$", _re.I)
+        # The VALUE row is labelled differently by every filer: "Revenue" (PLTR),
+        # "Net revenue" (V), "Revenue from contract with customers" (GOOGL). Matching only
+        # the first three meant Alphabet extracted nothing at all while its table sat there
+        # fully populated.
+        _MONEY = _re.compile(
+            r"^(net |total |operating )*(revenues?|sales)"
+            r"( from contract(s)? with customers)?$", _re.I)
         out, cur = {}, None
         for _, r in tbl.iterrows():
             lab = str(r["0"]).strip()
@@ -27888,6 +27894,25 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                 out.pop(k)
         # Reconcile against the statement's own revenue when the caller supplied it: a split
         # that does not add up is worse than no split, because it looks authoritative.
+        # ONE AXIS ONLY. A single table often stacks several disaggregations: Visa lists
+        # geography (U.S. + International), THEN product (Service, Data processing, ...),
+        # THEN the contra-revenue line Client incentives. Each axis reconciles to revenue on
+        # its own, but taking every row together double-counts -- Visa summed to 32,626
+        # against real revenue of 11,633, so the check below threw away a perfectly good
+        # geography split. Walk the rows IN ORDER and keep the first contiguous run that
+        # reconciles; that is the first complete axis in the table.
+        if total and len(out) > 2:
+            items = list(out.items())
+            for start in range(len(items)):
+                run = 0.0
+                for end in range(start, len(items)):
+                    run += items[end][1]["now"]
+                    if end > start and abs(run - total) / total < 0.02:
+                        out = dict(items[start:end + 1])
+                        break
+                else:
+                    continue
+                break
         if total and out:
             gap = abs(sum(v["now"] for v in out.values()) - total) / total
             if gap > 0.05:

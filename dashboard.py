@@ -386,6 +386,23 @@ def _updown_pair(hist, close_col="Close"):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+
+def _open_T(dte):
+    """Years remaining at TOMORROW'S OPEN, for pricing the estimated opening value.
+
+    `max(dte - 1, 0)` looked right and was not: a 1-DTE option got T = 0, and Black-Scholes
+    with zero time returns INTRINSIC ONLY. An out-of-the-money leg therefore printed
+    "~$0.00" the day before expiry -- a GOOGL 335P with spot 340.45 and a real mid of $0.82
+    showed as worthless, while the ±1σ range beside it correctly spanned $0.09-$5.61.
+
+    An option expiring tomorrow still has a full session of time value when the market opens,
+    so the floor is a fraction of a day (6.5 trading hours ≈ 0.27 of a calendar day) rather
+    than zero. Callers handle dte <= 0 separately ("exp today" / "expired"), so this only
+    ever sees a leg with at least one day to run.
+    """
+    return max(float(dte) - 1.0, 0.27) / 365.0
+
+
 def _tg_md(text):
     """Convert the engine's TELEGRAM HTML into Streamlit Markdown.
 
@@ -16832,7 +16849,7 @@ elif page == "🎯 Next-Day Exit Planner":
                         # always brackets it, instead of floating around a pure-model base.
                         _folo = max(l["cur"] + min(_fvu, _fvd) - _fbase, 0.01)
                         _fohi = max(l["cur"] + max(_fvu, _fvd) - _fbase, _folo)
-                        _ftopen = bs_greeks(l["spot"], l["K"], max(l["dte"] - 1, 0) / 365.0, _R, l["iv"], l["typ"])["price"]
+                        _ftopen = bs_greeks(l["spot"], l["K"], _open_T(l["dte"]), _R, l["iv"], l["typ"])["price"]
                         _ftopen_disp = ("expired" if l["dte"] < 0 else "exp today" if l["dte"] == 0 else
                                         "~$0.00" if _ftopen < 0.005 else f"${_ftopen:.2f}")
                         _fpx, _ffromq = _smart_close_limit(l["side"], l["cur"], l.get("bid"), l.get("ask"))
@@ -17562,7 +17579,7 @@ elif page == "🎯 Next-Day Exit Planner":
                         # always brackets it, instead of floating around a pure-model base.
                         _olo = max(l["cur"] + min(_vu, _vd) - _base, 0.01)
                         _ohi = max(l["cur"] + max(_vu, _vd) - _base, _olo)
-                        _topen = bs_greeks(l["spot"], l["K"], max(l["dte"] - 1, 0) / 365.0, _R, l["iv"], l["typ"])["price"]
+                        _topen = bs_greeks(l["spot"], l["K"], _open_T(l["dte"]), _R, l["iv"], l["typ"])["price"]
                         # label clearly: <0 truly expired; 0 = expires today; sub-penny reads "~0"
                         if l["dte"] < 0:
                             _topen_disp = "expired"

@@ -24341,6 +24341,58 @@ if page == "💧 Money Flow (Sankey)":
                                        "📉 falling" if (_gr or 0) < -2 else "flat")})
                 st.markdown("**Where the revenue comes from**")
                 _pinned_df(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+
+            # ── DRILL DOWN ────────────────────────────────────────────────────────────
+            # One level below each headline number, using ONLY what the filing publishes.
+            # Where a company does not file a deeper cut this says so rather than inventing
+            # one: Palantir reports "Rest of world" as a single line, and there is nothing
+            # underneath it to show.
+            st.markdown("---")
+            st.markdown("#### 🔎 Drill into a number")
+            _geo = _sk_s.get("segments") or {}
+            _cust = _sk_s.get("segments_by") or {}
+            _opx = _sk_s.get("opex_parts") or {}
+            _choices = ["Revenue"] + (["Operating expenses"] if _opx else [])
+            _dd = st.radio("Which one", _choices, horizontal=True, key="sk_dd",
+                           label_visibility="collapsed")
+
+            def _dd_table(d, parent, unit, div):
+                rows = []
+                for n, v in sorted(d.items(), key=lambda kv: -kv[1]["now"]):
+                    gr = ((v["now"] / v["prior"] - 1) * 100) if v.get("prior") else None
+                    rows.append({"Part": n,
+                                 f"Amount ({unit})": round(v["now"] / div, 2),
+                                 "Share of parent": f"{v['now'] / parent * 100:.1f}%",
+                                 "Y/Y": (f"{gr:+.0f}%" if gr is not None else "—")})
+                _pinned_df(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+            if _dd == "Revenue":
+                _cuts = [c for c, d in (("By geography", _geo), ("By customer type", _cust)) if d]
+                if not _cuts:
+                    st.info("This filer publishes no revenue breakdown — the diagram shows a "
+                            "single revenue node because that is all there is.")
+                else:
+                    for _c_name in _cuts:
+                        _d = _geo if _c_name == "By geography" else _cust
+                        st.markdown(f"**{_c_name}** — {len(_d)} parts of "
+                                    f"${_sk_s['revenue'] / _dv:,.2f}{_un}")
+                        _dd_table(_d, _sk_s["revenue"], _un, _dv)
+                    # A second level only exists where the filer publishes one. Alphabet
+                    # gives four regions; Palantir gives two. Saying which is the honest
+                    # answer to "can I expand Rest of world".
+                    st.caption(
+                        f"Deeper than this, {_sk_s['company']} files nothing — its finest "
+                        f"published cut is {max(len(_geo), len(_cust))} parts. Companies "
+                        f"differ: Alphabet breaks geography into four regions, Palantir "
+                        f"reports 'Rest of world' as one line, so there is no level beneath it."
+                        if max(len(_geo), len(_cust), 0) <= 4 else "")
+            else:
+                st.markdown(f"**Operating expenses** — {len(_opx)} parts of "
+                            f"${_sk_s['opex'] / _dv:,.2f}{_un}")
+                _dd_table({k: {"now": v, "prior": None} for k, v in _opx.items()},
+                          _sk_s["opex"], _un, _dv)
+                st.caption("Cost of revenue is shown separately in the diagram — it is the "
+                           "cost of delivering the product, not an operating expense.")
             st.caption(f"**{_sk_s['company']}** · {_sk_s['period']} · figures in "
                        f"{'billions' if _un == 'B' else ('trillions' if _un == 'T' else 'millions')}"
                        f". Hover any "

@@ -6397,6 +6397,111 @@ with st.sidebar:
     if _jump in _ALL_PAGES:
         st.caption("↑ jump active — reset it to *browse* to use the section list")
 
+    # ── Step-up gate on the pages that show the BOOK ───────────────────────
+    # The dashboard is published on a public URL behind a token in the query string. That
+    # token is a CAPABILITY, not a login: whoever holds the link is in, it never expires, and
+    # nothing records who used it. Fine for GEX and scanners, which are market data. Not fine
+    # for holdings, cost basis, P&L and the tax panel.
+    #
+    # So those pages ask for a SECOND secret that never appears in a URL, is never sent in a
+    # link, and is stored only as a hash. Someone who gets the shared link sees the analytics
+    # terminal and nothing about what you own.
+    #
+    # Deliberately session-scoped and time-limited: unlocking should not persist forever in a
+    # browser that might not be yours. The book stays available privately via the Telegram
+    # bot (/positions, /tax), which is authenticated by your own Telegram account.
+    _PRIVATE_PAGES = {
+        "💼 Portfolio & Suggestions",   # holdings, cost basis, P&L
+        "📝 Paper Trading",
+        "🔮 Live Position Predictor",   # prices the real book forward
+        "🎯 Next-Day Exit Planner",     # per-position exits
+        "👀 Watchlist",                 # reveals what is being tracked
+    }
+    _PW_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dash_private.txt")
+    _LOCK_AFTER = 30 * 60      # seconds of inactivity before it re-locks
+
+    def _private_ok():
+        """True when this session has unlocked the book. No password file = no gate at all,
+        so a local run is unchanged and nobody is locked out of their own laptop."""
+        import hashlib as _hl
+        try:
+            want = open(_PW_FILE, encoding="utf-8").read().strip()
+        except Exception:
+            return True                                  # not configured -> not gated
+        if not want:
+            return True
+        _seen = st.session_state.get("_priv_at", 0)
+        if st.session_state.get("_priv_ok") and (time.time() - _seen) < _LOCK_AFTER:
+            st.session_state["_priv_at"] = time.time()   # sliding window
+            return True
+
+        # OWNER LINK: ?owner=... unlocks without typing, so a bookmarked link on your own
+        # phone just works while the plain link still shows the demo book. Understand the
+        # trade-off before using it -- a token in a URL is a capability, so anyone who gets
+        # that link is you. It is stored hashed, like the password, and it is optional: if
+        # dash_owner.txt does not exist, the password is the only way in.
+        try:
+            _owner_want = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                            "dash_owner.txt"), encoding="utf-8").read().strip()
+        except Exception:
+            _owner_want = ""
+        if _owner_want:
+            try:
+                _got = st.query_params.get("owner", "")
+            except Exception:
+                _got = (st.experimental_get_query_params().get("owner") or [""])[0]
+            if _got and _hl.sha256(_got.encode()).hexdigest() == _owner_want:
+                st.session_state["_priv_ok"] = True
+                st.session_state["_priv_at"] = time.time()
+                return True
+        st.warning("🔒 This page shows your book. Enter the dashboard password to unlock it "
+                   "for this session.")
+        _pw = st.text_input("Password", type="password", key="_priv_pw")
+        if _pw:
+            # Compare hashes so the file never holds the password in the clear.
+            if _hl.sha256(_pw.encode()).hexdigest() == want:
+                st.session_state["_priv_ok"] = True
+                st.session_state["_priv_at"] = time.time()
+                st.rerun()
+            st.error("Incorrect.")
+        st.caption("Market analytics — GEX, scanners, flow, macro — need no password. "
+                   "Your positions are also available privately in Telegram via /positions.")
+        return False
+
+    def _demo_book():
+        """Sample book shown INSTEAD of the real one while locked, so a visitor can see what
+        the page does without seeing what you own.
+
+        Labelled loudly and repeatedly on purpose. Numbers that look like a real portfolio but
+        are invented are worse than no preview at all -- someone could screenshot them, quote
+        them, or act on them. The banner, the caption and the ticker names all say DEMO.
+        """
+        st.error("🎭 **DEMO DATA — this is NOT a real portfolio.** Every row below is invented "
+                 "to illustrate the layout. Enter the password above to see the real book.")
+        _demo = pd.DataFrame([
+            {"Ticker": "DEMO-A", "Type": "CALL", "Strike": 100.0, "Qty": 2,
+             "Entry": 3.20, "Now": 4.15, "P&L %": 29.7},
+            {"Ticker": "DEMO-B", "Type": "PUT", "Strike": 55.0, "Qty": 1,
+             "Entry": 2.10, "Now": 1.48, "P&L %": -29.5},
+            {"Ticker": "DEMO-C", "Type": "STOCK", "Strike": 0.0, "Qty": 50,
+             "Entry": 41.00, "Now": 44.60, "P&L %": 8.8},
+        ])
+        st.dataframe(_demo.style.format({"Strike": "{:.2f}", "Entry": "{:.2f}",
+                                         "Now": "{:.2f}", "P&L %": "{:+.1f}"},
+                                        precision=2, thousands=","),
+                     width="stretch", hide_index=True)
+        st.caption("🎭 Illustrative only. Tickers DEMO-A/B/C do not exist. The real page prices "
+                   "every leg off live quotes, flags the short-to-long-term tax flip, and "
+                   "ranks exits by risk.")
+
+    # st.stop() halts the whole script, so the page body below never runs and no position
+    # data is rendered or even queried. Checking here rather than inside each page means a
+    # new private page is protected by adding its name to the set above, not by remembering
+    # to copy a guard into it.
+    if page in _PRIVATE_PAGES and not _private_ok():
+        _demo_book()
+        st.stop()
+
     st.markdown("---")
     # ── GEX Command sub-view ────────────────────────────────────────────────────
     # "📊 GEX Profile" and "🎯 Gamma Wall Advisor" used to be two separate nav entries

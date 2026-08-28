@@ -1106,7 +1106,20 @@ try:
                 except Exception:
                     log.debug("healed resend failed", exc_info=True)
             try:
-                safe = orig_text.replace('<', '&lt;').replace('>', '&gt;') if isinstance(orig_text, str) else text2
+                # PLAIN-TEXT fallback: STRIP the markup, never escape it. This escaped
+                # '<' to '&lt;' and then sent with parse_mode=None -- and with no parse mode
+                # Telegram renders literally, so the reader got "&lt;b&gt;What followed:&lt;/b&gt;"
+                # across an entire briefing (user 2026-08-28). The rule is stated at the top
+                # of this very function and was inverted right here: escaping is for when a
+                # parse mode IS in play. Unformatted-but-readable beats a wall of entities.
+                if isinstance(orig_text, str):
+                    import html as _he, re as _re
+                    safe = _re.sub(r"<br\s*/?>", "\n", orig_text)
+                    safe = _re.sub(r"</?(?:b|strong|i|em|u|s|code|pre|a|blockquote)\b[^>]*>",
+                                   "", safe)
+                    safe = _he.unescape(safe)          # &amp; -> &, &gt; -> >
+                else:
+                    safe = text2
                 kwargs2 = dict(kwargs)
                 kwargs2.pop("parse_mode", None)
                 return await _orig_send(self, chat_id=chat_id, text=safe, parse_mode=None, *args, **kwargs2)

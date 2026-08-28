@@ -19332,7 +19332,53 @@ historical one) — its numbers come from predictions logged live and resolved o
                                    value=0.5, key="sa_thr",
                                    format_func=lambda x: f"{x:.2f}%") / 100.0
 
+    # ── The MEASURED verdict, before the per-ticker replay ──────────────────────────────
+    # This page's replay marks "edge" on a raw threshold: no significance test, no
+    # correction for testing ~20 models at once. On this data 68% of RANDOMLY GENERATED
+    # signals passed a naive test, so a green tick from a threshold alone means very little.
+    # The engine's multiplicity-corrected verdict goes FIRST so the raw table is read in its
+    # light rather than instead of it.
+    try:
+        _mres, _mcrit = _TB_ENGINE._signal_base_rates(get_conn()) if _TB_ENGINE else ([], 0)
+    except Exception:
+        _mres, _mcrit = [], 0
+    if _mres:
+        _mpass = [o for o in _mres if o["t"] >= _mcrit]
+        _mnom = [o for o in _mres if 2.0 < o["t"] < _mcrit]
+        _mdays = max(o["days"] for o in _mres)
+        st.markdown("### 🎯 Measured verdict — the whole ensemble, multiplicity-corrected")
+        _c = st.columns(3)
+        _c[0].metric("Models tested", len(_mres), f"{_mdays} days")
+        _c[1].metric("Clear the bar", len(_mpass), f"t ≥ {_mcrit:.2f}")
+        _c[2].metric("Nominal only", len(_mnom), "do not act on", delta_color="off")
+        if _mpass:
+            st.success("**Measured edge:** " + " · ".join(
+                f"{o['model']}/{o['call']} — {o['hit']*100:.0f}% vs {o['base']*100:.0f}% "
+                f"baseline, t={o['t']:.2f} on {o['days']} days" for o in _mpass))
+            if len({o["call"] for o in _mpass}) == 1 and len(_mpass) > 1:
+                st.caption("⚠️ All of them are the same call type, and that family has "
+                           "overlapped 63–92% on its fires — treat this as **one** finding "
+                           "counted more than once until the overlap is checked.")
+        else:
+            st.info("**Nothing clears the bar.** That is a real answer, not a failure — it is "
+                    "what stops a self-improving loop from optimising noise.")
+        _pinned_df(pd.DataFrame([
+            {"Model": o["model"], "Call": o["call"], "Hit": f"{o['hit']*100:.1f}%",
+             "Baseline": f"{o['base']*100:.1f}%", "Edge": f"{(o['hit']-o['base'])*100:+.1f}pp",
+             "Days": o["days"], "t": round(o["t"], 2),
+             "Verdict": ("MEASURED" if o["t"] >= _mcrit else
+                         "nominal only" if o["t"] > 2 else "not measured")}
+            for o in _mres[:12]]), hide_index=True, use_container_width=True)
+        st.caption(f"Significance is computed on DAILY aggregates (n = {_mdays} days), never "
+                   f"pooled per row — 700+ tickers on one day are nowhere near 700 independent "
+                   f"draws, and a pooled t inflates roughly tenfold. The critical t of "
+                   f"{_mcrit:.2f} is Bonferroni-corrected for testing {len(_mres)} models at once.")
+        st.markdown("---")
+
     st.markdown("### 📊 DB-backtestable signals")
+    st.caption("⚠️ This section is a per-ticker **replay**, scored on a raw threshold with no "
+               "significance test and no multiplicity correction. Read it as exploration; the "
+               "panel above is the verdict.")
     _sa = _signal_accuracy_backtest(_sa_tk, int(_sa_hold), float(_sa_thr))
     if not _sa or not _sa.get("signals"):
         st.info("Not enough stored history for this selection.")
@@ -19350,7 +19396,9 @@ historical one) — its numbers come from predictions logged live and resolved o
                               "Verdict": "⚪ too few", "What it is": s["desc"]})
                 continue
             _vsb = round(s["hit"] - _sa["base_up"], 1)
-            _verdict = ("🟢 edge" if s["edge"] > 0.1 and s["hit"] >= _sa["base_up"]
+            # "raw +" not "edge": this is a threshold on a replay, not a measured edge, and
+            # calling it one invited exactly the confidence the panel above exists to temper.
+            _verdict = ("🟢 raw +" if s["edge"] > 0.1 and s["hit"] >= _sa["base_up"]
                         else "🔴 backwards" if s["edge"] < -0.1
                         else "🟡 weak")
             _rows.append({"Signal": s["name"], "Hit-rate": s["hit"], "vs base": _vsb,

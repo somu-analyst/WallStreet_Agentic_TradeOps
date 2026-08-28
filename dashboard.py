@@ -6427,8 +6427,19 @@ with st.sidebar:
         try:
             want = open(_PW_FILE, encoding="utf-8").read().strip()
         except Exception:
-            return True                                  # not configured -> not gated
+            want = ""
         if not want:
+            # No password configured. On a laptop that means "not gated" -- the right default,
+            # since nobody should be locked out of their own machine by a half-finished setup.
+            #
+            # On a PUBLICLY EXPOSED host it is the wrong default entirely: the protection is
+            # silently absent and the share link hands out the real book, which is exactly what
+            # happened on 2026-08-28. So the cloud sets NYSE_REQUIRE_PRIVATE_PW=1 and fails
+            # CLOSED instead: no password file means nobody sees the book, not everybody.
+            if os.environ.get("NYSE_REQUIRE_PRIVATE_PW", "0") == "1":
+                st.error("🔒 The book is locked. No dashboard password has been configured on "
+                         "this host, so these pages are unavailable to everyone.")
+                return False
             return True
         _seen = st.session_state.get("_priv_at", 0)
         if st.session_state.get("_priv_ok") and (time.time() - _seen) < _LOCK_AFTER:

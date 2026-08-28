@@ -210,7 +210,7 @@ def run_job_headless(path, extra_args=None):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
         for line in proc.stdout:
@@ -239,7 +239,7 @@ def launch_job_background(path):
     proc = subprocess.Popen(
         [sys.executable, "-u", path], cwd=os.path.dirname(path),
         stdout=lf, stderr=subprocess.STDOUT, text=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return proc, lf
 
@@ -264,7 +264,7 @@ def run_openbb_parallel_lane(bb_proc, bb_log):
             proc = subprocess.Popen(
                 [sys.executable, "-u", JOB_BB_DERIVE, "--stock"],   # --stock: also rebuild stock_daily
                 cwd=job_dir, stdout=lf, stderr=subprocess.STDOUT, text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW)
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             rc = proc.wait()
         log_msg(f"OpenBB derive finished rc={rc} -> {dlog}")
         # IV-metrics panel (skew25/atm_iv/pcvol/...): idempotent over all capture dates, so a
@@ -275,7 +275,7 @@ def run_openbb_parallel_lane(bb_proc, bb_log):
             proc = subprocess.Popen(
                 [sys.executable, "-u", JOB_BB_SKEW],
                 cwd=job_dir, stdout=lf, stderr=subprocess.STDOUT, text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW)
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             rc = proc.wait()
         log_msg(f"skew_snapshot finished rc={rc} -> {slog}")
     except Exception as e:

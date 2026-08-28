@@ -28085,7 +28085,7 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                                    headers=_SEC_UA), timeout=25).read().decode("utf-8", "ignore")
         # Prefer a geography/disaggregation report; segment tables carry profit lines too and
         # are messier to read as a pure revenue split.
-        best, cands = None, []
+        best, cands, fallback = None, [], []
         for rep in _re.findall(r"<Report[^>]*>.*?</Report>", fs, _re.S):
             nm = _re.search(r"<ShortName>(.*?)</ShortName>", rep, _re.S)
             fn = _re.search(r"<HtmlFileName>(.*?)</HtmlFileName>", rep, _re.S)
@@ -28116,15 +28116,20 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                               name, _re.I):
                     cands.append(fn.group(1))
             else:
+                # A TRUE geography match always beats the segment-shaped fallback, whatever
+                # order they appear in the filing. Collecting both into one list lost that
+                # precedence and handed Alphabet's geography slot to its segment table,
+                # because "Revenue by Segment" happens to be filed first.
                 if _re.search(r"disaggregat|revenue by geograph|geographic (sales|revenue)",
                               name, _re.I):
                     cands.append(fn.group(1))
                 elif _re.search(r"segment.*(revenue|sales)|(revenue|sales).*segment",
                                 name, _re.I):
-                    cands.append(fn.group(1))
+                    fallback.append(fn.group(1))
         # The Nth match within THIS basis. attempt=0 reproduces the old
         # first-match behaviour; the caller raises it only when the chosen
         # table turned out to carry no sub-lines.
+        cands = cands or fallback          # geography wins; segment-shaped is last resort
         best = cands[attempt] if attempt < len(cands) else None
         if not best:
             return {}
@@ -28339,6 +28344,18 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
                                      total=rev, basis="geography")
         seg_by = _revenue_segments(ticker, quarterly=quarterly, unit_div=unit_div,
                                    total=rev, basis="segment")
+        # If the chosen segment table lists only the parents, try the NEXT candidate for the
+        # same axis -- filers often publish both a summary and a fuller table, and only the
+        # fuller one carries the sub-lines (Alphabet's Search / YouTube / Network sit under
+        # Google Services). Only ever within this basis: the axes are told apart by name, so
+        # searching across both collapses geography into segment.
+        if seg_by and not any((v.get("children") or {}) for v in seg_by.values()):
+            for _try in (1, 2):
+                _alt = _revenue_segments(ticker, quarterly=quarterly, unit_div=unit_div,
+                                         total=rev, basis="segment", attempt=_try)
+                if _alt and any((v.get("children") or {}) for v in _alt.values()):
+                    seg_by = _alt
+                    break
     except Exception:
         segments, seg_by = {}, {}
     return {"company": name, "period": (f"quarter ending {period}" if quarterly

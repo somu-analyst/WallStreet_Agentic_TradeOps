@@ -282,6 +282,20 @@ def compute_walls(df, spot=None):
     out = {"call_wall": None, "put_wall": None, "call_wall_oi": 0.0, "put_wall_oi": 0.0,
            "call_wall_strength": 0.0, "put_wall_strength": 0.0}
     if df is None or len(df) == 0:
+        # Attach children, dropping SUBTOTAL rows. Alphabet files "Google advertising" as a
+        # child worth exactly Search + YouTube + Network; rendering it beside its own
+        # components would double the level and look like a data error.
+        for _pname, _pv in out.items():
+            _mine = {k: v for k, v in kids.items() if v.get("parent") == _pname}
+            if not _mine:
+                continue
+            _vals = sorted((v["now"] for v in _mine.values()), reverse=True)
+            _drop = set()
+            for _k, _v in _mine.items():
+                _others = sum(x["now"] for kk, x in _mine.items() if kk != _k)
+                if _v["now"] > 0 and abs(_others - _v["now"] * 2) / max(_v["now"], 1) < 0.02:
+                    _drop.add(_k)                      # equals the sum of the rest
+            _pv["children"] = {k: v for k, v in _mine.items() if k not in _drop}
         return out
     try:
         d = df.copy()
@@ -392,8 +406,12 @@ async def _safe_reply(message, text, parse_mode="HTML", reply_markup=None):
                 log.debug("suppressed exception", exc_info=True)
 
 # ─── Config ───
-DATA_DIR  = r"C:\Users\srini\Options_chain_data"
-NYSE_DIR  = os.path.join(DATA_DIR, "NYSE_DATA")
+# Derived from this file's own location, not hardcoded: on the laptop this resolves to exactly
+# the old literals, but a hardcoded C:\ drive silently killed file logging on the Oracle VM
+# (2026-08-27) — harmless while a human watches the terminal, fatal for a scheduled night that
+# then leaves nothing to diagnose. NYSE_DATA_DIR overrides for an out-of-tree data root.
+NYSE_DIR  = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR  = os.environ.get("NYSE_DATA_DIR") or os.path.dirname(NYSE_DIR)
 # PRIMARY DB = OpenBB (US_data_OpenBB.db): 734 tickers + real IV/greeks, state synced from Yahoo.
 # Override via env NYSE_DB_PATH (e.g. point to US_data.db to revert to the Yahoo feed).
 DB_PATH   = os.environ.get("NYSE_DB_PATH") or os.path.join(DATA_DIR, "US_data_OpenBB.db")
@@ -411,6 +429,14 @@ TOKEN_FILE  = os.path.join(NYSE_DIR, "token.txt")
 CHATID_FILE = os.path.join(NYSE_DIR, "us_bot_id.txt")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# httpx logs every request URL at INFO, and a Telegram API URL EMBEDS THE BOT TOKEN:
+#   HTTP Request: POST https://api.telegram.org/bot<ID>:<SECRET>/getUpdates "HTTP/1.1 200 OK"
+# Under systemd that lands in the journal, which is world-readable to anyone with shell access
+# and gets copied wherever logs are pasted (2026-08-28: a token reached a chat transcript this
+# way and had to be revoked). WARNING keeps real failures visible and drops the URL line.
+for _noisy in ("httpx", "httpcore", "telegram.ext.Updater", "telegram.request"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 
@@ -14739,6 +14765,16 @@ def _data_audit(conn, day=None):
     """Stringent per-day audit. Returns (status, checks, day);
     checks = [(name, ok_bool, detail_str)]. Persists to data_audit."""
     day = day or _last_expected_eod()
+    # Fill stock_history BEFORE judging it. The sync is a free fold-forward from stock_daily,
+    # but it only runs when _daily_history is called WITHOUT a connection -- so whether it had
+    # happened by audit time was luck. That is why `history` was the check that kept failing:
+    # 2026-08-24 was recorded as 15 tickers against stock_daily's 730, and later held all 730
+    # once something happened to trigger the sync. Auditing a table the audit itself can bring
+    # up to date was reporting a scheduling accident as a data fault.
+    try:
+        _sync_history_from_daily(conn)
+    except Exception:
+        log.debug("pre-audit history sync failed", exc_info=True)
     checks = []
 
     def _nt(tbl, col):
@@ -14790,7 +14826,54 @@ def _data_audit(conn, day=None):
                  (day, status, _summary,
                   datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M")))
     conn.commit()
+    _reaudit_stale(conn, day)
     return status, checks, day
+
+
+def _reaudit_stale(conn, today_str, lookback=20):
+    """Re-check past PARTIAL/FAILED days and upgrade any whose data has since healed.
+
+    The verdict was a point-in-time snapshot nothing ever revisited, so a day audited while
+    the EOD lane was still running kept its amber mark permanently. The dashboard strip then
+    showed failures that no longer existed, and the same phantom cost three separate
+    investigations (IDs 215, 274, 353).
+
+    UPGRADE ONLY. A day that genuinely still fails keeps its mark, so this cannot paper over
+    a real gap -- it can only retract a stale accusation.
+    """
+    try:
+        stale = [r[0] for r in conn.execute(
+            "SELECT audit_date FROM data_audit WHERE status <> 'VALIDATED' "
+            "AND audit_date < ? ORDER BY audit_date DESC LIMIT ?", (today_str, lookback))]
+    except Exception:
+        return
+    for d in stale:
+        try:
+            cap = conn.execute("SELECT COUNT(DISTINCT ticker) FROM options_openbb "
+                               "WHERE trade_date=?", (d,)).fetchone()[0]
+            der = conn.execute("SELECT COUNT(DISTINCT ticker) FROM options_change "
+                               "WHERE trade_date_now=?", (d,)).fetchone()[0]
+            stk = conn.execute("SELECT COUNT(DISTINCT ticker) FROM stock_daily "
+                               "WHERE trade_date=?", (d,)).fetchone()[0]
+            hst = conn.execute("SELECT COUNT(DISTINCT ticker) FROM stock_history "
+                               "WHERE trade_date=?", (d,)).fetchone()[0]
+            skw = conn.execute("SELECT COUNT(DISTINCT ticker) FROM skew_snapshot "
+                               "WHERE trade_date=?", (d,)).fetchone()[0]
+            _pq = os.path.join(os.path.dirname(DB_PATH), "openbb_chains", f"chains_{d}.parquet")
+            if (cap >= 300 and der >= cap * 0.98 and stk >= 300
+                    and hst >= stk * 0.95 and skw >= 300 and os.path.exists(_pq)):
+                conn.execute(
+                    "UPDATE data_audit SET status='VALIDATED', summary=?, run_at=? "
+                    "WHERE audit_date=?",
+                    (f"✅ re-audited and healed · capture {cap} · derive {der} · stock {stk}"
+                     f" · history {hst} · skew {skw}",
+                     datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M"),
+                     d))
+                conn.commit()
+                log.info("data_audit: %s upgraded to VALIDATED on re-audit (history now %d)",
+                         d, hst)
+        except Exception:
+            log.debug("re-audit failed for %s", d, exc_info=True)
 
 
 async def data_audit_alert(ctx: ContextTypes.DEFAULT_TYPE):
@@ -27846,7 +27929,7 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         _MONEY = _re.compile(
             r"^(net |total |operating )*(revenues?|sales)"
             r"( from contract(s)? with customers)?$", _re.I)
-        out, cur = {}, None
+        out, cur, cur_parent = {}, None, None
         for _, r in tbl.iterrows():
             lab = str(r["0"]).strip()
             val = str(r["1"]).strip()
@@ -27865,10 +27948,10 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                             pv = str(r["2"]).strip()
                             if _re.search(r"\d", pv) and pv.lower() != "nan":
                                 prior = float(_re.sub(r"[^\d.]", "", pv)) * scale / unit_div
-                        out[cur] = {"now": now, "prior": prior}
+                        out[cur] = {"now": now, "prior": prior, "parent": cur_parent}
                     except ValueError:
                         pass
-                    cur = None
+                    cur = cur_parent = None
                 continue                                  # a bare total, no segment -> skip
             if not has_val and not _BOILER.search(lab):
                 # The name sits on EITHER side of the pipe depending on the report:
@@ -27878,7 +27961,13 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                 # called "Operating Segments". Drop the axis parts and keep what remains.
                 parts = [q.strip() for q in lab.split("|") if q.strip()]
                 keep = [q for q in parts if not _AXIS.search(q)]
+                # NESTING. Two surviving parts mean "child | parent": Alphabet files
+                # "Google Search & other | Google Services" as a CHILD of the segment
+                # "Google Services". Taking keep[0] alone flattened the tree and made the
+                # child a sibling of its own parent, which is why a second level never
+                # appeared. Order is child-first in every filing seen.
                 cur = keep[0] if keep else None
+                cur_parent = keep[1] if len(keep) > 1 else None
         # A TOTAL ROW OFTEN LOOKS LIKE A SEGMENT. PLTR's axis label "Geographic
         # Concentration Risk" and XOM's "Sales and other operating revenue" both carry the
         # consolidated figure, so taking them at face value double-counted the business:
@@ -27901,6 +27990,11 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         # against real revenue of 11,633, so the check below threw away a perfectly good
         # geography split. Walk the rows IN ORDER and keep the first contiguous run that
         # reconciles; that is the first complete axis in the table.
+        # Children never take part in the top-level reconciliation: they are already counted
+        # inside their parent, so leaving them in doubles the sum and the axis check throws
+        # away a perfectly good split (the same trap Visa's stacked axes sprang).
+        kids = {k: v for k, v in out.items() if v.get("parent")}
+        out = {k: v for k, v in out.items() if not v.get("parent")}
         if total and len(out) > 2:
             items = list(out.items())
             for start in range(len(items)):
@@ -34320,6 +34414,34 @@ async def intraday_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
         log.warning(f"intraday lane spawn failed: {e}")
 
 
+def _script_running_proc(script_name, require_arg=None):
+    """psutil-free fallback: read /proc directly. Linux only; returns True (assume running)
+    anywhere it cannot tell, so a missing dependency can never cause a respawn loop."""
+    if not os.path.isdir("/proc"):
+        return True
+    try:
+        pids = [d for d in os.listdir("/proc") if d.isdigit()]
+    except Exception:
+        return True
+    me = str(os.getpid())
+    for pid in pids:
+        if pid == me:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                argv = [a.decode("utf-8", "replace") for a in fh.read().split(b"\0") if a]
+        except Exception:
+            continue                              # process vanished mid-scan, or not ours
+        if not argv or not os.path.basename(argv[0]).lower().startswith("python"):
+            continue
+        if not any(os.path.basename(a) == script_name for a in argv):
+            continue
+        if require_arg and require_arg not in argv:
+            continue
+        return True
+    return False
+
+
 def _script_running(script_name, require_arg=None):
     """Is a PYTHON process actually running `script_name`?
 
@@ -34327,11 +34449,20 @@ def _script_running(script_name, require_arg=None):
     the filename, which matched a shell that merely mentioned it -- a py_compile command in an
     admin console was enough to convince the bot the watchdog was already up, so it never
     spawned one (caught 2026-08-08). A stray grep must never suppress a supervisor.
+
+    It used to return False when psutil was NOT INSTALLED -- i.e. "no watchdog running" -- so
+    the bot spawned one on every start. The watchdog then restarts the bot, the new bot is
+    equally blind, and the two spawn each other forever: on the Oracle VM that produced a chain
+    of 15 processes in ~40 seconds and 6.45 GB of 12 GB before it was killed (2026-08-28).
+
+    So: psutil when present, a /proc scan on Linux when not, and if NEITHER can answer, report
+    True. That is deliberately the opposite of the old default. Failing to spawn a supervisor
+    is a degraded state you can notice; a spawn loop takes the whole host down.
     """
     try:
         import psutil
     except ImportError:
-        return False
+        return _script_running_proc(script_name, require_arg)
     for p in psutil.process_iter(["name", "cmdline"]):
         try:
             if not (p.info["name"] or "").lower().startswith("python"):

@@ -29738,14 +29738,32 @@ async def catchup_command(update, ctx):
         await update.message.reply_text("No scheduled briefings are registered yet — the bot "
                                         "may still be starting up.", parse_mode=H)
         return
+    # _CATCHUP_JOBS entries are 6-tuples (key, mins, fn, label, days, tz). Unpacking FOUR here
+    # raised ValueError on every invocation, so /catchup has never worked -- the scheduled
+    # sweep at catchup_alert unpacks six and was fine, which is why the briefings still arrived
+    # and only the on-demand command was dead (found 2026-08-28).
+    #
+    # `mins` is wall-clock in the job's OWN timezone. Comparing an ET slot against a UTC clock
+    # was a 4-5 hour error, so ET briefings would have been called "not due yet" all morning.
     _now_utc = datetime.now(timezone.utc)
     _now_min = _now_utc.hour * 60 + _now_utc.minute
-    _due = [(k, m, fn, lbl) for k, m, fn, lbl in _CATCHUP_JOBS if m <= _now_min]
+    try:
+        from zoneinfo import ZoneInfo
+        _et = _now_utc.astimezone(ZoneInfo("America/New_York"))
+        _now_et_min = _et.hour * 60 + _et.minute
+    except Exception:
+        _now_et_min = _now_min
+
+    def _slot_passed(mins, tz):
+        return mins <= (_now_et_min if tz == "ET" else _now_min)
+
+    _due = [(k, m, fn, lbl) for k, m, fn, lbl, _d, _tz in _CATCHUP_JOBS
+            if _slot_passed(m, _tz)]
     if not _due:
         _nxt = min(_CATCHUP_JOBS, key=lambda x: x[1])
         await update.message.reply_text(
             f"Nothing is due yet today — the first briefing (<b>{_nxt[3]}</b>) is scheduled "
-            f"for {_nxt[1]//60:02d}:{_nxt[1]%60:02d} UTC.", parse_mode=H)
+            f"for {_nxt[1]//60:02d}:{_nxt[1]%60:02d} {_nxt[5]}.", parse_mode=H)
         return
     await update.message.reply_text(
         f"🔄 Sending <b>{len(_due)}</b> briefing(s) due so far today: "

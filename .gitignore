@@ -284,3 +284,7 @@ docs/*_backup_*.xlsx
 id_rsa*
 id_ed25519*
 oci-nyse*
+
+# Verified cloud DB snapshots pulled by tools/pull_cloud_backup.py — the only copy
+# independent of Oracle. Never in git: ~1.2 GB each.
+cloud_backups/

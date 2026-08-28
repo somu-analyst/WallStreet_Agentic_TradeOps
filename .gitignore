@@ -273,3 +273,14 @@ transcripts/
 
 # Machine-specific SSL CA bundle (Avast/AV interception fix, generated at startup)
 combined_ca_bundle.pem
+
+# Tracker backups — point-in-time duplicates of IDEA_TRACKER.xlsx, no reason to version them
+docs/*_backup_*.xlsx
+
+# SSH / private keys — never let one in by accident (2026-08-27)
+*.key
+*.pem
+!combined_ca_bundle.pem
+id_rsa*
+id_ed25519*
+oci-nyse*

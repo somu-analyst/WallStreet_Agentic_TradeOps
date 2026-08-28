@@ -33,9 +33,9 @@ except Exception:                                    # stock_daily (--stock) nee
     curl_requests = None
 
 # ── config (self-contained: OpenBB DB only) ─────────────────────────
-DATA_DIR = r"C:\Users\srini\Options_chain_data"
+DATA_DIR = os.environ.get("NYSE_DATA_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 US_CHARTS_DIR = os.path.join(DATA_DIR, "US_CHARTS")
-OB_DB = os.path.join(DATA_DIR, "US_data_OpenBB.db")
+OB_DB = os.environ.get("NYSE_DB_PATH") or os.path.join(DATA_DIR, "US_data_OpenBB.db")
 TABLE_OPTIONS = "options_daily"
 TABLE_OPTIONS_CHANGE = "options_change"
 TABLE_STOCK_DAILY = "stock_daily"

@@ -7429,7 +7429,13 @@ if page == "🌍 Market Overview":
             # ticker_universe.xlsx moved into NYSE_DATA (next to this file) 2026-07-20
             _tm_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ticker_universe.xlsx")
             if not os.path.exists(_tm_file):
-                _tm_file = "C:/Users/srini/Options_chain_data/US_CHARTS/ticker_universe.xlsx"
+                # Old location, resolved RELATIVE to the data root rather than a hardcoded
+                # C:\ drive -- which on the Oracle VM produced "No such file or directory:
+                # 'C:/Users/srini/...'" on every heatmap render (2026-08-28).
+                _tm_file = os.path.join(
+                    os.environ.get("NYSE_DATA_DIR")
+                    or os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "US_CHARTS", "ticker_universe.xlsx")
             _tm_df = pd.read_excel(_tm_file, sheet_name="bk")
             _tm_df = _tm_df[["ticker", "name", "category"]].dropna(subset=["ticker"])
             _tm_df["ticker"] = _tm_df["ticker"].str.strip().str.upper()

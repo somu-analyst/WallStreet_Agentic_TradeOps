@@ -153,8 +153,12 @@ def gate_e():
 @gate("F. Dashboard module parses")
 def gate_f():
     import py_compile
-    py_compile.compile("dashboard.py", doraise=True)
-    return True, "dashboard.py compiles (Streamlit serves it as a script)"
+    # Named once and reported from the same variable. The cloud mirror rewrites the quoted
+    # filename but not prose inside a longer string, so a hardcoded second mention would report
+    # "dashboard.py compiles" while actually having compiled cloud_dashboard.py.
+    _dash = "dashboard.py"
+    py_compile.compile(_dash, doraise=True)
+    return True, f"{_dash} compiles (Streamlit serves it as a script)"
 
 
 @gate("G. Free-tier resource fit", critical=False)

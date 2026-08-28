@@ -1306,6 +1306,15 @@ def get_conn():
             for _ix in (
                 "CREATE INDEX IF NOT EXISTS idx_oo_lookup ON options_openbb(ticker, strike, expiry_date, trade_date)",
                 "CREATE INDEX IF NOT EXISTS idx_oc_lookup ON options_change(ticker, strike, expiry_date, trade_date_now)",
+                # DATE-LEADING index (2026-08-28). idx_oo_lookup leads with `ticker`, so any query
+                # filtering on trade_date alone cannot use it as a prefix and SCANs all 7.1M rows.
+                # That was the real cause of the sluggish dashboard, not cache size -- a bigger
+                # cache was measured 4-20% SLOWER, because you cannot cache your way out of
+                # reading every row. Measured on the VM after adding this: latest-day count
+                # 1,105ms -> 15ms, per-ticker day 13ms -> 1ms, GEX-style group-by 779ms -> 75ms.
+                # Costs ~400 MB and 18s to build.
+                "CREATE INDEX IF NOT EXISTS idx_oo_date ON options_openbb(trade_date, ticker)",
+                "CREATE INDEX IF NOT EXISTS idx_oc_date ON options_change(trade_date_now, ticker)",
             ):
                 try:
                     conn.execute(_ix)

@@ -36,6 +36,13 @@
   hypothesis ("`_positions_card_parts` is SHARED by the 10-min push — a throw there would
   silence it") which turned out to be a real unguarded crash path in a scheduled job; it was
   found only because the user asked whether the sheet was being followed.
+- **Cloud/hosting work lives on its OWN sheet — never the main queue** (user 2026-08-27).
+  `docs/IDEA_TRACKER.xlsx` now has a **`Cloud Migration`** worksheet with its own ID series
+  starting at 1. Read it with `python tools/show_pending.py --cloud`; write it with
+  `tracker_io.add(..., sheet=tracker_io.CLOUD)` / `update(..., sheet=tracker_io.CLOUD)`.
+  **IDs repeat across sheets** — an `update()` without `sheet=` searches the main sheet and
+  will miss, or worse, hit an unrelated row. Six rows were moved off the main sheet on
+  2026-08-27; their old numbers survive as a `[was main-tracker ID nnn]` prefix in `Detail`.
 - **Write the tracker through `tools/tracker_io.py` — never hardcode an ID.** Two sessions
   edited the workbook at once on 2026-08-12, both computed "next ID" from a stale copy, and
   the second save won: 5 rows collided and 4 lost their outcome text to an ID-keyed update

@@ -17,9 +17,10 @@ Run:  python skew_snapshot.py            # process all capture dates (idempotent
 """
 import os, sqlite3, numpy as np, pandas as pd
 
-DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "US_data_OpenBB.db")
-DB = os.path.normpath(DB) if os.path.exists(os.path.normpath(DB)) else \
-    r"C:\Users\srini\Options_chain_data\US_data_OpenBB.db"
+# NYSE_DB_PATH first so this agrees with the capture, the derive step and the bot. The old
+# fallback was a hardcoded Windows path, which off that laptop pointed at nothing.
+DB = os.environ.get("NYSE_DB_PATH") or os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "US_data_OpenBB.db"))
 
 
 def _metrics(g):

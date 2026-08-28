@@ -746,3 +746,49 @@ stock ~326 from 374). PEAD says drift continues LOWER ~20d. User closed their be
 spread today at +$1,361 — signal says the directional thesis had further to run.
 
 Scripts: scratchpad `mag7_earnings.py`, `pead.csv`.
+
+## 2026-08-27 — Cloud migration: the system now runs on Oracle
+
+**State:** VM `nyse-bot` at 150.136.41.250, us-ashburn-1, A1.Flex 2 OCPU / 12 GB, Always Free.
+Seven services up: nyse-bot, nyse-dashboard, cloud-tunnel, cloud-keepalive, fail2ban,
+cloud-eod.timer, cloud-backup.timer.
+
+**The full EOD pipeline ran end to end on the VM** for 2026-08-27, laptop uninvolved: capture
+716 tickers -> options_change 249,520 -> skew 709 -> stock_daily 716 (Finnhub, no yfinance) ->
+serving layer 714 -> fundamentals 500. cloud_smoke.py gate C answered the migration's deciding
+question authoritatively: BOTH capture paths work from a datacenter IP.
+
+**Separate repo by user decision:** Street_Cloud_AI_TradeOps, private. Every .py renamed
+(telegram_bot_optimized -> cloud_bot, NYSE_OpenBB -> cloud_capture...). tools/sync_cloud.py is a
+ONE-WAY mirror that renames AND rewrites references in four shapes, including STRING filenames
+like JOB_BB and py_compile targets, which fail at RUN time not import time. Never edit .py
+inside NYSE_Cloud - the next sync overwrites it.
+
+**Bugs found, every one of which failed silently rather than loudly:**
+- psutil missing -> _script_running answered "no watchdog" -> bot and watchdog spawned each
+  other: 15 processes, 6.45 GB, 40 seconds. psutil now required, /proc fallback added, and the
+  no-answer default INVERTED - a spawn loop takes the host down, a missing supervisor does not.
+- python-telegram-bot without [job-queue] -> a warning, and every scheduled job silently never
+  ran: position pushes, earnings alerts, digests, heat streamer, intraday supervisor.
+- httpx logs request URLs at INFO and a Telegram URL embeds the token -> the bot token reached
+  the journal and a transcript. Four loggers forced to WARNING; token revoked and reissued.
+- Hardcoded Windows paths in five files meant the nightly lane could never have run on Linux;
+  NYSE_OpenBB.py also ignored NYSE_DB_PATH and would have filled a DB nothing else opens.
+- Persistent=true fires a missed timer window the instant the timer is enabled -> collided with
+  a manual capture, seven at once, 204 CBOE throttle errors. Single-instance lock added INSIDE
+  the capture, because the collision was manual-versus-scheduled.
+- A capture started in an SSH foreground froze 39 minutes on SIGTTOU when the session dropped.
+
+**Idle reclamation:** Oracle reclaims when CPU 95th pct AND network AND memory are ALL under 20%
+over 7 days. The CPU route needs ~1.2 h/day; the nightly-validation idea measures 25-35 min, so
+it does not qualify. Solved on memory instead: cloud-keepalive holds 3 GB, memory 34-38%, one
+second of CPU total.
+
+**Rejected after measurement:** SQLite cache_size tuning was 4-20% SLOWER in an alternating A/B
+on the VM. Suspect is idx_oo_lookup leading with ticker while these queries lead with trade_date.
+
+**Open:** offsite backup must LEAVE Oracle (1.1 GB verified snapshot exists, same disk); budget
+still non-recurring; WallStreet_Agentic_TradeOps still public with a 14 MB DB in its history;
+Tailscale Funnel would give a permanent dashboard hostname, free, no domain.
+
+Cloud tracker: python tools/show_pending.py --cloud  - 22 rows, kept OFF the main sheet.

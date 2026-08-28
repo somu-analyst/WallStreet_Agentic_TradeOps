@@ -11,7 +11,10 @@ from zoneinfo import ZoneInfo
 
 
 # ================== PATHS / CONFIG ==================
-BASE_DIR = r"C:\Users\srini\Options_chain_data\NYSE_DATA"
+# Derived from this file's own location. On the laptop it resolves to exactly the old literal;
+# on the Oracle VM the scripts live in ~/nyse, and a hardcoded C:\ path meant JOB_BB pointed at
+# a file that does not exist, so the nightly lane could never have run there (2026-08-27).
+BASE_DIR = os.environ.get("NYSE_APP_DIR") or os.path.dirname(os.path.abspath(__file__))
 JOB1 = os.path.join(BASE_DIR, "NYSE_YFin.py")
 # OpenBB is the PRIMARY lane: capture+derive+skew in one shot (--full).
 # Yahoo (JOB1) is the fallback when BB capture is missing/incomplete for the day.
@@ -41,8 +44,16 @@ stop_sleep_thread = False
 main_log = None  # Global for log_msg
 
 
+# The anti-sleep dance exists because a laptop that suspends mid-capture loses the night. A
+# server does not suspend, and `ctypes.windll` does not exist off Windows at all -- referencing
+# it raises AttributeError, which would kill the scheduler on its very first line of work.
+_IS_WIN = os.name == "nt"
+
+
 def prevent_sleep():
     global sleep_cookie
+    if not _IS_WIN:
+        return
     sleep_cookie = ctypes.windll.kernel32.SetThreadExecutionState(
         ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
     )
@@ -50,6 +61,8 @@ def prevent_sleep():
 
 def refresh_sleep():
     global stop_sleep_thread
+    if not _IS_WIN:
+        return
     while not stop_sleep_thread:
         time.sleep(30)
         if sleep_cookie:
@@ -59,6 +72,8 @@ def refresh_sleep():
 def allow_sleep():
     global stop_sleep_thread
     stop_sleep_thread = True
+    if not _IS_WIN:
+        return
     if sleep_cookie:
         ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
 

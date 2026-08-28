@@ -1,6 +1,15 @@
 # Core runtime (bot + dashboard + data pipeline)
-streamlit
-python-telegram-bot
+# PINNED. The VM installed 1.62.0 while the laptop runs 1.54.0, and the page rendered at a
+# different width (user 2026-08-28). Streamlit changes default block padding and max-width
+# between minors, and this dashboard carries a lot of CSS tuned against the local version --
+# _CSS_LIGHT/_CSS_DARK, the .stDataFrame rules, the sidebar widths. Matching the laptop keeps
+# one appearance; upgrading is a deliberate act that needs the CSS re-checked in a browser.
+streamlit==1.54.0
+# [job-queue] is NOT optional here: it pulls APScheduler, and without it PTB emits a mere
+# WARNING and every scheduled job silently never runs — the 10-minute position push, earnings
+# alerts, digests, the heat streamer, data-health checks, and intraday_lane_supervisor, which
+# is what starts the intraday lane during market hours (found on the Oracle VM 2026-08-28).
+python-telegram-bot[job-queue]
 pandas
 numpy
 scipy
@@ -12,6 +21,19 @@ pandas_market_calendars
 pytz
 requests
 openpyxl
+
+# Not optional. _script_running() uses it to decide whether a supervisor is already up, and
+# without it the bot and bot_watchdog.py each conclude the other is absent and respawn one
+# another (Oracle VM 2026-08-28: 15 processes and 6.45 GB in ~40s). There is now a /proc
+# fallback for Linux, but psutil is the supported path and the only one that works on Windows.
+psutil
+
+# Dashboard pages degrade to an "install X" message rather than failing, so a missing one is
+# invisible until someone opens that page. Both were absent on the Oracle VM (2026-08-28):
+#   feedparser -> "Breaking News & Market Impact" rendered nothing
+#   pandas-ta  -> "Technical Signals" (RSI/MACD/Bollinger/EMA20) rendered nothing
+feedparser
+pandas-ta
 
 # MCP server (mcp_server.py — exposes the engine as MCP tools over stdio)
 mcp

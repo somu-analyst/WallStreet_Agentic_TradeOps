@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import yfinance as yf
 
-DATA_DIR = r"C:\Users\srini\Options_chain_data"
+DATA_DIR = os.environ.get("NYSE_DATA_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IDB_PATH = os.path.join(DATA_DIR, "US_intraday.db")
 MAIN_DB = os.environ.get("NYSE_DB_PATH") or os.path.join(DATA_DIR, "US_data_OpenBB.db")
 

@@ -44,7 +44,9 @@ except Exception:
     curl_requests = None
 
 # ---- config (mirrors NYSE_YFin.py) ------------------------------------------
-DATA_DIR = r"C:\Users\srini\Options_chain_data"
+# Parent of this file's directory, not a hardcoded drive: on the laptop that is the same
+# Options_chain_data folder as before, on the Oracle VM it is /home/ubuntu (2026-08-27).
+DATA_DIR = os.environ.get("NYSE_DATA_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 US_CHARTS_DIR = os.path.join(DATA_DIR, "US_CHARTS")
 # ticker_universe.xlsx moved into NYSE_DATA (next to the scripts) 2026-07-20; prefer that,
 # fall back to the old US_CHARTS location for safety.
@@ -56,7 +58,10 @@ UNIVERSE_SHEET_ACTIVE = "ticker_universe"
 # Output DB: US_data_OpenBB.db = full copy of the yfinance DB (all 53 tables,
 # seeded once via sqlite backup) + this script's captures accumulating in the
 # 'options_openbb' table. Production US_data.db is STILL never written to.
-OUT_DB_PATH = os.path.join(DATA_DIR, "US_data_OpenBB.db")
+# NYSE_DB_PATH is what the bot, the dashboard and cloud_smoke all read. The capture wrote to a
+# DATA_DIR-derived path instead, so on any host where the two differ it would have filled a
+# database nothing else opens -- a silent split-brain rather than a visible error.
+OUT_DB_PATH = os.environ.get("NYSE_DB_PATH") or os.path.join(DATA_DIR, "US_data_OpenBB.db")
 OB_DB = OUT_DB_PATH   # alias used by derive + skew functions below
 
 MAX_HORIZON_DAYS = 45          # same horizon window as NYSE_YFin
@@ -298,6 +303,44 @@ def _wiki_tickers(url, col_candidates=("Symbol", "Ticker")):
     return []
 
 
+def _acquire_capture_lock():
+    """Refuse to start a second capture while one is already running.
+
+    WHY THIS EXISTS (2026-08-27, cloud tracker ID 14)
+        Seven `--full` captures ran at once on the Oracle VM: some started by hand, one launched
+        by the systemd timer -- `Persistent=true` makes systemd fire a just-missed window the
+        instant the timer is enabled. Four workers each against a lane sized for four TOTAL got
+        CBOE throttling within minutes: 204 chain-fetch failures, and the adaptive backoff
+        crawled to workers 2 / pace 2.00s / rest 120s. The run still completes, but it takes
+        hours and repeatedly hammers an endpoint that could decide to block the IP instead.
+
+        The lock has to sit HERE, not in the scheduler: the collision was a manual capture
+        against a scheduled one, and a scheduler-side lock cannot see a process it did not
+        start. Every entry point takes the same lock, so they serialise no matter who starts them.
+
+    Returns the held file handle (kept open for the process lifetime) or None if busy.
+    The handle MUST stay referenced -- letting it be garbage-collected releases the lock.
+    """
+    path = os.path.join(DATA_DIR, ".capture.lock")
+    try:
+        fh = open(path, "w")
+    except Exception:
+        return "unlocked"                     # cannot create a lock file -> do not block work
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, IOError):
+        fh.close()
+        return None                           # someone else holds it
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
+
+
 def build_expanded_universe():
     """Build the expanded universe -> new sheet 'openbb_universe' (production sheets untouched)."""
     tks = []
@@ -327,7 +370,15 @@ def build_expanded_universe():
         t for t in tks
         if t and t not in _skip and "-USD" not in t and not t.startswith("^")))
     df = pd.DataFrame({"ticker": uni})
-    with pd.ExcelWriter(UNIVERSE_FILE, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
+    # mode="a" REQUIRES the workbook to already exist, so on a fresh host this "auto-build on
+    # first run" path crashed with FileNotFoundError instead of building anything (Oracle VM,
+    # 2026-08-27). The universe is derived -- Wikipedia plus the curated lists above -- so there
+    # is nothing to preserve on a host that has no workbook yet: create one.
+    _exists = os.path.exists(UNIVERSE_FILE)
+    if not _exists:
+        os.makedirs(os.path.dirname(UNIVERSE_FILE) or ".", exist_ok=True)
+    _kw = dict(mode="a", if_sheet_exists="replace") if _exists else dict(mode="w")
+    with pd.ExcelWriter(UNIVERSE_FILE, engine="openpyxl", **_kw) as w:
         df.to_excel(w, sheet_name=EXPANDED_SHEET, index=False)
     print(f"Wrote {len(uni)} tickers -> sheet '{EXPANDED_SHEET}' (production sheets untouched)")
     return uni
@@ -655,6 +706,15 @@ def main():
         return
     if args.compare:
         compare_vs_yfinance(args.compare if args.compare != "today" else None)
+        return
+
+    # Held for the whole run. Named so it cannot be garbage-collected -- dropping the handle
+    # releases the lock and the guard silently stops working.
+    _capture_lock = _acquire_capture_lock()
+    if _capture_lock is None:
+        print("ANOTHER CAPTURE IS ALREADY RUNNING -- exiting rather than competing for CBOE.")
+        print("  running now:  pgrep -af 'NYSE_OpenBB.py|cloud_capture.py'")
+        print("  reruns are idempotent and RESUME, so nothing is lost by waiting.")
         return
 
     obb = _load_openbb()

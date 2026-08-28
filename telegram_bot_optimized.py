@@ -600,6 +600,26 @@ def _ensure_tunnel(port: int = 8502, timeout: int = 30):
     return url
 
 
+def _external_tunnel_url():
+    """URL of a tunnel this process did NOT start, published by whatever runs it.
+
+    On the cloud host the tunnel is its own systemd unit, started before the bot and outliving
+    it, so `_ensure_tunnel` (which spawns and owns a cloudflared child) can never see it. Left
+    alone, /terminal reports `http://localhost:8502` on a machine the user is not sitting at --
+    which is exactly what happened on 2026-08-28.
+
+    The contract is a file: the tunnel unit writes its public hostname to `.tunnel_url` beside
+    the bot. A quick tunnel gets a fresh random hostname on every restart, so this is read at
+    call time, never cached.
+    """
+    p = os.path.join(NYSE_DIR, ".tunnel_url")
+    try:
+        url = open(p, encoding="utf-8").read().strip()
+    except Exception:
+        return None
+    return url if url.startswith("https://") else None
+
+
 async def terminal_command(update, ctx):
     """/terminal — open the Streamlit dashboard INSIDE Telegram (Mini App).
     Boots the dashboard + a cloudflared quick tunnel, token-gated."""
@@ -607,6 +627,28 @@ async def terminal_command(update, ctx):
     ok_dash = await asyncio.to_thread(ensure_streamlit_running, 8502)
     if not ok_dash:
         await msg.edit_text("❌ Dashboard failed to start (see bot log).", parse_mode=H)
+        return
+    ext = await asyncio.to_thread(_external_tunnel_url)
+    if ext:                                         # tunnel managed outside this process
+        tok = await asyncio.to_thread(_dash_token)
+        link = f"{ext}/?token={tok}"
+        try:
+            from telegram import WebAppInfo
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Open Terminal (in Telegram)", web_app=WebAppInfo(url=link))],
+                [InlineKeyboardButton("🌐 Open in browser", url=link)]])
+        except Exception:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open Terminal", url=link)]])
+        # The link is also emitted as a bare <code> block, not just buttons. Buttons cannot be
+        # copied out of Telegram, and this URL has to travel: to a desktop browser, to another
+        # device, to a note. Tapping a <code> span copies it.
+        await msg.edit_text(
+            "📊 <b>RUDRARJUN Terminal</b> — served from the cloud host\n\n"
+            f"<code>{link}</code>\n\n"
+            "<i>Tap the link above to copy it. Token-gated — anyone holding it gets in, so do "
+            "not forward it. The hostname changes whenever the tunnel restarts; ask /terminal "
+            "again rather than keeping an old link.</i>",
+            parse_mode=H, reply_markup=kb)
         return
     if not MINIAPP_TUNNEL:                          # local-only mode (no public exposure)
         await msg.edit_text(
@@ -14889,6 +14931,78 @@ def _reaudit_stale(conn, today_str, lookback=20):
             log.debug("re-audit failed for %s", d, exc_info=True)
 
 
+def _fmt_signal_accuracy(conn):
+    """Telegram body for the measured-signal state, or None when nothing is graded yet."""
+    res, crit = _signal_base_rates(conn)
+    if not res:
+        return None, set()
+    passed = [o for o in res if o["t"] >= crit]
+    nominal = [o for o in res if 2.0 < o["t"] < crit]
+    days = max(o["days"] for o in res)
+    keys = {f"{o['model']}/{o['call']}" for o in passed}
+
+    rows = [(("🟢" if o["t"] >= crit else ("🟡" if o["t"] > 2 else "▪")),
+             o["model"][:13], f"{o['hit'] * 100:.0f}%",
+             f"{(o['hit'] - o['base']) * 100:+.0f}", f"{o['t']:.2f}")
+            for o in res[:8]]
+    body = _report(
+        "🎯 SIGNAL ACCURACY",
+        ("", "Model", "Hit", "vs base", "t"), rows, right_cols={2, 3, 4},
+        legend=f"🟢 clears the multiplicity bar (t≥{crit:.2f}) · 🟡 nominal only · "
+               f"{len(res)} models tested on {days} days",
+        notes="A model only counts as MEASURED if it clears the Bonferroni column. "
+              "Testing ~20 models at once produces about half a nominal hit from noise alone.")
+    if passed:
+        body += ("\n\n<b>✅ Measured edge:</b> "
+                 + " · ".join(f"{o['model']}/{o['call']} "
+                              f"({o['hit'] * 100:.0f}% vs {o['base'] * 100:.0f}%, t={o['t']:.2f})"
+                              for o in passed))
+    else:
+        body += ("\n\n<b>Nothing clears the bar yet.</b> That is a real answer, not a "
+                 "failure — it is what stops a self-improving loop from optimising noise.")
+    if nominal:
+        body += (f"\n<i>Nominal only, do NOT act on: "
+                 f"{', '.join(o['model'] + '/' + o['call'] for o in nominal)}</i>")
+    return body, keys
+
+
+async def signal_accuracy_alert(ctx: ContextTypes.DEFAULT_TYPE):
+    """Daily measured-signal state (ID 336). Speaks up when the VERDICT changes.
+
+    The measurement existed only as a tool someone had to remember to run, so a model
+    crossing the multiplicity bar — the single event this whole apparatus exists to detect —
+    could pass unnoticed for weeks. A model entering or leaving the measured set is pushed
+    loudly; an unchanged verdict is logged and sent quietly, so the daily message cannot
+    become wallpaper.
+    """
+    conn = get_conn()
+    try:
+        body, keys = _fmt_signal_accuracy(conn)
+        if not body:
+            return
+        prev = set(filter(None, (_app_setting(conn, "sigacc_measured") or "").split(",")))
+        gained, lost = keys - prev, prev - keys
+        _set_app_setting(conn, "sigacc_measured", ",".join(sorted(keys)))
+    finally:
+        conn.close()
+    head = ""
+    if gained:
+        head = (f"🔔 <b>NEW measured edge: {', '.join(sorted(gained))}</b>\n"
+                f"<i>First time this cleared the multiplicity bar. Re-run as the sample "
+                f"grows before acting — a threshold crossed once on a thin sample is "
+                f"exactly when a false positive looks most convincing.</i>\n\n")
+    elif lost:
+        head = (f"⚠️ <b>No longer measured: {', '.join(sorted(lost))}</b>\n"
+                f"<i>It fell back below the bar as more data arrived. That is the sample "
+                f"correcting itself, and the reason nothing is acted on early.</i>\n\n")
+    _, chat_id = load_creds()
+    try:
+        await ctx.bot.send_message(chat_id=int(chat_id), text=(head + body)[:4000],
+                                   parse_mode=H, disable_notification=not (gained or lost))
+    except Exception as e:
+        log.warning(f"signal_accuracy_alert send failed: {e}")
+
+
 async def data_audit_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """Post-EOD job: run the stringent audit and post the verdict (once/day)."""
     conn = get_conn()
@@ -18955,6 +19069,68 @@ def _setup_hp_tables(conn):
             PRIMARY KEY (ticker, model_name)
         )""")
     conn.commit()
+
+
+def _signal_base_rates(conn, min_rows=100, min_days=8):
+    """Measured base rate per (model, call). Returns (results, bonferroni_critical_t).
+
+    THE MEASUREMENT LIVES HERE, in the canonical file, so the bot can report it and
+    `tools/measure_signal_base_rates.py` imports it. Keeping it only in the tool would have
+    forced the alert to re-implement the statistics -- a second copy of engine logic, which
+    is exactly what the house rule forbids and how the grading thresholds drifted before.
+
+    Three things this gets right that a naive version does not:
+      * BASELINE MATCHES THE GRADING RULE. `_score_signal` uses a dead zone and treats
+        SELL_PREMIUM as a volatility call. Comparing all three call types to "the up-rate"
+        reported 8 inverse models and 0 edges on data that actually holds 0 and 3.
+      * SIGNIFICANCE ON DAILY AGGREGATES. 700+ tickers on one day are not 700 draws; a
+        pooled t inflates roughly tenfold. n here is DAYS.
+      * MULTIPLICITY. ~20 combinations are tested at once, so about half a hit at p<0.05 is
+        expected from noise. The Bonferroni critical t is returned so callers report against
+        it rather than the nominal bar.
+    """
+    import math                                   # not a module-level import in this file
+    rows = list(conn.execute(
+        "SELECT model_name, signal, trade_date, actual_ret, correct FROM signal_accuracy"
+        " WHERE actual_ret IS NOT NULL AND correct IS NOT NULL"))
+    if not rows:
+        return [], 0.0
+    from collections import defaultdict as _dd
+    day_base = _dd(lambda: _dd(list))
+    for _m, _s, d, ret, _c in rows:
+        for k in ("BULL", "BEAR", "SELL_PREMIUM"):
+            day_base[k][d].append(1 if _score_signal(k, ret) else 0)
+    overall = {k: sum(sum(v) for v in dd.values()) / max(sum(len(v) for v in dd.values()), 1)
+               for k, dd in day_base.items()}
+    by = _dd(lambda: _dd(list))
+    for m, s, d, _ret, corr in rows:
+        by[(m, s)][d].append(corr)
+
+    out = []
+    for (m, s), per_day in by.items():
+        if s not in overall:
+            continue
+        n_obs = sum(len(v) for v in per_day.values())
+        diffs = [sum(v) / len(v) - sum(day_base[s][d]) / len(day_base[s][d])
+                 for d, v in per_day.items() if v and day_base[s].get(d)]
+        if n_obs < min_rows or len(diffs) < min_days:
+            continue
+        mu = sum(diffs) / len(diffs)
+        var = sum((x - mu) ** 2 for x in diffs) / (len(diffs) - 1)
+        se = math.sqrt(var / len(diffs)) if var > 0 else 0.0
+        out.append({"model": m, "call": s, "n": n_obs, "days": len(diffs),
+                    "hit": sum(sum(v) for v in per_day.values()) / n_obs,
+                    "base": overall[s], "edge": mu, "t": (mu / se) if se else 0.0})
+    crit = 0.0
+    if out:
+        p = 0.05 / len(out)
+        # inverse normal via a small rational approximation; only a threshold display
+        _a, _y = 0.147, 2 * (1 - p / 2) - 1
+        _ln = math.log(1 - _y * _y) if abs(_y) < 1 else -30.0
+        _tm = 2 / (math.pi * _a) + _ln / 2
+        crit = math.sqrt(2) * math.copysign(
+            math.sqrt(max(math.sqrt(_tm * _tm - _ln / _a) - _tm, 0.0)), _y)
+    return sorted(out, key=lambda z: -z["t"]), crit
 
 
 def _score_signal(sig, ret, dead=0.003, band=0.012):
@@ -43347,6 +43523,10 @@ def main():
         _sched_once(job_queue, history_sync_job, (18, 20), "history_sync",
                     "History sync (stock_daily → stock_history)")   # 6:20pm ET, post-EOD
         _sched_once(job_queue, data_audit_alert, (18, 35), "data_audit", "EOD data audit")     # 6:35pm ET
+        # After the audit, so the day's fires are graded before the verdict is measured
+        # (ID 336). Registered via _sched_once, so it also arrives in the startup catch-up.
+        _sched_once(job_queue, signal_accuracy_alert, (18, 45), "signal_accuracy",
+                    "Signal accuracy", days=(1, 2, 3, 4, 5))
         log.info("Scheduled Risk-Off Radar (startup + post-close)")
         log.info("Scheduled morning alert 14:00 UTC (10:00am EDT / 9:00am EST)")
         # 15-min intraday alert (fires every 15 min; function checks market hours internally)

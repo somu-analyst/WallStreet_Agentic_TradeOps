@@ -41,8 +41,8 @@ def _bucket(status):
     return "ACTIONABLE"
 
 
-def main(show_all=False):
-    ws = openpyxl.load_workbook(XL)["Ideas & Questions"]
+def main(show_all=False, sheet="Ideas & Questions"):
+    ws = openpyxl.load_workbook(XL)[sheet]
     rows = list(ws.values)[1:]
     buckets = {"ACTIONABLE": [], "WAITING": [], "RESOLVED": []}
     for r in rows:
@@ -79,4 +79,7 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
-    main("--all" in sys.argv)
+    # --cloud reads the Oracle/hosting queue, which is a SEPARATE sheet on purpose (user
+    # 2026-08-27): cloud items were diluting the main queue and their IDs are their own series.
+    main("--all" in sys.argv,
+         "Cloud Migration" if "--cloud" in sys.argv else "Ideas & Questions")

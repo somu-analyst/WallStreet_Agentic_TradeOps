@@ -632,23 +632,48 @@ async def terminal_command(update, ctx):
     if ext:                                         # tunnel managed outside this process
         tok = await asyncio.to_thread(_dash_token)
         link = f"{ext}/?token={tok}"
+        # Two links, because they are not interchangeable. The share link reaches the whole
+        # analytics terminal but shows a labelled SAMPLE book on the five position pages; the
+        # owner link additionally unlocks the real book. Emitting both makes the difference
+        # explicit at the moment of sharing, rather than leaving it to be remembered.
+        def _owner_tok():
+            try:
+                v = open(os.path.join(NYSE_DIR, "dash_owner.txt"), encoding="utf-8").read().strip()
+                return v or None
+            except Exception:
+                return None
+        _own = await asyncio.to_thread(_owner_tok)
+        _mine = f"{link}&owner={_own}" if _own else None
+        # Buttons open YOUR link. /terminal is a private message to the account that owns the
+        # book, so tapping should land on the real thing; the share link is copy-only, below.
+        _btn = _mine or link
         try:
             from telegram import WebAppInfo
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📊 Open Terminal (in Telegram)", web_app=WebAppInfo(url=link))],
-                [InlineKeyboardButton("🌐 Open in browser", url=link)]])
+                [InlineKeyboardButton("📊 Open Terminal (in Telegram)", web_app=WebAppInfo(url=_btn))],
+                [InlineKeyboardButton("🌐 Open in browser", url=_btn)]])
         except Exception:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open Terminal", url=link)]])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open Terminal", url=_btn)]])
         # The link is also emitted as a bare <code> block, not just buttons. Buttons cannot be
         # copied out of Telegram, and this URL has to travel: to a desktop browser, to another
         # device, to a note. Tapping a <code> span copies it.
-        await msg.edit_text(
-            "📊 <b>RUDRARJUN Terminal</b> — served from the cloud host\n\n"
-            f"<code>{link}</code>\n\n"
-            "<i>Tap the link above to copy it. Token-gated — anyone holding it gets in, so do "
-            "not forward it. The hostname changes whenever the tunnel restarts; ask /terminal "
-            "again rather than keeping an old link.</i>",
-            parse_mode=H, reply_markup=kb)
+        _body = "📊 <b>RUDRARJUN Terminal</b> — served from the cloud host\n\n"
+        if _mine:
+            _body += ("🔒 <b>Yours</b> — real positions\n"
+                      f"<code>{_mine}</code>\n\n"
+                      "👥 <b>Share</b> — same terminal, sample book instead of your positions\n"
+                      f"<code>{link}</code>\n\n"
+                      "<i>Tap a link to copy it. Send the SHARE one to other people: it opens "
+                      "every analytics page but shows a labelled sample portfolio where yours "
+                      "would be. Never send the top link — it carries your positions.</i>")
+        else:
+            _body += (f"<code>{link}</code>\n\n"
+                      "<i>Tap to copy. This link opens the full terminal. Book pages ask for "
+                      "the dashboard password unless one has been set up, so check before "
+                      "sharing it.</i>")
+        _body += ("\n\n<i>The hostname changes whenever the tunnel restarts — ask /terminal "
+                  "again rather than keeping an old link.</i>")
+        await msg.edit_text(_body, parse_mode=H, reply_markup=kb)
         return
     if not MINIAPP_TUNNEL:                          # local-only mode (no public exposure)
         await msg.edit_text(
@@ -28027,7 +28052,7 @@ def _sec_cik(ticker):
 
 
 def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
-                      basis="geography"):
+                      basis="geography", attempt=0):
     """{segment: revenue} from the company's own filing, or {} — NEVER raises.
 
     SEC renders every filing's segment tables as plain HTML (the "R" reports listed in
@@ -28060,7 +28085,7 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                                    headers=_SEC_UA), timeout=25).read().decode("utf-8", "ignore")
         # Prefer a geography/disaggregation report; segment tables carry profit lines too and
         # are messier to read as a pure revenue split.
-        best = None
+        best, cands = None, []
         for rep in _re.findall(r"<Report[^>]*>.*?</Report>", fs, _re.S):
             nm = _re.search(r"<ShortName>(.*?)</ShortName>", rep, _re.S)
             fn = _re.search(r"<HtmlFileName>(.*?)</HtmlFileName>", rep, _re.S)
@@ -28075,6 +28100,11 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
             # Two DIFFERENT disaggregations live in the same filing and answer different
             # questions: geography (where customers are) and operating segment (who they
             # are -- government vs commercial). The caller picks.
+            # Matching stays PER BASIS -- the two axes are told apart by name and nothing
+            # else, so a single heuristic across both collapses them (tried, reverted: it
+            # made geography and customer-type return identical rows). What changes is that
+            # matches are COLLECTED rather than taken first-and-break, so the caller can ask
+            # for the next candidate within the same axis when the first lacks sub-lines.
             if basis == "segment":
                 # Must be a DETAIL table. "Segment and Geographic Information" on its own is
                 # the narrative text block -- it matches every segment word and contains no
@@ -28082,15 +28112,20 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                 if not _re.search(r"\(detail", name, _re.I):
                     continue
                 if _re.search(r"financial information for each reportable segment|"
-                              r"segment.*(revenue|financial info)", name, _re.I):
-                    best = fn.group(1); break
+                              r"segment.*(revenue|financial info)|revenue by segment",
+                              name, _re.I):
+                    cands.append(fn.group(1))
             else:
                 if _re.search(r"disaggregat|revenue by geograph|geographic (sales|revenue)",
                               name, _re.I):
-                    best = fn.group(1); break
-                if best is None and _re.search(
-                        r"segment.*(revenue|sales)|(revenue|sales).*segment", name, _re.I):
-                    best = fn.group(1)
+                    cands.append(fn.group(1))
+                elif _re.search(r"segment.*(revenue|sales)|(revenue|sales).*segment",
+                                name, _re.I):
+                    cands.append(fn.group(1))
+        # The Nth match within THIS basis. attempt=0 reproduces the old
+        # first-match behaviour; the caller raises it only when the chosen
+        # table turned out to carry no sub-lines.
+        best = cands[attempt] if attempt < len(cands) else None
         if not best:
             return {}
         html = _u.urlopen(_u.Request(f"{base}/{best}", headers=_SEC_UA), timeout=25).read()

@@ -6450,7 +6450,11 @@ with st.sidebar:
                 _got = st.query_params.get("owner", "")
             except Exception:
                 _got = (st.experimental_get_query_params().get("owner") or [""])[0]
-            if _got and _hl.sha256(_got.encode()).hexdigest() == _owner_want:
+            # Compared in the clear, unlike the password. The password is something you TYPE,
+            # so it must never be recoverable from the box; the owner token is something the
+            # bot has to hand you as a link, which it cannot do from a hash. Both files sit on
+            # the same host with the same permissions, so hashing this one bought nothing.
+            if _got and _got == _owner_want:
                 st.session_state["_priv_ok"] = True
                 st.session_state["_priv_at"] = time.time()
                 return True

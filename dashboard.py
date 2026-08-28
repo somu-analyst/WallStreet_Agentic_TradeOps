@@ -6476,23 +6476,51 @@ with st.sidebar:
         are invented are worse than no preview at all -- someone could screenshot them, quote
         them, or act on them. The banner, the caption and the ticker names all say DEMO.
         """
-        st.error("🎭 **DEMO DATA — this is NOT a real portfolio.** Every row below is invented "
-                 "to illustrate the layout. Enter the password above to see the real book.")
+        st.error("🎭 **SAMPLE PORTFOLIO — NOT REAL HOLDINGS.** The tickers are real so the page "
+                 "looks like itself, but nobody owns these positions and every price is made "
+                 "up. Do not read, screenshot or act on any number below. Enter the password "
+                 "to see the actual book.")
+        # Real tickers, invented positions. Two structures on purpose so the demo shows what
+        # the page is FOR: LEAPS (long-dated, the tax clock matters) against next monthly opex
+        # (short-dated, the gamma/exit logic matters), plus stock legs, which are linear and
+        # take a different code path from options everywhere in this app.
         _demo = pd.DataFrame([
-            {"Ticker": "DEMO-A", "Type": "CALL", "Strike": 100.0, "Qty": 2,
-             "Entry": 3.20, "Now": 4.15, "P&L %": 29.7},
-            {"Ticker": "DEMO-B", "Type": "PUT", "Strike": 55.0, "Qty": 1,
-             "Entry": 2.10, "Now": 1.48, "P&L %": -29.5},
-            {"Ticker": "DEMO-C", "Type": "STOCK", "Strike": 0.0, "Qty": 50,
-             "Entry": 41.00, "Now": 44.60, "P&L %": 8.8},
+            # US — LEAPS
+            {"Ticker": "GOOG",  "Type": "CALL",  "Strike": 200.0, "Expiry": "2028-01-21",
+             "Qty": 2,   "Entry": 34.50, "Now": 41.20, "P&L %": 19.4},
+            {"Ticker": "AMZN",  "Type": "CALL",  "Strike": 240.0, "Expiry": "2028-01-21",
+             "Qty": 1,   "Entry": 42.80, "Now": 38.15, "P&L %": -10.9},
+            # US — next monthly opex
+            {"Ticker": "AVGO",  "Type": "CALL",  "Strike": 340.0, "Expiry": "2026-09-18",
+             "Qty": 3,   "Entry": 8.40,  "Now": 11.05, "P&L %": 31.5},
+            {"Ticker": "GOOG",  "Type": "PUT",   "Strike": 170.0, "Expiry": "2026-09-18",
+             "Qty": 2,   "Entry": 3.15,  "Now": 2.05,  "P&L %": -34.9},
+            # US — stock legs (linear; no strike, no expiry)
+            {"Ticker": "AVGO",  "Type": "STOCK", "Strike": 0.0,   "Expiry": "",
+             "Qty": 40,  "Entry": 296.00, "Now": 331.40, "P&L %": 12.0},
+            {"Ticker": "AMZN",  "Type": "STOCK", "Strike": 0.0,   "Expiry": "",
+             "Qty": 60,  "Entry": 205.50, "Now": 219.80, "P&L %": 7.0},
+            # India — index option + stock, incl. the data-centre theme
+            {"Ticker": "NIFTY",        "Type": "CALL",  "Strike": 25500.0,
+             "Expiry": "2026-09-24", "Qty": 1, "Entry": 210.00, "Now": 268.00, "P&L %": 27.6},
+            {"Ticker": "RELIANCE.NS",  "Type": "STOCK", "Strike": 0.0, "Expiry": "",
+             "Qty": 120, "Entry": 1402.00, "Now": 1487.50, "P&L %": 6.1},
+            {"Ticker": "M&M.NS",       "Type": "STOCK", "Strike": 0.0, "Expiry": "",
+             "Qty": 45,  "Entry": 3120.00, "Now": 3044.00, "P&L %": -2.4},
+            {"Ticker": "NETWEB.NS",    "Type": "STOCK", "Strike": 0.0, "Expiry": "",
+             "Qty": 30,  "Entry": 2180.00, "Now": 2456.00, "P&L %": 12.7},
+            {"Ticker": "ANANTRAJ.NS",  "Type": "STOCK", "Strike": 0.0, "Expiry": "",
+             "Qty": 200, "Entry": 545.00,  "Now": 511.00,  "P&L %": -6.2},
         ])
         st.dataframe(_demo.style.format({"Strike": "{:.2f}", "Entry": "{:.2f}",
                                          "Now": "{:.2f}", "P&L %": "{:+.1f}"},
                                         precision=2, thousands=","),
                      width="stretch", hide_index=True)
-        st.caption("🎭 Illustrative only. Tickers DEMO-A/B/C do not exist. The real page prices "
-                   "every leg off live quotes, flags the short-to-long-term tax flip, and "
-                   "ranks exits by risk.")
+        st.caption("🎭 Sample data — invented positions in real tickers, for layout only. "
+                   "The real page prices every leg off live quotes, splits option legs from "
+                   "stock legs (shares are linear, so they never touch Black-Scholes), tracks "
+                   "the short-to-long-term tax flip per lot, and ranks exits by risk. "
+                   "🇮🇳 rows read from a separate India store with its own calendar.")
 
     # st.stop() halts the whole script, so the page body below never runs and no position
     # data is rendered or even queried. Checking here rather than inside each page means a

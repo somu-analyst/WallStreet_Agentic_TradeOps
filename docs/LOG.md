@@ -792,3 +792,42 @@ still non-recurring; WallStreet_Agentic_TradeOps still public with a 14 MB DB in
 Tailscale Funnel would give a permanent dashboard hostname, free, no domain.
 
 Cloud tracker: python tools/show_pending.py --cloud  - 22 rows, kept OFF the main sheet.
+
+## 2026-08-28/29 — Migration to Oracle Cloud, completed
+
+The engine now runs on an Oracle Ampere A1 instance (us-ashburn-1, 2 OCPU / 12 GB Always Free)
+with the laptop uninvolved. The proof is the scheduled lane capturing 732 tickers for 2026-08-28
+on its own, not a smoke test.
+
+**Built:** VM via Cloud Shell CLI after the console dialogs failed; separate private deployment
+repo with every module renamed by `tools/sync_cloud.py`; systemd units for bot, dashboard,
+hourly EOD timer, daily verified backup, and an idle keep-alive; a second Telegram bot so cloud
+and laptop can run together; a password gate on the five pages that show the book, with a
+labelled sample portfolio for anyone else; offsite backup pulled to the laptop and checksummed.
+
+**Bugs found that had never worked, on either machine:**
+- `subprocess.CREATE_NO_WINDOW` is Windows-only — the nightly scheduler had crashed on every run
+  since the timer was enabled. Same class as `ctypes.windll`.
+- `python-telegram-bot` was required without `[job-queue]`, so PTB emitted a warning and EVERY
+  scheduled job silently never ran — position pushes, earnings alerts, digests, heat streamer,
+  and the supervisor that starts the intraday lane.
+- `psutil` was undeclared, and `_script_running()` answered False without it, so the bot and
+  watchdog each concluded the other was missing and spawned it: 15 processes, 6.45 GB in ~40s.
+- `/catchup` destructured 4 fields from 6-tuples and raised ValueError on every invocation, and
+  compared ET-anchored slots against a UTC clock.
+- Hardcoded `C:\` paths in six files, one of which (`NYSE_OpenBB.py`) also ignored `NYSE_DB_PATH`
+  and would have filled a database nothing else opens.
+
+**Measured:** a date-leading index (`idx_oo_date`) took the latest-day query from 1,105 ms to
+15 ms; `cache_size` was the wrong theory and tested 4–20% slower. Finnhub network time from
+Ashburn is ~1 min for 730 symbols, so the 12-minute floor is entirely the rate cap.
+
+**Security:** all public exposure removed and verified by probing from outside. Git history
+rewritten to purge a 14 MB database, the tracker (352 rows, 74 touching tax or positions) and
+five files carrying hardcoded bot tokens that GitGuardian flagged. `api_keys.enc` was 664 and is
+now 600; `rpcbind` was listening on 0.0.0.0 and is disabled. Three secrets reached the chat
+transcript over the session and were rotated.
+
+**Open:** the CBOE chain lane breaches Cboe's Market Data Policies, which prohibit automated
+extraction. Moving it to a broker API resolves it at no cost and is blocked only on knowing
+which broker. See `docs/NEXT.md`.

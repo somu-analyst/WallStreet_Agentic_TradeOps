@@ -6531,7 +6531,7 @@ def _get_earnings_dte(ticker: str) -> "int | None":
         return None
 
 
-def _compute_gex(ticker: str, conn, spot: float, expiry=None) -> dict:
+def _compute_gex(ticker: str, conn, spot: float, expiry=None, as_of=None) -> dict:
     """
     Gamma Exposure (GEX) for the nearest LIQUID expiry, with per-strike implied
     vol backed out from stored option last-prices (HV fallback when unavailable).
@@ -6549,15 +6549,26 @@ def _compute_gex(ticker: str, conn, spot: float, expiry=None) -> dict:
     if not spot or spot <= 0:
         return result
 
-    # Latest snapshot date for this ticker
+    # Snapshot date for this ticker. `as_of` pins it to a PAST date so the same function can
+    # rebuild a historical GEX panel -- gamma_wall_trades is empty, so the gamma-wall claim has
+    # never actually been scored against what price did next. Without this the function always
+    # answers "today", which is fine live and useless for a backtest (2026-08-29).
     try:
-        _ld = pd.read_sql(
-            "SELECT trade_date_now FROM options_change WHERE ticker=?"
-            " ORDER BY trade_date_now DESC LIMIT 1",
-            conn, params=(ticker,))
-        if _ld.empty:
-            return result
-        date_str = _ld["trade_date_now"].iloc[0]
+        if as_of:
+            _chk = pd.read_sql(
+                "SELECT 1 FROM options_change WHERE ticker=? AND trade_date_now=? LIMIT 1",
+                conn, params=(ticker, as_of))
+            if _chk.empty:
+                return result                      # no capture for that ticker on that date
+            date_str = as_of
+        else:
+            _ld = pd.read_sql(
+                "SELECT trade_date_now FROM options_change WHERE ticker=?"
+                " ORDER BY trade_date_now DESC LIMIT 1",
+                conn, params=(ticker,))
+            if _ld.empty:
+                return result
+            date_str = _ld["trade_date_now"].iloc[0]
         ref_dt = datetime.strptime(date_str, "%Y-%m-%d")
     except Exception:
         return result
@@ -28234,17 +28245,25 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         kids = {k: v for k, v in out.items() if v.get("parent")}
         out = {k: v for k, v in out.items() if not v.get("parent")}
         if total and len(out) > 2:
+            # Pick the run that lands CLOSEST to the total, not the first one merely within
+            # tolerance. Alphabet files Google Services 94,540 + Google Cloud 24,768 =
+            # 119,308, which is 0.41% off 119,796 and passed -- so the search stopped there
+            # and discarded Other Bets at 382, even though including it gives 119,690 and
+            # 0.09%. A first-match rule silently drops the smallest segment of ANY company
+            # whose largest two already sum near the total; it was never Alphabet-specific.
             items = list(out.items())
+            best_run, best_gap = None, None
             for start in range(len(items)):
                 run = 0.0
                 for end in range(start, len(items)):
                     run += items[end][1]["now"]
-                    if end > start and abs(run - total) / total < 0.02:
-                        out = dict(items[start:end + 1])
-                        break
-                else:
-                    continue
-                break
+                    if end == start:
+                        continue
+                    gap = abs(run - total) / total
+                    if gap < 0.02 and (best_gap is None or gap < best_gap):
+                        best_run, best_gap = (start, end), gap
+            if best_run:
+                out = dict(items[best_run[0]:best_run[1] + 1])
         if total and out:
             gap = abs(sum(v["now"] for v in out.values()) - total) / total
             if gap > 0.05:

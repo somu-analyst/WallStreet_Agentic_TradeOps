@@ -24533,16 +24533,36 @@ if page == "💧 Money Flow (Sankey)":
                     else _sk_s.get("segments")) or {}
             if _seg:
                 _rows = []
-                for _n, _v in sorted(_seg.items(), key=lambda kv: -kv[1]["now"]):
+
+                def _seg_row(_n, _v, child=False):
+                    """One row. Children are indented and share the parent's columns, so a
+                    breakdown reads as a breakdown rather than as more top-level sources."""
                     _gr = ((_v["now"] / _v["prior"] - 1) * 100) if _v.get("prior") else None
-                    _rows.append({"Source": _n,
-                                  f"Revenue ({_un})": round(_v["now"] / _dv, 2),
-                                  "Share": f"{_v['now'] / _sk_s['revenue'] * 100:.0f}%",
-                                  "Y/Y": (f"{_gr:+.0f}%" if _gr is not None else "—"),
-                                  "": ("📈 growing" if (_gr or 0) > 5 else
-                                       "📉 falling" if (_gr or 0) < -2 else "flat")})
+                    return {"Source": ("    ↳ " + _n) if child else _n,
+                            f"Revenue ({_un})": round(_v["now"] / _dv, 2),
+                            "Share": f"{_v['now'] / _sk_s['revenue'] * 100:.0f}%",
+                            "Y/Y": (f"{_gr:+.0f}%" if _gr is not None else "—"),
+                            "": ("" if child else
+                                 "📈 growing" if (_gr or 0) > 5 else
+                                 "📉 falling" if (_gr or 0) < -2 else "flat")}
+
+                _kids_total = 0
+                for _n, _v in sorted(_seg.items(), key=lambda kv: -kv[1]["now"]):
+                    _rows.append(_seg_row(_n, _v))
+                    # Second level, where the filer publishes one. Alphabet breaks Google
+                    # Services into Search, YouTube, Network and subscriptions; the parser
+                    # already drops the "Google advertising" subtotal so these sum to their
+                    # parent instead of double-counting it.
+                    for _cn, _cv in sorted((_v.get("children") or {}).items(),
+                                           key=lambda kv: -kv[1]["now"]):
+                        _rows.append(_seg_row(_cn, _cv, child=True))
+                        _kids_total += 1
                 st.markdown("**Where the revenue comes from**")
                 _pinned_df(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+                if _kids_total:
+                    st.caption(f"↳ {_kids_total} sub-line(s) come from the filing's own "
+                               f"breakdown and sum to their parent — subtotal rows the filer "
+                               f"also reports are excluded, or the level would count twice.")
 
             # ── DRILL DOWN ────────────────────────────────────────────────────────────
             # One level below each headline number, using ONLY what the filing publishes.

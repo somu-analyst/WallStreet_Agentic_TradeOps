@@ -28256,6 +28256,39 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                 log.debug("segments for %s miss the total by %.1f%% — discarding",
                           ticker, gap * 100)
                 return {}
+        # Attach each child to its parent, dropping SUBTOTAL rows. Alphabet files
+        # "Google advertising" as a child of Google Services worth exactly
+        # Search + YouTube + Network, so rendering it beside its own components would
+        # double the level and read as a data error. A child whose value equals the sum
+        # of its siblings is therefore a subtotal, not a peer.
+        for _pname, _pv in out.items():
+            _mine = {k: v for k, v in kids.items() if v.get("parent") == _pname}
+            if not _mine:
+                continue
+            # The flat "child | parent" labels collapse what is really THREE levels:
+            # Alphabet reports Google advertising 81,629 AND its own components (Search
+            # 63,271, YouTube 11,055, Network 7,303) as siblings under Google Services.
+            # Two different subsets each reconcile to the parent -- {advertising,
+            # subscriptions} and {Search, YouTube, Network, subscriptions} -- so pick the
+            # one with the MOST members, which is the finest real breakdown, and treat
+            # everything outside it as a subtotal already counted.
+            _kept = _mine
+            if len(_mine) <= 10 and _pv["now"] > 0:
+                import itertools as _it
+                _ks = list(_mine)
+                _best = None
+                for _n in range(len(_ks), 1, -1):
+                    for _combo in _it.combinations(_ks, _n):
+                        _sum = sum(_mine[k]["now"] for k in _combo)
+                        if abs(_sum - _pv["now"]) / _pv["now"] < 0.01:
+                            _best = _combo
+                            break
+                    if _best:
+                        break                      # largest cardinality wins
+                if _best:
+                    _kept = {k: _mine[k] for k in _best}
+            if _kept:
+                _pv["children"] = _kept
         return out if len(out) >= 2 else {}
     except Exception:
         log.debug("revenue segment lookup failed for %s", ticker, exc_info=True)

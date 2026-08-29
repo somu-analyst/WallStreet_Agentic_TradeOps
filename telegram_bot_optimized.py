@@ -282,20 +282,6 @@ def compute_walls(df, spot=None):
     out = {"call_wall": None, "put_wall": None, "call_wall_oi": 0.0, "put_wall_oi": 0.0,
            "call_wall_strength": 0.0, "put_wall_strength": 0.0}
     if df is None or len(df) == 0:
-        # Attach children, dropping SUBTOTAL rows. Alphabet files "Google advertising" as a
-        # child worth exactly Search + YouTube + Network; rendering it beside its own
-        # components would double the level and look like a data error.
-        for _pname, _pv in out.items():
-            _mine = {k: v for k, v in kids.items() if v.get("parent") == _pname}
-            if not _mine:
-                continue
-            _vals = sorted((v["now"] for v in _mine.values()), reverse=True)
-            _drop = set()
-            for _k, _v in _mine.items():
-                _others = sum(x["now"] for kk, x in _mine.items() if kk != _k)
-                if _v["now"] > 0 and abs(_others - _v["now"] * 2) / max(_v["now"], 1) < 0.02:
-                    _drop.add(_k)                      # equals the sum of the rest
-            _pv["children"] = {k: v for k, v in _mine.items() if k not in _drop}
         return out
     try:
         d = df.copy()

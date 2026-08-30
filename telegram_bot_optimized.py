@@ -28422,6 +28422,42 @@ def _dcf(inp, growth, years=5, fade_to=0.025, wacc=None, terminal_growth=0.025,
     }
 
 
+def _reverse_dcf(inp, lo=-0.30, hi=1.50, tol=0.005, **kw):
+    """The growth rate the CURRENT PRICE implies. Returns None if no rate explains it.
+
+    This is the honest way round for a company the forward model calls wildly overvalued.
+    Instead of asserting Apple is worth $105 against a $320 price -- which mostly says the
+    assumptions were mine -- it asks what the market must believe, and lets the reader judge
+    THAT. It is the standard practitioner answer (a "reverse" or "inverse" DCF) precisely
+    because it needs no forecast: the price supplies it.
+
+    Bisection on year-one growth. Monotonic in growth, so bisection is safe and exact enough.
+    """
+    px = inp.get("price") or 0
+    if px <= 0:
+        return None
+    def _v(g):
+        try:
+            return _dcf(inp, g, **kw)["per_share"]
+        except Exception:
+            return None
+    v_lo, v_hi = _v(lo), _v(hi)
+    if v_lo is None or v_hi is None or not (v_lo <= px <= v_hi):
+        return None                       # the price is outside anything this model can reach
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        v = _v(mid)
+        if v is None:
+            return None
+        if abs(v - px) / px < tol:
+            return mid
+        if v < px:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
 def _dcf_sensitivity(inp, growth, waccs, terminals, **kw):
     """Fair value across a WACC x terminal-growth grid.
 
@@ -28702,6 +28738,14 @@ def _fmt_valuation(ticker):
         det.append(f"Across sensible WACC and terminal-growth choices the answer runs "
                    f"<b>${lo:,.0f}–${hi:,.0f}</b> ({hi/max(lo,0.01):.1f}× spread). "
                    f"That range is the output; a single number is not.")
+    try:
+        impl = _reverse_dcf(inp)
+    except Exception:
+        impl = None
+    if impl is not None:
+        det.append(f"<b>What the price already assumes:</b> roughly <b>{impl:.0%}</b> "
+                   f"first-year cash-flow growth. This needs no forecast — the price "
+                   f"supplies it; the question is whether you believe it.")
     mv = _multiples_value(inp, pe=inp.get("forward_pe"), ev_ebitda=15)
     for k, v in mv.items():
         det.append(f"{'Forward P/E' if k == 'pe' else 'EV/EBITDA'} {v['multiple']:.1f}x implies "

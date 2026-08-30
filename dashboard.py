@@ -24579,6 +24579,30 @@ if page == "🧮 Valuation (DCF)":
             # ALL THREE SIDE BY SIDE, never in tabs. The point of three scenarios is the
             # SPREAD between them; a tab shows one at a time and asks the reader to hold the
             # other two in memory, which is precisely the comparison being offered.
+            # REVERSE DCF -- the standard practitioner move when a forward model calls a
+            # quality name wildly overvalued. Asserting Apple is worth $105 against $320
+            # mostly says the assumptions were mine; asking what the market must BELIEVE
+            # puts a falsifiable number on the table and lets the reader judge it.
+            try:
+                _impl = _TB_ENGINE._reverse_dcf(_vi, years=_vyears, fade_to=_fade,
+                                                wacc=_w, base=_bk)
+            except Exception:
+                _impl = None
+            if _impl is not None:
+                _verdict = ("demanding — that is a lot to keep up" if _impl > 0.15 else
+                            "modest — the price is not asking much" if _impl < 0.05 else
+                            "plausible for a strong franchise")
+                st.info(f"**Turn it around: what does the price already assume?**  At "
+                        f"${_vi['price']:,.2f} the market is pricing roughly "
+                        f"**{_impl:.1%} first-year free-cash-flow growth**, fading to "
+                        f"{_fade:.1%} by year {_vyears} at a {_w:.2%} discount rate — "
+                        f"{_verdict}. This needs no forecast from you: the price supplies "
+                        f"it, and the only question is whether you believe it.")
+            elif _vi["price"]:
+                st.info("**Turn it around:** no growth rate inside a sensible range explains "
+                        "the current price under these assumptions — the market is valuing "
+                        "something this model does not capture.")
+
             st.markdown("##### The three scenarios, compared")
             _cmp = []
             for _nm, (_g, _tg, _sw) in _SCEN.items():

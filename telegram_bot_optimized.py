@@ -28661,6 +28661,78 @@ def _sankey_fig(s, width=1150, height=620):
     return fig
 
 
+def _fmt_valuation(ticker):
+    """Telegram body for /value. Three scenarios, the assumption RANGE, and a cross-check.
+
+    Deliberately never prints one fair value on its own. A DCF swings by multiples across
+    assumptions nobody would call unreasonable, so a bare number would be the same false
+    precision `_signal_writeup` exists to prevent -- the range IS the answer.
+    """
+    inp = _valuation_inputs(ticker)
+    w = _wacc(inp)
+    scen = (("Bear", 0.02, 0.015, w + 0.015),
+            ("Base", 0.06, 0.025, w),
+            ("Bull", 0.11, 0.030, max(w - 0.010, 0.03)))
+    rows, base = [], None
+    for nm, g, tg, sw in scen:
+        try:
+            r = _dcf(inp, g, wacc=sw, terminal_growth=tg)
+        except Exception:
+            continue
+        if nm == "Base":
+            base = r
+        em = "🟢" if (r["upside"] or 0) > 0 else "🔴"
+        rows.append((em, nm, f"{r['per_share']:,.0f}", f"{r['upside']:+.0f}%"))
+    if not rows:
+        return f"{hdr('🧮 VALUATION')}\n\n{ticker}: the model could not be solved."
+
+    grid = _dcf_sensitivity(inp, 0.06, [w - 0.02, w - 0.01, w, w + 0.01, w + 0.02],
+                            [0.015, 0.020, 0.025, 0.030, 0.035])
+    flat = [v for r in grid for v in r if v]
+    lo, hi = (min(flat), max(flat)) if flat else (0, 0)
+
+    det = [f"<b>Price ${inp['price']:,.2f}</b> · {inp['sector']} · beta {inp['beta']:.2f} · "
+           f"WACC {w:.1%}",
+           f"Free cash flow <b>${inp['fcf_latest']/1e9:,.1f}B</b> latest, "
+           f"${inp['fcf_avg3']/1e9:,.1f}B 3-yr average"]
+    if base:
+        det.append(f"Terminal value is <b>{base['terminal_pct']:.0f}%</b> of the base case — "
+                   f"{'mostly a bet on the far future' if base['terminal_pct'] >= 70 else 'a reasonable share'}.")
+    if flat:
+        det.append(f"Across sensible WACC and terminal-growth choices the answer runs "
+                   f"<b>${lo:,.0f}–${hi:,.0f}</b> ({hi/max(lo,0.01):.1f}× spread). "
+                   f"That range is the output; a single number is not.")
+    mv = _multiples_value(inp, pe=inp.get("forward_pe"), ev_ebitda=15)
+    for k, v in mv.items():
+        det.append(f"{'Forward P/E' if k == 'pe' else 'EV/EBITDA'} {v['multiple']:.1f}x implies "
+                   f"<b>${v['per_share']:,.0f}</b> ({v['upside']:+.0f}%)")
+    if base and mv:
+        gap = max(abs(v["per_share"] - base["per_share"]) / max(base["per_share"], 1)
+                  for v in mv.values())
+        if gap > 0.4:
+            det.append("⚠️ The two methods disagree sharply — the market is paying for growth "
+                       "this model does not assume, or the multiple has run ahead of the cash.")
+    return _report(f"🧮 {inp['name'][:26]} — what the cash is worth",
+                   ("", "Case", "Value", "vs px"), rows, right_cols={2, 3},
+                   legend=f"$ per share · base free cash flow ${inp['fcf_latest']/1e9:,.1f}B",
+                   details=det,
+                   notes="A MODEL, not a measurement. Every forward number is an assumption. "
+                         "Not advice.")
+
+
+async def value_command(update, ctx):
+    """/value TICKER — discounted cash flow with its own uncertainty attached."""
+    tk = (ctx.args[0].upper() if ctx.args else "AAPL")
+    await update.message.reply_text(f"🧮 Valuing {tk}…", parse_mode=H)
+    try:
+        body = await asyncio.to_thread(_fmt_valuation, tk)
+    except Exception as e:
+        body = (f"❌ Couldn't value <b>{tk}</b> — {_h.escape(str(e)[:160])}\n"
+                f"<i>Needs a filed cash-flow statement and a share count; ETFs and funds "
+                f"have neither.</i>")
+    await update.message.reply_text(body[:4000], parse_mode=H)
+
+
 async def sankey_command(update, ctx):
     """/sankey TICKER [annual] — how a company's money flows, revenue through to net income.
 
@@ -43709,6 +43781,7 @@ def main():
     app.add_handler(CommandHandler("dealer", dealer_command))     # CFTC dealer futures book
     app.add_handler(CommandHandler("heatmap", heatmap_command))   # sector treemap
     app.add_handler(CommandHandler("sankey", sankey_command))     # company money-flow diagram
+    app.add_handler(CommandHandler("value", value_command))       # DCF with its own range
     app.add_handler(CommandHandler("breaking", breaking_command))  # news on your book
     app.add_handler(CommandHandler("catchup", catchup_command))   # resend today's briefings
     app.add_handler(CommandHandler("whymoved", whymoved_command))  # why did it move

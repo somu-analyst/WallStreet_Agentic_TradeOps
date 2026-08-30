@@ -6349,6 +6349,7 @@ with st.sidebar:
         ],
         "💼 Portfolio & Risk": [
             "💼 Portfolio & Suggestions",
+            "🧮 Valuation (DCF)",
             "👀 Watchlist",
             "📝 Paper Trading",
             "🔮 Live Position Predictor",
@@ -6359,7 +6360,6 @@ with st.sidebar:
         ],
         "🏛 Smart Money & News": [
             "💧 Money Flow (Sankey)",
-            "🧮 Valuation (DCF)",
             "📈 Insider / Congress / Whales",
             "🏆 Legendary Investors (13F)",
             "🧠 Smart Money Hub",

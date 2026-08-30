@@ -28102,16 +28102,22 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
             # made geography and customer-type return identical rows). What changes is that
             # matches are COLLECTED rather than taken first-and-break, so the caller can ask
             # for the next candidate within the same axis when the first lacks sub-lines.
+            # SELECT BY CONTENT, NOT BY TITLE. Every filer names this table differently, so
+            # each title pattern was a guess -- and matching only 30% of a 20-name sample is
+            # what that guessing actually bought. The net is now cast WIDE by title (a cheap
+            # filter) and the decision is made by RECONCILIATION downstream: the right table
+            # is the one whose members sum to total revenue, which is a property of the data
+            # rather than of the wording. Candidates stay ordered best-guess-first so the
+            # usual case still resolves on the first try.
+            if not _re.search(r"\(detail", name, _re.I):
+                continue                                   # narrative blocks carry no data
             if basis == "segment":
-                # Must be a DETAIL table. "Segment and Geographic Information" on its own is
-                # the narrative text block -- it matches every segment word and contains no
-                # data, and breaking on it returned nothing at all.
-                if not _re.search(r"\(detail", name, _re.I):
-                    continue
                 if _re.search(r"financial information for each reportable segment|"
                               r"segment.*(revenue|financial info)|revenue by segment",
                               name, _re.I):
                     cands.append(fn.group(1))
+                elif _re.search(r"segment|business unit|reportable", name, _re.I):
+                    fallback.append(fn.group(1))
             else:
                 # A TRUE geography match always beats the segment-shaped fallback, whatever
                 # order they appear in the filing. Collecting both into one list lost that
@@ -28120,7 +28126,8 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                 if _re.search(r"disaggregat|revenue by geograph|geographic (sales|revenue)",
                               name, _re.I):
                     cands.append(fn.group(1))
-                elif _re.search(r"segment.*(revenue|sales)|(revenue|sales).*segment",
+                elif _re.search(r"segment.*(revenue|sales)|(revenue|sales).*segment|"
+                                r"geograph|by (product|region|market)|revenue.*(product|line)",
                                 name, _re.I):
                     fallback.append(fn.group(1))
         # The Nth match within THIS basis. attempt=0 reproduces the old
@@ -28378,10 +28385,21 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
     # foreign issuer or an unparseable table simply leaves this empty and the diagram shows
     # one revenue node, exactly as before.
     try:
-        segments = _revenue_segments(ticker, quarterly=quarterly, unit_div=unit_div,
-                                     total=rev, basis="geography")
-        seg_by = _revenue_segments(ticker, quarterly=quarterly, unit_div=unit_div,
-                                   total=rev, basis="segment")
+        # Try each candidate until one RECONCILES. _revenue_segments returns {} when the
+        # members do not sum to revenue, so an empty result means "wrong table", not "no
+        # data" -- and walking on is what turns a title guess into a content decision.
+        segments = {}
+        for _a in range(6):
+            segments = _revenue_segments(ticker, quarterly=quarterly, unit_div=unit_div,
+                                         total=rev, basis="geography", attempt=_a) or {}
+            if segments:
+                break
+        seg_by = {}
+        for _a in range(6):
+            seg_by = _revenue_segments(ticker, quarterly=quarterly, unit_div=unit_div,
+                                       total=rev, basis="segment", attempt=_a) or {}
+            if seg_by:
+                break
         # If the chosen segment table lists only the parents, try the NEXT candidate for the
         # same axis -- filers often publish both a summary and a fuller table, and only the
         # fuller one carries the sub-lines (Alphabet's Search / YouTube / Network sit under

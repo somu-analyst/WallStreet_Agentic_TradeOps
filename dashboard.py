@@ -24481,11 +24481,19 @@ if page == "💧 Money Flow (Sankey)":
         _sk_go = st.button("Build flow", key="sk_go", type="primary")
 
     _sk_basis = st.radio(
-        "Split revenue by", ["Geography / product", "Customer type (segment)", "Don't split"],
+        # Named after what the filing ACTUALLY publishes. "Geography" and "Customer type"
+        # were wrong for most filers: Apple's disaggregation is by PRODUCT while its
+        # reportable segments are GEOGRAPHIC, so the old labels had them backwards and
+        # looked like a bug when both were correct.
+        "Split revenue by", ["Disaggregation (how they break out sales)",
+                             "Reportable segments (how they run the business)",
+                             "Don't split"],
         horizontal=True, key="sk_basis",
         help="Both come from the company's own filing. Geography answers WHERE the money is; "
-             "customer type answers WHO is paying — for Palantir that is Government vs "
-             "Commercial. Not every filer publishes both.")
+             "Disaggregation is however the filer chooses to break sales out — by product "
+             "for Apple, by geography for Visa. Reportable segments are how management "
+             "actually runs the business — Government vs Commercial at Palantir, but "
+             "GEOGRAPHIC at Apple. Not every filer publishes both.")
 
     if _sk_tk:
         @st.cache_data(ttl=3600, show_spinner=False)
@@ -24529,7 +24537,7 @@ if page == "💧 Money Flow (Sankey)":
             # Where the business comes from, and which part is actually carrying it. A
             # consolidated growth number hides this: Apple grew 22% on iPhone while iPad
             # FELL 6%, and those are different businesses having different quarters.
-            _seg = (_sk_s.get("segments_by") if _sk_basis.startswith("Customer")
+            _seg = (_sk_s.get("segments_by") if _sk_basis.startswith("Reportable")
                     else _sk_s.get("segments")) or {}
             if _seg:
                 _rows = []

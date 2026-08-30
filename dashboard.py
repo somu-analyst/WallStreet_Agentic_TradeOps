@@ -24549,6 +24549,124 @@ if page == "🧮 Valuation (DCF)":
                          "Discounted ($B)": round(f["pv"] / 1e9, 2)} for f in _r["flows"]]),
                         hide_index=True, use_container_width=True)
 
+            # ── Charts ──────────────────────────────────────────────────────────────────
+            # Colours are the validated slots 1 and 2 from the reference palette, stepped
+            # per mode (checked with the palette validator in both light and dark: lightness
+            # band, chroma floor, CVD separation, normal-vision floor, contrast). Identity is
+            # never colour-alone -- every series is direct-labelled as well.
+            _dk = "Dark" in st.session_state.get("ui_theme", "")
+            _C_DCF = "#3987e5" if _dk else "#2a78d6"      # slot 1, blue
+            _C_MUL = "#d95926" if _dk else "#eb6834"      # slot 2, orange
+            _INK = "#e4e9ee" if _dk else "#171d24"
+            _MUTE = "#8996a3" if _dk else "#66727f"
+            _GRID = "rgba(140,150,160,0.18)"
+            _RAMP = (["#9dc4ee", "#5b9ede", "#2a78d6"] if not _dk
+                     else ["#8fb6dd", "#5b9ede", "#3987e5"])   # sequential: Bear→Base→Bull
+
+            st.markdown("##### What each method says the share is worth")
+            _bars, _lab, _col = [], [], []
+            for _nm in ("🐻 Bear", "⚖️ Base", "🐂 Bull"):
+                _r = _res.get(_nm, {})
+                if "per_share" in _r:
+                    _bars.append(_r["per_share"]); _lab.append(_nm.split()[-1] + " DCF")
+                    _col.append(_RAMP[len(_col) % 3])
+            _mv0 = _TB_ENGINE._multiples_value(
+                _vi, pe=float(_vi.get("forward_pe") or 0) or None, ev_ebitda=15)
+            for _k, _v in _mv0.items():
+                _bars.append(_v["per_share"])
+                _lab.append("Forward P/E" if _k == "pe" else "EV/EBITDA")
+                _col.append(_C_MUL)
+            if _bars:
+                _ff = go.Figure()
+                _ff.add_trace(go.Bar(
+                    x=_bars, y=_lab, orientation="h", marker=dict(color=_col),
+                    width=0.55, text=[f"${v:,.0f}" for v in _bars],
+                    textposition="outside", textfont=dict(color=_INK, size=12),
+                    hovertemplate="%{y}<br><b>$%{x:,.0f}</b> per share<extra></extra>",
+                    showlegend=False))
+                # The reference line is the whole point: every bar is read against it.
+                _ff.add_vline(x=_vi["price"], line_dash="dash", line_color=_INK,
+                              line_width=2,
+                              annotation_text=f"price ${_vi['price']:,.0f}",
+                              annotation_position="top",
+                              annotation_font=dict(color=_INK, size=12))
+                _ff.update_layout(
+                    height=300, margin=dict(l=8, r=64, t=34, b=28),
+                    xaxis=dict(title="$ per share", gridcolor=_GRID, zeroline=False,
+                               tickfont=dict(color=_MUTE)),
+                    yaxis=dict(autorange="reversed", tickfont=dict(color=_INK)),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=_INK), bargap=0.35)
+                st.plotly_chart(_ff, use_container_width=True,
+                                config={"displayModeBar": False})
+                _above = [l for l, v in zip(_lab, _bars) if v > _vi["price"]]
+                st.caption(
+                    f"Bars left of the dashed line say the market pays more than the method "
+                    f"justifies. " + (f"**{', '.join(_above)}** sit{'s' if len(_above) == 1 else ''} "
+                                      f"above the price." if _above else
+                                      "**Every method here lands below the current price.**"))
+
+            _fc1, _fc2 = st.columns(2)
+            with _fc1:
+                st.markdown("##### Cash flow the scenarios assume")
+                _pf = go.Figure()
+                for _i, _nm in enumerate(("🐻 Bear", "⚖️ Base", "🐂 Bull")):
+                    _r = _res.get(_nm, {})
+                    if "flows" not in _r:
+                        continue
+                    _pf.add_trace(go.Scatter(
+                        x=[f["year"] for f in _r["flows"]],
+                        y=[f["fcf"] / 1e9 for f in _r["flows"]],
+                        mode="lines+markers", name=_nm.split()[-1],
+                        line=dict(color=_RAMP[_i], width=2),
+                        marker=dict(size=8, color=_RAMP[_i]),
+                        hovertemplate=_nm.split()[-1] + " · year %{x}<br>"
+                                      "<b>$%{y:,.1f}B</b><extra></extra>"))
+                _pf.update_layout(
+                    height=260, margin=dict(l=8, r=8, t=10, b=28),
+                    xaxis=dict(title="forecast year", gridcolor=_GRID,
+                               tickfont=dict(color=_MUTE), dtick=1),
+                    yaxis=dict(title="free cash flow ($B)", gridcolor=_GRID,
+                               tickfont=dict(color=_MUTE)),
+                    legend=dict(orientation="h", y=1.15, x=0,
+                                font=dict(color=_INK, size=11)),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=_INK), hovermode="x unified")
+                st.plotly_chart(_pf, use_container_width=True,
+                                config={"displayModeBar": False})
+            with _fc2:
+                st.markdown("##### Where the base-case value comes from")
+                if "per_share" in _base:
+                    # A waterfall, because the question is composition: the terminal bar
+                    # dwarfing the explicit one IS the health warning about this valuation.
+                    _wf = go.Figure(go.Waterfall(
+                        orientation="v",
+                        measure=["relative", "relative", "relative", "relative", "total"],
+                        x=["Forecast years", "Terminal", "− Debt", "+ Cash", "Equity"],
+                        y=[_base["pv_explicit"] / 1e9, _base["pv_terminal"] / 1e9,
+                           -_vi["debt"] / 1e9, _vi["cash"] / 1e9, 0],
+                        text=[f"${_base['pv_explicit']/1e9:,.0f}B",
+                              f"${_base['pv_terminal']/1e9:,.0f}B",
+                              f"−${_vi['debt']/1e9:,.0f}B", f"+${_vi['cash']/1e9:,.0f}B",
+                              f"${_base['equity_value']/1e9:,.0f}B"],
+                        textposition="outside", textfont=dict(color=_INK, size=11),
+                        increasing=dict(marker=dict(color=_C_DCF)),
+                        decreasing=dict(marker=dict(color=_C_MUL)),
+                        totals=dict(marker=dict(color=_MUTE)),
+                        connector=dict(line=dict(color=_GRID, width=1)),
+                        hovertemplate="%{x}<br><b>$%{y:,.1f}B</b><extra></extra>"))
+                    _wf.update_layout(
+                        height=260, margin=dict(l=8, r=8, t=10, b=28),
+                        xaxis=dict(tickfont=dict(color=_MUTE)),
+                        yaxis=dict(title="$B", gridcolor=_GRID,
+                                   tickfont=dict(color=_MUTE)),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=_INK), showlegend=False)
+                    st.plotly_chart(_wf, use_container_width=True,
+                                    config={"displayModeBar": False})
+                    st.caption(f"Terminal is **{_base['terminal_pct']:.0f}%** of enterprise "
+                               f"value — the forecast years are the small bar.")
+
             # The honesty piece: one number invites more confidence than a DCF can carry.
             st.markdown("##### How much the answer moves when you change your mind")
             _ws = [round(_w + d, 4) for d in (-0.02, -0.01, 0, 0.01, 0.02)]

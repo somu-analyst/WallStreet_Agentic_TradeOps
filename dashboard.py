@@ -403,6 +403,53 @@ def _open_T(dte):
     return max(float(dte) - 1.0, 0.27) / 365.0
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def _fair_value(tk):
+    """Base-case DCF value per share, or None. Cached SIX HOURS on purpose.
+
+    The split that makes this affordable: fair value derives from the last FILING and barely
+    moves between them, while upside moves with every tick. So the expensive half is cached
+    hard and the cheap half is recomputed live by the caller. Without that, an eleven-name
+    watchlist would pay ~30s of yfinance on every rerun.
+
+    Returns None on any failure -- an ETF, a fund, a missing cash-flow statement. A column
+    that shows a dash is fine; one that raises takes the whole grid down.
+    """
+    if not tk or not _TB_ENGINE:
+        return None
+    try:
+        inp = _TB_ENGINE._valuation_inputs(str(tk).upper())
+        # A DCF is MEANINGLESS when the company does not generate cash. Bloom Energy came
+        # back at $0.73 (+28,580% vs price) and Amazon at MINUS $2.47 -- a discounted
+        # cash-flow model fed negative or near-zero cash produces a number with no meaning
+        # and full authority, which is worse than a blank. Refuse instead.
+        if inp["fcf_latest"] <= 0 or inp["fcf_avg3"] <= 0:
+            return None
+        fv = float(_TB_ENGINE._dcf(inp, 0.06)["per_share"])
+        if fv <= 0:
+            return None
+        # A gap beyond roughly 10x either way means the model does not describe this
+        # business (early-stage, cyclical trough, heavy reinvestment), not that the market
+        # is wrong by 28,000%.
+        px = inp.get("price") or 0
+        if px and not (0.1 <= px / fv <= 10):
+            return None
+        return fv
+    except Exception:
+        return None
+
+
+def _fv_cells(tk, price):
+    """(fair value, gap%) for a grid row. Gap is computed live against `price`."""
+    fv = _fair_value(tk)
+    if not fv or not price:
+        return None, None
+    try:
+        return round(fv, 2), round((float(price) / fv - 1) * 100, 1)
+    except Exception:
+        return None, None
+
+
 def _tg_md(text):
     """Convert the engine's TELEGRAM HTML into Streamlit Markdown.
 
@@ -24529,25 +24576,61 @@ if page == "🧮 Valuation (DCF)":
                              "of the DCF" if _base["terminal_pct"] < 75 else "far-future bet",
                              delta_color="off")
 
-            _tabs = st.tabs(list(_SCEN))
-            for _tab, (_nm, (_g, _tg, _sw)) in zip(_tabs, _SCEN.items()):
-                with _tab:
-                    _r = _res[_nm]
-                    if "error" in _r:
-                        st.warning(_r["error"]); continue
-                    st.caption(f"Year-1 growth **{_g:.0%}** fading to **{_fade:.1%}** by year "
-                               f"{_vyears} · WACC **{_sw:.2%}** · terminal growth **{_tg:.1%}**")
-                    _c = st.columns(3)
-                    _c[0].metric("Fair value", f"${_r['per_share']:,.2f}",
-                                 f"{_r['upside']:+.0f}%")
-                    _c[1].metric("Equity value", f"${_r['equity_value']/1e9:,.0f}B")
-                    _c[2].metric("Terminal", f"{_r['terminal_pct']:.0f}%", "of enterprise value",
-                                 delta_color="off")
-                    _pinned_df(pd.DataFrame([
-                        {"Year": f["year"], "Growth": f"{f['growth']:.1%}",
-                         "Free cash flow ($B)": round(f["fcf"] / 1e9, 2),
-                         "Discounted ($B)": round(f["pv"] / 1e9, 2)} for f in _r["flows"]]),
-                        hide_index=True, use_container_width=True)
+            # ALL THREE SIDE BY SIDE, never in tabs. The point of three scenarios is the
+            # SPREAD between them; a tab shows one at a time and asks the reader to hold the
+            # other two in memory, which is precisely the comparison being offered.
+            st.markdown("##### The three scenarios, compared")
+            _cmp = []
+            for _nm, (_g, _tg, _sw) in _SCEN.items():
+                _r = _res[_nm]
+                if "error" in _r:
+                    _cmp.append({"Scenario": _nm, "Year-1 growth": f"{_g:.0%}",
+                                 "WACC": f"{_sw:.2%}", "Terminal growth": f"{_tg:.1%}",
+                                 "Fair value": None, "vs price": None,
+                                 "Equity ($B)": None, "Terminal %": None})
+                    continue
+                _cmp.append({
+                    "Scenario": _nm, "Year-1 growth": f"{_g:.0%}", "WACC": f"{_sw:.2%}",
+                    "Terminal growth": f"{_tg:.1%}",
+                    "Fair value": round(_r["per_share"], 2),
+                    "vs price": round(_r["upside"], 1),
+                    "Equity ($B)": round(_r["equity_value"] / 1e9),
+                    "Terminal %": round(_r["terminal_pct"])})
+            _pinned_df(pd.DataFrame(_cmp), hide_index=True, use_container_width=True,
+                       column_config={
+                           "Fair value": st.column_config.NumberColumn(format="$%.2f"),
+                           "vs price": st.column_config.NumberColumn(format="%+.1f%%"),
+                           "Equity ($B)": st.column_config.NumberColumn(format="$%d B"),
+                           "Terminal %": st.column_config.ProgressColumn(
+                               "Terminal % of value", min_value=0, max_value=100,
+                               format="%d%%",
+                               help="How much of the valuation rests on the years AFTER the "
+                                    "forecast. Above ~70% the number is mostly a claim "
+                                    "about the far future.")})
+            _ok = [c for c in _cmp if c["Fair value"]]
+            if len(_ok) > 1:
+                _lo, _hi = min(c["Fair value"] for c in _ok), max(c["Fair value"] for c in _ok)
+                st.caption(f"Bear to Bull spans **${_lo:,.2f} – ${_hi:,.2f}** "
+                           f"({_hi/max(_lo,0.01):.1f}×) on growth and discount-rate "
+                           f"assumptions alone, before any sensitivity to the terminal rate.")
+
+            # Every year of every scenario, in one table -- nothing the tabs showed is lost.
+            st.markdown("##### Projected free cash flow, all three scenarios ($B)")
+            _yrs = sorted({f["year"] for _r in _res.values() for f in _r.get("flows", [])})
+            _fcf_rows = []
+            for _y in _yrs:
+                _row = {"Year": _y}
+                for _nm in _SCEN:
+                    _f = next((f for f in _res[_nm].get("flows", []) if f["year"] == _y), None)
+                    if _f:
+                        _row[f"{_nm.split()[-1]} FCF"] = round(_f["fcf"] / 1e9, 2)
+                        _row[f"{_nm.split()[-1]} PV"] = round(_f["pv"] / 1e9, 2)
+                _fcf_rows.append(_row)
+            if _fcf_rows:
+                _pinned_df(pd.DataFrame(_fcf_rows), hide_index=True, use_container_width=True)
+                st.caption("FCF is the projected cash; PV is that cash discounted back to "
+                           "today. The gap between them widens with each year and IS the "
+                           "cost of waiting.")
 
             # ── Charts ──────────────────────────────────────────────────────────────────
             # Colours are the validated slots 1 and 2 from the reference palette, stepped
@@ -25903,9 +25986,13 @@ if page == "👀 Watchlist":
                         _wcw = _wg.get("call_wall"); _wpw = _wg.get("put_wall")
                     except Exception:
                         pass
+                # Fair value is cached against the FILING (6h); the gap is recomputed live
+                # against spot, so the expensive half is paid once (ID 365).
+                _wfv, _wgap = _fv_cells(_wtk, _wspot)
                 _wl_rows.append({
                     "id": int(_wr["id"]), "Class": _wr.get("asset_class") or "Stock",
                     "Ticker": _wtk, "Name": _wl_company_name(_wtk), "Spot": round(_wspot, 2), "Src": _wsrc,
+                    "Fair value": _wfv, "vs FV": _wgap,
                     "Day%": (round(_wchg, 2) if _wchg is not None else None),
                     "Day L-H": (f"${_wdl:,.2f}-${_wdh:,.2f}" if (_wdh and _wdl) else "—"),
                     "52w L-H": (f"${_w52lo:,.2f}-${_w52hi:,.2f}" if (_w52hi and _w52lo) else "—"),
@@ -26017,6 +26104,17 @@ if page == "👀 Watchlist":
                     help="Where the current price sits inside TODAY's low-high range. "
                          "0%% = trading at the session low, 100%% = at the session high. "
                          "Closing near the high or low is what the number is telling you."),
+                "Fair value": st.column_config.NumberColumn(
+                    "Fair value", format="%.2f",
+                    help="Base-case discounted cash flow, per share. A MODEL under standard "
+                         "assumptions (6% year-one growth fading to 2.5%, CAPM discount "
+                         "rate), not a measurement — open the Valuation page to change them. "
+                         "Blank where the company files no cash-flow statement (ETFs, funds)."),
+                "vs FV": st.column_config.NumberColumn(
+                    "vs FV %", format="%+.0f%%",
+                    help="How far the PRICE sits above (+) or below (−) that fair value. "
+                         "Positive means the market pays more than this model justifies — "
+                         "which for a quality compounder is the normal state, not a signal."),
                 "52w L-H": st.column_config.TextColumn("52-week low–high",
                     help="Lowest and highest price over the past 252 trading days."),
                 "52w Pos": st.column_config.ProgressColumn("52w position", min_value=0.0,
@@ -26061,6 +26159,10 @@ if page == "👀 Watchlist":
                     help="Date this ticker was added to the watchlist."),
             }
             _wl_order = ["Ticker", "🌍", "Name", "Spot", "Day%", "1W", "1M", "3M",
+                         # Fair value sits next to Spot: the two are read together or not
+                         # at all, and a gap column far from the price it refers to is a
+                         # column nobody looks at.
+                         "Fair value", "vs FV",
                          "Day line", "Day Pos", "52w Pos",
                          "52w L-H", "Day L-H",
                          "Call Wall", "Put Wall", "Target", "Dist to Target", "RSI(14)",
@@ -26389,6 +26491,7 @@ if page == "📝 Paper Trading":
                 _pxirr = _xirr(_pcfs)
             except Exception:
                 _pxirr = None
+            _pfv, _pgap = _fv_cells(_ptk, _pmark)
             # A non-US listing is quoted in its own currency (MOTHERSON on the NSE is in
             # rupees). Carry it per row so the column can never imply dollars it isn't.
             try:
@@ -26400,6 +26503,7 @@ if page == "📝 Paper Trading":
                              "Qty": _pqty, "Lots": len(_grp), "Status": "🟢 Live",
                              "Entry": round(_pentry, 2), "Current Price": round(_pmark, 2),
                              "52w L-H": (f"{_p52lo:,.2f}-{_p52hi:,.2f}" if _p52hi else "—"),
+                             "Fair value": _pfv, "vs FV": _pgap,
                              # 0-100 and CLAMPED, matching the Watchlist grid (ID 251). Was a
                              # raw 0-1 fraction, so the same holding read "0.55" here and "1%"
                              # there. Unclamped it could also exceed 1 on a fresh 52w high and
@@ -26447,6 +26551,10 @@ if page == "📝 Paper Trading":
             except Exception:
                 _pspot = 0.0
             _pstatus = "🟢 Live"
+            # An option has no DCF; its UNDERLYING does. A call on a name trading at twice
+            # its cash value is a different proposition from one at half, so the row carries
+            # the underlying's figure (the column header says so).
+            _pfv, _pgap = _fv_cells(_ptk, _pspot)
             _pt_rows.append({"id": (int(_pr["trade_id"]),),
                              "Ticker": _ptk, "Type": f"${_pr['strike']:.0f}{_ptyp[0]} exp {_pr['expiry']}",
                              "Ccy": "USD",          # listed options in this book are US
@@ -26454,6 +26562,7 @@ if page == "📝 Paper Trading":
                              "Entry": round(_pentry, 2), "Current Price": round(_pmark, 2),
                              "Spot": (round(_pspot, 2) if _pspot else None),
                              "52w L-H": (f"{_p52lo:,.2f}-{_p52hi:,.2f}" if _p52hi else "—"),
+                             "Fair value": _pfv, "vs FV": _pgap,
                              "52w Pos": (round(max(0.0, min(1.0, (_pspot - _p52lo) / (_p52hi - _p52lo))) * 100, 1)
                                          if _p52hi and _pspot and _p52hi > _p52lo else None),
                              "_cost": abs(_pentry * _pqty * 100),   # options: 100x multiplier

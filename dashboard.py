@@ -24579,6 +24579,53 @@ if page == "🧮 Valuation (DCF)":
             # ALL THREE SIDE BY SIDE, never in tabs. The point of three scenarios is the
             # SPREAD between them; a tab shows one at a time and asks the reader to hold the
             # other two in memory, which is precisely the comparison being offered.
+            # Every term on this page, explained with THIS company's live numbers. A
+            # definition tells you what a word means; a worked example tells you what the
+            # control will do when you move it, which is the thing that stops a reader
+            # leaving every slider alone (user, 2026-08-29).
+            with st.expander("📖 What these words mean — worked through " + _vi["name"],
+                             expanded=False):
+                _ex_fcf = _vi["fcf_latest"] / 1e9
+                st.markdown(f"""
+**Free cash flow** — the cash left after running the business and paying for equipment.
+Not profit: profit includes things that never moved cash. **{_vi['name']} generated
+${_ex_fcf:,.1f}B** in the last filed year. Everything on this page values *that* stream.
+
+**DCF (discounted cash flow)** — cash arriving in ten years is worth less than cash today,
+so you shrink each future year back to today's money and add it up. That total is what the
+business is worth if your assumptions hold.
+
+**WACC ({_wacc_auto:.2%} here)** — the yearly return this company must beat to be worth
+owning, blending what shareholders demand with what its debt costs. **Higher WACC = lower
+value**, because distant cash gets shrunk harder. Leave the box at 0 and it is computed from
+the company's own beta ({_vi['beta']:.2f}); type a number to override it.
+
+**Risk-free rate & equity risk premium** — the two pieces WACC is built from. Risk-free is
+what government bonds pay ({_rf:.1%}); the premium is the extra ({_erp:.1%}) investors want
+for holding shares instead. Raise either and WACC rises, so value falls.
+
+**Fade to growth ({_fade:.1%})** — no company grows fast forever. If year one is 6%, growth
+slides down each year to reach {_fade:.1%} by year {_vyears}. Without a fade you would be
+assuming today's pace continues indefinitely, which nothing does.
+
+**Terminal value / terminal share** — the model only forecasts {_vyears} years explicitly;
+terminal value covers *everything after*. For {_vi['name']} it is
+**{_base.get('terminal_pct', 0):.0f}% of the total**. When that share is high, the answer is
+mostly a claim about the distant future rather than about the years you can actually reason
+about — which is why it is shown as a headline rather than buried.
+
+**Forward P/E ({(_vi.get('forward_pe') or 0):.1f}x)** — price divided by next year's expected
+earnings per share. A quick cross-check: what buyers currently pay per dollar of profit.
+
+**EV/EBITDA** — enterprise value (market value plus debt, minus cash) over rough operating
+cash earnings. Useful because it ignores how a company is financed, so two firms with
+different debt loads can be compared.
+
+**Reverse DCF** — runs the whole thing backwards. Instead of you guessing growth, it takes
+today's price and solves for the growth *already priced in*. If that number looks
+unreachable, the market is assuming something you may not.
+""")
+
             # REVERSE DCF -- the standard practitioner move when a forward model calls a
             # quality name wildly overvalued. Asserting Apple is worth $105 against $320
             # mostly says the assumptions were mine; asking what the market must BELIEVE

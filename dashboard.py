@@ -6285,6 +6285,7 @@ _PAGE_HELP = {
     "🔄 Rotation Tracker":       "Where money is rotating, high→low: Macro (CROSS-ASSET — equities vs bonds, gold, commodities, crypto, $) → Sectors → Themes/Industries → Stocks. RRG logic vs SPY on two axes — leadership (3mo excess) and momentum (improving vs fading) — placing each into Leading / Weakening (money leaving) / Improving (money entering) / Lagging. Visual rotation map + IN/OUT calls + a risk-on/off tilt, with daily transition tracking.",
     "🫧 Anti-Bubble Radar":      "Khoo-style 'great repricing' screen for ANY tickers — flags 🔴 cyclical traps (crowded, vertical, peak-earnings names like memory/semis) to avoid, and 🟢 anti-bubble quality (wide moat, durable earnings, below intrinsic value, not overextended) to accumulate. Picks are auto-tracked so you can see whether quality is beating cyclicals over time.",
     "🎛️ Command Center":         "Your whole system on ONE screen — market weather (Radar turbulence + direction + next-session SPY levels), your open book (live P&L, expiring soon), the top ⭐ consensus trade ideas, and what fired today. Start here; drill into other pages only when needed.",
+    "🧮 Valuation (DCF)":       "What the cash flows are worth, under assumptions YOU set. Three scenarios side by side, a sensitivity grid showing how far the answer moves when the discount rate and terminal growth change, and a multiple-based cross-check. This is a MODEL, not a measurement — the grid is there because a single fair-value number invites more confidence than the method can carry.",
     "💧 Money Flow (Sankey)":    "How a company turns revenue into profit, as a flow diagram — revenue splits into gross profit and cost of sales, gross profit into operating income and expenses, operating income into net income and tax. Figures come from the company's own filed statement rather than being typed in, and every subtotal is checked to balance before anything is drawn.",
     "🌍 Market Overview":        "Big-picture market snapshot. VIX, sector rotation, Fear & Greed, macro correlations, and top OI movers. Start here every morning.",
     "🔬 OI Comparison Charts":   "Deep-dive OI analysis per ticker and expiry. Compare Open Interest changes between two dates to spot institutional positioning, gamma walls, and money flow direction.",
@@ -6358,6 +6359,7 @@ with st.sidebar:
         ],
         "🏛 Smart Money & News": [
             "💧 Money Flow (Sankey)",
+            "🧮 Valuation (DCF)",
             "📈 Insider / Congress / Whales",
             "🏆 Legendary Investors (13F)",
             "🧠 Smart Money Hub",
@@ -24467,7 +24469,138 @@ def _macro_playbook(slope2s10s, infl_dir, fed_dir):
     return " · ".join(bits), events, ideas
 
 
-if page == "💧 Money Flow (Sankey)":
+if page == "🧮 Valuation (DCF)":
+    _page_header("🧮 Valuation (DCF)", _PAGE_HELP["🧮 Valuation (DCF)"])
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _val_inputs(tk):
+        """Cached an hour: these come from the last FILING, not from the tick."""
+        return _TB_ENGINE._valuation_inputs(tk)
+
+    _vc1, _vc2, _vc3 = st.columns([2, 1, 1])
+    with _vc1:
+        _vtk = st.text_input("Ticker", value="AAPL", key="val_tk",
+                             help="Any company that files a cash-flow statement. ETFs and "
+                                  "funds have none, so they will not work.").strip().upper()
+    with _vc2:
+        _vbase = st.radio("Base free cash flow", ["Latest year", "3-year average"],
+                          key="val_base",
+                          help="One year can be distorted by a single working-capital swing "
+                               "or a legal settlement. The 3-year mean is steadier.")
+    with _vc3:
+        _vyears = st.slider("Forecast years", 3, 10, 5, key="val_years")
+
+    if _vtk:
+        try:
+            _vi = _val_inputs(_vtk)
+            _wacc_auto = _TB_ENGINE._wacc(_vi)
+
+            st.markdown("##### Global assumptions")
+            _g1, _g2, _g3, _g4 = st.columns(4)
+            _rf = _g1.number_input("Risk-free %", 0.0, 12.0, 4.2, 0.1, key="val_rf") / 100
+            _erp = _g2.number_input("Equity risk premium %", 1.0, 12.0, 5.0, 0.1,
+                                    key="val_erp") / 100
+            _wacc_in = _g3.number_input("WACC % (0 = compute)", 0.0, 30.0,
+                                        round(_wacc_auto * 100, 2), 0.25, key="val_wacc")
+            _fade = _g4.number_input("Fade to growth %", 0.0, 8.0, 2.5, 0.25,
+                                     key="val_fade") / 100
+            _w = (_wacc_in / 100) if _wacc_in > 0 else _TB_ENGINE._wacc(_vi, rf=_rf, erp=_erp)
+            _bk = "avg3" if _vbase.startswith("3") else "latest"
+
+            _SCEN = {"🐻 Bear": (0.02, 0.015, _w + 0.015),
+                     "⚖️ Base": (0.06, 0.025, _w),
+                     "🐂 Bull": (0.11, 0.030, max(_w - 0.010, 0.03))}
+            _res = {}
+            for _nm, (_g, _tg, _sw) in _SCEN.items():
+                try:
+                    _res[_nm] = _TB_ENGINE._dcf(_vi, _g, years=_vyears, fade_to=_fade,
+                                                wacc=_sw, terminal_growth=_tg, base=_bk)
+                except Exception as _e:
+                    _res[_nm] = {"error": str(_e)}
+
+            _base = _res.get("⚖️ Base", {})
+            _k = st.columns(4)
+            _k[0].metric("Price", f"${_vi['price']:,.2f}", _vi["sector"])
+            if "per_share" in _base:
+                _k[1].metric("Base fair value", f"${_base['per_share']:,.2f}",
+                             f"{_base['upside']:+.0f}% vs price")
+                _k[2].metric("WACC", f"{_base['wacc']:.2%}", f"beta {_vi['beta']:.2f}")
+                _k[3].metric("Terminal share", f"{_base['terminal_pct']:.0f}% of value",
+                             "of the DCF" if _base["terminal_pct"] < 75 else "far-future bet",
+                             delta_color="off")
+
+            _tabs = st.tabs(list(_SCEN))
+            for _tab, (_nm, (_g, _tg, _sw)) in zip(_tabs, _SCEN.items()):
+                with _tab:
+                    _r = _res[_nm]
+                    if "error" in _r:
+                        st.warning(_r["error"]); continue
+                    st.caption(f"Year-1 growth **{_g:.0%}** fading to **{_fade:.1%}** by year "
+                               f"{_vyears} · WACC **{_sw:.2%}** · terminal growth **{_tg:.1%}**")
+                    _c = st.columns(3)
+                    _c[0].metric("Fair value", f"${_r['per_share']:,.2f}",
+                                 f"{_r['upside']:+.0f}%")
+                    _c[1].metric("Equity value", f"${_r['equity_value']/1e9:,.0f}B")
+                    _c[2].metric("Terminal", f"{_r['terminal_pct']:.0f}%", "of enterprise value",
+                                 delta_color="off")
+                    _pinned_df(pd.DataFrame([
+                        {"Year": f["year"], "Growth": f"{f['growth']:.1%}",
+                         "Free cash flow ($B)": round(f["fcf"] / 1e9, 2),
+                         "Discounted ($B)": round(f["pv"] / 1e9, 2)} for f in _r["flows"]]),
+                        hide_index=True, use_container_width=True)
+
+            # The honesty piece: one number invites more confidence than a DCF can carry.
+            st.markdown("##### How much the answer moves when you change your mind")
+            _ws = [round(_w + d, 4) for d in (-0.02, -0.01, 0, 0.01, 0.02)]
+            _tgs = [0.015, 0.020, 0.025, 0.030, 0.035]
+            _grid = _TB_ENGINE._dcf_sensitivity(_vi, 0.06, _ws, _tgs, years=_vyears,
+                                                fade_to=_fade, base=_bk)
+            _sdf = pd.DataFrame(_grid, index=[f"{x:.2%}" for x in _ws],
+                                columns=[f"{x:.1%}" for x in _tgs])
+            _sdf.index.name = "WACC \\ terminal growth"
+            st.dataframe(_sdf.style.format("${:,.0f}", na_rep="n/a")
+                         .background_gradient(cmap="RdYlGn", axis=None),
+                         use_container_width=True)
+            _flat = [v for row in _grid for v in row if v]
+            if _flat:
+                st.caption(f"Across this grid the fair value runs **${min(_flat):,.0f}** to "
+                           f"**${max(_flat):,.0f}** — a {max(_flat)/max(min(_flat),0.01):.1f}× "
+                           f"spread from assumption changes most people would call reasonable. "
+                           f"That spread is the honest output; a single number is not.")
+
+            st.markdown("##### Cross-check: what the market pays for comparable cash")
+            _m1, _m2 = st.columns(2)
+            _pe = _m1.number_input("Target forward P/E", 0.0, 100.0,
+                                   float(_vi.get("forward_pe") or 20), 0.5, key="val_pe")
+            _evx = _m2.number_input("Target EV/EBITDA", 0.0, 60.0, 15.0, 0.5, key="val_ev")
+            _mv = _TB_ENGINE._multiples_value(_vi, pe=_pe or None, ev_ebitda=_evx or None)
+            if _mv:
+                _pinned_df(pd.DataFrame([
+                    {"Method": ("Forward P/E" if k == "pe" else "EV / EBITDA"),
+                     "Multiple": f"{v['multiple']:.1f}x",
+                     "Implied value": f"${v['per_share']:,.2f}",
+                     "vs price": f"{v['upside']:+.0f}%"} for k, v in _mv.items()]),
+                    hide_index=True, use_container_width=True)
+                if "per_share" in _base:
+                    _gap = [abs(v["per_share"] - _base["per_share"]) / max(_base["per_share"], 1)
+                            for v in _mv.values()]
+                    if _gap and max(_gap) > 0.4:
+                        st.info("**The two methods disagree sharply, and that gap is the "
+                                "finding.** A DCF prices the cash; a multiple prices what the "
+                                "market currently pays for comparable cash. A wide gap means "
+                                "either the market expects growth this model does not, or the "
+                                "multiple has run ahead of the cash behind it.")
+            st.caption("Free cash flow from the filed cash-flow statement · "
+                       f"base {'3-year average' if _bk == 'avg3' else 'latest year'} "
+                       f"${(_vi['fcf_avg3'] if _bk == 'avg3' else _vi['fcf_latest'])/1e9:,.1f}B · "
+                       "everything forward-looking is your assumption, not a measurement. "
+                       "Not investment advice.")
+        except Exception as _ve:
+            st.warning(f"Couldn't value **{_vtk}** — {_ve}")
+            st.caption("Needs a filed cash-flow statement and a share count. ETFs, indices and "
+                       "funds have neither.")
+
+elif page == "💧 Money Flow (Sankey)":
     _page_header("💧 Money Flow (Sankey)", _PAGE_HELP["💧 Money Flow (Sankey)"])
     _sk_c1, _sk_c2, _sk_c3 = st.columns([2, 1, 1])
     with _sk_c1:

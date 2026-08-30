@@ -28302,6 +28302,163 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         return {}
 
 
+def _valuation_inputs(ticker):
+    """Everything a DCF needs, pulled once. Returns a dict, or raises with a plain reason.
+
+    Kept separate from the model so the ASSUMPTIONS and the FACTS never get muddled: this
+    function reports only what the company filed and what the market currently pays, and the
+    caller supplies every forward-looking judgement.
+    """
+    import yfinance as _yf
+    t = _yf.Ticker(ticker)
+    info = t.info or {}
+    cf = t.cashflow
+    if cf is None or cf.empty:
+        raise ValueError(f"{ticker}: no cash-flow statement filed")
+
+    def _row(name):
+        try:
+            s = cf.loc[name].dropna()
+            return [float(x) for x in s.values], [str(c)[:10] for c in s.index]
+        except Exception:
+            return [], []
+
+    fcf, yrs = _row("Free Cash Flow")
+    if not fcf:
+        ocf, yrs = _row("Operating Cash Flow")
+        capex, _ = _row("Capital Expenditure")
+        if ocf and capex:
+            # capex is filed NEGATIVE, so this adds a negative -- do not subtract twice.
+            fcf = [o + c for o, c in zip(ocf, capex)]
+    if not fcf:
+        raise ValueError(f"{ticker}: cannot derive free cash flow")
+
+    shares = info.get("sharesOutstanding") or 0
+    if not shares:
+        raise ValueError(f"{ticker}: share count unavailable")
+    price = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+    if not price:
+        try:
+            price = float(t.fast_info.get("lastPrice") or 0)
+        except Exception:
+            price = 0.0
+    return {
+        "ticker": ticker.upper(),
+        "name": info.get("longName") or info.get("shortName") or ticker.upper(),
+        "fcf": fcf, "fcf_years": yrs,
+        "fcf_latest": fcf[0],
+        # A single year can be distorted by one large working-capital swing or a legal
+        # settlement, so the model offers a 3-year mean as the alternative base.
+        "fcf_avg3": sum(fcf[:3]) / len(fcf[:3]),
+        "shares": float(shares),
+        "price": float(price),
+        "market_cap": float(info.get("marketCap") or price * shares),
+        "debt": float(info.get("totalDebt") or 0),
+        "cash": float(info.get("totalCash") or 0),
+        "beta": float(info.get("beta") or 1.0),
+        "trailing_pe": info.get("trailingPE"),
+        "forward_pe": info.get("forwardPE"),
+        "eps_fwd": info.get("forwardEps"),
+        "ebitda": float(info.get("ebitda") or 0),
+        "ev": float(info.get("enterpriseValue") or 0),
+        "sector": info.get("sector") or "—",
+    }
+
+
+def _wacc(inp, rf=0.042, erp=0.05, cost_debt=0.05, tax=0.21):
+    """CAPM cost of equity, blended with after-tax debt at market weights.
+
+    Defaults are deliberately conservative and stated rather than hidden: a 10-year around
+    4.2% and a 5% equity risk premium. WACC is the single most violent input in a DCF -- a
+    point either way moves fair value by tens of percent -- which is why the page shows a
+    sensitivity grid instead of one number.
+    """
+    e = max(inp["market_cap"], 1.0)
+    d = max(inp["debt"], 0.0)
+    v = e + d
+    re = rf + inp["beta"] * erp
+    return (e / v) * re + (d / v) * cost_debt * (1 - tax)
+
+
+def _dcf(inp, growth, years=5, fade_to=0.025, wacc=None, terminal_growth=0.025,
+         exit_multiple=None, base="latest"):
+    """Project free cash flow, discount it, and add a terminal value.
+
+    `growth` is year-one growth; it FADES linearly to `fade_to` by the final year, because a
+    company compounding at 15% for five straight years and then stopping abruptly is not a
+    forecast anyone believes. Terminal value is Gordon growth unless `exit_multiple` is given.
+
+    Returns the components, never just an answer -- the split between explicit-period value
+    and terminal value is the honest health warning: when terminal is 80% of the total, the
+    valuation is a statement about the far future, not about the next five years.
+    """
+    w = wacc if wacc is not None else _wacc(inp)
+    f0 = inp["fcf_avg3"] if base == "avg3" else inp["fcf_latest"]
+    if w <= terminal_growth:
+        # Gordon growth explodes (or flips sign) when the discount rate does not exceed the
+        # perpetual growth rate. Refuse rather than print a confident absurdity.
+        raise ValueError(f"WACC {w:.1%} must exceed terminal growth {terminal_growth:.1%}")
+    flows, pv_sum, f = [], 0.0, f0
+    for i in range(1, years + 1):
+        g = growth + (fade_to - growth) * (i - 1) / max(years - 1, 1)
+        f = f * (1 + g)
+        pv = f / ((1 + w) ** i)
+        pv_sum += pv
+        flows.append({"year": i, "growth": g, "fcf": f, "pv": pv})
+    if exit_multiple:
+        tv = f * exit_multiple
+    else:
+        tv = f * (1 + terminal_growth) / (w - terminal_growth)
+    pv_tv = tv / ((1 + w) ** years)
+    ev = pv_sum + pv_tv
+    equity = ev - inp["debt"] + inp["cash"]
+    per_share = equity / inp["shares"]
+    return {
+        "wacc": w, "flows": flows, "pv_explicit": pv_sum, "terminal_value": tv,
+        "pv_terminal": pv_tv, "terminal_pct": (pv_tv / ev * 100) if ev else 0,
+        "enterprise_value": ev, "equity_value": equity, "per_share": per_share,
+        "upside": ((per_share / inp["price"] - 1) * 100) if inp["price"] else None,
+        "base_fcf": f0,
+    }
+
+
+def _dcf_sensitivity(inp, growth, waccs, terminals, **kw):
+    """Fair value across a WACC x terminal-growth grid.
+
+    This exists because a single DCF number invites more confidence than the method can
+    carry. Seeing the answer swing from one corner of the grid to the other is the point.
+    """
+    grid = []
+    for w in waccs:
+        row = []
+        for g in terminals:
+            try:
+                row.append(_dcf(inp, growth, wacc=w, terminal_growth=g, **kw)["per_share"])
+            except Exception:
+                row.append(None)
+        grid.append(row)
+    return grid
+
+
+def _multiples_value(inp, pe=None, ev_ebitda=None):
+    """Valuation by multiple, as a cross-check on the DCF rather than a rival to it.
+
+    A DCF says what the cash is worth; a multiple says what the market currently pays for
+    comparable cash. When they disagree sharply, that gap IS the finding.
+    """
+    out = {}
+    if pe and inp.get("eps_fwd"):
+        out["pe"] = {"multiple": pe, "metric": inp["eps_fwd"],
+                     "per_share": pe * inp["eps_fwd"]}
+    if ev_ebitda and inp.get("ebitda"):
+        ev = ev_ebitda * inp["ebitda"]
+        out["ev_ebitda"] = {"multiple": ev_ebitda, "metric": inp["ebitda"],
+                            "per_share": (ev - inp["debt"] + inp["cash"]) / inp["shares"]}
+    for v in out.values():
+        v["upside"] = ((v["per_share"] / inp["price"] - 1) * 100) if inp["price"] else None
+    return out
+
+
 def _income_stmt(ticker, quarterly=True, unit_div=1e6):
     """A company's income statement, shaped for the flow diagram.
 

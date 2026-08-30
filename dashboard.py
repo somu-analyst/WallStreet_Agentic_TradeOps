@@ -24542,6 +24542,26 @@ if page == "🧮 Valuation (DCF)":
             _vi = _val_inputs(_vtk)
             _wacc_auto = _TB_ENGINE._wacc(_vi)
 
+            # How stale is this? A DCF steps on the filing, not on the tick, so the two
+            # dates that matter are which statement it came from and when the next one
+            # lands (user asked directly how often these change).
+            _asof, _nxt = _vi.get("as_of"), _vi.get("next_earnings")
+            if _asof or _nxt:
+                _bits = []
+                if _asof:
+                    _bits.append(f"Built from the cash-flow statement for the year ending "
+                                 f"**{_asof}**")
+                if _nxt:
+                    try:
+                        _dd = (pd.to_datetime(_nxt).date() - datetime.now().date()).days
+                        _bits.append(f"next results **{_nxt}**"
+                                     + (f" ({_dd}d away)" if 0 <= _dd < 400 else ""))
+                    except Exception:
+                        _bits.append(f"next results **{_nxt}**")
+                st.caption(" · ".join(_bits) + " — this number does not drift day to day. "
+                           "It steps when a new filing lands, roughly quarterly; only the "
+                           "gap to price moves in between.")
+
             st.markdown("##### Global assumptions")
             _g1, _g2, _g3, _g4 = st.columns(4)
             _rf = _g1.number_input("Risk-free %", 0.0, 12.0, 4.2, 0.1, key="val_rf") / 100
@@ -24567,6 +24587,14 @@ if page == "🧮 Valuation (DCF)":
 
             _base = _res.get("⚖️ Base", {})
             _k = st.columns(4)
+            # How stale this can be. The valuation steps on the FILING, roughly quarterly --
+            # not on the tick — so a fair value shown without its as-of date hides its age.
+            if _vi.get("as_of"):
+                _nxt = (f" · next results **{_vi['next_earnings']}**"
+                        if _vi.get("next_earnings") else "")
+                st.caption(f"📅 Built from the statement to **{_vi['as_of']}**{_nxt}. "
+                           f"The fair value steps when a new statement lands — roughly "
+                           f"quarterly. Only the price, and so the gap, moves daily.")
             _k[0].metric("Price", f"${_vi['price']:,.2f}", _vi["sector"])
             if "per_share" in _base:
                 _k[1].metric("Base fair value", f"${_base['per_share']:,.2f}",

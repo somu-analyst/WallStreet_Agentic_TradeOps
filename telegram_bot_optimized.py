@@ -28362,7 +28362,25 @@ def _valuation_inputs(ticker):
         "ebitda": float(info.get("ebitda") or 0),
         "ev": float(info.get("enterpriseValue") or 0),
         "sector": info.get("sector") or "—",
+        # WHEN this valuation was last able to change, and when it next will. A DCF does not
+        # drift day to day -- it steps when a new cash-flow statement lands, so a fair value
+        # with no filing date attached hides how stale it might be (user asked directly how
+        # often these change: roughly quarterly, on the filing).
+        "as_of": (yrs[0] if yrs else None),
+        "next_earnings": _next_earnings_date(t),
     }
+
+
+def _next_earnings_date(t):
+    """Next scheduled results date, or None. That is when the fair value can next move."""
+    try:
+        cal = t.calendar
+        d = cal.get("Earnings Date") if isinstance(cal, dict) else None
+        if isinstance(d, (list, tuple)) and d:
+            d = d[0]
+        return str(d)[:10] if d else None
+    except Exception:
+        return None
 
 
 def _wacc(inp, rf=0.042, erp=0.05, cost_debt=0.05, tax=0.21):
@@ -28731,6 +28749,13 @@ def _fmt_valuation(ticker):
            f"WACC {w:.1%}",
            f"Free cash flow <b>${inp['fcf_latest']/1e9:,.1f}B</b> latest, "
            f"${inp['fcf_avg3']/1e9:,.1f}B 3-yr average"]
+    # WHEN this can next change. A fair value with no filing date attached hides how stale it
+    # might be -- this steps on the filing, roughly quarterly, not on the tick.
+    if inp.get("as_of"):
+        _nx = (f" · next results <b>{inp['next_earnings']}</b>"
+               if inp.get("next_earnings") else "")
+        det.insert(1, f"Built from the statement to <b>{inp['as_of']}</b>{_nx} — "
+                      f"it steps on the filing, not on the tick.")
     if base:
         det.append(f"Terminal value is <b>{base['terminal_pct']:.0f}%</b> of the base case — "
                    f"{'mostly a bet on the far future' if base['terminal_pct'] >= 70 else 'a reasonable share'}.")

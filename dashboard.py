@@ -24868,6 +24868,68 @@ unreachable, the market is assuming something you may not.
                            f"spread from assumption changes most people would call reasonable. "
                            f"That spread is the honest output; a single number is not.")
 
+            # ── Which assumption actually moves the answer ──────────────────────────────
+            # The grid shows THAT the answer moves; this shows WHICH lever moves it. Sorted
+            # by swing, so the top bar is the assumption worth arguing about and the bottom
+            # ones are not worth a meeting.
+            if "per_share" in _base:
+                st.markdown("##### Which assumption moves the answer most")
+                _b0 = _base["per_share"]
+
+                def _fv(**kw):
+                    try:
+                        return _TB_ENGINE._dcf(_vi, kw.pop("g", 0.06), years=_vyears,
+                                               fade_to=kw.pop("fade", _fade), base=_bk,
+                                               **kw)["per_share"]
+                    except Exception:
+                        return None
+
+                _levers = [
+                    ("Discount rate (WACC)", _fv(wacc=_w + 0.02, terminal_growth=0.025),
+                     _fv(wacc=_w - 0.02, terminal_growth=0.025), "±2 points"),
+                    ("Terminal growth", _fv(wacc=_w, terminal_growth=0.015),
+                     _fv(wacc=_w, terminal_growth=0.035), "1.5% vs 3.5%"),
+                    ("Year-1 growth", _fv(g=0.02, wacc=_w, terminal_growth=0.025),
+                     _fv(g=0.11, wacc=_w, terminal_growth=0.025), "2% vs 11%"),
+                    ("Fade-to growth", _fv(wacc=_w, terminal_growth=0.025, fade=0.01),
+                     _fv(wacc=_w, terminal_growth=0.025, fade=0.04), "1% vs 4%"),
+                ]
+                _levers = [(n, lo, hi, note) for n, lo, hi, note in _levers if lo and hi]
+                _levers.sort(key=lambda r: abs(r[2] - r[1]))       # widest at the top
+                if _levers:
+                    _tor = go.Figure()
+                    for _n, _lo, _hi, _note in _levers:
+                        # Two bars from the base, so the reader sees which DIRECTION each
+                        # assumption pushes -- a single span would hide that.
+                        _tor.add_trace(go.Bar(
+                            y=[_n], x=[_lo - _b0], base=[_b0], orientation="h",
+                            marker=dict(color=_C_MUL), width=0.55, showlegend=False,
+                            hovertemplate=f"{_n} low<br><b>${_lo:,.0f}</b><extra></extra>"))
+                        _tor.add_trace(go.Bar(
+                            y=[_n], x=[_hi - _b0], base=[_b0], orientation="h",
+                            marker=dict(color=_C_DCF), width=0.55, showlegend=False,
+                            hovertemplate=f"{_n} high<br><b>${_hi:,.0f}</b><extra></extra>"))
+                    _tor.add_vline(x=_b0, line_color=_INK, line_width=2,
+                                   annotation_text=f"base ${_b0:,.0f}",
+                                   annotation_position="top",
+                                   annotation_font=dict(color=_INK, size=12))
+                    _tor.update_layout(
+                        height=250, margin=dict(l=8, r=28, t=34, b=28), barmode="overlay",
+                        xaxis=dict(title="$ per share", gridcolor=_GRID,
+                                   tickfont=dict(color=_MUTE), zeroline=False),
+                        yaxis=dict(tickfont=dict(color=_INK)),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=_INK))
+                    st.plotly_chart(_tor, use_container_width=True,
+                                    config={"displayModeBar": False})
+                    _top = _levers[-1]
+                    st.caption(
+                        f"**{_top[0]}** dominates — moving it across {_top[3]} swings the "
+                        f"answer from **${min(_top[1], _top[2]):,.0f}** to "
+                        f"**${max(_top[1], _top[2]):,.0f}**. Orange pushes value down, blue up. "
+                        f"If the top bar is a rate rather than the business, this valuation is "
+                        f"mostly a statement about interest rates.")
+
             st.markdown("##### Cross-check: what the market pays for comparable cash")
             _m1, _m2 = st.columns(2)
             _pe = _m1.number_input("Target forward P/E", 0.0, 100.0,

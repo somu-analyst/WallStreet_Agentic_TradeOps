@@ -28302,6 +28302,97 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         return {}
 
 
+_FLOW_INDEXY = {"SPY", "QQQ", "IWM", "DIA", "VIX", "SPX", "NDX", "RUT", "VXX", "UVXY",
+                "TLT", "HYG", "EEM", "EFA", "GLD", "SLV", "XLF", "XLE", "XLK", "SMH"}
+
+
+def _flow_board(conn, trade_date=None, top=10, min_premium=1e6):
+    """Premium leaderboards by ticker: where the option money actually went.
+
+    WHAT THIS IS NOT. Services like Cheddar Flow rank by ORDER COUNT and split bullish from
+    bearish by whether a trade hit the ask or the bid. Both need time-and-sales with the
+    aggressor side. We capture chain SNAPSHOTS, so we have contracts traded and a price --
+    never an order count and never who initiated. Printing an "orders" column would be
+    invention, so this reports premium and contracts, which are real.
+
+    RANKED ON NET, NOT GROSS, and that matters more than it sounds. On 2026-08-28 SPY put
+    premium was $1,005M against $396M of calls -- that is structural index hedging, not
+    bearish conviction, and a gross put board is topped by the same hedges every single day.
+    Netting the two sides cancels the standing hedge and leaves the day's tilt. Index and
+    sector ETFs are still flagged, because even their NET is mostly someone buying insurance.
+
+    Premium uses the mid where a two-sided quote exists, falling back to last traded.
+    """
+    day = trade_date or conn.execute(
+        "SELECT MAX(trade_date) FROM options_openbb").fetchone()[0]
+    if not day:
+        return {"date": None, "bullish": [], "bearish": []}
+    rows = conn.execute("""
+        SELECT ticker,
+               SUM(vol_Call * COALESCE(NULLIF((bid_Call+ask_Call)/2.0,0), lastPrice_Call) * 100),
+               SUM(vol_Put  * COALESCE(NULLIF((bid_Put +ask_Put )/2.0,0), lastPrice_Put ) * 100),
+               SUM(COALESCE(vol_Call,0)), SUM(COALESCE(vol_Put,0))
+        FROM options_openbb WHERE trade_date=?
+        GROUP BY ticker""", (day,)).fetchall()
+    out = []
+    for tk, cprem, pprem, cvol, pvol in rows:
+        cprem, pprem = float(cprem or 0), float(pprem or 0)
+        if cprem + pprem < min_premium:
+            continue
+        out.append({"ticker": tk, "call_prem": cprem, "put_prem": pprem,
+                    "net": cprem - pprem, "call_vol": float(cvol or 0),
+                    "put_vol": float(pvol or 0), "total": cprem + pprem,
+                    "index": tk in _FLOW_INDEXY,
+                    "skew": (cprem / pprem) if pprem > 0 else None})
+    bull = sorted([r for r in out if r["net"] > 0], key=lambda r: -r["net"])[:top]
+    bear = sorted([r for r in out if r["net"] < 0], key=lambda r: r["net"])[:top]
+    return {"date": day, "bullish": bull, "bearish": bear}
+
+
+def _fmt_flow_board(conn, top=8):
+    """Telegram body for the flow boards. Two tables, framed for what they are."""
+    b = _flow_board(conn, top=top)
+    if not b["bullish"] and not b["bearish"]:
+        return None
+
+    def _tbl(rows, title, net_key):
+        body = []
+        for r in rows:
+            mark = "🏛" if r["index"] else ("🟢" if net_key > 0 else "🔴")
+            # No sign: the table title already states the direction, and "+659M" on a
+            # PUT-leading board reads as bullish at a glance.
+            body.append((mark, r["ticker"][:6],
+                         _compact_money(abs(r["net"])).lstrip("+"),
+                         _compact_money(r["total"]).lstrip("+")))
+        return _pipe_table(("", "Ticker", "Net", "Total"), body, right_cols={2, 3},
+                           title=title)
+
+    parts = [hdr(f"💸 OPTION FLOW · {b['date']}")]
+    if b["bullish"]:
+        parts.append(_tbl(b["bullish"], "📈 Call premium leading", 1))
+    if b["bearish"]:
+        parts.append(_tbl(b["bearish"], "📉 Put premium leading", -1))
+    det = []
+    for r in (b["bullish"][:3] + b["bearish"][:3]):
+        det.append(f"<b>{r['ticker']}</b> calls {_compact_money(r['call_prem'])} vs puts "
+                   f"{_compact_money(r['put_prem'])} · {r['call_vol']+r['put_vol']:,.0f} contracts"
+                   + (" · 🏛 index/sector — its put demand is largely hedging, not a view"
+                      if r["index"] else ""))
+    parts.append("\n".join(det))
+    # When the put board is mostly index and sector names, the day is a HEDGING day, not a
+    # bearish one -- saying so is the difference between a flow board and a misleading one.
+    _idx = sum(1 for r in b["bearish"] if r["index"])
+    if b["bearish"] and _idx >= max(2, len(b["bearish"]) // 2):
+        parts.append(f"<i>⚠️ {_idx} of {len(b['bearish'])} names on the put board are "
+                     f"index or sector ETFs. That is portfolio insurance being bought, not "
+                     f"a directional view — read it as a hedging day, not a bearish one.</i>")
+    parts.append("<i>Premium = contracts × mid × 100, netted call-minus-put so a standing "
+                 "hedge does not top the board every day. NOT order counts and NOT "
+                 "ask-vs-bid — a chain snapshot cannot see who initiated a trade. "
+                 "Descriptive only: the UOA family scored 47% over 204 fires, a coin flip.</i>")
+    return "\n\n".join(parts)
+
+
 def _valuation_inputs(ticker):
     """Everything a DCF needs, pulled once. Returns a dict, or raises with a plain reason.
 
@@ -38115,6 +38206,15 @@ async def oi_flow_alert(ctx):
     conn = get_conn()
     try:
         msg = _fmt_oi_flow(conn)
+        # The premium leaderboards ride the same post-close push. They are built from the EOD
+        # chain, so they change ONCE A DAY -- sending them on the 15-minute cadence would
+        # repeat identical content until the next capture.
+        try:
+            board = _fmt_flow_board(conn)
+            if board:
+                msg = (msg + "\n\n" + board) if msg else board
+        except Exception:
+            log.debug("flow board failed", exc_info=True)
     finally:
         conn.close()
     if not msg:

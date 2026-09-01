@@ -25349,6 +25349,60 @@ elif page == "📡 Macro/Event Hub":
                 st.error(f"Regime error: {e}")
 
         with _tb_flow:
+            # ── Premium leaderboards ────────────────────────────────────────────────────
+            # The in-cell bar is the whole point of this layout: rank is readable at a
+            # glance without reading a single number.
+            st.markdown("##### Where the option premium went")
+            try:
+                _fb = _tbmod._flow_board(_hub_conn, top=10)
+                if _fb["bullish"] or _fb["bearish"]:
+                    _fcol = st.columns(2)
+                    for _cx, (_key, _ttl, _hue) in zip(
+                            _fcol, (("bullish", "📈 Call premium leading", "#2a78d6"),
+                                    ("bearish", "📉 Put premium leading", "#eb6834"))):
+                        with _cx:
+                            st.markdown(f"**{_ttl}**")
+                            _rws = _fb[_key]
+                            if not _rws:
+                                st.caption("nothing on this side today"); continue
+                            _mx = max(abs(r["net"]) for r in _rws) or 1
+                            # Premium is stored in DOLLARS; the column formats as $x.xM, so
+                            # it has to be divided here or a $918M day prints as $918000000M.
+                            _df = pd.DataFrame([{
+                                "Ticker": ("🏛 " if r["index"] else "") + r["ticker"],
+                                "Net premium": abs(r["net"]) / 1e6,
+                                "Contracts": int(r["call_vol"] + r["put_vol"]),
+                                "Share": abs(r["net"]) / _mx,
+                            } for r in _rws])
+                            st.dataframe(
+                                _df, hide_index=True, use_container_width=True,
+                                column_config={
+                                    "Net premium": st.column_config.NumberColumn(
+                                        format="$%.1fM",
+                                        help="Call minus put premium. Netted so a standing "
+                                             "hedge does not top the board every day."),
+                                    "Contracts": st.column_config.NumberColumn(format="%d"),
+                                    "Share": st.column_config.ProgressColumn(
+                                        "", min_value=0.0, max_value=1.0, format=" ",
+                                        help="Relative to the biggest name on this side."),
+                                })
+                    _idx_n = sum(1 for r in _fb["bearish"] if r["index"])
+                    if _fb["bearish"] and _idx_n >= max(2, len(_fb["bearish"]) // 2):
+                        st.warning(f"⚠️ {_idx_n} of {len(_fb['bearish'])} names on the put "
+                                   f"board are index or sector ETFs — that is insurance being "
+                                   f"bought, not a directional view. Read it as a hedging "
+                                   f"day, not a bearish one.")
+                    st.caption(
+                        f"Chain of **{_fb['date']}** · premium = contracts × mid × 100, "
+                        f"netted call-minus-put. 🏛 marks index and sector ETFs, whose put "
+                        f"demand is structurally hedging. **Not order counts and not "
+                        f"ask-versus-bid** — a chain snapshot cannot see who initiated a "
+                        f"trade, so this is where money went, never who was aggressive. "
+                        f"Descriptive only: the UOA family scored 47% over 204 fires.")
+                    st.markdown("---")
+            except Exception as _fbe:
+                st.caption(f"Flow board unavailable: {_fbe}")
+
             st.caption("Money-flow / rotation across US sectors, style, continents, countries, "
                        "currencies, commodities, bonds, crypto (bot /flow) — Chaikin Money Flow + "
                        "relative strength + RRG quadrant, plus 'what moves together' correlations.")

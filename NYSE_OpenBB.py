@@ -351,8 +351,19 @@ def build_expanded_universe():
     except Exception as e:
         print(f"S&P 500 fetch failed ({e}) — continuing without")
     try:
-        ndx = _wiki_tickers("https://en.wikipedia.org/wiki/Nasdaq-100")
+        # THE CONSTITUENTS MOVED TO THEIR OWN ARTICLE (fixed 2026-09-02, ID 352). The
+        # /Nasdaq-100 page returns 18 tables and not one of them is the member list any
+        # more -- it carries only index history plus a navbox pointing here. So this was
+        # never a column-naming problem: no widening of col_candidates could have found a
+        # table that is not on the page. Table 0 here is the list, under "Ticker".
+        ndx = _wiki_tickers("https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies")
         print(f"Nasdaq-100 from Wikipedia: {len(ndx)}")
+        # A silent 0 is how this went unnoticed: the universe still built (the S&P and the
+        # curated lists carry most names), so nothing failed loudly while every Nasdaq-100
+        # member absent from those lists was quietly missing from the capture.
+        if len(ndx) < 90:
+            print(f"  !! WARNING: expected ~100 Nasdaq-100 members, got {len(ndx)} — "
+                  f"the Wikipedia page layout has probably changed again")
         tks += ndx
     except Exception as e:
         print(f"Nasdaq-100 fetch failed ({e}) — continuing without")

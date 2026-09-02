@@ -28345,6 +28345,77 @@ _FLOW_INDEXY = {"SPY", "QQQ", "IWM", "DIA", "VIX", "SPX", "NDX", "RUT", "VXX", "
                 "TLT", "HYG", "EEM", "EFA", "GLD", "SLV", "XLF", "XLE", "XLK", "SMH"}
 
 
+def _options_activity(conn, ma=5):
+    """5-day average call / put contract volume and the call-to-put ratio (ID 383).
+
+    SCOPE, because it decides what this number can be compared against. This sums OUR
+    captured universe -- about 730 optionable US names -- not the whole listed market. The
+    LEVEL is therefore ours and will not match a published figure built from OCC totals
+    across every symbol. The RATIO is scale-invariant and does travel: measured 1.26 on
+    2026-09-01 against a published 1.25 for the same week, which is the agreement you would
+    expect from two different samples of the same market.
+
+    NO PERCENTILE. The obvious next line is "higher than X% of history", and the honest
+    answer is that we cannot say: capture starts 2026-07-02, so the entire series is a few
+    dozen sessions. A percentile computed over that and printed without its window reads
+    exactly like a multi-year one, which is how a short sample gets laundered into
+    authority. Direction over a month is what this length of history supports.
+
+    Returns {} when there is not enough history to average.
+    """
+    try:
+        df = pd.read_sql(
+            "SELECT trade_date d, SUM(vol_Call) c, SUM(vol_Put) p, "
+            "COUNT(DISTINCT ticker) n FROM options_openbb "
+            "GROUP BY trade_date ORDER BY trade_date", conn)
+    except Exception:
+        return {}
+    if df is None or len(df) < ma:
+        return {}
+    df = df.dropna(subset=["c", "p"])
+    if len(df) < ma:
+        return {}
+    cur_c = float(df["c"].tail(ma).mean())
+    cur_p = float(df["p"].tail(ma).mean())
+    if cur_p <= 0:
+        return {}
+    out = {"date": str(df["d"].iloc[-1]), "days": len(df), "tickers": int(df["n"].iloc[-1]),
+           "call": cur_c, "put": cur_p,
+           # Ratio of the AVERAGES, not the average of daily ratios: the latter lets a thin
+           # session count as much as a heavy one.
+           "ratio": float(df["c"].tail(ma).sum() / df["p"].tail(ma).sum()),
+           "start": str(df["d"].iloc[0])}
+    # Change against the same average a month of sessions back, when we have that much.
+    back = 21
+    if len(df) >= ma + back:
+        prev_c = float(df["c"].iloc[-(ma + back):-back].mean())
+        prev_p = float(df["p"].iloc[-(ma + back):-back].mean())
+        if prev_c > 0 and prev_p > 0:
+            out["call_chg"] = (cur_c / prev_c - 1) * 100
+            out["put_chg"] = (cur_p / prev_p - 1) * 100
+            out["ratio_prev"] = float(df["c"].iloc[-(ma + back):-back].sum()
+                                      / df["p"].iloc[-(ma + back):-back].sum())
+    return out
+
+
+def _fmt_activity(conn, ma=5):
+    """One block on market-wide option activity, or '' when history is too short."""
+    a = _options_activity(conn, ma=ma)
+    if not a:
+        return ""
+    lines = [f"📊 <b>Option activity</b> — {ma}-day average to {a['date']}",
+             f"Calls <b>{a['call'] / 1e6:.1f}M</b> · Puts <b>{a['put'] / 1e6:.1f}M</b> · "
+             f"call/put <b>{a['ratio']:.2f}</b>"]
+    if "call_chg" in a:
+        lines.append(f"vs a month ago: calls {a['call_chg']:+.0f}%, puts {a['put_chg']:+.0f}%, "
+                     f"ratio {a['ratio_prev']:.2f} → {a['ratio']:.2f}")
+    lines.append(f"<i>Contracts across our {a['tickers']} captured names, not the whole listed "
+                 f"market — the LEVEL is ours and will not match an OCC-based figure. The "
+                 f"RATIO is scale-free and does compare. No percentile: capture starts "
+                 f"{a['start']} ({a['days']} sessions), too short to rank against.</i>")
+    return "\n".join(lines)
+
+
 def _flow_board(conn, trade_date=None, top=10, min_premium=1e6):
     """Premium leaderboards by ticker: where the option money actually went.
 
@@ -38448,6 +38519,14 @@ async def oi_flow_alert(ctx):
                 msg = (msg + "\n\n" + board) if msg else board
         except Exception:
             log.debug("flow board failed", exc_info=True)
+        # Whole-universe participation, on the same once-a-day cadence (ID 383). The board
+        # says WHERE the money went; this says how much was moving at all.
+        try:
+            act = _fmt_activity(conn)
+            if act:
+                msg = (msg + "\n\n" + act) if msg else act
+        except Exception:
+            log.debug("activity block failed", exc_info=True)
     finally:
         conn.close()
     if not msg:

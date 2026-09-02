@@ -25521,6 +25521,13 @@ elif page == "📡 Macro/Event Hub":
                         f"ask-versus-bid** — a chain snapshot cannot see who initiated a "
                         f"trade, so this is where money went, never who was aggressive. "
                         f"Descriptive only: the UOA family scored 47% over 204 fires.")
+                    # How much was moving at all, next to where it went (ID 383).
+                    try:
+                        _act = _tbmod._fmt_activity(_hub_conn)
+                    except Exception:
+                        _act = ""
+                    if _act:
+                        st.markdown(_tg_md(_act))
                     st.markdown("---")
             except Exception as _fbe:
                 st.caption(f"Flow board unavailable: {_fbe}")

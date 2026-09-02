@@ -12217,6 +12217,21 @@ elif page == "📈 Insider / Congress / Whales":
         # Greenlight (Einhorn) — a DME Advisors LP lead looked promising but was inconsistent
         # under closer check, so the original (still real, just possibly less current)
         # Greenlight Capital Inc CIK was kept rather than swap in something unverified.
+        # DATE AUDIT 2026-09-02 (ID 381) — a NAME check cannot catch a dead row.
+        # The 2026-07-24 pass above verified conformed names and pronounced Markel-Gayner and
+        # Jana Partners "FINE". Both were real EDGAR entities with exactly the right names and
+        # both had stopped filing years earlier: Markel-Gayner in 2007, Jana in 2023. A row
+        # pointing at a genuine company that no longer files looks perfectly healthy and
+        # silently serves nothing. Only the newest 13F-HR DATE distinguishes the two, so the
+        # roster is now audited by date (tools/audit_13f_ciks.py) — 78 entries, 71 current.
+        # Swapped to the live filer: Gates Foundation Trust (was a secondary filer frozen at
+        # 2024-11), Icahn (the G.P. entity files no 13F at all; Carl Icahn's own CIK does),
+        # Invesco (was last filed 2004), Markel Group, Jana Partners Management.
+        # LEFT ALONE, deliberately, because no current filer exists rather than because one
+        # was not found: Omega (Cooperman went family-office, last 13F 2019), Greenlight
+        # (Einhorn, record ends 2024-08 with no successor entity located), and BlackRock
+        # Finance (whole filing record ends 2025-04). Guessing a plausible CIK for these is
+        # how the stale rows got here in the first place.
         _EDGAR_FUNDS = {
             "Berkshire Hathaway": "0001067983", "Vanguard Group": "0000102909",
             "BlackRock": "0001364742", "Citadel Advisors": "0001423053",
@@ -12232,13 +12247,19 @@ elif page == "📈 Insider / Congress / Whales":
             # matches into THIS roster instead — one 13F engine, real filings, no scrape to
             # maintain against their page layout). Every CIK verified directly against SEC EDGAR
             # company search before adding.
-            "Icahn Enterprises": "0001257324", "Duquesne (Druckenmiller)": "0001536411",
+            "Icahn (Carl Icahn)": "0000921669", "Duquesne (Druckenmiller)": "0001536411",
             "Appaloosa (Tepper)": "0001656456", "Lone Pine Capital": "0001061165",
             "Coatue Management": "0001135730", "Viking Global": "0001103804",
             "Tudor Investment (PTJ)": "0000923093", "Fisher Asset Mgmt": "0000850529",
             "Trian (Peltz)": "0001345471", "Oaktree Capital (Marks)": "0000949509",
             "Point72 (Cohen)": "0001603466",
-            "Gates Foundation Trust": "0001663801", "Paulson & Co": "0001035674",
+            # CIK CORRECTED 2026-09-02 (ID 381). Was 0001663801 "Gates Foundation": a real
+            # EDGAR entity, which is why it passed the original name check, but a SECONDARY
+            # filer whose last 13F-HR is dated 2024-11-14 -- so the row had been quietly
+            # frozen for about two years. 0001166559 "GATES FOUNDATION TRUST" is the ongoing
+            # filer: 98 filings on record, most recent 2026-08-14. Verified by comparing
+            # 13F-HR counts and latest filing dates on both, not by name alone.
+            "Gates Foundation Trust": "0001166559", "Paulson & Co": "0001035674",
             "Gotham Asset Mgmt (Greenblatt)": "0001510387", "Ariel Investments (Rogers)": "0000936753",
             "Southeastern (Hawkins)": "0000807985", "Maverick Capital (Ainslie)": "0000934639",
             "Glenview Capital (Robbins)": "0001138995", "Omega Advisors (Cooperman)": "0000898202",
@@ -12246,7 +12267,7 @@ elif page == "📈 Insider / Congress / Whales":
             "Pzena Investment Mgmt": "0001027796", "Yacktman Asset Mgmt": "0000905567",
             "Royce & Associates": "0000906304", "Sands Capital Management": "0001020066",
             "Harris Associates (Herro)": "0000813917", "First Eagle Investment": "0001325447",
-            "Generation IM (Al Gore)": "0001375534", "Invesco Advisers": "0000020430",
+            "Generation IM (Al Gore)": "0001375534", "Invesco Ltd": "0000914208",
             "Dodge & Cox": "0000200217", "Baron Funds (BAMCO)": "0001017918",
             # Second batch 2026-07-24 (user: "we have many right in the page right" — the
             # first pass stopped at 40 when TradingKey's roster has 88; this covers nearly
@@ -12262,12 +12283,12 @@ elif page == "📈 Insider / Congress / Whales":
             "Diamond Hill Capital": "0001217541", "Davis Selected Advisers": "0001036325",
             "Wasatch Advisors": "0000814133", "Brandes Investment Partners": "0001015079",
             "Akre Capital Management": "0001112520", "Mairs & Power": "0001070134",
-            "Markel-Gayner (Gayner)": "0001034180", "Manning & Napier Advisors": "0000062039",
+            "Markel Group (Gayner)": "0001096343", "Manning & Napier Advisors": "0000062039",
             "First Pacific Advisors": "0001377581", "Horizon Kinetics (Stahl)": "0001056823",
             "Smead Capital Management": "0001427008", "Matthews Intl Capital Mgmt": "0001028074",
             "Tweedy Browne": "0000732905", "Donald Smith & Co": "0000814375",
             "Moore Capital Management": "0001448574", "Weitz Investment Mgmt": "0000883965",
-            "Jana Partners": "0001159159", "Fairholme Capital (Berkowitz)": "0001056831",
+            "Jana Partners Management": "0001998597", "Fairholme Capital (Berkowitz)": "0001056831",
             "Third Avenue Management": "0001099281", "Olstein Capital Management": "0000947996",
             "Kahn Brothers": "0001039565", "Hussman Strategic Advisors": "0001179475",
             "Pennant Investors (Fournier)": "0001759176", "Baillie Gifford": "0001088875",

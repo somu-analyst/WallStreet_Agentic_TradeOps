@@ -28072,8 +28072,19 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
             headers=_SEC_UA), timeout=25).read())
         rec = subs.get("filings", {}).get("recent", {})
         forms = rec.get("form", [])
+        # PREFERENCE, NOT MEMBERSHIP. This read `f in want`, which is a SET test: the tuple
+        # order meant nothing and the newest filing of EITHER form won. So a company that had
+        # just filed its 10-K handed back ANNUAL segments while the caller reconciled them
+        # against a QUARTERLY revenue total -- MSFT's geography split sums to its full-year
+        # 331,839 against a ~76,000 quarter, so the check correctly rejected a correctly-read
+        # table, every quarter, forever. Walk the preferences IN ORDER and take the newest
+        # filing OF THAT FORM (ID 361).
         want = ("10-Q", "10-K") if quarterly else ("10-K", "10-Q")
-        idx = next((i for i, f in enumerate(forms) if f in want), None)
+        idx = None
+        for _wf in want:
+            idx = next((i for i, f in enumerate(forms) if f == _wf), None)
+            if idx is not None:
+                break
         if idx is None:
             return {}
         acc = rec["accessionNumber"][idx].replace("-", "")
@@ -28171,28 +28182,47 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         _MONEY = _re.compile(
             r"^(net |total |operating )*(revenues?|sales)"
             r"( from contract(s)? with customers)?$", _re.I)
+        # THE MONEY IS NOT ALWAYS IN COLUMN 1. Filers interleave a footnote-marker column:
+        # Microsoft's geography table is 5 columns wide and column 1 holds "[1]" or nothing,
+        # with the figures starting at column 2. Reading a FIXED column returned nothing at
+        # all for every such filer while the table sat there fully populated -- MSFT, XOM,
+        # JNJ, CVX and PFE all file the split and all came back empty (ID 361).
+        # Scanning also has to REJECT the footnote marker rather than parse it: "[1]" contains
+        # a digit, so the old bare \d test reads it as money and yields a revenue of 1.
+        _NUM = _re.compile(r"^\(?-?[\d,]+(\.\d+)?\)?$")
+
+        def _money_cells(row):
+            """Every real number in the row, left to right. First = current period."""
+            vals = []
+            for _ci in range(1, tbl.shape[1]):
+                _cv = str(row[str(_ci)]).strip()
+                if not _cv or _cv.lower() == "nan":
+                    continue
+                _cv = _cv.replace("$", "").replace(" ", "").replace(" ", "")
+                if not _NUM.match(_cv):
+                    continue                      # footnote marker, date, or stray text
+                try:
+                    _v = float(_re.sub(r"[^\d.]", "", _cv))
+                except ValueError:
+                    continue
+                vals.append(-_v if _cv.startswith("(") else _v)
+            return vals
+
         out, cur, cur_parent = {}, None, None
         for _, r in tbl.iterrows():
             lab = str(r["0"]).strip()
-            val = str(r["1"]).strip()
-            has_val = bool(_re.search(r"\d", val)) and val.lower() != "nan"
+            cells = _money_cells(r)
+            has_val = bool(cells)
             if not lab or lab.lower() == "nan":
                 continue
             if _MONEY.match(lab) and has_val:
                 if cur:                                   # belongs to the segment above it
-                    try:
-                        now = float(_re.sub(r"[^\d.]", "", val)) * scale / unit_div
-                        # The PRIOR-PERIOD column sits right beside it, so per-segment growth
-                        # costs no extra request -- and "which part is growing" is the whole
-                        # question a single consolidated number cannot answer.
-                        prior = None
-                        if tbl.shape[1] > 2:
-                            pv = str(r["2"]).strip()
-                            if _re.search(r"\d", pv) and pv.lower() != "nan":
-                                prior = float(_re.sub(r"[^\d.]", "", pv)) * scale / unit_div
-                        out[cur] = {"now": now, "prior": prior, "parent": cur_parent}
-                    except ValueError:
-                        pass
+                    now = cells[0] * scale / unit_div
+                    # The PRIOR-PERIOD column sits right beside it, so per-segment growth
+                    # costs no extra request -- and "which part is growing" is the whole
+                    # question a single consolidated number cannot answer.
+                    prior = (cells[1] * scale / unit_div) if len(cells) > 1 else None
+                    out[cur] = {"now": now, "prior": prior, "parent": cur_parent}
                     cur = cur_parent = None
                 continue                                  # a bare total, no segment -> skip
             if not has_val and not _BOILER.search(lab):

@@ -17873,167 +17873,187 @@ elif page == "🎯 Next-Day Exit Planner":
             # was merged into the multi-mode page. Confirmed via server log (not just browser
             # inspection): no crash was occurring, execution was being deliberately stopped here.
 
-        # ──────────────────────────────────────────────────────────────
-        # BATCH HELPER: fetch current option mid-price from yfinance
-        # ──────────────────────────────────────────────────────────────
-        def _fetch_option_mid(ticker, expiry_str, strike, opt_type):
-            """Return (mid_price, iv, spot) or (None, None, None) on failure.
-            Finds nearest available expiry when exact date not listed by yfinance."""
+    # ──────────────────────────────────────────────────────────────
+    # BATCH HELPERS — shared by THREE modes, so they live at page level.
+    #
+    # These sat one level deeper, inside the "Next-Day Game Plan" branch, while
+    # "All Open Positions" and "All positions — by Ticker" both call them. Streamlit
+    # re-runs the whole script on every interaction, so selecting either of those
+    # modes skipped the Game Plan branch entirely and the names were never bound:
+    # NameError: name '_ep_batch_table' is not defined. Two of the four modes were
+    # dead. It stayed hidden because the crash sits BEHIND the `_ep_open_trades.empty`
+    # guard — with no open positions the page returns "No open positions" and never
+    # reaches the call, so the bug only appears once you actually hold something.
+    # Found 2026-09-01 by seeding open trades into a throwaway DB (ID 365).
+    # Keep these at this indent: they are pure defs and must bind before the dispatch.
+    # ──────────────────────────────────────────────────────────────
+    def _fetch_option_mid(ticker, expiry_str, strike, opt_type):
+        """Return (mid_price, iv, spot) or (None, None, None) on failure.
+        Finds nearest available expiry when exact date not listed by yfinance."""
+        try:
+            tk = yf.Ticker(ticker)
+            hist = tk.history(period="2d")
+            spot = float(hist["Close"].iloc[-1]) if len(hist) >= 1 else None
             try:
-                tk = yf.Ticker(ticker)
-                hist = tk.history(period="2d")
-                spot = float(hist["Close"].iloc[-1]) if len(hist) >= 1 else None
-                try:
-                    exp_dt = datetime.strptime(expiry_str, "%Y-%m-%d").date()
-                except Exception:
-                    return None, None, spot
-                # Find nearest available expiry
-                available = tk.options  # tuple of YYYY-MM-DD strings
-                if not available:
-                    return None, None, spot
-                exp_str = expiry_str  # default: try exact
-                if expiry_str not in available:
-                    # pick closest available expiry by calendar distance
-                    avail_dts = [datetime.strptime(e, "%Y-%m-%d").date() for e in available]
-                    nearest = min(avail_dts, key=lambda d: abs((d - exp_dt).days))
-                    exp_str = nearest.strftime("%Y-%m-%d")
-                chain = _cached_option_chain(ticker, exp_str)
-                df_c = chain.calls if opt_type.lower() == "call" else chain.puts
-                row = df_c[abs(df_c["strike"] - strike) < 0.01]
-                if row.empty:
-                    row = df_c.iloc[(df_c["strike"] - strike).abs().argsort()[:1]]
-                if row.empty:
-                    return None, None, spot
-                bid = float(row["bid"].iloc[0])
-                ask = float(row["ask"].iloc[0])
-                iv  = float(row["impliedVolatility"].iloc[0]) if "impliedVolatility" in row.columns else None
-                mid = (bid + ask) / 2 if bid >= 0 and ask >= 0 else None
-                return mid, iv, spot
+                exp_dt = datetime.strptime(expiry_str, "%Y-%m-%d").date()
             except Exception:
-                return None, None, None
+                return None, None, spot
+            # Find nearest available expiry
+            available = tk.options  # tuple of YYYY-MM-DD strings
+            if not available:
+                return None, None, spot
+            exp_str = expiry_str  # default: try exact
+            if expiry_str not in available:
+                # pick closest available expiry by calendar distance
+                avail_dts = [datetime.strptime(e, "%Y-%m-%d").date() for e in available]
+                nearest = min(avail_dts, key=lambda d: abs((d - exp_dt).days))
+                exp_str = nearest.strftime("%Y-%m-%d")
+            chain = _cached_option_chain(ticker, exp_str)
+            df_c = chain.calls if opt_type.lower() == "call" else chain.puts
+            row = df_c[abs(df_c["strike"] - strike) < 0.01]
+            if row.empty:
+                row = df_c.iloc[(df_c["strike"] - strike).abs().argsort()[:1]]
+            if row.empty:
+                return None, None, spot
+            bid = float(row["bid"].iloc[0])
+            ask = float(row["ask"].iloc[0])
+            iv  = float(row["impliedVolatility"].iloc[0]) if "impliedVolatility" in row.columns else None
+            mid = (bid + ask) / 2 if bid >= 0 and ask >= 0 else None
+            return mid, iv, spot
+        except Exception:
+            return None, None, None
 
-        def _ep_batch_table(trades_df):
-            """Build batch exit analysis rows for a set of open trades."""
-            rows = []
-            today = datetime.now().date()
-            _ev_cache = {}                                  # ticker -> (er_days, exdiv_days), one lookup per ticker
+    def _ep_batch_table(trades_df):
+        """Build batch exit analysis rows for a set of open trades."""
+        rows = []
+        today = datetime.now().date()
+        _ev_cache = {}                                  # ticker -> (er_days, exdiv_days), one lookup per ticker
 
-            def _leg_events(tk):
-                if tk not in _ev_cache:
-                    er = xd = None
-                    try:
-                        _e = _next_earnings(tk)
-                        er = _e.get("days") if _e else None
-                    except Exception:
-                        pass
-                    try:
-                        import telegram_bot_optimized as _tbo_ev
-                        _d = _tbo_ev._divcap_stats(tk)
-                        xd = _d.get("ex_days") if _d else None
-                    except Exception:
-                        pass
-                    _ev_cache[tk] = (er, xd)
-                return _ev_cache[tk]
-
-            for _, r in trades_df.iterrows():
+        def _leg_events(tk):
+            if tk not in _ev_cache:
+                er = xd = None
                 try:
-                    strike = float(r["strike"])
-                    entry  = float(r["entry_price"])
-                    raw_qty = int(r.get("quantity", 1) or 1)
-                    side   = "SELL" if raw_qty < 0 else "BUY"
-                    qty    = abs(raw_qty)
-                    opt    = str(r["option_type"]).lower()
-                    ticker = str(r["ticker"]).upper()
-                    try:
-                        exp_dt = datetime.strptime(str(r["expiry"]), "%Y-%m-%d").date()
-                        dte = (exp_dt - today).days
-                    except Exception:
-                        dte = None
-                    mid, iv, spot = _fetch_option_mid(ticker, str(r["expiry"]), strike, opt)
-                    # P&L direction: for SELL, profit when option price goes DOWN
-                    if mid is not None:
-                        if side == "BUY":
-                            pnl = round((mid - entry) * qty * 100, 2)
-                            pnl_pct = round((mid - entry) / entry * 100, 1) if entry > 0 else None
-                        else:  # SELL — collected premium, profit = entry - mid
-                            pnl = round((entry - mid) * qty * 100, 2)
-                            pnl_pct = round((entry - mid) / entry * 100, 1) if entry > 0 else None
-                    else:
-                        pnl = pnl_pct = None
-                    # signal
-                    if pnl_pct is None:
-                        sig = "⚪ N/A"
-                    elif pnl_pct >= 50:
-                        sig = "🟢 TAKE PROFIT"
-                    elif pnl_pct <= -30:
-                        sig = "🔴 CUT LOSS"
-                    elif dte is not None and dte <= 5 and pnl_pct < 0:
-                        sig = "🔴 NEAR EXPIRY"
-                    elif dte is not None and dte <= 5 and pnl_pct > 0:
-                        sig = "🟡 CLOSE SOON"
-                    else:
-                        sig = "⚪ HOLD"
-                    # ── Event column: earnings / ex-div landing before this leg's expiry ──
-                    _er, _xd = _leg_events(ticker)
-                    _evt = []
-                    if _er is not None:
-                        if dte is not None and 0 <= _er <= dte:
-                            _evt.append(f"📊 ER {_er}d ⚠️pre-exp")
-                        elif 0 <= _er <= 14:
-                            _evt.append(f"📊 ER {_er}d")
-                    if _xd is not None and dte is not None and 0 <= _xd <= max(dte, 0):
-                        _evt.append(f"💵 ex-div {_xd}d")
-                    event_s = " · ".join(_evt) if _evt else "—"
-                    # event-aware advice: only escalate a plain HOLD, never mask profit/loss/expiry signals
-                    if sig == "⚪ HOLD":
-                        if _er is not None and dte is not None and 0 <= _er <= dte:
-                            sig = "🟡 ER PRE-EXP — decide before print"
-                        elif (_xd is not None and dte is not None and 0 <= _xd <= max(dte, 0)
-                              and side == "SELL" and opt == "call" and spot and spot > strike):
-                            sig = "🟡 EX-DIV — early-assignment risk"
-                    price_note = ""
-                    if mid is not None:
-                        direction = "↑" if mid > entry else "↓"
-                        price_note = f"${entry:.2f}→${mid:.2f} ({direction}{abs(mid-entry)/entry*100:.0f}% option Δ)"
-                    rows.append({
-                        "Side": side,
-                        "Ticker": ticker,
-                        "Type": opt.upper(),
-                        "Strike": f"${strike:.0f}",
-                        "Expiry": str(r["expiry"]),
-                        "DTE": dte,
-                        "Event": event_s,
-                        "Qty": f"{side} ×{qty}",
-                        "Premium paid→now": price_note if mid is not None else "N/A",
-                        "P&L $": f"${pnl:+,.0f}" if pnl is not None else "N/A",
-                        "P&L %": f"{pnl_pct:+.1f}%" if pnl_pct is not None else "N/A",
-                        "IV": f"{iv*100:.0f}%" if iv else "N/A",
-                        "Spot": f"${spot:.2f}" if spot else "N/A",
-                        "Signal": sig,
-                    })
-                except Exception:
-                    continue
-            return pd.DataFrame(rows)
-
-        def _add_total_row(df):
-            """Append a TOTAL row summing P&L $ to a batch df."""
-            if df.empty:
-                return df
-            pnl_vals = []
-            for v in df["P&L $"]:
-                try:
-                    pnl_vals.append(float(str(v).replace("$","").replace(",","").replace("+","")))
+                    _e = _next_earnings(tk)
+                    er = _e.get("days") if _e else None
                 except Exception:
                     pass
-            tot = sum(pnl_vals)
-            tot_em = "🟢" if tot >= 0 else "🔴"
-            tot_row = {c: "" for c in df.columns}
-            tot_row["Side"] = f"{tot_em} TOTAL"
-            tot_row["Ticker"] = f"{len(df)} leg(s)"
-            tot_row["P&L $"] = f"${tot:+,.0f}"
-            win_n = sum(1 for v in pnl_vals if v > 0)
-            tot_row["Signal"] = f"{win_n}W/{len(pnl_vals)-win_n}L"
-            return pd.concat([df, pd.DataFrame([tot_row])], ignore_index=True)
+                try:
+                    import telegram_bot_optimized as _tbo_ev
+                    _d = _tbo_ev._divcap_stats(tk)
+                    xd = _d.get("ex_days") if _d else None
+                except Exception:
+                    pass
+                _ev_cache[tk] = (er, xd)
+            return _ev_cache[tk]
+
+        for _, r in trades_df.iterrows():
+            try:
+                strike = float(r["strike"])
+                entry  = float(r["entry_price"])
+                raw_qty = int(r.get("quantity", 1) or 1)
+                side   = "SELL" if raw_qty < 0 else "BUY"
+                qty    = abs(raw_qty)
+                opt    = str(r["option_type"]).lower()
+                ticker = str(r["ticker"]).upper()
+                try:
+                    exp_dt = datetime.strptime(str(r["expiry"]), "%Y-%m-%d").date()
+                    dte = (exp_dt - today).days
+                except Exception:
+                    dte = None
+                mid, iv, spot = _fetch_option_mid(ticker, str(r["expiry"]), strike, opt)
+                # P&L direction: for SELL, profit when option price goes DOWN
+                if mid is not None:
+                    if side == "BUY":
+                        pnl = round((mid - entry) * qty * 100, 2)
+                        pnl_pct = round((mid - entry) / entry * 100, 1) if entry > 0 else None
+                    else:  # SELL — collected premium, profit = entry - mid
+                        pnl = round((entry - mid) * qty * 100, 2)
+                        pnl_pct = round((entry - mid) / entry * 100, 1) if entry > 0 else None
+                else:
+                    pnl = pnl_pct = None
+                # signal
+                if pnl_pct is None:
+                    sig = "⚪ N/A"
+                elif pnl_pct >= 50:
+                    sig = "🟢 TAKE PROFIT"
+                elif pnl_pct <= -30:
+                    sig = "🔴 CUT LOSS"
+                elif dte is not None and dte <= 5 and pnl_pct < 0:
+                    sig = "🔴 NEAR EXPIRY"
+                elif dte is not None and dte <= 5 and pnl_pct > 0:
+                    sig = "🟡 CLOSE SOON"
+                else:
+                    sig = "⚪ HOLD"
+                # ── Event column: earnings / ex-div landing before this leg's expiry ──
+                _er, _xd = _leg_events(ticker)
+                _evt = []
+                if _er is not None:
+                    if dte is not None and 0 <= _er <= dte:
+                        _evt.append(f"📊 ER {_er}d ⚠️pre-exp")
+                    elif 0 <= _er <= 14:
+                        _evt.append(f"📊 ER {_er}d")
+                if _xd is not None and dte is not None and 0 <= _xd <= max(dte, 0):
+                    _evt.append(f"💵 ex-div {_xd}d")
+                event_s = " · ".join(_evt) if _evt else "—"
+                # event-aware advice: only escalate a plain HOLD, never mask profit/loss/expiry signals
+                if sig == "⚪ HOLD":
+                    if _er is not None and dte is not None and 0 <= _er <= dte:
+                        sig = "🟡 ER PRE-EXP — decide before print"
+                    elif (_xd is not None and dte is not None and 0 <= _xd <= max(dte, 0)
+                          and side == "SELL" and opt == "call" and spot and spot > strike):
+                        sig = "🟡 EX-DIV — early-assignment risk"
+                price_note = ""
+                if mid is not None:
+                    direction = "↑" if mid > entry else "↓"
+                    price_note = f"${entry:.2f}→${mid:.2f} ({direction}{abs(mid-entry)/entry*100:.0f}% option Δ)"
+                # Fair value belongs to the UNDERLYING, never to the option (ID 365).
+                # Naming these "Fair value"/"vs FV" as the Watchlist does would read, in a
+                # row whose neighbour column is "Premium paid→now", as the fair value of
+                # the CONTRACT -- a number this model does not produce and cannot. A DCF
+                # values the business; what that implies for a given strike and expiry is
+                # a separate question the column must not appear to answer.
+                _bfv, _bgap = _fv_cells(ticker, spot)
+                rows.append({
+                    "Side": side,
+                    "Ticker": ticker,
+                    "Type": opt.upper(),
+                    "Strike": f"${strike:.0f}",
+                    "Expiry": str(r["expiry"]),
+                    "DTE": dte,
+                    "Event": event_s,
+                    "Qty": f"{side} ×{qty}",
+                    "Premium paid→now": price_note if mid is not None else "N/A",
+                    "P&L $": f"${pnl:+,.0f}" if pnl is not None else "N/A",
+                    "P&L %": f"{pnl_pct:+.1f}%" if pnl_pct is not None else "N/A",
+                    "IV": f"{iv*100:.0f}%" if iv else "N/A",
+                    "Spot": f"${spot:.2f}" if spot else "N/A",
+                    "Underlying FV": f"${_bfv:,.2f}" if _bfv else "—",
+                    "Spot vs FV": f"{_bgap:+.0f}%" if _bgap is not None else "—",
+                    "Signal": sig,
+                })
+            except Exception:
+                continue
+        return pd.DataFrame(rows)
+
+    def _add_total_row(df):
+        """Append a TOTAL row summing P&L $ to a batch df."""
+        if df.empty:
+            return df
+        pnl_vals = []
+        for v in df["P&L $"]:
+            try:
+                pnl_vals.append(float(str(v).replace("$","").replace(",","").replace("+","")))
+            except Exception:
+                pass
+        tot = sum(pnl_vals)
+        tot_em = "🟢" if tot >= 0 else "🔴"
+        tot_row = {c: "" for c in df.columns}
+        tot_row["Side"] = f"{tot_em} TOTAL"
+        tot_row["Ticker"] = f"{len(df)} leg(s)"
+        tot_row["P&L $"] = f"${tot:+,.0f}"
+        win_n = sum(1 for v in pnl_vals if v > 0)
+        tot_row["Signal"] = f"{win_n}W/{len(pnl_vals)-win_n}L"
+        return pd.concat([df, pd.DataFrame([tot_row])], ignore_index=True)
 
     if _ep_mode == "🌐 All Open Positions":
         st.markdown("#### 🌐 All Open Positions — Batch Analysis")
@@ -18066,6 +18086,12 @@ elif page == "🎯 Next-Day Exit Planner":
                           "💵 ex-div Xd = ex-dividend before expiry (early-assignment risk on short ITM calls)\n"
                         "- **Signal**: TAKE PROFIT (>50% gain), CUT LOSS (>30% loss), NEAR EXPIRY (<5 DTE), "
                           "ER PRE-EXP / EX-DIV (event lands before expiry — decide ahead of it), HOLD otherwise\n"
+                        "- **Underlying FV / Spot vs FV**: base-case DCF value of the **company**, and how far "
+                          "spot sits above (+) or below (−) it. This is *not* the fair value of the option — a DCF "
+                          "values the business, and what that implies for one strike and expiry is a separate "
+                          "question. Read it as context on the underlying, never as an exit trigger. A dash means "
+                          "the model refused: negative or near-zero cash flow, an ETF, or a gap beyond ~10× "
+                          "either way, where the output would carry full authority and no meaning\n"
                         "- **TOTAL row**: Last row shows sum of all P&L and win/loss count"
                     )
                 _pinned_df(_add_total_row(_ep_batch_df), hide_index=True, use_container_width=True)

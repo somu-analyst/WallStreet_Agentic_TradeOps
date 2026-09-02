@@ -25137,6 +25137,20 @@ elif page == "💧 Money Flow (Sankey)":
             _k[3].metric("Net income", _fm(_sk_s["net"]), f"{_m:.0f}% margin")
             st.plotly_chart(_sk_fig, use_container_width=True,
                             config={"displayModeBar": False})
+            # WHAT CHANGED, not just what the quarter looks like (ID 330). The diagram shows
+            # the shape of a period and nothing about direction of travel — the same picture
+            # is drawn by a business compounding and one quietly shrinking. Engine-side so
+            # Telegram and this page cannot drift; _tg_md because the engine speaks Telegram
+            # HTML and st.markdown would print the <b> tags on screen.
+            try:
+                _sk_ins = _tb_fmt._flow_insights(_sk_s)
+            except Exception:
+                _sk_ins = []
+            if _sk_ins:
+                st.markdown("##### What changed since a year ago")
+                for _one in _sk_ins:
+                    st.markdown("- " + _tg_md(_one))
+                st.markdown("")
             # Where the business comes from, and which part is actually carrying it. A
             # consolidated growth number hides this: Apple grew 22% on iPhone while iPad
             # FELL 6%, and those are different businesses having different quarters.

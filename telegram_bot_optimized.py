@@ -28843,6 +28843,86 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
             "other": max(net + tax - opinc, 0.0), "tax": tax, "net": net, "yoy": yoy}
 
 
+def _flow_insights(d):
+    """Plain-language readings of an income statement, as a list of HTML strings.
+
+    A Sankey shows the SHAPE of a quarter and nothing about the direction of travel: the
+    same diagram is drawn by a business compounding and by one quietly shrinking. Every
+    figure used here is already fetched -- year-over-year lines come back in `yoy`, and each
+    segment carries its own `prior` -- so this costs no extra request (ID 330).
+
+    Three readings, in the order they change a decision:
+      OPERATING LEVERAGE  did profit grow faster than sales, i.e. did costs grow slower
+      MIX SHIFT           which part of the business is taking over, in share not dollars
+      DIVERGENCE          the fastest and slowest parts, which one blended number hides
+
+    Mix shift matters more than it sounds. Two segments can both grow while the business
+    changes character entirely, and a consolidated growth rate cannot show that -- Apple
+    grew 22% on iPhone while iPad FELL 6% in the same quarter.
+    """
+    out, yoy = [], (d.get("yoy") or {})
+    rev, opinc = d.get("revenue") or 0, d.get("opinc") or 0
+    g_rev, g_oi = yoy.get("Total revenue"), yoy.get("Operating income")
+
+    # 1. OPERATING LEVERAGE. Reconstruct the prior margin from the two growth rates rather
+    #    than fetching the prior quarter again: margin_prior = (opinc/(1+g_oi)) / (rev/(1+g_rev)).
+    if g_rev is not None and g_oi is not None and rev and opinc:
+        try:
+            m_now = opinc / rev * 100
+            m_prev = (opinc / (1 + g_oi / 100)) / (rev / (1 + g_rev / 100)) * 100
+            gap = g_oi - g_rev
+            if gap > 1:
+                out.append(f"⚙️ <b>Operating leverage is positive</b> — operating income grew "
+                           f"{g_oi:+.1f}% on revenue up {g_rev:+.1f}%, so costs grew SLOWER than "
+                           f"sales. Operating margin {m_prev:.1f}% → {m_now:.1f}% "
+                           f"({m_now - m_prev:+.1f}pp).")
+            elif gap < -1:
+                out.append(f"⚙️ <b>Operating leverage is negative</b> — operating income grew "
+                           f"{g_oi:+.1f}% while revenue grew {g_rev:+.1f}%, so costs grew FASTER "
+                           f"than sales. Operating margin {m_prev:.1f}% → {m_now:.1f}% "
+                           f"({m_now - m_prev:+.1f}pp). Growth is being bought, not earned.")
+            else:
+                out.append(f"⚙️ Operating income and revenue grew in step ({g_oi:+.1f}% vs "
+                           f"{g_rev:+.1f}%) — margin held near {m_now:.1f}%.")
+        except Exception:
+            pass
+
+    # 2/3. MIX SHIFT and DIVERGENCE, from whichever axis actually resolved.
+    segs = d.get("segments") or d.get("segments_by") or {}
+    pairs = [(k, v["now"], v["prior"]) for k, v in segs.items()
+             if not v.get("parent") and v.get("prior") not in (None, 0) and v.get("now") is not None]
+    if len(pairs) >= 2:
+        tot_now = sum(p[1] for p in pairs)
+        tot_prev = sum(p[2] for p in pairs)
+        if tot_now and tot_prev:
+            shifts = sorted(((n / tot_now - p / tot_prev) * 100, k, n, p)
+                            for k, n, p in pairs)
+            up, dn = shifts[-1], shifts[0]
+            if abs(up[0]) >= 0.3 or abs(dn[0]) >= 0.3:
+                out.append(f"🔀 <b>Mix shift</b> — {up[1]} took {up[0]:+.1f}pp of revenue share "
+                           f"(now {up[2] / tot_now * 100:.1f}%), while {dn[1]} gave up "
+                           f"{abs(dn[0]):.1f}pp (now {dn[2] / tot_now * 100:.1f}%). Share, not "
+                           f"dollars: both can grow and the business still change character.")
+        grow = sorted(((n / p - 1) * 100, k) for k, n, p in pairs)
+        fast, slow = grow[-1], grow[0]
+        if fast[0] - slow[0] > 5:
+            # Only tie this back to the consolidated growth rate when it actually SITS
+            # between the extremes. It does not always: segment growth comes from the
+            # filing's own prior column while `yoy` comes from the statement four quarters
+            # back, and for a filer whose fiscal year ends mid-calendar (PG in June) those
+            # can be different periods -- PG reads +13.6% and +6.4% against a consolidated
+            # +1.5%, which no weighting of the two produces. Asserting an average there
+            # would be arithmetic that cannot be true, stated confidently.
+            tie = ""
+            if g_rev is not None and slow[0] <= g_rev <= fast[0]:
+                tie = (f" The consolidated {g_rev:+.1f}% sits between them and describes "
+                       f"neither.")
+            out.append(f"↕️ <b>The parts disagree</b> — {fast[1]} {fast[0]:+.1f}% against "
+                       f"{slow[1]} {slow[0]:+.1f}% year-over-year, on the company's own "
+                       f"prior-period column.{tie}")
+    return out
+
+
 def _sankey_fig(s, width=1150, height=620):
     """Plotly figure for one income statement. Raises if the flows do not balance."""
     import plotly.graph_objects as _go
@@ -29074,6 +29154,13 @@ async def sankey_command(update, ctx):
                 right_cols={1, 2}, legend="$ millions · figures as filed",
                 notes="Subtotals are the company's reported ones; residuals derived so the "
                       "flow balances."), parse_mode=H)
+    # The diagram shows the SHAPE of a quarter and nothing about direction of travel -- the
+    # same picture is drawn by a business compounding and one quietly shrinking (ID 330).
+    _ins = _flow_insights(stmt)
+    if _ins:
+        await update.message.reply_text(
+            f"📈 <b>What changed since a year ago</b>\n\n" + "\n\n".join(_ins),
+            parse_mode=H)
 
 
 # ── Fear & Greed history (user 2026-08-07) ───────────────────────────────────────────

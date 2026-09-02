@@ -38628,6 +38628,49 @@ async def paper_india_alert(ctx):
         log.warning(f"paper_india_alert send failed: {e}")
 
 
+_PERF_HORIZONS = (("1W", 5), ("1M", 21), ("3M", 63), ("1Y", 252))
+
+
+def _perf_line(tk, conn=None):
+    """"🟩🟩🟥🟩🟩 · 1W +2.1% · 1M +5.4% ..." for one ticker, or "" (user 2026-09-02).
+
+    The dashboard grids carry a five-box red/green week and trailing returns; the Telegram
+    book carried neither, so the same holding read differently depending on where you looked.
+    Telegram cannot draw the dashboard's PNG boxes, but it does not need to -- 🟩/🟥 squares
+    ARE the week bar, and they cost nothing to send.
+
+    This goes on the DETAIL line, not in the grid. `<pre>` is ~28 characters wide here and the
+    table already spends them on Leg and P&L; six more numeric columns cannot fit and trying
+    would wrap every row. Detail lines render outside `<pre>` and have no width limit.
+
+    Horizons are TRADING days, not calendar -- 5/21/63/252 -- because the series is indexed by
+    session. A horizon longer than the history available is skipped rather than computed
+    against the oldest bar on file, which would silently relabel a 3-month return as a 1-year
+    one for any recently listed name.
+    """
+    try:
+        # Bare NSE symbols are stored WITHOUT the suffix ("MOTHERSON"), and history is filed
+        # under the Yahoo form -- so the India leg silently got no line while every US leg
+        # got one. Resolve through the SAME alias the currency logic uses rather than adding
+        # a second mapping that can drift out of step with it.
+        _hk = _yf_alias(tk) or tk
+        s = _daily_history(_hk, years=2, conn=conn)
+        if s is None or len(s) < 6:
+            return ""
+        closes = [float(x) for x in s.values if x and x == x]
+        if len(closes) < 6:
+            return ""
+        bar = "".join("🟩" if closes[-i] >= closes[-i - 1] else "🟥"
+                      for i in range(5, 0, -1))
+        rets = []
+        for lbl, n in _PERF_HORIZONS:
+            if len(closes) > n and closes[-n - 1]:
+                rets.append(f"{lbl} {(closes[-1] / closes[-n - 1] - 1) * 100:+.1f}%")
+        return bar + (" · " + " · ".join(rets) if rets else "")
+    except Exception:
+        return ""
+
+
 def _fmt_paper(conn):
     """DEMO positions — a separate `paper_trades` table (never touches the real `trades`
     book, so it can't contaminate live P&L, the tax clock, or Exit Planner). Same one-line
@@ -38698,6 +38741,12 @@ def _fmt_paper(conn):
         details.append(f"• #{ids_txt} {leg} · {entry:,.2f} → {mark:,.2f} · entry {earliest}"
                         + (f" ({days_held}d held)" if days_held is not None else "")
                         + f" · {pnl_pct:+.0f}%" + _earn_txt(tk) + note_txt)
+        # Price / week bar / trailing returns, matching what the dashboard grids show for the
+        # same holding (ID 385). Its own line: appended to the one above it would push past
+        # what reads comfortably on a phone.
+        _pf = _perf_line(tk, conn)
+        if _pf:
+            details.append(f"   ↳ now {mark:,.2f} · {_pf}")
     _expired = 0
     for _, r in _opt_df.iterrows():
         tk = str(r["ticker"]).upper()

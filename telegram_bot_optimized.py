@@ -14691,22 +14691,30 @@ def _last_expected_eod():
     return d.isoformat()
 
 
-# ── 2-week watch on the scoped nightly derive (user 2026-08-12) ──────────────
+# ── Invariants for the scoped nightly derive (user 2026-08-12; PROMOTED 2026-09-02) ──
 # NYSE_OpenBB.py used to re-derive EVERY capture date every night; it now does the
 # captured day plus anything genuinely missing (_derive_scope). That is a large win
 # (~50 min/night, and it no longer grows with history) but it removes an accidental
-# safety net: the full rebuild used to paper over any day that came out wrong. These
-# checks watch for exactly what could now slip through, and they EXPIRE on their own —
-# after the date below the function returns nothing and every alert it raised
-# auto-RESOLVEs through the normal _data_health_upsert reconcile.
-_DERIVE_WATCH_UNTIL = "2026-08-26"
+# safety net: the full rebuild used to paper over any day that came out wrong.
+#
+# This began as a 2-week watch that expired on 2026-08-26 (tracker ID 234). At the
+# decision point it had found nothing across all five downstream tables — and the
+# temptation was to read a clean fortnight as "proven, delete it". Kept instead,
+# because these are not probes of a change under trial, they are INVARIANTS: a derive
+# that silently skips a captured day is the one fault that cannot be repaired later.
+# CBOE serves current open interest only, so a day noticed weeks afterwards is gone
+# for good. A check that costs three queries a night against a permanently
+# unrecoverable loss is not a close call.
+#
+# What DID change at promotion: the gap scan is bounded to a recent window. Over all
+# history one genuinely unfixable old gap would raise an alert that can never be
+# resolved and would nag forever, which is how a useful check trains you to ignore it.
+# Checks 2 and 3 already look only at the newest day.
+_DERIVE_WATCH_DAYS = 30
 
 
 def _derive_scope_watch(conn):
-    """Return (kind, detail) issues specific to the scoped derive. Empty after the window."""
-    today = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
-    if today > _DERIVE_WATCH_UNTIL:
-        return []
+    """Return (kind, detail) issues specific to the scoped derive. Runs permanently."""
     issues = []
 
     def _dates(tbl, col):
@@ -14728,7 +14736,8 @@ def _derive_scope_watch(conn):
                             ("stock_daily", "trade_date", "stock_daily"),
                             ("daily_ticker_summary", "trade_date", "serving layer"),
                             ("skew_snapshot", "trade_date", "skew_snapshot")):
-        missing = sorted(set(cap[:-1]) - set(_dates(tbl, col)))
+        # Recent window only -- see the note above on why an unbounded scan self-defeats.
+        missing = sorted(set(cap[-(_DERIVE_WATCH_DAYS + 1):-1]) - set(_dates(tbl, col)))
         if missing:
             issues.append((f"derive_gap_{tbl}",
                            f"{label} missing {len(missing)} captured day(s): "

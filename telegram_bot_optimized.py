@@ -28567,6 +28567,86 @@ def _reverse_dcf(inp, lo=-0.30, hi=1.50, tol=0.005, **kw):
     return (lo + hi) / 2
 
 
+def _price_requires(inp, growth, tol=0.004, **kw):
+    """What each assumption must become, ON ITS OWN, to justify today's price.
+
+    The natural chart for "why does the market pay $325 when the cash says $105" is a
+    waterfall splitting the gap into growth, discount rate and multiple. That chart would
+    be a LIE, and it is worth saying why: those levers are SUBSTITUTES, not components.
+    Raising growth and lowering WACC each close the whole gap by themselves, so any split
+    between them sums to far more than the gap and the "contribution" of each depends
+    entirely on the order you apply them. The residual bar would be doing the real work.
+
+    So this answers the honest version instead: hold everything else at base and solve
+    each lever separately for the value that reproduces the price. The output is a set of
+    ALTERNATIVES -- believe any one of these and the price is fair -- never an addition.
+
+    Every level is SOLVED by bisection, never assumed. Each lever is monotonic in value
+    (value rises with growth and terminal growth, falls with WACC), which is what makes
+    bisection exact enough here. Returns [] when there is no price to explain, and drops
+    any lever the model cannot reach -- an unreachable level is a real answer ("no discount
+    rate explains this price") and is better shown as absent than as a clipped bound.
+    """
+    px = inp.get("price") or 0
+    if px <= 0:
+        return []
+    try:
+        base = _dcf(inp, growth, **kw)
+    except Exception:
+        return []
+    base_w = base["wacc"]
+    base_tg = kw.get("terminal_growth", 0.025)
+
+    def _solve(fn, lo, hi, rising):
+        """Bisect fn(x)->per_share for fn(x)==px. `rising` = value increases with x."""
+        try:
+            v_lo, v_hi = fn(lo), fn(hi)
+        except Exception:
+            return None
+        if v_lo is None or v_hi is None:
+            return None
+        span = (v_lo, v_hi) if rising else (v_hi, v_lo)
+        if not (span[0] <= px <= span[1]):
+            return None                      # price is outside anything this lever can reach
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            v = fn(mid)
+            if v is None:
+                return None
+            if abs(v - px) / px < tol:
+                return mid
+            if (v < px) == rising:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2
+
+    def _ps(**over):
+        kw2 = dict(kw); kw2.update(over)
+        try:
+            return _dcf(inp, growth, **kw2)["per_share"]
+        except Exception:
+            return None
+
+    out = []
+    # Year-one growth. Reuse the existing solver so the page and /value cannot disagree.
+    g_req = _reverse_dcf(inp, **kw)
+    if g_req is not None:
+        out.append({"lever": "Year-1 growth", "base": growth, "required": g_req,
+                    "unit": "pct", "move": (g_req - growth) * 100})
+    # Discount rate. Terminal growth is the floor: Gordon explodes as WACC approaches it.
+    w_req = _solve(lambda w: _ps(wacc=w), base_tg + 0.005, 0.30, rising=False)
+    if w_req is not None:
+        out.append({"lever": "Discount rate (WACC)", "base": base_w, "required": w_req,
+                    "unit": "pct", "move": (w_req - base_w) * 100})
+    # Perpetual growth, capped below WACC for the same reason.
+    tg_req = _solve(lambda g: _ps(terminal_growth=g), -0.02, base_w - 0.005, rising=True)
+    if tg_req is not None:
+        out.append({"lever": "Terminal growth", "base": base_tg, "required": tg_req,
+                    "unit": "pct", "move": (tg_req - base_tg) * 100})
+    return out
+
+
 def _dcf_sensitivity(inp, growth, waccs, terminals, **kw):
     """Fair value across a WACC x terminal-growth grid.
 
@@ -35285,6 +35365,33 @@ async def eod_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
         _LAST_EOD_SPAWN = time.time()
         log.warning("EOD capture missing for %s - spawned run_all_offhours.py "
                     "(scheduled task did not deliver)", now_et.date())
+        # SAY SO. Until 2026-09-01 this path only wrote to a log, so the backstop
+        # covering for a dead scheduled task was invisible: the capture kept landing
+        # and nothing ever reported that the primary launcher had stopped working.
+        # A fallback that silently becomes the only mechanism is how you end up with
+        # ONE mechanism and not know it. Once per day, deduped like every other alert.
+        try:
+            _c = get_conn()
+            try:
+                _ensure_alert_dedup_table(_c)
+                _dup = _alert_already_sent(_c, now_et.date().isoformat(),
+                                           str(now_et.date()), "eod_spawn")
+            finally:
+                _c.close()
+            if not _dup:
+                _, _cid = load_creds()
+                await ctx.bot.send_message(
+                    chat_id=_cid, parse_mode=H,
+                    text=("🛟 <b>EOD capture: backstop fired</b>\n\n"
+                          f"The scheduled task did not deliver {now_et.date()} by 17:30 ET, "
+                          "so the bot launched the chain itself. <b>Your data is being "
+                          "captured</b> — this is not a data loss.\n\n"
+                          "It does mean the Windows task <code>NYSE_OffHours_Chain</code> is "
+                          "not running, and the download now rests on this bot staying up. "
+                          "Re-enable it from an <b>admin</b> PowerShell:\n"
+                          "<code>Enable-ScheduledTask -TaskName NYSE_OffHours_Chain</code>"))
+        except Exception as _ne:
+            log.warning(f"EOD spawn notice failed: {_ne}")
     except Exception as e:
         log.warning(f"EOD lane spawn failed: {e}")
 

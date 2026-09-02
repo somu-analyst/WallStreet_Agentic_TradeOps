@@ -24956,6 +24956,67 @@ unreachable, the market is assuming something you may not.
                         f"If the top bar is a rate rather than the business, this valuation is "
                         f"mostly a statement about interest rates.")
 
+            # ── What the price already requires you to believe ──────────────────────────
+            # The obvious chart here would be a waterfall splitting the price-vs-fair-value
+            # gap into growth + discount rate + multiple. That chart would be a LIE: those
+            # levers are SUBSTITUTES, not components. Each one closes the entire gap by
+            # itself, so any split sums to far more than the gap and every "contribution"
+            # depends on the order applied. This shows them as ALTERNATIVES instead, each
+            # SOLVED for the level that reproduces today's price (ID 368).
+            if "per_share" in _base:
+                try:
+                    _req = _TB_ENGINE._price_requires(
+                        _vi, 0.06, years=_vyears, fade_to=_fade, base=_bk,
+                        wacc=_w, terminal_growth=0.025)
+                except Exception:
+                    _req = []
+                if _req:
+                    st.markdown("##### What today's price already requires you to believe")
+                    _rq = go.Figure()
+                    for _r in _req:
+                        # Terminal growth above ~3% means the company outgrows the whole
+                        # economy in perpetuity -- not aggressive, arithmetically impossible.
+                        _impossible = (_r["lever"] == "Terminal growth" and _r["required"] > 0.03)
+                        _rq.add_trace(go.Bar(
+                            y=[_r["lever"]], x=[_r["move"]], orientation="h",
+                            marker=dict(color=(_C_MUL if _impossible else _C_DCF)),
+                            width=0.55, showlegend=False,
+                            text=[f"  {_r['required']*100:.1f}%  "],
+                            textposition="outside", textfont=dict(color=_INK, size=12),
+                            hovertemplate=(f"{_r['lever']}<br>our base "
+                                           f"<b>{_r['base']*100:.2f}%</b><br>price requires "
+                                           f"<b>{_r['required']*100:.2f}%</b><extra></extra>")))
+                    _rq.add_vline(x=0, line_color=_INK, line_width=2)
+                    _rq.update_layout(
+                        height=210, margin=dict(l=8, r=64, t=18, b=28),
+                        xaxis=dict(title="percentage points the assumption must move",
+                                   gridcolor=_GRID, tickfont=dict(color=_MUTE), zeroline=False),
+                        yaxis=dict(tickfont=dict(color=_INK)),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=_INK))
+                    st.plotly_chart(_rq, use_container_width=True,
+                                    config={"displayModeBar": False})
+                    _rd = {r["lever"]: r for r in _req}
+                    _bits = []
+                    if "Year-1 growth" in _rd:
+                        _bits.append(f"grow **{_rd['Year-1 growth']['required']*100:.0f}%** next year")
+                    if "Discount rate (WACC)" in _rd:
+                        _bits.append(f"be discounted at **{_rd['Discount rate (WACC)']['required']*100:.1f}%** "
+                                     f"instead of {_w*100:.1f}%")
+                    if "Terminal growth" in _rd:
+                        _bits.append(f"compound at **{_rd['Terminal growth']['required']*100:.1f}%** forever")
+                    _tgr = _rd.get("Terminal growth", {}).get("required")
+                    st.caption(
+                        f"At **${_vi['price']:,.2f}** the market is paying for a company that would "
+                        f"have to " + ", *or*  ".join(_bits) + ". These are **alternatives, not a "
+                        f"recipe** — each one closes the whole gap by itself, which is exactly why "
+                        f"you should not read them as adding up. Every level is solved from the "
+                        f"price, not assumed."
+                        + (f" A terminal rate of **{_tgr*100:.1f}%** is above long-run economic "
+                           f"growth, which would mean this company eventually becomes the entire "
+                           f"economy — so that lever cannot be the explanation."
+                           if _tgr and _tgr > 0.03 else ""))
+
             st.markdown("##### Cross-check: what the market pays for comparable cash")
             _m1, _m2 = st.columns(2)
             _pe = _m1.number_input("Target forward P/E", 0.0, 100.0,

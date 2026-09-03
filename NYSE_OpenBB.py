@@ -1068,7 +1068,7 @@ def _compute_oi_vol_change(trade_day, db_path=OB_DB):
     return len(df_out)
 
 
-def _finnhub_eod(tickers, timeout=10):
+def _finnhub_eod(tickers, timeout=20):
     """{ticker: OHLC} from Finnhub /quote. Empty dict when no key.
 
     THE POINT OF THIS LANE: yfinance is scraped, and a DATACENTER IP gets flagged by Yahoo
@@ -1082,21 +1082,72 @@ def _finnhub_eod(tickers, timeout=10):
     """
     key = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_KEY")
     if not key:
+        # THE KEYS LIVE IN api_keys.enc, NOT IN THE ENVIRONMENT (fixed 2026-09-03).
+        # This read os.environ only, so unless someone had exported the variable by hand the
+        # lane returned {} INSTANTLY, without making a single call -- and the caller fell
+        # through to capture-time spot. That is exactly what happened on 2026-09-03: Yahoo
+        # blocked all 731 tickers, finnhub reported 0/731, and an intraday price was written
+        # into a `close` column while the audit still said VALIDATED. The whole point of this
+        # lane is to be the one that works when yfinance is blocked, and it could never fire.
+        # Imported lazily and delegated rather than copied: the vault is machine-bound and
+        # already has two implementations (bot + dashboard): a third would be the copy that
+        # goes stale the day the format changes.
+        try:
+            import telegram_bot_optimized as _tb
+            _tb._load_api_keys()                      # populates os.environ from the vault
+            key = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_KEY")
+        except Exception as _e:
+            print(f"  finnhub: key vault unavailable ({type(_e).__name__})")
+    if not key:
+        print("  finnhub: NO KEY (env and vault both empty) - lane cannot run")
         return {}
     import urllib.request as _u, json as _j, time as _t
-    out, budget = {}, 60.0 / 60.0        # free tier: 60/min -> 1s spacing
-    for i, tk in enumerate(tickers):
-        try:
-            with _u.urlopen(f"https://finnhub.io/api/v1/quote?symbol={tk}&token={key}",
-                            timeout=timeout) as r:
-                d = _j.loads(r.read())
-            if d.get("c"):
-                out[tk] = {"open": d.get("o"), "high": d.get("h"),
-                           "low": d.get("l"), "close": d.get("c"), "volume": np.nan}
-        except Exception:
-            pass
-        if i % 55 == 54:                  # stay under the per-minute cap
-            _t.sleep(60 * budget)
+    # PACE EVENLY, DO NOT BURST. The old loop fired 55 calls back-to-back and then slept a
+    # whole minute. That averages under the 60/min cap but the BURST trips Finnhub, which
+    # answers 401 rather than 429 -- so it reads as an auth failure and gets blamed on the
+    # key. Measured 2026-09-03: 1 of 3 consecutive calls succeeded. One call per ~1.05s
+    # costs the same 13 minutes for 730 tickers and does not burst.
+    # Failures are COUNTED AND REPORTED. The old `except: pass` is how a lane that fetched
+    # nothing at all still looked healthy: the caller saw an empty dict, silently fell back
+    # to intraday spot, and the audit passed.
+    # ONE RETRY. The residual failures are TIMEOUTS, not rejections -- a single slow response
+    # was costing a ticker its close outright, and a close we silently do not have is how an
+    # intraday price ends up in a `close` column. A retry is cheap against that.
+    out, first_err = {}, None
+
+    def _pass(names):
+        """Fetch `names`, return the ones that failed."""
+        nonlocal first_err
+        missed = []
+        for tk in names:
+            try:
+                with _u.urlopen(f"https://finnhub.io/api/v1/quote?symbol={tk}&token={key}",
+                                timeout=timeout) as r:
+                    d = _j.loads(r.read())
+                if d.get("c"):
+                    out[tk] = {"open": d.get("o"), "high": d.get("h"),
+                               "low": d.get("l"), "close": d.get("c"), "volume": np.nan}
+                else:
+                    missed.append(tk)
+                    first_err = first_err or f"{tk}: empty quote {d}"
+            except Exception as e:
+                missed.append(tk)
+                first_err = first_err or f"{tk}: {type(e).__name__}: {e}"
+            _t.sleep(1.05)                # even spacing, never a burst
+        return missed
+
+    # A SECOND PASS OVER THE FAILURES, not more retries inline. What is left after one clean
+    # sweep is transient -- 503s and read timeouts -- and by the time the sweep has finished
+    # the far end has usually recovered. Retrying immediately just re-hits whatever is
+    # struggling; coming back at the end costs one extra second per missing ticker instead of
+    # per ticker overall.
+    missed = _pass(list(tickers))
+    if missed:
+        _t.sleep(5)
+        missed = _pass(missed)
+    if missed:
+        print(f"  finnhub: {len(missed)}/{len(tickers)} still missing after retry - "
+              f"first: {first_err}")
     return out
 
 

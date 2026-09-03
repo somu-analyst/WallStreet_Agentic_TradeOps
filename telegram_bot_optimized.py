@@ -14981,15 +14981,24 @@ def _fmt_signal_accuracy(conn):
     days = max(o["days"] for o in res)
     keys = {f"{o['model']}/{o['call']}" for o in passed}
 
-    rows = [(("🟢" if o["t"] >= crit else ("🟡" if o["t"] > 2 else "▪")),
+    # ⚪ not ▪ (user 2026-09-02, ID 390). U+25AA measures as ONE cell in _disp_w but Telegram
+    # renders it with emoji presentation at TWO, so every below-the-bar row sat a space wider
+    # than the 🟢 rows and the column visibly stepped. ⚪ is a real emoji codepoint, so the
+    # width counter and the renderer agree, and it is already this repo's neutral marker
+    # (⚪ HOLD / ⚪ N/A in the Exit Planner) rather than a fourth vocabulary.
+    rows = [(("🟢" if o["t"] >= crit else ("🟡" if o["t"] > 2 else "⚪")),
              o["model"][:13], f"{o['hit'] * 100:.0f}%",
              f"{(o['hit'] - o['base']) * 100:+.0f}", f"{o['t']:.2f}")
             for o in res[:8]]
     body = _report(
         "🎯 SIGNAL ACCURACY",
         ("", "Model", "Hit", "vs base", "t"), rows, right_cols={2, 3, 4},
-        legend=f"🟢 clears the multiplicity bar (t≥{crit:.2f}) · 🟡 nominal only · "
-               f"{len(res)} models tested on {days} days",
+        # Every marker used must be NAMED here. The third one was printed and never
+        # explained, which is worse than omitting it: the reader sees a distinction being
+        # drawn and has to guess which way it cuts (ID 392).
+        legend=f"🟢 clears the multiplicity bar (t≥{crit:.2f}) — measured · "
+               f"🟡 nominal only, not corrected for testing many models · "
+               f"⚪ no evidence (t≤2) · {len(res)} models tested on {days} days",
         notes="A model only counts as MEASURED if it clears the Bonferroni column. "
               "Testing ~20 models at once produces about half a nominal hit from noise alone.")
     if passed:

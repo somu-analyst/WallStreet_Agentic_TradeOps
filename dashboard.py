@@ -415,28 +415,15 @@ def _fair_value(tk):
     Returns None on any failure -- an ETF, a fund, a missing cash-flow statement. A column
     that shows a dash is fine; one that raises takes the whole grid down.
     """
+    # THE RULES LIVE IN THE ENGINE (2026-09-03). This used to hold its own copy of the
+    # refusal conditions -- non-positive cash flow, a gap past ~10x -- while the Telegram
+    # paper book needed the same judgement for its vsFV column. Two copies of a rule about
+    # when a valuation is MEANINGLESS is precisely the arrangement that lets one surface
+    # print a number the other refuses to. The engine owns it; this keeps only the cache,
+    # which is the one thing Streamlit does better.
     if not tk or not _TB_ENGINE:
         return None
-    try:
-        inp = _TB_ENGINE._valuation_inputs(str(tk).upper())
-        # A DCF is MEANINGLESS when the company does not generate cash. Bloom Energy came
-        # back at $0.73 (+28,580% vs price) and Amazon at MINUS $2.47 -- a discounted
-        # cash-flow model fed negative or near-zero cash produces a number with no meaning
-        # and full authority, which is worse than a blank. Refuse instead.
-        if inp["fcf_latest"] <= 0 or inp["fcf_avg3"] <= 0:
-            return None
-        fv = float(_TB_ENGINE._dcf(inp, 0.06)["per_share"])
-        if fv <= 0:
-            return None
-        # A gap beyond roughly 10x either way means the model does not describe this
-        # business (early-stage, cyclical trough, heavy reinvestment), not that the market
-        # is wrong by 28,000%.
-        px = inp.get("price") or 0
-        if px and not (0.1 <= px / fv <= 10):
-            return None
-        return fv
-    except Exception:
-        return None
+    return _TB_ENGINE._fair_value(str(tk).upper())
 
 
 def _fv_cells(tk, price):

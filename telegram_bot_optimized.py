@@ -28686,6 +28686,50 @@ def _reverse_dcf(inp, lo=-0.30, hi=1.50, tol=0.005, **kw):
     return (lo + hi) / 2
 
 
+_FV_CACHE = {}                      # ticker -> (expires_at, value or None)
+_FV_TTL = 6 * 3600
+
+
+def _fair_value(ticker, growth=0.06):
+    """Base-case DCF value per share, or None. Six-hour in-process cache.
+
+    THE ENGINE OWNS THIS. The dashboard had its own copy of these refusal rules behind an
+    st.cache_data wrapper; two copies of a rule about when a valuation is meaningless is
+    exactly the arrangement that lets the two surfaces disagree about whether a number
+    should be shown at all. The dashboard now calls this and keeps only its cache.
+
+    The cache is what makes it usable from Telegram: a DCF is one to two seconds of yfinance
+    per ticker, so a six-leg book would add ten seconds to every /paper without it. Fair
+    value moves with the last FILING and barely changes between them, so six hours is
+    generous rather than stale.
+
+    Returns None rather than a number whenever the model does not describe the business:
+      * non-positive free cash flow -- a DCF fed negative cash produces a figure with no
+        meaning and full authority, which is worse than a blank (Bloom Energy came back at
+        +28,580%, Amazon at MINUS $2.47)
+      * a gap beyond roughly 10x either way, which says the model is wrong about this
+        company rather than that the market is wrong by 28,000%
+    """
+    tk = str(ticker or "").upper()
+    if not tk:
+        return None
+    hit = _FV_CACHE.get(tk)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    val = None
+    try:
+        inp = _valuation_inputs(tk)
+        if inp["fcf_latest"] > 0 and inp["fcf_avg3"] > 0:
+            fv = float(_dcf(inp, growth)["per_share"])
+            px = inp.get("price") or 0
+            if fv > 0 and (not px or 0.1 <= px / fv <= 10):
+                val = fv
+    except Exception:
+        val = None
+    _FV_CACHE[tk] = (time.time() + _FV_TTL, val)
+    return val
+
+
 def _price_requires(inp, growth, tol=0.004, **kw):
     """What each assumption must become, ON ITS OWN, to justify today's price.
 
@@ -38835,7 +38879,14 @@ def _fmt_paper(conn):
         # No per-row flag: each table is ALREADY one currency under a country heading
         # ("🇮🇳 India NSE · INR"), so the flag repeated every row bought nothing and cost the
         # 2 cells that were forcing MOTHERSON to truncate to "MOTHERSO" (ID 204).
-        rows.setdefault(_cc, []).append((em, tk[:9], f"{pnl:+,.0f}"))
+        # FAIR VALUE joins the grid (user 2026-09-03). Only the GAP earns a column -- it is
+        # the comparable number, one width for every row. The value itself goes on the detail
+        # line below, where there is no width budget to spend, exactly as size/entry/mark did
+        # under ID 204. A dash means the model refused (no positive cash flow, an ETF, or a
+        # gap past ~10x), which is a real answer and not a missing one.
+        _fv = _fair_value(tk)
+        _fvg = f"{(mark / _fv - 1) * 100:+.0f}" if (_fv and mark) else "—"
+        rows.setdefault(_cc, []).append((em, tk[:9], f"{pnl:+,.0f}", _fvg))
         earliest = grp["entry_date"].min()
         try:
             days_held = (datetime.now().date() - datetime.strptime(str(earliest), "%Y-%m-%d").date()).days
@@ -38846,7 +38897,9 @@ def _fmt_paper(conn):
         note_txt = f" — {note_txt}" if note_txt else ""
         details.append(f"• #{ids_txt} {leg} · {entry:,.2f} → {mark:,.2f} · entry {earliest}"
                         + (f" ({days_held}d held)" if days_held is not None else "")
-                        + f" · {pnl_pct:+.0f}%" + _earn_txt(tk) + note_txt)
+                        + f" · {pnl_pct:+.0f}%"
+                        + (f" · FV {_fv:,.2f}" if _fv else "")
+                        + _earn_txt(tk) + note_txt)
         # Price / week bar / trailing returns, matching what the dashboard grids show for the
         # same holding (ID 385). Its own line: appended to the one above it would push past
         # what reads comfortably on a phone.
@@ -38932,16 +38985,26 @@ def _fmt_paper(conn):
         # Blended return on capital deployed, not the mean of the per-row percentages —
         # that would weight a 1-share lot like a 3,000-share one (user 2026-08-10).
         _cst = _cost_by.get(_cy, 0.0)
-        _rr.append(("", "TOTAL", f"{_sub:+,.0f}"))
+        # DROP the fair-value column entirely when nothing in this table has one. EDGAR is
+        # US-only, so the India / EUR / JPY books can never populate it -- carrying a column
+        # of dashes cost 5 cells and pushed MOTHERSON's table to 32, past the width where a
+        # phone wraps it, in exchange for no information at all. The US table fits at 27.
+        _has_fv = any(r[3] != "—" for r in _rr)
+        if not _has_fv:
+            _rr = [r[:3] for r in _rr]
+        _rr.append(("", "TOTAL", f"{_sub:+,.0f}") + (("",) if _has_fv else ()))
         # The blended return moves to the legend rather than a 4th column -- it is ONE number
         # for the whole table, so spending a column on it (blank for every row but the last)
         # was the least efficient possible use of the width (ID 204).
         _blend = f" · return on capital {_sub / _cst * 100:+.2f}%" if _cst > 0 else ""
-        parts.append("\n" + _pipe_table(("", "Leg", "P&L"), _rr,
-                                        right_cols={2},
-                                        title=_CCY_TITLE.get(_cy, _cy),
-                                        legend=f"all values in {_cy}{_blend} · size, entry "
-                                               f"and mark are in the lines below"))
+        parts.append("\n" + _pipe_table(
+            (("", "Leg", "P&L", "vsFV") if _has_fv else ("", "Leg", "P&L")), _rr,
+            right_cols=({2, 3} if _has_fv else {2}),
+            title=_CCY_TITLE.get(_cy, _cy),
+            legend=(f"all values in {_cy}{_blend}"
+                    + (" · vsFV = % above (+) or below (−) the DCF fair value of the company, "
+                       "— when the model refuses" if _has_fv else "")
+                    + " · size, entry and mark are in the lines below")))
     if details:
         parts.append("\n" + "\n".join(details))
     parts.append(f"\n<i>{_note}</i>")

@@ -2326,8 +2326,15 @@ def load_market_history(symbol, limit=500):
 # ---------------------------------------------------------------------------
 # PAGE CONFIG
 # ---------------------------------------------------------------------------
+# Which HOST this is, shown in the window title and the sidebar. Env-driven and empty by
+# default on purpose: this file is mirrored to the VM as cloud_dashboard.py, so a literal
+# "— Cloud" here would rename the LOCAL dashboard too and defeat the whole point. The VM
+# sets NYSE_SITE_LABEL=Cloud in nyse.env; a laptop sets nothing and keeps the plain name.
+_SITE_LABEL = os.environ.get("NYSE_SITE_LABEL", "").strip()
+_APP_TITLE = "RUDRARJUN Analytics" + (f" — {_SITE_LABEL}" if _SITE_LABEL else "")
+
 st.set_page_config(
-    page_title="RUDRARJUN Analytics",
+    page_title=_APP_TITLE,
     page_icon="static/icon-192.png",   # was a plain emoji favicon — replaced with the real
                                        # app icon (user 2026-07-24: "its old one" in Chrome)
     layout="wide",
@@ -6349,6 +6356,15 @@ with st.sidebar:
     st.markdown("<div>"
                 "📊 WallStreet_Agentic_TradeOps</div>", unsafe_allow_html=True)
     st.markdown("##### *Options Intelligence Terminal*")
+    # Same badge as the window title. The taskbar answers "which window is this" only while
+    # you are picking one; once you are looking at the page, the page has to say it too --
+    # the two dashboards are otherwise identical down to the pixel.
+    if _SITE_LABEL:
+        st.markdown(
+            f"<div style='display:inline-block;padding:2px 10px;margin:2px 0 6px 0;"
+            f"border:1px solid #3a8fd6;border-radius:10px;font-size:0.78rem;"
+            f"letter-spacing:.06em;color:#3a8fd6;'>☁ {_SITE_LABEL.upper()}</div>",
+            unsafe_allow_html=True)
     st.radio("Theme", ["🌙 Dark", "☀️ Light"], key="ui_theme", horizontal=True,
              label_visibility="collapsed", on_change=_save_theme,
              help="Switch between dark fintech and light minimal. Your choice is remembered next time.")
@@ -6454,16 +6470,49 @@ with st.sidebar:
         "👀 Watchlist",                 # reveals what is being tracked
     }
     _PW_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dash_private.txt")
+    _OWNER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dash_owner.txt")
     _LOCK_AFTER = 30 * 60      # seconds of inactivity before it re-locks
 
     def _private_ok():
         """True when this session has unlocked the book. No password file = no gate at all,
         so a local run is unchanged and nobody is locked out of their own laptop."""
+        # `time` is NOT imported at module scope in this file -- every _tm.time() below was
+        # unreachable dead code until the owner link made this path run, and would have
+        # crashed the page the first time anyone configured a password.
         import hashlib as _hl
+        import time as _tm
         try:
             want = open(_PW_FILE, encoding="utf-8").read().strip()
         except Exception:
             want = ""
+        try:
+            _owner_want = open(_OWNER_FILE, encoding="utf-8").read().strip()
+        except Exception:
+            _owner_want = ""
+
+        # Already unlocked in this session (sliding window). Checked first so neither branch
+        # below re-prompts someone who is already in.
+        if (st.session_state.get("_priv_ok")
+                and (_tm.time() - st.session_state.get("_priv_at", 0)) < _LOCK_AFTER):
+            st.session_state["_priv_at"] = _tm.time()
+            return True
+
+        # OWNER LINK, checked BEFORE the no-password branch. An owner token is a configured
+        # way in, so a host that has one is not the unconfigured host the fail-closed rule
+        # was written for -- it used to be unreachable there, which meant the only way to see
+        # your own book on the cloud host was to also set a password you would have to type.
+        # Understand the trade-off: a token in a URL is a capability, so anyone who gets that
+        # link is you. On this host the link only exists inside an ssh tunnel.
+        if _owner_want:
+            try:
+                _got = st.query_params.get("owner", "")
+            except Exception:
+                _got = (st.experimental_get_query_params().get("owner") or [""])[0]
+            if _got and _got == _owner_want:
+                st.session_state["_priv_ok"] = True
+                st.session_state["_priv_at"] = _tm.time()
+                return True
+
         if not want:
             # No password configured. On a laptop that means "not gated" -- the right default,
             # since nobody should be locked out of their own machine by a half-finished setup.
@@ -6477,34 +6526,7 @@ with st.sidebar:
                          "this host, so these pages are unavailable to everyone.")
                 return False
             return True
-        _seen = st.session_state.get("_priv_at", 0)
-        if st.session_state.get("_priv_ok") and (time.time() - _seen) < _LOCK_AFTER:
-            st.session_state["_priv_at"] = time.time()   # sliding window
-            return True
-
-        # OWNER LINK: ?owner=... unlocks without typing, so a bookmarked link on your own
-        # phone just works while the plain link still shows the demo book. Understand the
-        # trade-off before using it -- a token in a URL is a capability, so anyone who gets
-        # that link is you. It is stored hashed, like the password, and it is optional: if
-        # dash_owner.txt does not exist, the password is the only way in.
-        try:
-            _owner_want = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                            "dash_owner.txt"), encoding="utf-8").read().strip()
-        except Exception:
-            _owner_want = ""
-        if _owner_want:
-            try:
-                _got = st.query_params.get("owner", "")
-            except Exception:
-                _got = (st.experimental_get_query_params().get("owner") or [""])[0]
-            # Compared in the clear, unlike the password. The password is something you TYPE,
-            # so it must never be recoverable from the box; the owner token is something the
-            # bot has to hand you as a link, which it cannot do from a hash. Both files sit on
-            # the same host with the same permissions, so hashing this one bought nothing.
-            if _got and _got == _owner_want:
-                st.session_state["_priv_ok"] = True
-                st.session_state["_priv_at"] = time.time()
-                return True
+        # (session check and the owner link are handled above, before the no-password branch)
         st.warning("🔒 This page shows your book. Enter the dashboard password to unlock it "
                    "for this session.")
         _pw = st.text_input("Password", type="password", key="_priv_pw")
@@ -6512,7 +6534,7 @@ with st.sidebar:
             # Compare hashes so the file never holds the password in the clear.
             if _hl.sha256(_pw.encode()).hexdigest() == want:
                 st.session_state["_priv_ok"] = True
-                st.session_state["_priv_at"] = time.time()
+                st.session_state["_priv_at"] = _tm.time()
                 st.rerun()
             st.error("Incorrect.")
         st.caption("Market analytics — GEX, scanners, flow, macro — need no password. "

@@ -26430,11 +26430,18 @@ if page == "👀 Watchlist":
                          "behind the low-high range, not just its endpoints. Blank when the "
                          "ticker is outside the intraday lane (~31 names)."),
                 "1W": st.column_config.ImageColumn(
-                    "1W", width="medium",
+                    # Header carries the day mapping (user 2026-09-02, ID 393). The boxes
+                    # were unlabelled, so which end was today had to be assumed. SESSIONS,
+                    # not calendar days -- over a weekend -1 is not yesterday, and letting
+                    # the reader assume it is would be wrong in a way nobody would catch.
+                    "1W  −4…0", width="medium",
                     help="One box per session for the last trading WEEK — green closed up, "
                          "red closed down. Shade carries size: pale under 1%, mid 1-3%, "
-                         "deep 3%+. Drawn as a picture so it scales to the row height and "
-                         "never makes the row taller."),
+                         "deep 3%+. LEFT to RIGHT is oldest to newest: the rightmost box is "
+                         "0, the latest close, and −1 is the session before it — sessions, "
+                         "not calendar days, so across a weekend −1 is not yesterday. Drawn "
+                         "as a picture so it scales to the row height and never makes the "
+                         "row taller."),
                 "1M": st.column_config.LineChartColumn(
                     "1M", width="small",
                     help="Closing price over the last 21 sessions (a trading month). A line, "
@@ -27120,10 +27127,15 @@ if page == "📝 Paper Trading":
                     _pcfg["P&L"] = st.column_config.NumberColumn("P&L", format="%d")
                 if "1W" in _grpdf.columns:
                     _pcfg["1W"] = st.column_config.ImageColumn(
-                        "1W", width="medium",
+                        # Same day mapping as the Watchlist grid (ID 393) — the two show the
+                        # same picture and must label it the same way.
+                        "1W  −4…0", width="medium",
                         help="One box per session for the last trading week of the "
-                             "UNDERLYING — green closed up, red down, shade by size. "
-                             "Scales to the row height, so it never makes the row taller.")
+                             "UNDERLYING — green closed up, red down, shade by size. LEFT "
+                             "to RIGHT is oldest to newest: the rightmost box is 0, the "
+                             "latest close, and −1 is the session before it — sessions, not "
+                             "calendar days. Scales to the row height, so it never makes "
+                             "the row taller.")
                 for _sp, _n in (("1M", 21), ("3M", 63)):
                     if _sp in _grpdf.columns:
                         _pcfg[_sp] = st.column_config.LineChartColumn(

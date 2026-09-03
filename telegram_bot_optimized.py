@@ -38720,7 +38720,10 @@ _PERF_HORIZONS = (("1W", 5), ("1M", 21), ("3M", 63), ("1Y", 252))
 
 
 def _perf_line(tk, conn=None):
-    """"🟩🟩🟥🟩🟩 · 1W +2.1% · 1M +5.4% ..." for one ticker, or "" (user 2026-09-02).
+    """(returns, days) for one ticker — ("1W +2.1% · 1M +5.4% ...", "-4🟥-1.2  ...  0🟩+0.8").
+
+    Both empty when there is not enough history. Returns a PAIR because the two go on
+    separate lines: one dense line carrying nine numbers is not readable on a phone.
 
     The dashboard grids carry a five-box red/green week and trailing returns; the Telegram
     book carried neither, so the same holding read differently depending on where you looked.
@@ -38748,15 +38751,30 @@ def _perf_line(tk, conn=None):
         closes = [float(x) for x in s.values if x and x == x]
         if len(closes) < 6:
             return ""
-        bar = "".join("🟩" if closes[-i] >= closes[-i - 1] else "🟥"
-                      for i in range(5, 0, -1))
+        # DAY-LABELLED, AND THE NUMBER TRAVELS WITH THE BOX (user 2026-09-02, ID 393).
+        # Bare squares said a day was red without saying by how much, and nothing said WHICH
+        # day each square was -- the dashboard draws the percent inside its boxes, so the two
+        # surfaces were showing different amounts of the same thing. Telegram cannot draw
+        # inside an emoji, so the figure sits beside it instead.
+        # Offsets are SESSIONS, not calendar days: 0 is the latest close we hold and -1 the
+        # session before it. Over a weekend or holiday "-1" is not yesterday, and calling it
+        # yesterday would be wrong in a way nobody would catch.
+        # Oldest LEFT, today RIGHT, matching _updown_img in the dashboard, which keeps its
+        # returns in chronological order -- the point of this change is that the two agree.
+        days = []
+        for i in range(5, 0, -1):
+            prev = closes[-i - 1]
+            if not prev:
+                continue
+            chg = (closes[-i] / prev - 1) * 100
+            days.append(f"{-(i - 1)}{'🟩' if chg >= 0 else '🟥'}{chg:+.1f}")
         rets = []
         for lbl, n in _PERF_HORIZONS:
             if len(closes) > n and closes[-n - 1]:
                 rets.append(f"{lbl} {(closes[-1] / closes[-n - 1] - 1) * 100:+.1f}%")
-        return bar + (" · " + " · ".join(rets) if rets else "")
+        return (" · ".join(rets), "  ".join(days))
     except Exception:
-        return ""
+        return ("", "")
 
 
 def _fmt_paper(conn):
@@ -38832,9 +38850,11 @@ def _fmt_paper(conn):
         # Price / week bar / trailing returns, matching what the dashboard grids show for the
         # same holding (ID 385). Its own line: appended to the one above it would push past
         # what reads comfortably on a phone.
-        _pf = _perf_line(tk, conn)
+        _pf, _pdays = _perf_line(tk, conn)
         if _pf:
             details.append(f"   ↳ now {mark:,.2f} · {_pf}")
+        if _pdays:
+            details.append(f"   ↳ 5d {_pdays}")
     _expired = 0
     for _, r in _opt_df.iterrows():
         tk = str(r["ticker"]).upper()
@@ -38889,6 +38909,11 @@ def _fmt_paper(conn):
     _net_txt = " · ".join(f"{s}{v:+,.0f}" for s, v in _by_ccy.items()) or f"${tot_pnl:+,.0f}"
     if len(_by_ccy) > 1:
         _note = "totals are PER CURRENCY — not converted · " + _note
+    # The 5d row is unreadable without saying what the offsets count. SESSIONS, not calendar
+    # days -- across a weekend "-1" is not yesterday, and letting the reader assume it is
+    # would be wrong in a way nobody would ever catch (ID 393).
+    _note = ("5d row: 0 = latest close, -1 the session before it (sessions, not calendar "
+             "days) · " + _note)
     if not rows:
         return (f"{hdr('PAPER TRADING (demo)')}\n\nNo live demo positions."
                 + (f"\n<i>{_expired} expired leg(s) hidden.</i>" if _expired else ""))

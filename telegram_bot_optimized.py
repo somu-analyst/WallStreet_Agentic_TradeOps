@@ -2392,8 +2392,17 @@ _MONEYFLOW_UNIVERSE = {
                    ("XLV", "Health"), ("XLI", "Industrials"), ("XLY", "Discretionary"),
                    ("XLP", "Staples"), ("XLU", "Utilities"), ("XLB", "Materials"),
                    ("XLRE", "RealEstate"), ("XLC", "CommSvcs")],
-    "US Style/Size": [("QQQ", "Nasdaq100"), ("IWM", "SmallCap"), ("IWF", "Growth"),
-                      ("IWD", "Value"), ("MTUM", "Momentum")],
+    # STYLE AND SIZE ARE TWO AXES, and this row used to mix them: IWM sat among Growth,
+    # Value and Momentum as though "small" were a style. Splitting them is what makes the
+    # size question answerable at all -- "is money going down the cap scale?" cannot be read
+    # off a list where exactly one size appears (ID 388).
+    "US Style": [("QQQ", "Nasdaq100"), ("IWF", "Growth"), ("IWD", "Value"),
+                 ("MTUM", "Momentum")],
+    # IWM MOVES here rather than being duplicated. Listing it in both blocks would have it
+    # scored twice and counted twice in the risk-appetite tally -- the double-count this row
+    # warned about. Ordered large to micro so the block reads as a scale.
+    "US Market Cap": [("OEF", "MegaCap"), ("MDY", "MidCap"), ("IWM", "SmallCap"),
+                      ("IWC", "MicroCap")],
     "Continents/Regions": [("EFA", "Developed"), ("EEM", "EmergMkt"), ("VGK", "Europe"),
                            ("AAXJ", "AsiaXJapan"), ("EPP", "AsiaPacific"), ("ILF", "LatinAmer")],
     "Countries": [("EWJ", "Japan"), ("FXI", "China"), ("INDA", "India"), ("EWZ", "Brazil"),
@@ -2409,7 +2418,10 @@ _MONEYFLOW_UNIVERSE = {
 }
 # Risk-on assets (money in = risk appetite) vs risk-off / defensive (money in = fear)
 _RISK_ON  = {"XLK", "XLY", "IWM", "QQQ", "IWF", "MTUM", "XLF", "XLC", "BTC-USD", "ETH-USD",
-             "FXI", "EEM", "EWZ", "EWY", "EWT", "EWW", "ILF", "AAXJ", "EPP"}
+             "FXI", "EEM", "EWZ", "EWY", "EWT", "EWW", "ILF", "AAXJ", "EPP", "IWC"}
+# OEF and MDY are deliberately NOT risk-on. Mega and mid caps are simply "the market" -- the
+# risk-appetite end of the size scale is small and micro, and tagging the whole scale would
+# make the appetite score move whenever ANY size rallied, which is no signal at all.
 _RISK_OFF = {"XLU", "XLP", "XLV", "TLT", "IEF", "LQD", "TIP", "GLD", "UUP", "FXY"}
 
 def _cmf_series(h, n=20):

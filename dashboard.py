@@ -397,8 +397,13 @@ def _open_T(dte):
 
     An option expiring tomorrow still has a full session of time value when the market opens,
     so the floor is a fraction of a day (6.5 trading hours ≈ 0.27 of a calendar day) rather
-    than zero. Callers handle dte <= 0 separately ("exp today" / "expired"), so this only
-    ever sees a leg with at least one day to run.
+    than zero.
+
+    DO NOT reach for this floor at dte == 0. It was tried (2026-09-04) and is wrong: this
+    column is the NEXT-DAY value, and a leg expiring today has no next day, so pricing in a
+    full 6.5-hour session of time value invents value for a contract that will not exist.
+    It printed $0.89 on a TSLA 380C the market had at $0.13. Callers handle dte == 0 by
+    showing INTRINSIC, which is what the leg actually settles at (ID 407/408).
     """
     return max(float(dte) - 1.0, 0.27) / 365.0
 
@@ -17085,8 +17090,15 @@ elif page == "🎯 Next-Day Exit Planner":
                         _folo = max(l["cur"] + min(_fvu, _fvd) - _fbase, 0.01)
                         _fohi = max(l["cur"] + max(_fvu, _fvd) - _fbase, _folo)
                         _ftopen = bs_greeks(l["spot"], l["K"], _open_T(l["dte"]), _R, l["iv"], l["typ"])["price"]
-                        _ftopen_disp = ("expired" if l["dte"] < 0 else "exp today" if l["dte"] == 0 else
-                                        "~$0.00" if _ftopen < 0.005 else f"${_ftopen:.2f}")
+                        # Same rule as the single-position view: a 0-DTE leg's next-day value
+                        # is its INTRINSIC, because by then it has settled (ID 407/408).
+                        _fintr = (max(l["spot"] - l["K"], 0.0) if l["typ"] == "call"
+                                  else max(l["K"] - l["spot"], 0.0))
+                        _ftopen_disp = (
+                            "expired" if l["dte"] < 0 else
+                            ((f"${_fintr:.2f} · at expiry" if _fintr >= 0.005
+                              else "$0.00 · expires worthless") if l["dte"] == 0 else
+                             ("~$0.00" if _ftopen < 0.005 else f"${_ftopen:.2f}")))
                         _fpx, _ffromq = _smart_close_limit(l["side"], l["cur"], l.get("bid"), l.get("ask"))
                         _fclimit = (f"SELL ≤ ${_fpx:.2f}" if l["side"] == "long" else f"BUY ≥ ${_fpx:.2f}") \
                                    + ("" if _ffromq else " (est)")
@@ -17286,7 +17298,7 @@ elif page == "🎯 Next-Day Exit Planner":
                 st.caption(f"All **{len(_flat)}** legs across **{len(_by_tk)}** tickers · total open "
                            f"P&L **${_ftot:,.0f}**.  **Now** = live option mid (bid/ask) when the market's "
                            "open, else the last close.  **Prev Cls** = prior session close · **Hi/Lo** = that "
-                           "day's option high/low.  **Est Open** = flat-stock decay reference — backtested: NO edge over Now, trust the scenarios instead (*expired*=0DTE, "
+                           "day's option high/low.  **Est Open** = value at the NEXT open with the stock flat — backtested: NO edge over Now, trust the scenarios instead (a leg expiring TODAY shows its **intrinsic**, because by the next open it has settled, "
                            "*~\\$0.00*=deep-OTM) · **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs — **⚠️thin** flags vol<100 or spread>8%, where that error is NOT validated) · "
                            "**Walls (Next Exp)** = call/put GEX walls for the ticker's nearest liquid expiry · "
                            "**Walls (Opt Exp)** = same, for THIS leg's own expiry (may differ from next) · "
@@ -17815,11 +17827,22 @@ elif page == "🎯 Next-Day Exit Planner":
                         _olo = max(l["cur"] + min(_vu, _vd) - _base, 0.01)
                         _ohi = max(l["cur"] + max(_vu, _vd) - _base, _olo)
                         _topen = bs_greeks(l["spot"], l["K"], _open_T(l["dte"]), _R, l["iv"], l["typ"])["price"]
-                        # label clearly: <0 truly expired; 0 = expires today; sub-penny reads "~0"
+                        # 0-DTE: SHOW WHAT IT SETTLES AT, which is intrinsic (ID 407).
+                        # This column is the NEXT-DAY value under a flat stock. A leg expiring
+                        # today has no next day -- by tomorrow's open it is gone, worth exactly
+                        # its intrinsic. Two wrong answers were tried before this one: the bare
+                        # words "exp today", which tell you nothing; and (briefly) the
+                        # Black-Scholes price off _open_T's 0.27/365 floor, which prices in a
+                        # full 6.5-hour session of time value for a contract that will not
+                        # exist tomorrow -- it read $0.89 on a TSLA 380C the market had at
+                        # $0.13. Intrinsic is the only figure that is actually true here.
+                        _intr = (max(l["spot"] - l["K"], 0.0) if l["typ"] == "call"
+                                 else max(l["K"] - l["spot"], 0.0))
                         if l["dte"] < 0:
                             _topen_disp = "expired"
                         elif l["dte"] == 0:
-                            _topen_disp = "exp today"
+                            _topen_disp = (f"${_intr:.2f} · at expiry" if _intr >= 0.005
+                                           else "$0.00 · expires worthless")
                         elif _topen < 0.005:
                             _topen_disp = "~$0.00"
                         else:
@@ -17855,7 +17878,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                "value — Time$ is the part that decays to $0 unless the stock moves. "
                                "**±$1 stk** = position P&L per $1 stock move (delta in dollars — your real "
                                "exposure). **Θ/day** = dollars gained/lost per calendar day from decay. "
-                               "**Est Open** = flat-stock decay reference — backtested: no edge over Now (one day of "
+                               "**Est Open** = value at the NEXT open with the stock flat — a leg expiring today shows its **intrinsic**, since by then it has settled — backtested: no edge over Now (one day of "
                                "decay). *expired* = 0DTE; *~\\$0.00* = deep-OTM. **Day L–H** = leg value if the stock touches the **Stk ±1σ** targets shown (validated: ~4–7% median error on liquid 8+ DTE legs — **⚠️thin** flags vol<100 or spread>8%, where that error is NOT validated). "
                                "**Close @** = marketable limit to close. **Max P / Max L** = theoretical "
                                "max profit / loss for that leg held to expiry (*Unlimited* = uncapped).")

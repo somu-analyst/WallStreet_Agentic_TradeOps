@@ -23,5 +23,17 @@ dataframeBorderColor = "#000000"
 [client]
 showErrorDetails = true
 
+# "Magic" auto-writes a bare expression by rewriting the AST of the WHOLE script on every
+# single rerun (every click, every nav) before it can even be compiled -- profiled live on
+# the cloud VM with py-spy during a 6-9s page stall: the hot stack for the full duration was
+# streamlit's own add_magic -> ast.parse/_modify_ast_subtree/_fix, not app code, not a query,
+# not network I/O (2026-09-03). Cost scales with script SIZE, and this file is 1.6MB / tens
+# of thousands of lines -- one of the largest things Streamlit's magic walk will ever see.
+# The app never relies on magic: every value is rendered through an explicit st.* call
+# (st.markdown/st.metric/st.dataframe/_pinned_df/...), so turning it off changes nothing
+# about what renders, only how much work happens to get there.
+[runner]
+magicEnabled = false
+
 [server]
 enableStaticServing = true

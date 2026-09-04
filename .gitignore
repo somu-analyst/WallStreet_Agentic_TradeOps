@@ -262,6 +262,7 @@ dash_token.txt
 tools/
 .tmp.driveupload/
 dash_theme.txt
+dash_zoom.txt
 
 # Kronos research lane (2026-07-22) - heavy deps + model weights, never committed
 research/kronos-venv/

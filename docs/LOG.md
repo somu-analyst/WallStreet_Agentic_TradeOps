@@ -1,5 +1,117 @@
 # LOG
 
+## 2026-09-04 — The cloud dashboard window was never zoomed, it was fighting the user
+
+Traced "letters are zoomed on cloud, local is fine" to the actual cause instead of re-guessing
+at the earlier (real but insufficient) zoom-isolation fix. Ruled out CSS/zoom first, fast:
+Playwright at a matched viewport showed byte-identical computed font-size, `devicePixelRatio`,
+and CSS zoom on both pages — so no time went into styling before confirming it wasn't styling.
+
+Real cause was structural: `cloud_console.py`'s `_open_window()` passed an explicit
+`--window-size` on every single launch. The local launcher
+(`telegram_bot_optimized.py::open_dashboard_on_startup`) never does — it lets Chrome's own
+per-profile window memory take over after the first open. A forced size overrides the user's
+own resize/maximize on every click, forever, which is why local had quietly settled in large
+over time while cloud kept resetting.
+
+Fix: dropped `--window-size`, added `--start-maximized` (fills the screen on a fresh profile's
+first-ever launch, then steps aside so Chrome remembers from there — same as local). Deleted
+the stale profile that had accumulated under the old forced-size behavior. Verified with a
+real launch, not simulated: `GetWindowRect` measured 1550x878 against a 1536x864 screen work
+area — the small negative-offset overage is the exact signature of a genuinely maximized
+window. Cloud row 46.
+
+## 2026-09-04 — Live trade sync shipped; a silent trade_id collision defused first
+
+Cloud row 41 ("add a position on either bot, it should reflect on the other") shipped and is
+now running unattended. `tools/sync_trades.py` (gitignored): full diff of local vs cloud
+`trades` by `trade_id`, last-writer-wins on `updated_at`, receiving side keeps the SENDING
+side's exact timestamp (makes re-sync idempotent — a synced row reads as unchanged next pass,
+so it never ping-pongs back). All writes parameterized on both ends, never string-built SQL —
+`notes` and other text columns are free text, and a quote character would corrupt a naive
+`INSERT`.
+
+**Found and fixed before wiring anything**: local and cloud `trade_id` autoincrement counters
+diverged independently after the 2026-08-27/28 seed split — local's next id was 91, cloud's
+was 89. The very next position added through the cloud dashboard would have silently claimed
+an id that already meant a different trade locally. Reserved cloud's future ids at
+1,000,000+ via `sqlite_sequence` (DB backed up first as `US_data_OpenBB.db.pre_seqbump.bak`),
+touching zero existing rows — the two ranges can no longer collide.
+
+Applied the 2 backlogged TSLA trades (ids 89/90); cloud row 34 (book unlocked but empty) closed
+as a consequence. Wired for *ongoing* sync via Windows Scheduled Task `NYSE_TradeSync`
+(`pythonw tools/sync_trades.py --apply --quiet`, every 2 minutes) rather than tying it to
+either bot process being open — sync should not depend on the interactive bot happening to be
+running. Verified live, not by the script's own success message: made a real local change,
+let the task fire on its own (didn't invoke the script by hand), confirmed the matching
+timestamp on the cloud DB by direct SQL.
+
+Also fixed: the desktop launcher (`tools/cloud_console.py`) was popping several console
+windows per click under `pythonw` — Windows auto-allocates a console for any child console app
+(`ssh.exe`) when the parent has none, and the tunnel's own `Popen` additionally asked for
+`CREATE_NEW_CONSOLE` outright. `creationflags=CREATE_NO_WINDOW` on every ssh subprocess call;
+verified with a 100ms-resolution `IsWindowVisible` poll across the full launch against a
+pre-launch process baseline (a plain process-count snapshot false-positived on this Claude Code
+session's own unrelated conhost/cmd noise) — 0 visible windows.
+
+## 2026-09-03 — A desktop door to the cloud bot, and everything it revealed unlocked
+
+Built `tools/cloud_console.py` (gitignored, local-only): pythonw-silent desktop launcher for
+the cloud VM — opens the dashboard in its own isolated Chrome profile/window, tunnel + token
++ owner secret all fetched over ssh and never printed. Interactive status board (`--menu`)
+underneath for restart/logs/deploy. Icon: `static/cloud.ico` (committed), `.lnk` on Desktop.
+
+**Fixed on the dashboard side** (`dashboard.py`, deployed to cloud HEAD `c33d106`):
+- Book was unreachable on the cloud host: the owner-link unlock existed but the no-password
+  fail-closed branch (`NYSE_REQUIRE_PRIVATE_PW=1`) ran first. Hoisted the owner/session check
+  above it — a host WITH an owner token isn't the unconfigured host that flag was written for.
+  Checked first that no public exposure remains (only :22 listens outward, no nginx/caddy/
+  cloudflared) before touching it at all.
+- That exposed a **pre-existing latent crash**: `time` is never imported at module scope, but
+  `_private_ok()` called `time.time()` 5x. Both hosts had always returned before reaching those
+  lines. Would have taken the page down the first time anyone configured a password, on either
+  host. Fixed with a function-local `import time as _tm`.
+- `NYSE_SITE_LABEL` env var → window title + sidebar chip ("RUDRARJUN Analytics — Cloud"),
+  matched to the sidebar's own `.92rem` scale, not picked freehand (first cut was fine print).
+- **Performance**: live py-spy profiling on the VM during a 6–9s page stall (not guesswork —
+  RAM/CPU were confirmed idle throughout, ruling out "needs more RAM") found the hot stack was
+  Streamlit's own `add_magic` AST rewrite of the *entire* 1.6MB script, on every rerun. Set
+  `[runner] magicEnabled = false` in `.streamlit/config.toml` — app never relied on magic
+  (everything already goes through explicit `st.*` calls). Portfolio page: 6–9s → 5.15s cold;
+  every other page: ~1.1–1.4s, near the measured 536ms ssh-tunnel network floor. Portfolio is
+  still the outlier — unresolved, needs a second profiling pass if it still matters.
+- Chrome zoom looked wrong on cloud, fine locally: the launcher's app window used the user's
+  DAILY-DRIVER Chrome profile, which persists page zoom per-origin forever — one stray
+  Ctrl+scroll on that exact tunnel port, ever, reapplies forever. Gave the launcher its own
+  isolated `--user-data-dir`; confirmed via CDP attach to the *real* window that
+  `visualViewport.scale === 1`.
+- Two secrets (access token, owner token) reached this session's own transcript twice —
+  once through a Playwright error message, once through a `Get-CimInstance` command-line
+  listing. Rotated both times. `dash_token.txt`/`dash_owner.txt` are fetched fresh over ssh
+  on every launch, so rotation needs no other cache invalidation.
+
+**Found, not yet fixed — the same question in four places.** Local and cloud run as two
+independent Telegram bots (different `token.txt`, confirmed by hash) against two independent
+DBs, seeded from one snapshot around 2026-08-27/28 and diverging ever since:
+- `alert_dedup`: identical on all 57 dates through 08-27, then diverges every day — 114
+  local-only rows, 347 cloud-only.
+- `trades`: cloud has 87 CLOSED / 0 OPEN; the 2 currently OPEN positions exist only locally.
+- Nightly EOD capture runs in full on **both** machines against the same sources — local
+  fires 3 false "data stale" alerts most nights because it's still mid-run when cloud (which
+  finishes first) is already clean.
+- User wants both bots live-synced (**"i can only add positions in systems, other systems
+  should be updated immediately"**) rather than picking one owner. Proposed transport:
+  **Telegram itself as the relay** — both bots already long-poll continuously, so a shared
+  private group (both bots as members, `/setprivacy` off) sidesteps the NAT problem entirely
+  (the VM has no inbound path to the laptop; the laptop's outbound ssh only solves one
+  direction). Needs the user to create that group / disable privacy mode — a Telegram-side
+  action nobody but them can take — before any write-path hooks can be tested. Logged as
+  Cloud Migration tracker ID 41; see `docs/NEXT.md`.
+
+Full detail, every finding and fix individually verified (Playwright DOM reads, CDP zoom
+check, py-spy stack samples), lives in `docs/IDEA_TRACKER.xlsx` → Cloud Migration sheet,
+IDs 24–43.
+
 ## 2026-08-17 — Measured the whole ensemble. Nothing qualifies. (ID 243)
 
 `_signal_writeup()` refuses to print a base rate it was not given, so converting a signal's

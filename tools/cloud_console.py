@@ -23,10 +23,20 @@ WHY ONE SSH ROUND TRIP
     call. Six sequential connections to a VM across the internet is six handshakes and several
     seconds of blank screen; one is under a second, and the screen is the whole point.
 
+WHY THE DESKTOP ICON IS SILENT
+    The shortcut runs this with pythonw.exe, not python.exe -- no console attaches, so there
+    is nothing to print to and no board to show. It logs in, opens the tunnel, opens the
+    dashboard window, and the process exits. A launch failure with nothing to say it to still
+    leaves a line in logs/cloud_launcher.log rather than failing invisibly.
+
+    Run it from an actual terminal (python.exe) for the interactive board -- same script,
+    different attachment, detected via the win32 console handle, not by guessing from stdio.
+
 Usage:
     python tools/cloud_console.py            # LAUNCH: start if down, open dashboard, then board
     python tools/cloud_console.py --menu     # skip the launch, go straight to the board
     python tools/cloud_console.py --status   # print status once and exit, for scripting
+    pythonw tools/cloud_console.py           # what the desktop icon runs: silent, dashboard only
 """
 import os
 import subprocess
@@ -41,7 +51,6 @@ DB = "/home/ubuntu/US_data_OpenBB.db"
 REPO = "/home/ubuntu/nyse"
 SERVICES = ["nyse-bot", "nyse-dashboard"]
 TUNNEL_PORT = int(os.environ.get("NYSE_TUNNEL_PORT", "8602"))
-DASH_W, DASH_H = 1500, 950
 
 SSH = ["ssh", "-i", KEY, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=20",
        "-o", "BatchMode=yes"]
@@ -67,11 +76,24 @@ echo "@errl $(eval $J 2>/dev/null | grep '\[ERROR\]' | grep -vc 'No earnings dat
 """.replace("DBPATH", DB).replace("REPOPATH", REPO)
 
 
+# ssh.exe is a console app. Under pythonw (no console attached to THIS process at all --
+# what the desktop shortcut runs), Windows does not just skip giving it one: CreateProcess
+# auto-allocates a FRESH console for every single child console app that doesn't ask
+# otherwise, and it flashes on screen for however long that child runs. Every ssh() call and
+# the tunnel below is exactly that kind of child, so without this flag each one pops its own
+# window -- several per launch, each closing the instant its own command finishes, which
+# reads as "cmd windows keep opening" (user 2026-09-04) rather than one persistent console.
+# Under a real terminal (python.exe, console already exists) this flag changes nothing
+# observable, so it is applied unconditionally rather than only in the quiet path.
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
 def ssh(cmd, timeout=90):
     """Run one command on the VM. Returns (ok, text) -- never raises, because a dead network
     is a normal state for this screen to show, not a crash."""
     try:
-        r = subprocess.run(SSH + [VM, cmd], capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(SSH + [VM, cmd], capture_output=True, text=True, timeout=timeout,
+                           **_NO_WINDOW)
         return r.returncode == 0, (r.stdout or "") + (r.stderr or "")
     except subprocess.TimeoutExpired:
         return False, "timed out"
@@ -197,8 +219,10 @@ def tunnel():
     if not live:
         print(f"\n opening ssh tunnel {TUNNEL_PORT} -> VM 8502 ...")
         cmd = SSH + ["-N", "-L", f"{TUNNEL_PORT}:127.0.0.1:8502", VM]
-        kw = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if os.name == "nt" else {}
-        subprocess.Popen(cmd, **kw)
+        # Surviving the launcher process exiting needs no visible console at all -- a Windows
+        # child does not die with its parent by default. The earlier CREATE_NEW_CONSOLE was
+        # solving a problem that did not exist, at the cost of a permanent black window.
+        subprocess.Popen(cmd, **_NO_WINDOW)
         time.sleep(3)
     else:
         print(f" tunnel already up on {TUNNEL_PORT}")
@@ -219,7 +243,7 @@ def tunnel():
         print(f" Get the token from the bot's /terminal, or: ssh ... cat {REPO}/dash_token.txt")
     elif not owner:
         print(" No dash_owner.txt on the VM -- the book pages will still ask for a password.")
-    print(" (the tunnel runs in its own window; close that window to drop the forward)")
+    print(" (tunnel runs hidden in the background; closes when you sign out or reboot)")
 
 
 # Chromium's app mode, in preference order. --app= gives a window with no tab strip, no
@@ -233,14 +257,38 @@ _BROWSERS = [
 ]
 
 
+# A profile of its own, not the browser's daily-driver one. Reusing the default profile
+# meant this window inherited whatever that profile had already accumulated for
+# 127.0.0.1:8602 -- Chrome remembers page zoom PER ORIGIN forever, so one stray Ctrl+scroll,
+# ever, on that exact origin (during testing, or a trackpad slip) would silently reapply on
+# every future open. A dedicated profile has no such history and never can.
+_PROFILE_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+                            "NYSE_CloudDashboard", "ChromeProfile")
+
+
+
 def _open_window(url):
     """Open the dashboard as its own window, not a tab. Falls back to the default browser if
-    no chromium is found -- a tab you can see beats a window you cannot open."""
+    no chromium is found -- a tab you can see beats a window you cannot open.
+
+    NO --window-size. The local launcher (telegram_bot_optimized.py open_dashboard_on_startup)
+    never passes one either -- it lets Chrome's own per-profile window memory take over after
+    the first open, which is exactly why the local window has settled in nice and large over
+    time. A calculated --window-size does the opposite of that: it wins over whatever the user
+    just resized the window to, EVERY launch, forever -- so even a manual maximize gets undone
+    the next time the icon is clicked. That fight, not a font or a zoom level, is what read as
+    "cloud is zoomed" (confirmed: identical computed font-size and devicePixelRatio on both
+    pages at a matched viewport -- the only variable left was real window size). --start-
+    maximized replaces it: gives a fresh profile a full-size window on its very first launch
+    (nothing to remember yet), then gets out of the way -- Chrome remembers from there, same
+    as local."""
     for exe in _BROWSERS:
         if os.path.exists(exe):
             try:
-                subprocess.Popen([exe, f"--app={url}",
-                                  f"--window-size={DASH_W},{DASH_H}"])
+                os.makedirs(_PROFILE_DIR, exist_ok=True)
+                subprocess.Popen([exe, f"--app={url}", "--start-maximized",
+                                  f"--user-data-dir={_PROFILE_DIR}",
+                                  "--no-first-run", "--no-default-browser-check"])
                 return True
             except Exception:
                 break
@@ -284,6 +332,33 @@ def deploy():
     subprocess.run([sys.executable, os.path.join(HERE, "tools", "deploy_cloud.py")], cwd=HERE)
 
 
+def _has_console():
+    """Is there an actual console attached to read our stdout? True for a terminal running
+    python.exe; False for pythonw.exe (the desktop shortcut) and for GetConsoleWindow itself
+    failing. isatty() alone is not the right test here -- pythonw's stdout is a real,
+    non-None stream (redirected to nul), so it still answers isatty() calls; only the win32
+    console handle tells us whether anything is actually visible."""
+    if os.name != "nt":
+        return bool(sys.stdin) and sys.stdin.isatty()
+    try:
+        import ctypes
+        return bool(ctypes.windll.kernel32.GetConsoleWindow())
+    except Exception:
+        return True  # can't tell -- behave like a normal terminal run
+
+
+def _quiet_fail(reason):
+    """No console to report to. Leave a trail instead of failing invisibly -- the desktop
+    icon otherwise just does nothing and there is no way to tell why."""
+    try:
+        d = os.path.join(HERE, "logs")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "cloud_launcher.log"), "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {reason}\n")
+    except Exception:
+        pass
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -292,9 +367,16 @@ def main():
     if "--status" in sys.argv:
         board()
         return 0
+
+    quiet = not _has_console()   # the desktop shortcut: just open the dashboard, nothing else
     inline = False
     if "--menu" not in sys.argv:
-        if not launch():
+        ok = launch()
+        if quiet:
+            if not ok:
+                _quiet_fail("launch failed -- VM unreachable (see board/--status for detail)")
+            return 0 if ok else 1
+        if not ok:
             # Unreachable VM: hold the window open so the reason is readable. Dropping
             # straight to the board would just redraw the same failure.
             try:

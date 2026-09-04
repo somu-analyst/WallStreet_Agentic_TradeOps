@@ -2782,6 +2782,44 @@ st.session_state.setdefault("ui_theme", _load_saved_theme())
 st.markdown(_CSS_DARK if "Dark" in st.session_state["ui_theme"] else _CSS_LIGHT,
             unsafe_allow_html=True)
 
+# Zoom: a page-level text-size control, remembered per host exactly like the theme above --
+# same tiny-file pattern (dash_zoom.txt), same reason (session state alone resets on every
+# reload/relaunch). User 2026-09-04, after the window-maximize fix: rather than fight window
+# sizing, give the page its own zoom that works "as required" regardless of window size.
+# CSS `zoom` (not `transform: scale`) -- Chromium-native, reflows layout instead of leaving a
+# scaled canvas with dead space or clipped edges; every path that opens this app is Chromium
+# (Chrome app-mode windows, both hosts), so the one browser that matters supports it natively.
+_ZOOM_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dash_zoom.txt")
+_ZOOM_MIN, _ZOOM_MAX, _ZOOM_STEP = 70, 150, 10
+
+def _load_saved_zoom():
+    try:
+        with open(_ZOOM_FILE, encoding="utf-8") as _f:
+            _v = int(_f.read().strip())
+            if _ZOOM_MIN <= _v <= _ZOOM_MAX:
+                return _v
+    except Exception:
+        pass
+    return 100
+
+def _save_zoom():
+    try:
+        with open(_ZOOM_FILE, "w", encoding="utf-8") as _f:
+            _f.write(str(st.session_state.get("ui_zoom", 100)))
+    except Exception:
+        pass
+
+def _zoom_step(_delta):
+    # Buttons carry no value of their own across a rerun -- session_state is mutated directly
+    # in the callback, the same shape _save_theme uses for the radio.
+    st.session_state["ui_zoom"] = max(_ZOOM_MIN, min(_ZOOM_MAX,
+                                       st.session_state.get("ui_zoom", 100) + _delta))
+    _save_zoom()
+
+st.session_state.setdefault("ui_zoom", _load_saved_zoom())
+st.markdown(f"<style>html{{zoom:{st.session_state['ui_zoom']}%}}</style>",
+            unsafe_allow_html=True)
+
 # ===================================================================
 # ──  GREEKS  (Black-Scholes)
 # ===================================================================
@@ -5417,6 +5455,244 @@ def _edgar_load(cik):
         conn.close()
 
 
+# ── "Who owns this stock?" — search 13F holdings BY TICKER (user 2026-09-04, ID 409) ──
+# THE PROBLEM: edgar_13f stores what the filings store -- a CUSIP and an issuer NAME, never a
+# ticker. CUSIP is a licensed identifier with no free lookup, and the existing
+# cusip_ticker_map had resolved 9 of 11,950. Mapping all of them is the wrong shape of
+# problem anyway.
+#
+# THE INVERSION: we only ever need the ONE ticker being searched. So resolve that ticker to
+# its company name from SEC's own free ticker file, normalise both sides, and match against
+# the issuer strings already in the table. One name to match instead of eight thousand, and
+# the matched issuer strings get SHOWN so a wrong match is visible rather than silent.
+_ISS_SUFFIX = (r"\b(INC|INCORPORATED|CORP|CORPORATION|CO|COMPANY|LTD|LIMITED|PLC|LP|LLC|SA|"
+               r"NV|AG|HLDGS?|HOLDINGS?|GROUP|GRP|TR|TRUST|THE|NEW|COM|CL|USD|ADR|SHS|ORD|"
+               r"SERIES|CLASS|OF)\b")
+# Filers abbreviate on a 30-year-old fixed-width convention. These are the ones that actually
+# appear in the data; each was found by looking at what failed to match, not guessed.
+_ISS_ABBR = {"FINL": "FINANCIAL", "TECHS": "TECHNOLOGIES", "TECH": "TECHNOLOGY",
+             "SYS": "SYSTEMS", "INTL": "INTERNATIONAL", "MTRS": "MOTORS", "PETE": "PETROLEUM",
+             "PHARMS": "PHARMACEUTICALS", "LABS": "LABORATORIES", "INDS": "INDUSTRIES",
+             "RES": "RESOURCES", "SVCS": "SERVICES", "ENTMT": "ENTERTAINMENT",
+             "PPTYS": "PROPERTIES", "COMMUNICATNS": "COMMUNICATIONS", "MFG": "MANUFACTURING",
+             "NATL": "NATIONAL", "STR": "STREET", "DEPT": "DEPARTMENT",
+             # AMER and AMERICAN collapse onto ONE token rather than to each other. Bank of
+             # America appears in this table under four spellings -- "BANK AMERICA CORP",
+             # "BANK AMER CORP", "BANK OF AMER CORP" and "Bank America Corp" -- and mapping
+             # AMER->AMERICAN matched none of them against SEC's "BANK OF AMERICA CORP".
+             # Sending both to AMERICA, with OF dropped as a stopword, collapses all four.
+             "AMER": "AMERICA", "AMERICAN": "AMERICA"}
+
+
+def _iss_norm(s):
+    """Normalise an issuer or company name so the two conventions can be compared."""
+    # SEC titles carry a state-of-incorporation tag the filings never use:
+    # "OCCIDENTAL PETROLEUM CORP /DE/" against the filer's "OCCIDENTAL PETE CORP".
+    # Stripped FIRST, because the punctuation pass below would otherwise leave a stray
+    # "DE" token behind and the two names could never match. This alone was the whole
+    # difference between OXY/BAC resolving and returning nothing.
+    s = re.sub(r"/[A-Z]{2,4}/?", " ", str(s or "").upper())
+    s = re.sub(r"[^A-Z0-9 ]", " ", s)
+    s = " ".join(_ISS_ABBR.get(w, w) for w in s.split())
+    s = re.sub(_ISS_SUFFIX, " ", s)
+    return " ".join(s.split())
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _sec_name_for(ticker):
+    """Company name SEC files this ticker under, or None. Cached a day — it never moves."""
+    try:
+        import urllib.request, json          # neither is a module-level import in this file
+        d = json.loads(urllib.request.urlopen(urllib.request.Request(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers={"User-Agent": "NYSE_DATA research srinivas.analystsas@gmail.com"}),
+            timeout=30).read())
+        tk = str(ticker).upper()
+        for v in d.values():
+            if str(v.get("ticker", "")).upper() == tk:
+                return v.get("title")
+    except Exception:
+        return None
+    return None
+
+
+def _investors_in(ticker, extra_names=()):
+    """Every 13F holder of `ticker` in the DB, by quarter, with the action they took.
+
+    WHAT A 13F ACTUALLY SAYS, and what it does not. It reports shares held and market VALUE
+    at quarter end. It does NOT disclose cost basis. So value/shares is the quarter-end MARK,
+    not what anyone paid, and presenting it as a purchase price would be inventing a number.
+    What CAN be said honestly about price is the range the stock actually traded in during
+    the quarter a position was opened -- whatever they paid, it was inside that range. That
+    is what the caller renders beside a NEW position.
+
+    Action comes from comparing the same fund's share count to its own prior quarter, so it
+    is derived from the data rather than taken from a field that does not exist.
+    """
+    names = {_iss_norm(n) for n in extra_names if n}
+    nm = _sec_name_for(ticker)
+    if nm:
+        names.add(_iss_norm(nm))
+    names.discard("")
+    if not names:
+        return pd.DataFrame(), []
+    conn = get_conn()
+    try:
+        df = pd.read_sql("SELECT cik, fund, quarter, filing_date, cusip, issuer, shares, "
+                         "value, put_call FROM edgar_13f", conn)
+    except Exception:
+        return pd.DataFrame(), []
+    finally:
+        conn.close()
+    if df.empty:
+        return pd.DataFrame(), []
+    df["_n"] = df["issuer"].map(_iss_norm)
+    hit = df[df["_n"].isin(names)].copy()
+    if hit.empty:
+        # Token-subset fallback: "APPLE" against "APPLE INC COM". Only accepted when it
+        # resolves to ONE issuer string, because a loose match across several companies is
+        # worse than no answer.
+        toks = {t for n in names for t in n.split()}
+        cand = df[df["_n"].apply(lambda s: bool(s) and set(s.split()) <= toks)]
+        if cand["_n"].nunique() == 1:
+            hit = cand.copy()
+    if hit.empty:
+        return pd.DataFrame(), sorted(names)
+    # ONE ROW PER FUND PER QUARTER. A 13F lists an issuer several times over -- separate
+    # share classes, separate CUSIPs, and separate entries for option positions -- so Citadel
+    # showed up four times in 2026-06-30 with different share counts, and the add/trim label
+    # (which compares a row to the one before it) was comparing those fragments to each other
+    # and calling them adds and trims. Aggregate first, then judge the change.
+    #
+    # Option lines are EXCLUDED from the share count: put_call marks entries that are puts or
+    # calls on the name, not ownership of it, and summing them into "shares held" would
+    # overstate the position and, for a put, invert what it means.
+    hit = hit[hit["put_call"].fillna("").astype(str).str.strip() == ""]
+    if hit.empty:
+        return pd.DataFrame(), sorted(names)
+    hit = (hit.groupby(["fund", "quarter"], as_index=False)
+              .agg(shares=("shares", "sum"), value=("value", "sum"),
+                   filing_date=("filing_date", "max"), issuer=("issuer", "first")))
+    hit = hit.sort_values(["fund", "quarter"])
+    out = []
+    for fund, g in hit.groupby("fund"):
+        prev = None
+        for _, r in g.iterrows():
+            sh = float(r["shares"] or 0)
+            if prev is None:
+                act = "NEW"
+            elif sh > prev * 1.02:
+                act = "ADDED"
+            elif sh < prev * 0.98:
+                act = "TRIMMED"
+            else:
+                act = "HELD"
+            out.append({"Fund": fund, "Quarter": r["quarter"], "Filed": r["filing_date"],
+                        "Action": act, "Shares (M)": sh / 1e6,
+                        "Value $M": float(r["value"] or 0) / 1e6,
+                        "Mark $/sh": (float(r["value"] or 0) / sh) if sh else None,
+                        "Issuer as filed": r["issuer"]})
+            prev = sh
+    return pd.DataFrame(out), sorted(names)
+
+
+def _quarter_price_range(ticker, quarter_end):
+    """(low, high, avg close) for the quarter ENDING `quarter_end` — where a buyer must have paid."""
+    try:
+        q_end = datetime.strptime(str(quarter_end)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+    q_start = q_end - timedelta(days=92)
+    conn = get_conn()
+    try:
+        d = pd.read_sql("SELECT low, high, close FROM stock_history WHERE ticker=? "
+                        "AND trade_date BETWEEN ? AND ?", conn,
+                        params=(str(ticker).upper(), q_start.isoformat(), q_end.isoformat()))
+    except Exception:
+        return None
+    finally:
+        conn.close()
+    if d.empty:
+        return None
+    return (float(d["low"].min()), float(d["high"].max()), float(d["close"].mean()))
+
+
+def _render_who_owns(key_prefix="who"):
+    """Ticker box -> every 13F holder of it in the DB, with the price range they bought in.
+
+    ONE renderer, called from both the Smart Money tab and the Legendary Investors page, so
+    the two cannot drift apart.
+    """
+    st.markdown("##### 🔎 Who owns this stock?")
+    _wo_tk = st.text_input(
+        "Ticker", value="", key=f"{key_prefix}_tk",
+        placeholder="AAPL, OXY, BAC …",
+        help="Searches every 13F filing stored here for this company.").strip().upper()
+    if not _wo_tk:
+        st.caption("Type a ticker to see which tracked investors hold it, when they opened "
+                   "or changed the position, and the price range they must have paid inside.")
+        return
+    with st.spinner(f"Searching 13F filings for {_wo_tk}…"):
+        _wo_df, _wo_names = _investors_in(_wo_tk)
+    if _wo_df.empty:
+        st.warning(f"No tracked investor holds **{_wo_tk}** in the filings stored here.")
+        st.caption(
+            "Two different reasons this can happen, worth telling apart. Either none of the "
+            "78 tracked funds reported it — a real answer — or the company name could not be "
+            "matched: 13F filings carry a CUSIP and an issuer name, never a ticker, so the "
+            "search resolves your ticker to its SEC company name and matches that against the "
+            "issuer strings. "
+            + (f"It looked for: `{'`, `'.join(_wo_names)}`." if _wo_names else
+               "SEC returned no company name for this ticker, so it may be an ETF or a "
+               "non-US listing, which 13F issuer names do not carry consistently."))
+        return
+    # Quarter price range — the honest answer to "at what rate", one lookup per quarter.
+    _rng = {q: _quarter_price_range(_wo_tk, q) for q in _wo_df["Quarter"].unique()}
+    _wo_df["Low in qtr"] = _wo_df["Quarter"].map(lambda q: (_rng.get(q) or (None,))[0])
+    _wo_df["High in qtr"] = _wo_df["Quarter"].map(
+        lambda q: (_rng.get(q) or (None, None))[1] if _rng.get(q) else None)
+    _wo_df["Avg in qtr"] = _wo_df["Quarter"].map(
+        lambda q: (_rng.get(q) or (None, None, None))[2] if _rng.get(q) else None)
+    _funds = _wo_df["Fund"].nunique()
+    _latest = _wo_df["Quarter"].max()
+    _now = _wo_df[_wo_df["Quarter"] == _latest]
+    _c1, _c2, _c3 = st.columns(3)
+    _c1.metric("Investors holding", _funds)
+    _c2.metric("Latest quarter", _latest)
+    _c3.metric("Holders that quarter", f"{_now['Fund'].nunique()}")
+    _only_new = st.checkbox("Only show quarters where the position CHANGED",
+                            value=False, key=f"{key_prefix}_chg",
+                            help="Hides HELD rows, leaving opens, adds and trims.")
+    _show = _wo_df[_wo_df["Action"] != "HELD"] if _only_new else _wo_df
+    st.dataframe(
+        _show.sort_values(["Quarter", "Value $M"], ascending=[False, False]),
+        hide_index=True, use_container_width=True,
+        column_config={
+            # Scaled to millions rather than formatted with separators: NumberColumn's format
+            # is printf on the raw value, and "%,d" is not a printf verb -- it is silently
+            # ignored, which is how 9026498392 ended up on screen unreadable (same family as
+            # the ID 251 ProgressColumn trap).
+            "Shares (M)": st.column_config.NumberColumn(format="%.2fM"),
+            "Value $M": st.column_config.NumberColumn(format="$%.0fM"),
+            "Mark $/sh": st.column_config.NumberColumn(
+                format="$%.2f",
+                help="Value divided by shares at quarter end. A MARK, not what they paid."),
+            "Low in qtr": st.column_config.NumberColumn(format="$%.2f"),
+            "High in qtr": st.column_config.NumberColumn(format="$%.2f"),
+            "Avg in qtr": st.column_config.NumberColumn(format="$%.2f"),
+            "Issuer as filed": st.column_config.TextColumn(
+                help="The raw issuer string matched. Check it — a wrong match is visible here."),
+        })
+    st.info(
+        "**A 13F does not disclose what anyone paid.** It reports shares held and market "
+        "value at quarter end, so *Mark $/sh* is the quarter-end price, **not** a cost basis. "
+        "The honest answer to \"at what rate\" is the **Low/High in qtr** columns: whatever "
+        "they paid for a position opened that quarter, it was inside that range. "
+        "**Mind the lag** — 13Fs are filed up to 45 days after quarter end, so a position "
+        "you see here may already have been sold before you read it. And they show long US "
+        "equity only: no shorts, no bonds, no cash, so this is never the whole portfolio.")
+
+
 # ── Global Opportunities: curated regions / themes / country sectors (proxy ETFs) ──
 _GLOBAL_REGIONS = {
     "🇧🇷 Brazil": ("EWZ", "Brazil large-caps — commodities, banks, cheap valuations", "Brazil investment stocks commodities Lula rates"),
@@ -6366,14 +6642,29 @@ with st.sidebar:
     # you are picking one; once you are looking at the page, the page has to say it too --
     # the two dashboards are otherwise identical down to the pixel.
     if _SITE_LABEL:
+        # Matched to the sidebar's own scale (.stRadio label is .92rem) rather than picked
+        # freehand -- the first cut read as fine print next to the rest of the sidebar.
         st.markdown(
-            f"<div style='display:inline-block;padding:2px 10px;margin:2px 0 6px 0;"
-            f"border:1px solid #3a8fd6;border-radius:10px;font-size:0.78rem;"
-            f"letter-spacing:.06em;color:#3a8fd6;'>☁ {_SITE_LABEL.upper()}</div>",
+            f"<div style='display:inline-block;padding:3px 12px;margin:2px 0 6px 0;"
+            f"border:1px solid #3a8fd6;border-radius:10px;font-size:0.92rem;"
+            f"font-weight:600;letter-spacing:.04em;color:#3a8fd6;'>"
+            f"☁ {_SITE_LABEL.upper()}</div>",
             unsafe_allow_html=True)
     st.radio("Theme", ["🌙 Dark", "☀️ Light"], key="ui_theme", horizontal=True,
              label_visibility="collapsed", on_change=_save_theme,
              help="Switch between dark fintech and light minimal. Your choice is remembered next time.")
+    _zc1, _zc2, _zc3 = st.columns([1, 1.3, 1])
+    _zc1.button("−", key="zoom_out", use_container_width=True, disabled=st.session_state["ui_zoom"] <= _ZOOM_MIN,
+                on_click=_zoom_step, args=(-_ZOOM_STEP,), help="Zoom out")
+    _zc2.markdown(f"<div style='text-align:center;padding-top:8px;font-size:0.85rem;"
+                  f"opacity:.85'>{st.session_state['ui_zoom']}%</div>", unsafe_allow_html=True)
+    # U+FF0B FULLWIDTH PLUS, not ASCII "+" -- Streamlit renders button labels as markdown, and
+    # a bare leading "+" is markdown BULLET-LIST syntax there, so it silently renders as an
+    # empty list item instead of a visible glyph (found live: outerHTML had only whitespace
+    # where the label should be). The "−" above is U+2212 MINUS SIGN, a different codepoint
+    # from ASCII "-", which is exactly why it was never affected.
+    _zc3.button("＋", key="zoom_in", use_container_width=True, disabled=st.session_state["ui_zoom"] >= _ZOOM_MAX,
+                on_click=_zoom_step, args=(_ZOOM_STEP,), help="Zoom in")
     _dh_banner()
     st.markdown("---")
 
@@ -12685,6 +12976,11 @@ elif page == "📈 Insider / Congress / Whales":
 
     # ── Tab 4: Legendary Investors 13F ─────────────────────────────
     with tab4:
+        # Search by STOCK first (user 2026-09-04, ID 409). The page was organised entirely
+        # by INVESTOR -- fine for "what is Buffett doing", useless for "who owns the thing I
+        # am about to buy", which is the question you actually have in front of a ticker.
+        _render_who_owns("smt")
+        st.markdown("---")
         _LEGENDS = {
             "buffett":       {"name":"Warren Buffett",     "firm":"Berkshire Hathaway",   "aum":"$300B+",   "style":"Value / Long-term"},
             "soros":         {"name":"George Soros",       "firm":"Soros Fund Mgmt",      "aum":"$9.1B",    "style":"Macro / Reflexivity"},
@@ -13417,6 +13713,9 @@ elif page == "🏆 Legendary Investors (13F)":
     # date that went stale the moment Q2 landed. It now reads the stored history, so the
     # quarter shown is whatever has actually been filed.
     st.markdown("## 🏆 Legendary Investors — what they actually did")
+    # Same stock-first search as the Smart Money tab, same renderer (ID 409).
+    _render_who_owns("lgi")
+    st.markdown("---")
     _lg_conn = get_conn()
     try:
         import edgar_13f as _E13

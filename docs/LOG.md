@@ -943,3 +943,25 @@ transcript over the session and were rotated.
 **Open:** the CBOE chain lane breaches Cboe's Market Data Policies, which prohibit automated
 extraction. Moving it to a broker API resolves it at no cost and is blocked only on knowing
 which broker. See `docs/NEXT.md`.
+
+## 2026-09-04 — chart reader, 13F stock search, geography, expiry bugs
+
+**Shipped**
+- Chart Reader outlook + forward cone (404/406). Levels from the chart, probabilities from ATM
+  implied vol. Forced by measurement: patterns showed no edge (403), and the level-breakout edge
+  (+9.5pp, t=9.24) collapsed when random lines scored +9.7 — a baseline artifact (405).
+- 13F "Who owns this stock?" on both Smart Money and Legendary Investors (409). edgar_13f has no
+  ticker column, so the searched ticker is resolved to its SEC company name and matched against
+  issuer strings. Needed the /DE/ state tag stripped and AMER/AMERICAN collapsed (BAC files under
+  four spellings). Cost basis is NOT in a 13F — shows the quarter's low/high instead.
+- "Where this company operates" (351): long-lived assets by geography vs revenue by region.
+- 0-DTE Est Open shows intrinsic (407/408). First attempt used Black-Scholes off the 0.27/365
+  floor and read $0.89 against a real $0.13 — the user caught it.
+- Expired options now settle in BOTH books (410), and the ITM branch can finally run: it read
+  strike/option_type that were never in the SELECT, so every expiry booked as worthless.
+
+**Closed as not-bugs**: 396/378 (the scheduled task DOES fire — 09-04 05:03 result 0 — despite
+reporting Disabled), 411 (the alert was a 09:39 snapshot; both TSLA closes were recorded).
+
+**Next**: 412 (Market Wrap session table for S&P/Nasdaq/Russell — logged, not started),
+361 (source revenue from the same filing as the segment table), 386, 334 (re-run at ~80 dates).

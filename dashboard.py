@@ -6327,6 +6327,7 @@ _PAGE_HELP = {
     "🫧 Anti-Bubble Radar":      "Khoo-style 'great repricing' screen for ANY tickers — flags 🔴 cyclical traps (crowded, vertical, peak-earnings names like memory/semis) to avoid, and 🟢 anti-bubble quality (wide moat, durable earnings, below intrinsic value, not overextended) to accumulate. Picks are auto-tracked so you can see whether quality is beating cyclicals over time.",
     "🎛️ Command Center":         "Your whole system on ONE screen — market weather (Radar turbulence + direction + next-session SPY levels), your open book (live P&L, expiring soon), the top ⭐ consensus trade ideas, and what fired today. Start here; drill into other pages only when needed.",
     "🧮 Valuation (DCF)":       "What the cash flows are worth, under assumptions YOU set. Three scenarios side by side, a sensitivity grid showing how far the answer moves when the discount rate and terminal growth change, and a multiple-based cross-check. This is a MODEL, not a measurement — the grid is there because a single fair-value number invites more confidence than the method can carry.",
+    "📐 Chart Reader":           "The chart read the way a person reads one: horizontal levels where price has turned more than once, sloping trendlines through the swing highs and lows, and whether price is holding above a line or testing it. Every line is drawn from the price history by a fixed rule rather than by eye, so the same chart gives the same answer twice. It DESCRIBES the chart and does not forecast — no pattern here has been measured against forward returns yet, so it is context, not a signal.",
     "💧 Money Flow (Sankey)":    "How a company turns revenue into profit, as a flow diagram — revenue splits into gross profit and cost of sales, gross profit into operating income and expenses, operating income into net income and tax. Figures come from the company's own filed statement rather than being typed in, and every subtotal is checked to balance before anything is drawn.",
     "🌍 Market Overview":        "Big-picture market snapshot. VIX, sector rotation, Fear & Greed, macro correlations, and top OI movers. Start here every morning.",
     "🔬 OI Comparison Charts":   "Deep-dive OI analysis per ticker and expiry. Compare Open Interest changes between two dates to spot institutional positioning, gamma walls, and money flow direction.",
@@ -6409,6 +6410,7 @@ with st.sidebar:
             "🎯 Signal Accuracy",
         ],
         "🏛 Smart Money & News": [
+            "📐 Chart Reader",
             "💧 Money Flow (Sankey)",
             "📈 Insider / Congress / Whales",
             "🏆 Legendary Investors (13F)",
@@ -25078,6 +25080,114 @@ unreachable, the market is assuming something you may not.
             st.warning(f"Couldn't value **{_vtk}** — {_ve}")
             st.caption("Needs a filed cash-flow statement and a share count. ETFs, indices and "
                        "funds have neither.")
+
+elif page == "📐 Chart Reader":
+    _page_header("📐 Chart Reader", _PAGE_HELP["📐 Chart Reader"])
+    _cr1, _cr2, _cr3 = st.columns([2, 1, 1])
+    _cr_tk = _cr1.text_input("Ticker", value="AAPL", key="cr_tk").strip().upper()
+    _cr_days = _cr2.slider("Sessions to read", 60, 500, 180, 20, key="cr_days",
+                           help="How far back the levels and trendlines are drawn from. "
+                                "More history finds bigger levels but older ones.")
+    # The swing window IS the subjectivity. Two chartists disagree because they are looking
+    # at different timeframes, not because one is wrong -- exposing it as a control is more
+    # honest than hiding a hard-coded 5 and calling the output objective.
+    _cr_w = _cr3.slider("Swing sensitivity", 3, 15, 5, 1, key="cr_w",
+                        help="Bars either side a high/low must beat to count as a swing "
+                             "point. Lower = more, smaller pivots. This one number is where "
+                             "chartists genuinely disagree, so it is yours to set.")
+    if not _TB_ENGINE:
+        st.error("Engine unavailable.")
+    else:
+        try:
+            _cr = _TB_ENGINE._chart_read(_cr_tk, days=int(_cr_days), w=int(_cr_w))
+        except Exception as _cre:
+            _cr = None
+            st.error(f"Chart read failed: {_cre}")
+        if not _cr:
+            st.info(f"Not enough price history for **{_cr_tk}** — needs about 40 sessions.")
+        else:
+            _crc = _TB_ENGINE.get_conn()
+            try:
+                _crh = pd.read_sql(
+                    "SELECT trade_date, open, high, low, close FROM stock_history "
+                    "WHERE ticker=? ORDER BY trade_date DESC LIMIT ?",
+                    _crc, params=(_cr_tk, int(_cr_days)))
+            finally:
+                _crc.close()
+            _crh = _crh.iloc[::-1].reset_index(drop=True)
+            _m1, _m2, _m3, _m4 = st.columns(4)
+            _m1.metric("Spot", f"${_cr['spot']:,.2f}")
+            _m2.metric("Swing points", f"{_cr['pivot_highs']}H / {_cr['pivot_lows']}L")
+            _m3.metric("Levels found", len(_cr["levels"]))
+            _m4.metric("Trendlines", len(_cr["trendlines"]))
+
+            _fig = go.Figure(go.Candlestick(
+                x=_crh["trade_date"], open=_crh["open"], high=_crh["high"],
+                low=_crh["low"], close=_crh["close"], name=_cr_tk,
+                increasing_line_color="#26a69a", decreasing_line_color="#ef5350"))
+            # Horizontal levels: opacity carries STRENGTH, so a 5-touch level looks like one.
+            for _lv in _cr["levels"]:
+                _fig.add_hline(
+                    y=_lv["price"], line_width=1 + min(_lv["touches"], 5) * 0.4,
+                    line_dash="dot",
+                    line_color=("#ef5350" if _lv["side"] == "resistance" else "#26a69a"),
+                    opacity=min(0.25 + _lv["touches"] * 0.15, 0.9),
+                    annotation_text=f"{_lv['price']:,.2f} · {_lv['touches']}x",
+                    annotation_position="right",
+                    annotation_font=dict(size=10))
+            # Trendlines are drawn from their anchor bar to today, which is exactly the span
+            # a person would have drawn them over -- not extrapolated off the left edge.
+            for _ln in _cr["trendlines"]:
+                _i0 = int(_ln["anchor_i"]); _i1 = len(_crh) - 1
+                if _i0 >= len(_crh):
+                    continue
+                _fig.add_shape(
+                    type="line", x0=_crh["trade_date"].iloc[_i0], x1=_crh["trade_date"].iloc[_i1],
+                    y0=_ln["anchor_p"], y1=_ln["now"],
+                    line=dict(width=2, dash="solid",
+                              color=("#ef5350" if _ln["kind"] == "resistance" else "#26a69a")))
+            _fig.update_layout(
+                height=560, margin=dict(l=10, r=90, t=30, b=20),
+                xaxis_rangeslider_visible=False, showlegend=False,
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(_fig, use_container_width=True, config={"displayModeBar": False})
+
+            _cl1, _cl2 = st.columns(2)
+            with _cl1:
+                st.markdown("##### Horizontal levels")
+                if _cr["levels"]:
+                    st.dataframe(pd.DataFrame([{
+                        "Level": round(l["price"], 2), "Touches": l["touches"],
+                        "Side": l["side"].title(), "vs now %": round(l["dist_pct"], 1),
+                    } for l in _cr["levels"]]), hide_index=True, use_container_width=True)
+                else:
+                    st.caption("No price was revisited often enough to call a level.")
+            with _cl2:
+                st.markdown("##### Trendlines")
+                if _cr["trendlines"]:
+                    st.dataframe(pd.DataFrame([{
+                        "Kind": t["kind"].title(), "Now": round(t["now"], 2),
+                        "Touches": t["touches"], "vs now %": round(t["dist_pct"], 1),
+                        "State": t["state"],
+                    } for t in _cr["trendlines"]]), hide_index=True, use_container_width=True)
+                else:
+                    st.caption("No line held enough swing points without being broken.")
+
+            if _cr["breakout"]:
+                _b = _cr["breakout"]
+                _vol = (f"on **{_b['vol_x']:.1f}×** average volume" if _b.get("vol_x")
+                        else "— **volume is not available for this session**, so participation "
+                             "is unknown rather than low")
+                st.warning(f"⚡ Price broke **{_b['dir']}** through **{_b['level']:,.2f}** "
+                           f"({_b['touches']} prior touches) {_vol}.")
+            st.caption(
+                f"Read from {_cr['bars']} sessions to {_cr['asof']}. Levels are prices the "
+                f"stock reversed at more than once; a trendline is kept only if further swing "
+                f"points sit on it **and** no close has since broken through — any two points "
+                f"make a line, so without that test this would find a trendline in random "
+                f"data every time. **Descriptive, not predictive**: nothing here has been "
+                f"measured against forward returns, so read it as context and never as a "
+                f"signal. Same in Telegram via **/chart {_cr_tk}**.")
 
 elif page == "💧 Money Flow (Sankey)":
     _page_header("💧 Money Flow (Sankey)", _PAGE_HELP["💧 Money Flow (Sankey)"])

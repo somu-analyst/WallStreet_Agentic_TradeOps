@@ -33297,6 +33297,195 @@ def _fetch_openbb_history(tk, years):
         return None
 
 
+def _chart_pivots(highs, lows, w=5):
+    """Swing highs/lows as (index, price) lists, by the fractal rule.
+
+    A pivot high is a bar whose high is the highest in the window w bars either side. That
+    is the whole definition -- deterministic, one parameter, and the same answer every time.
+    Everything downstream (levels, trendlines, patterns) is built on these, so the subjective
+    part of chart reading is confined to ONE number the caller can see and change.
+
+    The last w bars can never be pivots: confirming one needs w bars of hindsight. That is a
+    real property of the method, not an off-by-one -- a "pivot" on today's bar is a guess.
+    """
+    ph, pl = [], []
+    n = len(highs)
+    for i in range(w, n - w):
+        seg_h = highs[i - w:i + w + 1]
+        seg_l = lows[i - w:i + w + 1]
+        if highs[i] == max(seg_h):
+            ph.append((i, highs[i]))
+        if lows[i] == min(seg_l):
+            pl.append((i, lows[i]))
+    return ph, pl
+
+
+def _chart_levels(pivots, spot, tol_pct=1.2, min_touches=2):
+    """Horizontal support/resistance: pivots that keep happening at the same PRICE.
+
+    A level is worth drawing when price turned there more than once, so pivots are clustered
+    by price and a cluster only survives with `min_touches`. Tolerance is a PERCENTAGE, not a
+    fixed dollar amount -- $2 is noise on a $500 stock and a chasm on a $6 one.
+    """
+    if not pivots:
+        return []
+    pts = sorted(p for _, p in pivots)
+    clusters, cur = [], [pts[0]]
+    for p in pts[1:]:
+        if abs(p - cur[-1]) / max(cur[-1], 1e-9) * 100 <= tol_pct:
+            cur.append(p)
+        else:
+            clusters.append(cur); cur = [p]
+    clusters.append(cur)
+    out = []
+    for c in clusters:
+        if len(c) < min_touches:
+            continue
+        lvl = sum(c) / len(c)
+        out.append({"price": lvl, "touches": len(c),
+                    "side": ("resistance" if lvl > spot else "support"),
+                    "dist_pct": (lvl / spot - 1) * 100 if spot else None})
+    # Strongest first: more touches is a level more people are watching.
+    return sorted(out, key=lambda d: (-d["touches"], abs(d["dist_pct"] or 0)))[:6]
+
+
+def _chart_trendlines(pivots, closes, kind, tol_pct=1.5, min_touches=3, max_dist_pct=20.0):
+    """Sloping support/resistance drawn through pivots, the way it is done by hand.
+
+    Every PAIR of pivots defines a line; the line is kept only if further pivots sit on it
+    and price has not closed decisively through it. That second test is what separates a
+    trendline from a line that merely touches two points -- any two points define a line, so
+    without it this would "find" a trendline on random data every single time.
+
+    `kind` is "support" (through lows, price should stay above) or "resistance" (through
+    highs, price should stay below).
+    """
+    if len(pivots) < min_touches:
+        return []
+    best = []
+    for a in range(len(pivots)):
+        for b in range(a + 1, len(pivots)):
+            i1, p1 = pivots[a]
+            i2, p2 = pivots[b]
+            if i2 == i1:
+                continue
+            slope = (p2 - p1) / (i2 - i1)
+            touches, broken = 0, False
+            for i, p in pivots:
+                line = p1 + slope * (i - i1)
+                if line > 0 and abs(p - line) / line * 100 <= tol_pct:
+                    touches += 1
+            # A close beyond the line by more than tolerance invalidates it -- the line was
+            # not respected, so nobody is trading off it.
+            # CHECKED TO THE PRESENT BAR, not just between the two anchors. Stopping at the
+            # second anchor reported lines price had ALREADY fallen through: AAPL came back
+            # with "support at 330.31" while it was trading at 327.97, and TSLA with
+            # resistance 30% below spot. A support line above the current price is not a
+            # support line, it is a line that broke.
+            for i in range(i1, len(closes)):
+                line = p1 + slope * (i - i1)
+                if line <= 0:
+                    continue
+                off = (closes[i] - line) / line * 100
+                if (kind == "support" and off < -tol_pct) or \
+                   (kind == "resistance" and off > tol_pct):
+                    broken = True
+                    break
+            if not broken and touches >= min_touches:
+                now = p1 + slope * (len(closes) - 1 - i1)
+                # TESTING vs HOLDING. Price inside the tolerance band sits ON the line rather
+                # than safely the correct side of it, and that is the interesting case -- it
+                # is the moment a line is about to matter. Reporting it as plain "resistance"
+                # while price prints ABOVE it reads as a contradiction; naming the state says
+                # what is actually happening.
+                off = (closes[-1] - now) / now * 100 if now > 0 else 0.0
+                # A LINE 100% AWAY IS NOT A LINE ANYONE DRAWS. Extending a steeply sloped
+                # line far enough forward always produces a number, and the first version
+                # duly reported "support at 179.87" for a stock trading at 375. It was
+                # arithmetically true and completely useless: nobody is trading off a level
+                # the price would have to halve to reach. Keep only what is near enough to
+                # matter.
+                if abs(off) > max_dist_pct:
+                    continue
+                best.append({"slope": slope, "anchor_i": i1, "anchor_p": p1,
+                             "touches": touches, "kind": kind, "now": now,
+                             "dist_pct": off,
+                             "state": "testing" if abs(off) <= tol_pct else "holding"})
+    # Most-touched first; a 5-touch line is a level the market clearly sees. Ties broken by
+    # PROXIMITY, because between two equally-respected lines the nearer one is the one that
+    # is about to matter.
+    best.sort(key=lambda d: (-d["touches"], abs(d["dist_pct"])))
+    out, seen = [], []
+    for ln in best:                      # drop near-duplicates of a line already kept
+        if any(abs(ln["now"] - s) / max(s, 1e-9) * 100 < tol_pct for s in seen):
+            continue
+        out.append(ln); seen.append(ln["now"])
+        if len(out) == 2:
+            break
+    return out
+
+
+def _chart_read(ticker, days=180, w=5, conn=None):
+    """What a person would say looking at the chart: levels, trendlines, where price sits.
+
+    DESCRIPTIVE, NOT PREDICTIVE, and the distinction is the point. This says "price is 1.2%
+    under a line it has touched four times", which is a fact about the chart. It does NOT say
+    what happens next, because no pattern here has been measured against forward returns yet.
+    Classical patterns (head and shoulders, triangles) come later and only through
+    measure_signal_base_rates with the Bonferroni bar, like every other model in this repo --
+    the published win-rates for those are in-sample description, which is the failure this
+    project already has two written rules about.
+    """
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        _daily_history(ticker, conn=conn)          # guarantees backfill/write-through
+        rows = conn.execute(
+            "SELECT trade_date, high, low, close, volume FROM stock_history "
+            "WHERE ticker=? ORDER BY trade_date DESC LIMIT ?", (str(ticker).upper(), days)
+        ).fetchall()
+    except Exception:
+        return None
+    finally:
+        if own:
+            conn.close()
+    rows = list(reversed(rows))
+    if len(rows) < 40:
+        return None
+    dates = [r[0] for r in rows]
+    highs = [float(r[1] or 0) for r in rows]
+    lows = [float(r[2] or 0) for r in rows]
+    closes = [float(r[3] or 0) for r in rows]
+    vols = [float(r[4] or 0) for r in rows]
+    spot = closes[-1]
+    ph, pl = _chart_pivots(highs, lows, w=w)
+    levels = _chart_levels(ph + pl, spot)
+    lines = (_chart_trendlines(pl, closes, "support")
+             + _chart_trendlines(ph, closes, "resistance"))
+    # BREAKOUT is only interesting with participation behind it. A close through a level on
+    # below-average volume is the classic false break, so the volume ratio travels with it
+    # rather than being left for the reader to look up.
+    v20 = sum(vols[-20:]) / max(len(vols[-20:]), 1)
+    brk = None
+    for lv in levels:
+        prev = closes[-2] if len(closes) > 1 else spot
+        if prev <= lv["price"] < spot:
+            brk = {"dir": "up", "level": lv["price"], "touches": lv["touches"]}
+        elif prev >= lv["price"] > spot:
+            brk = {"dir": "down", "level": lv["price"], "touches": lv["touches"]}
+    if brk:
+        # Volume can be genuinely ABSENT rather than zero: the Finnhub price lane fills OHLC
+        # from /quote, which publishes no volume at all, so those rows carry NaN/0. Printing
+        # "0.0x average volume" would read as a damning verdict on the breakout when in fact
+        # nothing was measured. None means unknown and the renderer must say so.
+        brk["vol_x"] = (vols[-1] / v20) if (v20 and vols[-1]) else None
+    return {"ticker": str(ticker).upper(), "asof": dates[-1], "spot": spot, "bars": len(rows),
+            "pivot_highs": len(ph), "pivot_lows": len(pl),
+            "levels": levels, "trendlines": lines, "breakout": brk,
+            "range_52w": (min(lows), max(highs))}
+
+
 def _daily_history(ticker, years=6, conn=None):
     """Daily close Series (datetime index), DB-first from stock_history; if a
     ticker is missing or short, lazily backfill ~years (yfinance primary, OpenBB
@@ -36450,6 +36639,60 @@ async def _send_breakout(msg, rows):
     await msg.reply_text(txt[:4000], parse_mode=H,
                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="breakout_view"),
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
+
+
+def _fmt_chart_read(ticker):
+    """Render _chart_read as the sentences a person would say about the chart."""
+    r = _chart_read(ticker)
+    if not r:
+        return (f"📐 <b>{str(ticker).upper()}</b> — not enough history to read a chart "
+                f"(needs ~40 sessions).")
+    spot = r["spot"]
+    rows = []
+    for lv in r["levels"]:
+        rows.append(("🟥" if lv["side"] == "resistance" else "🟩",
+                     f"{lv['price']:,.2f}", f"{lv['touches']}x", f"{lv['dist_pct']:+.1f}%"))
+    parts = [_report(
+        f"📐 {r['ticker']} CHART · {r['asof']}",
+        ("", "Level", "Hits", "vs now"), rows, right_cols={1, 2, 3},
+        legend=f"spot {spot:,.2f} · 🟩 support below · 🟥 resistance above · "
+               f"Hits = times price turned there",
+        notes="Horizontal levels: prices where the stock has reversed more than once.")]
+    if r["trendlines"]:
+        tl = []
+        for ln in r["trendlines"]:
+            tl.append(f"• <b>{ln['kind'].title()}</b> line now at <b>{ln['now']:,.2f}</b> "
+                      f"({ln['dist_pct']:+.1f}%) · {ln['touches']} touches · "
+                      f"{'rising' if ln['slope'] > 0 else 'falling'} "
+                      f"{abs(ln['slope']):.2f}/session · <i>{ln['state']}</i>")
+        parts.append("\n<b>Trendlines</b>\n" + "\n".join(tl))
+    if r["breakout"]:
+        b = r["breakout"]
+        vol = (f"on <b>{b['vol_x']:.1f}x</b> average volume" if b.get("vol_x")
+               else "<i>volume not available for this session, so participation is unknown</i>")
+        parts.append(f"\n⚡ <b>Broke {b['dir']}</b> through {b['level']:,.2f} "
+                     f"({b['touches']} prior touches) {vol}.")
+    parts.append(f"\n<i>Read from {r['bars']} sessions · {r['pivot_highs']} swing highs, "
+                 f"{r['pivot_lows']} swing lows. This DESCRIBES the chart — it is not a "
+                 f"forecast. No pattern here has been measured against forward returns yet, "
+                 f"so treat it as context, never as a signal.</i>")
+    return "\n".join(parts)
+
+
+async def chart_command(update, ctx):
+    """/chart TICKER — levels, trendlines and breakout state, read off the price history."""
+    args = (ctx.args if hasattr(ctx, "args") else None) or []
+    if not args:
+        await update.message.reply_text(
+            "📐 Usage: <code>/chart TICKER</code> — e.g. <code>/chart AAPL</code>",
+            parse_mode=H)
+        return
+    tk = str(args[0]).upper()
+    await update.message.reply_text(f"📐 Reading {tk}'s chart…", parse_mode=H)
+    try:
+        await update.message.reply_text(_fmt_chart_read(tk), parse_mode=H)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Chart read failed for {tk}: {e}", parse_mode=H)
 
 
 async def breakout_command(update, ctx):
@@ -44384,6 +44627,7 @@ def main():
     app.add_handler(CommandHandler("vrp", vrp_command))
     app.add_handler(CommandHandler("rs", rs_command))
     app.add_handler(CommandHandler("breakout", breakout_command))
+    app.add_handler(CommandHandler("chart", chart_command))
     app.add_handler(CommandHandler("zrev", zrev_command))
     app.add_handler(CommandHandler("riskoff", riskoff_command))
     app.add_handler(CommandHandler("rovalidate", rovalidate_command))

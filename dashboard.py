@@ -27308,10 +27308,12 @@ if page == "📝 Paper Trading":
                 else:
                     _pt_conn.execute(
                         "INSERT INTO paper_trades (ticker, option_type, strike, expiry, entry_price, "
-                        "quantity, entry_date, status, notes) VALUES (?,?,?,?,?,?,?, 'OPEN', ?)",
+                        "quantity, entry_date, status, notes, updated_at) "
+                        "VALUES (?,?,?,?,?,?,?, 'OPEN', ?, ?)",
                         (_pa_tk, _pa_typ.upper(), _pa_strike, _pa_exp, float(_entry_px),
                          float(_pa_qty) if _pa_typ == "Stock" else int(_pa_qty),
-                         _pa_entry_date.strftime("%Y-%m-%d"), _pa_note or None))
+                         _pa_entry_date.strftime("%Y-%m-%d"), _pa_note or None,
+                         datetime.now().isoformat()))
                     _pt_conn.commit()
                     st.success(f"Added demo {_pa_tk} {_pa_qty:+g} @ ${_entry_px:.2f}."); st.rerun()
 
@@ -27773,8 +27775,10 @@ if page == "📝 Paper Trading":
                 _pmult2 = 1 if str(_prow["option_type"]).upper() == "STOCK" else 100
                 _pnl_total += (_pexit - float(_prow["entry_price"] or 0)) * _pqty2 * _pmult2
                 _pt_conn.execute(
-                    "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=? WHERE trade_id=?",
-                    (_pexit, datetime.now().strftime("%Y-%m-%d"), int(_pid)))
+                    "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=?, "
+                    "updated_at=? WHERE trade_id=?",
+                    (_pexit, datetime.now().strftime("%Y-%m-%d"),
+                     datetime.now().isoformat(), int(_pid)))
             _pt_conn.commit()
             _lots_txt = f" across {len(_pids)} lots" if len(_pids) > 1 else ""
             st.success(f"Closed{_lots_txt} — P&L ${_pnl_total:+,.0f}."); st.rerun()

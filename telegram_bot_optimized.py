@@ -1979,8 +1979,9 @@ def _close_expired_positions() -> list:
                 # with no record of WHY, and "expired worthless" is the whole story.
                 conn.execute(
                     "UPDATE paper_trades SET status='CLOSED', exit_date=?, exit_price=?, "
-                    "notes=TRIM(COALESCE(notes,'') || ' | ' || ?) WHERE trade_id=?",
-                    (expd, float(round(intrinsic, 2)), reason, tid))
+                    "notes=TRIM(COALESCE(notes,'') || ' | ' || ?), updated_at=? WHERE trade_id=?",
+                    (expd, float(round(intrinsic, 2)), reason,
+                     datetime.now().isoformat(), tid))
             conn.commit()
             closed.append((tid, tk))
             log.info(f"Auto-closed expired {_tbl} position: {tk} trade_id={tid} expiry={expd}")
@@ -28107,7 +28108,7 @@ def _sec_cik(ticker):
 
 
 def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
-                      basis="geography", attempt=0):
+                      basis="geography", attempt=0, metric="revenue"):
     """{segment: revenue} from the company's own filing, or {} — NEVER raises.
 
     SEC renders every filing's segment tables as plain HTML (the "R" reports listed in
@@ -28122,6 +28123,17 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
     """
     try:
         import urllib.request as _u, json as _j, re as _re
+        # metric="assets" reads LONG-LIVED ASSETS by geography instead of revenue -- where the
+        # company physically IS, as opposed to where its customers are (ID 351). Those are
+        # different questions and filers answer both: Alphabet books most revenue in the US
+        # while holding property across several regions.
+        # Reconciliation is switched OFF for it, deliberately. The revenue path proves a table
+        # is the right one by checking its members sum to revenue; assets sum to a number that
+        # appears nowhere in the caller, so keeping the check would reject every correct table.
+        # Nulling `total` here is all that takes -- every downstream reconciliation step is
+        # already gated on it.
+        if metric != "revenue":
+            total = None
         cik = _sec_cik(ticker)
         if not cik:
             return {}
@@ -28180,6 +28192,18 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
             # usual case still resolves on the first try.
             if not _re.search(r"\(detail", name, _re.I):
                 continue                                   # narrative blocks carry no data
+            if metric == "assets":
+                # Asset tables are inherently geographic, so this ignores `basis`. Filers
+                # title them either way round -- JNJ "Revenue from External Customers and
+                # Long-Lived Assets, by Geographical Areas", PG "US And International Sales
+                # And Assets" -- so the strong pattern is the ASSET words, with a bare
+                # geography match as the fallback.
+                if _re.search(r"long.?lived|property.*plant|assets.*geograph|"
+                              r"geograph.*assets", name, _re.I):
+                    cands.append(fn.group(1))
+                elif _re.search(r"geograph|international", name, _re.I):
+                    fallback.append(fn.group(1))
+                continue
             if basis == "segment":
                 if _re.search(r"financial information for each reportable segment|"
                               r"segment.*(revenue|financial info)|revenue by segment",
@@ -28240,6 +28264,12 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         _MONEY = _re.compile(
             r"^(net |total |operating )*(revenues?|sales)"
             r"( from contract(s)? with customers)?$", _re.I)
+        if metric == "assets":
+            # The asset line is labelled as variously as the revenue one: "Long-lived
+            # assets", "Long-lived assets, net", "PROPERTY, PLANT AND EQUIPMENT, NET".
+            _MONEY = _re.compile(
+                r"^(total )?(long[- ]?lived assets|property,? plant and equipment)"
+                r"(,? net)?( excluding [a-z ]+)?$", _re.I)
         # THE MONEY IS NOT ALWAYS IN COLUMN 1. Filers interleave a footnote-marker column:
         # Microsoft's geography table is 5 columns wide and column 1 holds "[1]" or nothing,
         # with the figures starting at column 2. Reading a FIXED column returned nothing at
@@ -39662,9 +39692,10 @@ async def paper_command(update, ctx):
                 else:
                     conn.execute(
                         "INSERT INTO paper_trades (ticker, option_type, strike, expiry, entry_price, "
-                        "quantity, entry_date, status) VALUES (?,?,?,?,?,?,?, 'OPEN')",
+                        "quantity, entry_date, status, updated_at) VALUES (?,?,?,?,?,?,?, 'OPEN', ?)",
                         (p["tk"], p["typ"], p["strike"], p["expiry"], float(px), p["qty"],
-                         p["entry_date"] or datetime.now().strftime("%Y-%m-%d")))
+                         p["entry_date"] or datetime.now().strftime("%Y-%m-%d"),
+                         datetime.now().isoformat()))
                     conn.commit()
                     new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                     _set_pos_meta(conn, "paper_trades", new_id,
@@ -39700,8 +39731,10 @@ async def paper_command(update, ctx):
                     qty_close = float(rd["quantity"]) if is_stock else int(rd["quantity"])
                     pnl = (exit_px - float(rd["entry_price"] or 0)) * qty_close * mult
                     conn.execute(
-                        "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=? WHERE trade_id=?",
-                        (exit_px, datetime.now().strftime("%Y-%m-%d"), pid))
+                        "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=?, "
+                        "updated_at=? WHERE trade_id=?",
+                        (exit_px, datetime.now().strftime("%Y-%m-%d"),
+                         datetime.now().isoformat(), pid))
                     conn.commit()
                     msg = f"✅ Closed demo #{pid} @ ${exit_px:.2f} — P&L ${pnl:+,.0f}."
         else:

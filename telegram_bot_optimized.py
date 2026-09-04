@@ -36767,6 +36767,96 @@ async def _send_breakout(msg, rows):
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
 
 
+def _chart_outlook(ticker, conn=None, horizon_days=None):
+    """What could happen next, with the probability taken from OPTIONS, not from the chart.
+
+    WHY THE NUMBER CANNOT COME FROM THE CHART. Two measurements on our own history, both run
+    properly, both negative:
+      * classical patterns (ID 403): every edge between -1.5 and +1.9 points, |t| under the
+        2.75 Bonferroni bar, at 5, 10 and 20 sessions.
+      * level breakouts (ID 405): looked superb at +9.5pp and t=9.24, then RANDOM lines drawn
+        from the same price range scored +9.7pp and t=11.89. The edge was a baseline artifact,
+        not a level.
+    So any "70% chance this breakout works" computed from chart structure would contradict our
+    own testing. What we DO have is the options market's own opinion: ATM implied volatility
+    is a live, money-backed forecast of the distribution, and the levels are the specific
+    prices worth asking about. That combination is honest -- the chart supplies the QUESTION
+    (which prices matter) and the option market supplies the PROBABILITY.
+
+    Zero drift is assumed deliberately. Adding an expected return would be forecasting, which
+    is the thing we just measured we cannot do; the risk-neutral read is the market's own.
+
+    Returns None when there is no IV to price with -- an unlisted or illiquid name gets no
+    invented number.
+    """
+    import math                                   # module-level is `math as _math` here
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        r = _chart_read(ticker, conn=conn)
+        if not r:
+            return None
+        spot = r["spot"]
+        term = _atm_iv_term(conn, str(ticker).upper(), spot)
+        if not term:
+            return None
+        today = datetime.now(timezone.utc).replace(tzinfo=None).date()
+        # Pick the expiry closest to the horizon asked for; its IV is the market's vol for
+        # roughly that window, which is the whole reason the term structure is stored.
+        cands = []
+        for e, iv in term.items():
+            try:
+                dte = (datetime.strptime(e, "%Y-%m-%d").date() - today).days
+            except Exception:
+                continue
+            if dte >= 3 and iv and iv > 0:
+                cands.append((dte, e, float(iv)))
+        if not cands:
+            return None
+        target = horizon_days or 30
+        dte, exp, iv = min(cands, key=lambda c: abs(c[0] - target))
+        T = dte / 365.0
+        sig = iv * math.sqrt(T)                      # 1-sigma log move over the window
+        if sig <= 0:
+            return None
+
+        def _phi(z):
+            return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+        def _probs(level):
+            """(P end beyond, P touch at any point) for a barrier at `level`."""
+            if level <= 0 or spot <= 0:
+                return None, None
+            z = (math.log(level / spot) + 0.5 * sig * sig) / sig
+            p_below = _phi(z)
+            p_beyond = p_below if level < spot else (1.0 - p_below)
+            # Reflection principle for a driftless walk: touching is about twice as likely as
+            # finishing beyond. Capped, because the approximation exceeds 1 very close in.
+            return p_beyond, min(0.99, 2.0 * p_beyond)
+
+        targets = []
+        for L in r["levels"]:
+            pb, pt = _probs(L["price"])
+            if pb is None:
+                continue
+            targets.append({"price": L["price"], "side": L["side"], "touches": L["touches"],
+                            "dist_pct": (L["price"] / spot - 1) * 100,
+                            "p_beyond": pb * 100, "p_touch": pt * 100})
+        targets.sort(key=lambda d: abs(d["dist_pct"]))
+        return {"ticker": r["ticker"], "spot": spot, "asof": r["asof"], "iv": iv * 100,
+                "dte": dte, "expiry": exp, "sigma_pct": sig * 100,
+                "band_lo": spot * math.exp(-sig), "band_hi": spot * math.exp(sig),
+                "targets": targets[:6], "breakout": r.get("breakout"),
+                "patterns": r.get("patterns") or []}
+    except Exception:
+        log.debug("chart_outlook failed", exc_info=True)
+        return None
+    finally:
+        if own:
+            conn.close()
+
+
 def _fmt_chart_read(ticker):
     """Render _chart_read as the sentences a person would say about the chart."""
     r = _chart_read(ticker)
@@ -36815,6 +36905,28 @@ def _fmt_chart_read(ticker):
                      "counted on the same history used to define the pattern. On our data NO "
                      "pattern clears the significance bar, so the shape is worth seeing and "
                      "is not worth trading on its own.</i>")
+
+    # ── What could happen next, priced by the OPTIONS market ──────────────────────────
+    o = _chart_outlook(ticker)
+    if o and o["targets"]:
+        rows = [(("▲" if t["side"] == "resistance" else "▼"),
+                 f"{t['price']:,.2f}", f"{t['dist_pct']:+.1f}%",
+                 f"{t['p_touch']:.0f}%") for t in o["targets"][:5]]
+        parts.append("\n" + _report(
+            f"🎯 WHAT COULD HAPPEN — next {o['dte']}d",
+            ("", "Level", "Away", "Touch"), rows, right_cols={1, 2, 3},
+            legend=f"ATM IV {o['iv']:.1f}% to {o['expiry']} · 1σ band "
+                   f"{o['band_lo']:,.2f}–{o['band_hi']:,.2f} (±{o['sigma_pct']:.1f}%)",
+            notes="'Touch' = chance price reaches that level at any point before expiry."))
+        parts.append(
+            "\n<i>Where those odds come from, and where they do NOT. The LEVELS are from the "
+            "chart — they are prices this stock has actually turned at. The PROBABILITIES are "
+            "the options market's, backed out of implied volatility, i.e. what people are "
+            "paying real money for right now. Nothing here is our forecast, and that is "
+            "deliberate: we measured chart patterns (~51,800 cases) and level breakouts on our "
+            "own history and neither predicts direction — the breakout result even looked "
+            "strong until random lines scored the same. Drift is assumed ZERO, so these are "
+            "not a view on whether the stock goes up.</i>")
     parts.append(f"\n<i>Read from {r['bars']} sessions · {r['pivot_highs']} swing highs, "
                  f"{r['pivot_lows']} swing lows. This DESCRIBES the chart — it is not a "
                  f"forecast. No pattern here has been measured against forward returns yet, "

@@ -25173,6 +25173,56 @@ elif page == "📐 Chart Reader":
                 else:
                     st.caption("No line held enough swing points without being broken.")
 
+            # ── What could happen next: chart supplies the prices, options the odds ──
+            try:
+                _ol = _TB_ENGINE._chart_outlook(_cr_tk)
+            except Exception:
+                _ol = None
+            if _ol and _ol.get("targets"):
+                st.markdown("##### What could happen next")
+                _o1, _o2, _o3 = st.columns(3)
+                _o1.metric("Options-implied 1σ band",
+                           f"{_ol['band_lo']:,.2f} – {_ol['band_hi']:,.2f}",
+                           f"±{_ol['sigma_pct']:.1f}% over {_ol['dte']}d")
+                _o2.metric("ATM implied volatility", f"{_ol['iv']:.1f}%",
+                           help="The options market's own forecast of how much this moves.")
+                _o3.metric("Priced to", _ol["expiry"])
+                _odf = pd.DataFrame([{
+                    "": ("▲" if t["side"] == "resistance" else "▼"),
+                    "Level": round(t["price"], 2),
+                    "Away %": round(t["dist_pct"], 1),
+                    "Touches": t["touches"],
+                    # STORED 0-100, NOT 0-1 (the ID 251 trap, hit again here). ProgressColumn's
+                    # `format` is printf on the RAW value and does NOT multiply by 100, so a
+                    # 0-1 fraction under "%.0f%%" can only ever render 0% or 1% -- a 69.5%
+                    # touch probability displayed as "1%". max_value must match the scale.
+                    "Chance of touching": t["p_touch"],
+                    "Chance of closing beyond": t["p_beyond"],
+                } for t in _ol["targets"]])
+                st.dataframe(
+                    _odf, hide_index=True, use_container_width=True,
+                    column_config={
+                        "Level": st.column_config.NumberColumn(format="%.2f"),
+                        "Away %": st.column_config.NumberColumn(format="%+.1f%%"),
+                        "Chance of touching": st.column_config.ProgressColumn(
+                            min_value=0.0, max_value=100.0, format="%.0f%%",
+                            help="Reaches this level at ANY point before expiry."),
+                        "Chance of closing beyond": st.column_config.ProgressColumn(
+                            min_value=0.0, max_value=100.0, format="%.0f%%",
+                            help="Finishes past it on expiry day — always the smaller number."),
+                    })
+                st.info(
+                    "**Where these odds come from, and where they do not.** The **levels** are "
+                    "from the chart — prices this stock has actually turned at. The "
+                    "**probabilities** are the *options market's*, backed out of implied "
+                    "volatility: what people are paying real money for right now, not our "
+                    "opinion. That split is deliberate. We measured chart patterns (~51,800 "
+                    "cases) and level breakouts on our own history and **neither predicts "
+                    "direction** — the breakout result even looked strong at +9.5 points until "
+                    "random lines drawn from the same range scored +9.7. Drift is assumed "
+                    "**zero**, so none of this is a view on whether the stock rises; it is the "
+                    "spread of outcomes the market is currently pricing.")
+
             if _cr.get("patterns"):
                 st.markdown("##### Patterns present, and what each is actually worth")
                 _pf = pd.DataFrame([{

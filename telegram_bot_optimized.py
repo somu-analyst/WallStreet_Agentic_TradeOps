@@ -1885,15 +1885,35 @@ def _close_trade_now(trade_id, reason="telegram_quick_exit"):
 
 
 def _close_expired_positions() -> list:
-    """Auto-close any OPEN trade whose expiry date has already passed (expired worthless).
-    Called at startup and before every positions fetch. Returns list of (trade_id, ticker)."""
+    """Auto-close any OPEN option whose expiry has passed, in BOTH books.
+
+    Called at startup and before every positions fetch. Returns [(trade_id, ticker), ...].
+
+    TWO THINGS WERE WRONG HERE (both fixed 2026-09-04, ID 410):
+
+    1. IT ONLY EVER READ `trades`. The paper book had no expiry settlement at all, so a
+       GOOG 340P that expired on 2026-07-17 was still status='OPEN' 49 days later --
+       appearing in the position card, counted in book P&L, and generating an "exit
+       immediately" action for a contract that no longer exists.
+
+    2. THE ITM SETTLEMENT COULD NEVER FIRE. The 2026-07-22 fix below settles at intrinsic
+       off the close at expiry, and reads `tr.get("strike")` / `tr.get("option_type")` --
+       but neither column was in the SELECT. A pandas row `.get()` on a missing key returns
+       the DEFAULT, so strike was always 0, `strike > 0` was always false, and every expiry
+       booked as worthless no matter how deep in the money it finished. The careful signed
+       settlement logic was dead code guarded by a column that was never fetched.
+    """
     today = datetime.now().strftime("%Y-%m-%d")
     conn  = get_conn()
     closed = []
-    try:
+    # paper_trades carries a narrower schema (no exit_reason / pnl / days_held / updated_at),
+    # so the write is per-table while everything above it is shared.
+    for _tbl in ("trades", "paper_trades"):
+      try:
         df = pd.read_sql(
-            "SELECT trade_id, ticker, expiry, entry_price, quantity, entry_date "
-            "FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND expiry IS NOT NULL AND expiry != '' AND expiry < ?",
+            "SELECT trade_id, ticker, expiry, entry_price, quantity, entry_date, "
+            "strike, option_type "
+            f"FROM {_tbl} WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' AND expiry IS NOT NULL AND expiry != '' AND expiry < ?",
             conn, params=(today,))
         for _, tr in df.iterrows():
             tid   = int(tr["trade_id"])
@@ -1937,28 +1957,36 @@ def _close_expired_positions() -> list:
                 days_held = (ex - ed).days
             except Exception:
                 log.debug("suppressed exception", exc_info=True)
-            conn.execute("""
-                UPDATE trades
-                SET status='CLOSED',
-                    exit_date=?,
-                    exit_time='16:00:00',
-                    exit_price=?,
-                    exit_reason=?,
-                    pnl=?,
-                    pnl_pct=?,
-                    days_held=?,
-                    updated_at=?
-                WHERE trade_id=?
-            """, (expd, float(round(intrinsic, 2)), reason,
-                  float(round(pnl, 2)), float(round(pnl_pct, 2)),
-                  days_held, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), tid))
+            if _tbl == "trades":
+                conn.execute("""
+                    UPDATE trades
+                    SET status='CLOSED',
+                        exit_date=?,
+                        exit_time='16:00:00',
+                        exit_price=?,
+                        exit_reason=?,
+                        pnl=?,
+                        pnl_pct=?,
+                        days_held=?,
+                        updated_at=?
+                    WHERE trade_id=?
+                """, (expd, float(round(intrinsic, 2)), reason,
+                      float(round(pnl, 2)), float(round(pnl_pct, 2)),
+                      days_held, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), tid))
+            else:
+                # The demo book has no pnl/reason columns, so the settlement reason is
+                # appended to `notes` rather than dropped -- otherwise a row would close
+                # with no record of WHY, and "expired worthless" is the whole story.
+                conn.execute(
+                    "UPDATE paper_trades SET status='CLOSED', exit_date=?, exit_price=?, "
+                    "notes=TRIM(COALESCE(notes,'') || ' | ' || ?) WHERE trade_id=?",
+                    (expd, float(round(intrinsic, 2)), reason, tid))
             conn.commit()
             closed.append((tid, tk))
-            log.info(f"Auto-closed expired position: {tk} trade_id={tid} expiry={expd}")
-    except Exception as e:
-        log.warning(f"_close_expired_positions error: {e}")
-    finally:
-        conn.close()
+            log.info(f"Auto-closed expired {_tbl} position: {tk} trade_id={tid} expiry={expd}")
+      except Exception as e:
+        log.warning(f"_close_expired_positions({_tbl}) error: {e}")
+    conn.close()
     return closed
 
 

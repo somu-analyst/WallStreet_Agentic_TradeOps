@@ -25150,7 +25150,54 @@ elif page == "📐 Chart Reader":
                 height=560, margin=dict(l=10, r=90, t=30, b=20),
                 xaxis_rangeslider_visible=False, showlegend=False,
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+
+            # ── The forward cone: where the OPTION MARKET says it can go ────────────────
+            # Drawn as a widening range and never as a single line, because a single line
+            # would read as a forecast and we measured that we do not have one. The cone
+            # flares as sqrt(time), which is also why a ruled straight line drawn by hand
+            # overstates the near term and understates the far.
+            try:
+                _pj = _TB_ENGINE._chart_projection(_cr_tk)
+            except Exception:
+                _pj = None
+            if _pj and _pj.get("bands"):
+                _px_last = _crh["trade_date"].iloc[-1]
+                for _bi, _bd in enumerate(_pj["bands"]):
+                    _xs = [_px_last] + _pj["dates"]
+                    _shade = "rgba(120,140,255,0.13)" if _bd["z"] <= 1 else "rgba(120,140,255,0.07)"
+                    _hover = (f"{_bd['label']} band<br>%{{y:,.2f}}<br>"
+                              f"{_bd['p_touch']:.0f}% chance of touching<br>"
+                              f"{_bd['p_beyond']:.0f}% chance of closing beyond<extra></extra>")
+                    for _side in ("upper", "lower"):
+                        _ys = [_pj["spot"]] + _bd[_side]
+                        _fig.add_trace(go.Scatter(
+                            x=_xs, y=_ys, mode="lines", showlegend=False,
+                            line=dict(color="rgba(120,140,255,0.55)", width=1,
+                                      dash="dot" if _bd["z"] > 1 else "dash"),
+                            fill=("tonexty" if _side == "lower" else None),
+                            fillcolor=_shade, hovertemplate=_hover))
+                    # The probability travels ON the line, which is what makes the cone
+                    # readable without a legend.
+                    for _side, _end in (("upper", _bd["end_up"]), ("lower", _bd["end_dn"])):
+                        _fig.add_annotation(
+                            x=_pj["dates"][-1], y=_end, xanchor="left", showarrow=False,
+                            text=(f"<b>{_bd['label']}</b> {_end:,.0f} · "
+                                  f"{_bd['p_touch']:.0f}% touch / {_bd['p_beyond']:.0f}% beyond"),
+                            font=dict(size=10, color="#7b8cff"))
+                _fig.add_annotation(
+                    x=_pj["dates"][-1], y=_pj["spot"], xanchor="left", showarrow=False,
+                    text=f"<i>implied to {_pj['expiry']}</i>",
+                    font=dict(size=10, color="#98a2b3"))
             st.plotly_chart(_fig, use_container_width=True, config={"displayModeBar": False})
+            if _pj:
+                st.caption(
+                    f"**The shaded cone is not a prediction.** It is the range the options "
+                    f"market is pricing for **{_cr_tk}** to {_pj['expiry']} at "
+                    f"{_pj['iv']:.1f}% implied volatility, widening with the square root of "
+                    f"time. Drift is **zero**, so it is deliberately symmetric — it says "
+                    f"nothing about which way the stock goes, only how far it can travel. "
+                    f"Each line carries both numbers: the chance of *touching* it at any "
+                    f"point, which is roughly double the chance of *closing beyond* it.")
 
             _cl1, _cl2 = st.columns(2)
             with _cl1:

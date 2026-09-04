@@ -36857,6 +36857,82 @@ def _chart_outlook(ticker, conn=None, horizon_days=None):
             conn.close()
 
 
+def _chart_projection(ticker, conn=None, horizon_days=None, zs=(1.0, 2.0)):
+    """The forward CONE the option market is pricing — one path per band, probability attached.
+
+    This is the "where can it go" line, and it is a RANGE rather than a direction on purpose.
+    Drift is zero, so the cone is symmetric in log space and its middle is flat: it is not a
+    prediction that the stock rises or falls, it is the spread of outcomes currently being
+    paid for. Anything else would contradict our own measurements, which found no directional
+    edge in either patterns (ID 403) or level breaks (ID 405).
+
+    Each band carries BOTH numbers the user asked to see on the line:
+      p_beyond  chance of FINISHING past it on the last day    = 1 - Phi(z)
+      p_touch   chance of getting there at ANY point first     ~ 2 x p_beyond
+    The second is always the bigger one, and that gap is the whole point of the pair: a level
+    can be very likely to be tapped and unlikely to hold, which is exactly the distinction
+    that matters when placing a stop or picking a strike.
+
+    Widening goes as sqrt(time) -- the cone flares fast early and slowly later, which is why a
+    straight ruled line drawn on a chart overstates the near term and understates the far.
+    """
+    import math
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        r = _chart_read(ticker, conn=conn)
+        if not r:
+            return None
+        spot = r["spot"]
+        term = _atm_iv_term(conn, str(ticker).upper(), spot)
+        if not term or spot <= 0:
+            return None
+        today = datetime.now(timezone.utc).replace(tzinfo=None).date()
+        cands = []
+        for e, iv in term.items():
+            try:
+                dte = (datetime.strptime(e, "%Y-%m-%d").date() - today).days
+            except Exception:
+                continue
+            if dte >= 3 and iv and iv > 0:
+                cands.append((dte, e, float(iv)))
+        if not cands:
+            return None
+        dte, exp, iv = min(cands, key=lambda c: abs(c[0] - (horizon_days or 30)))
+
+        def _phi(z):
+            return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+        # One point per session ahead, so the cone lines up with a trading calendar rather
+        # than drifting across weekends.
+        steps = max(2, int(round(dte * 252 / 365)))
+        dates = [d.strftime("%Y-%m-%d") for d in
+                 pd.bdate_range(start=today + timedelta(days=1), periods=steps)]
+        bands = []
+        for z in zs:
+            up, dn = [], []
+            for i in range(1, steps + 1):
+                t_yrs = (i * 365 / 252) / 365.0
+                s = iv * math.sqrt(t_yrs)
+                up.append(spot * math.exp(-0.5 * s * s + z * s))
+                dn.append(spot * math.exp(-0.5 * s * s - z * s))
+            p_beyond = (1.0 - _phi(z)) * 100
+            bands.append({"z": z, "label": f"{z:g}σ",
+                          "upper": up, "lower": dn,
+                          "end_up": up[-1], "end_dn": dn[-1],
+                          "p_beyond": p_beyond,
+                          "p_touch": min(99.0, 2.0 * p_beyond)})
+        return {"ticker": r["ticker"], "spot": spot, "asof": r["asof"], "iv": iv * 100,
+                "dte": dte, "expiry": exp, "dates": dates, "bands": bands}
+    except Exception:
+        log.debug("chart_projection failed", exc_info=True)
+        return None
+    finally:
+        if own:
+            conn.close()
+
+
 def _fmt_chart_read(ticker):
     """Render _chart_read as the sentences a person would say about the chart."""
     r = _chart_read(ticker)
@@ -36927,6 +37003,21 @@ def _fmt_chart_read(ticker):
             "own history and neither predicts direction — the breakout result even looked "
             "strong until random lines scored the same. Drift is assumed ZERO, so these are "
             "not a view on whether the stock goes up.</i>")
+
+    # ── The forward cone, as text: where it can travel and how likely each edge is ──────
+    pj = _chart_projection(ticker)
+    if pj and pj.get("bands"):
+        rows = [(b["label"], f"{b['end_dn']:,.2f}", f"{b['end_up']:,.2f}",
+                 f"{b['p_touch']:.0f}%") for b in pj["bands"]]
+        parts.append("\n" + _report(
+            f"📈 HOW FAR IT CAN TRAVEL — by {pj['expiry']}",
+            ("Band", "Low", "High", "Touch"), rows, right_cols={1, 2, 3},
+            legend=f"{pj['iv']:.1f}% implied vol · widens with √time",
+            notes="Touch = chance of reaching that edge at any point; roughly double the "
+                  "chance of finishing beyond it."))
+        parts.append("\n<i>This is a RANGE, not a line pointing somewhere. Drift is zero, so "
+                     "it is symmetric by construction and says nothing about direction — only "
+                     "how far the option market thinks this can travel.</i>")
     parts.append(f"\n<i>Read from {r['bars']} sessions · {r['pivot_highs']} swing highs, "
                  f"{r['pivot_lows']} swing lows. This DESCRIBES the chart — it is not a "
                  f"forecast. No pattern here has been measured against forward returns yet, "

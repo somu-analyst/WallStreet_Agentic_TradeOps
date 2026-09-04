@@ -28149,7 +28149,13 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         # 331,839 against a ~76,000 quarter, so the check correctly rejected a correctly-read
         # table, every quarter, forever. Walk the preferences IN ORDER and take the newest
         # filing OF THAT FORM (ID 361).
-        want = ("10-Q", "10-K") if quarterly else ("10-K", "10-Q")
+        # LONG-LIVED ASSETS BY GEOGRAPHY IS AN ANNUAL DISCLOSURE. Asking the 10-Q for it
+        # returns a table that is often titled for both revenue and assets but carries only
+        # the revenue rows -- JNJ's "Schedule of Revenue from External Customers and
+        # Long-Lived Assets, by Geographical Areas" in a 10-Q is pure sales. So the asset
+        # metric always prefers the 10-K, whatever the caller asked for (ID 351).
+        want = (("10-K", "10-Q") if (not quarterly or metric == "assets")
+                else ("10-Q", "10-K"))
         idx = None
         for _wf in want:
             idx = next((i for i, f in enumerate(forms) if f == _wf), None)
@@ -28193,15 +28199,25 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
             if not _re.search(r"\(detail", name, _re.I):
                 continue                                   # narrative blocks carry no data
             if metric == "assets":
-                # Asset tables are inherently geographic, so this ignores `basis`. Filers
-                # title them either way round -- JNJ "Revenue from External Customers and
-                # Long-Lived Assets, by Geographical Areas", PG "US And International Sales
-                # And Assets" -- so the strong pattern is the ASSET words, with a bare
-                # geography match as the fallback.
-                if _re.search(r"long.?lived|property.*plant|assets.*geograph|"
-                              r"geograph.*assets", name, _re.I):
+                # THE TABLE MUST BE GEOGRAPHIC, and that gate comes FIRST. Matching on the
+                # asset words alone pulled P&G's "PROPERTY, PLANT AND EQUIPMENT" schedule,
+                # which splits assets by TYPE -- Machinery, Buildings, Land, Construction in
+                # progress. Those are real numbers answering a different question, and
+                # printing them under "where this company operates" would be worse than
+                # printing nothing. So require a place word, then prefer the asset tables
+                # among what is left. Filers title them either way round: JNJ "Revenue from
+                # External Customers and Long-Lived Assets, by Geographical Areas", PG "US
+                # And International Sales And Assets".
+                # "by location" earns its place: Microsoft files this as "Long-Lived Assets,
+                # Excluding Financial Instruments and Tax Assets, Classified by Location of
+                # Controlling Statutory Company" -- geographic in substance, with none of the
+                # words you would search for.
+                if not _re.search(r"geograph|international|by country|by region|location",
+                                  name, _re.I):
+                    continue
+                if _re.search(r"long.?lived|assets|property.*plant", name, _re.I):
                     cands.append(fn.group(1))
-                elif _re.search(r"geograph|international", name, _re.I):
+                else:
                     fallback.append(fn.group(1))
                 continue
             if basis == "segment":

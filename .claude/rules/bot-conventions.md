@@ -99,7 +99,13 @@ paths:
 - Wizards morph in place: `_wiz_show(query, text, kb)` edits the SAME message per step; falls back to reply.
 - Inline mode: `inline_query_handler` = `@bot TICKER` autocomplete (needs BotFather `/setinline` once).
 - Long reports: `<blockquote expandable>` per section (see `/plan`; strip-and-resend fallback).
-- Scanner output = `_pipe_table` rank table (≤28 chars wide) + per-row HTML detail lines (see `_send_spreads`, `/ratings`) — never crammed single-line bullets.
+- Scanner output = `_pipe_table` rank table + per-row HTML detail lines (see `_send_spreads`, `/ratings`) — never crammed single-line bullets.
+- ⚠️ **The ≤28-cell cap is NOT a user preference — the user overruled it 2026-09-04 (ID 414).**
+  Told twice in a row, on WATCHLIST and `/paper`: *"i asked all in table columsn, why are you
+  adding in seperate lines"*. The cap existed because a wide `<pre>` wraps on a phone; the user
+  has chosen width over wrapping. **Every SCALAR belongs in a column.** A detail line is only for
+  what a column cannot hold — the 5d coloured box strip, the 52w position bar, lot ids and
+  provenance. `/paper` now runs 58–61 cells wide on purpose. Do not "fix" that back.
 
 ## Tables — ALWAYS `_report()` / `_pipe_table()`
 - `_report(title, headers, rows, right_cols, legend, notes, details)` = THE universal

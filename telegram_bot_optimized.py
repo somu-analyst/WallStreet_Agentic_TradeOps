@@ -29969,7 +29969,20 @@ def wrap_facts(conn, universe_cap=120):
         F["indices"].append(d)
     if F["indices"]:
         F["lead"] = max(F["indices"], key=lambda d: abs(d["pct"]))
-        F["shape"] = _wrap_intraday_shape(F["lead"]["sym"])
+        # SHAPE FOR EVERY INDEX, not just the biggest mover (user 2026-09-04, ID 412).
+        # The wrap gave a full session breakdown for whichever index moved most and a bare
+        # last/day% line for the other four, so on a day the Dow led you could not see that
+        # the Nasdaq had round-tripped. One 5m history call each; they are cached by
+        # _wrap_hist and there are five of them.
+        F["shapes"] = {}
+        for _ix in F["indices"]:
+            try:
+                _sh = _wrap_intraday_shape(_ix["sym"])
+            except Exception:
+                _sh = None
+            if _sh:
+                F["shapes"][_ix["sym"]] = _sh
+        F["shape"] = F["shapes"].get(F["lead"]["sym"]) or _wrap_intraday_shape(F["lead"]["sym"])
 
     vq = _wrap_quote("^VIX")
     if vq:
@@ -30158,6 +30171,34 @@ def wrap_narrative(F, html=True):
             _sess.append(("Value", _wrap_money(abs(lead["dollars"]))))
         L.append("\n" + _pipe_table(("Metric", "Value"), _sess, right_cols={1},
                                     title=f"📊 {str(lead['name'])[:14]} — SESSION"))
+
+    # THE SAME SESSION SHAPE FOR EVERY INDEX (ID 412). The detailed grid above stays on the
+    # day's biggest mover, because that is the one the prose is about; this puts the other
+    # four on the same footing. Peak→trough is the column that earns its place: the INDICES
+    # table already carries last and day%, and a quiet-looking +0.2% close can hide a 1.5%
+    # intraday round trip that only shows up here.
+    _shapes = F.get("shapes") or {}
+    if len(_shapes) > 1:
+        _rows = []
+        for _ix in sorted(F["indices"], key=lambda d: d["pct"], reverse=True):
+            _sh = _shapes.get(_ix["sym"])
+            if not _sh or not _ix.get("prev"):
+                continue
+            _rows.append((
+                ("🟢" if _ix["pct"] >= 0 else "🔴"),
+                str(_ix["name"])[:12],
+                f"{(_sh['open'] / _ix['prev'] - 1) * 100:+.2f}%",
+                f"{_sh['peak']:,.0f}",
+                f"{_sh['trough']:,.0f}",
+                f"{_sh['dd_pct']:+.2f}%",
+                f"{_ix['pct']:+.2f}%"))
+        if _rows:
+            L.append("\n" + _pipe_table(
+                ("", "Index", "Open", "Peak", "Trough", "Pk→Tr", "Day"),
+                _rows, right_cols={2, 3, 4, 5, 6},
+                title="📊 EVERY INDEX — SESSION SHAPE",
+                legend="Open = gap vs prior close · Pk→Tr = deepest intraday drawdown",
+                notes="A small Day% with a large Pk→Tr is a round trip, not a quiet session."))
 
     # FOMC-today flag (user 2026-07-28: "where is today Fed meeting info, why that
     # missing" -- _FOMC_DATES already has the real schedule, the wrap just never checked
@@ -39561,7 +39602,21 @@ def _fmt_paper(conn):
         # gap past ~10x), which is a real answer and not a missing one.
         _fv = _fair_value(tk)
         _fvg = f"{(mark / _fv - 1) * 100:+.0f}" if (_fv and mark) else "—"
-        rows.setdefault(_cc, []).append((em, tk[:9], f"{pnl:+,.0f}", _fvg))
+        # COLUMNS, NOT LINES BELOW (user 2026-09-04, ID 414, said twice). The house
+        # convention is a narrow rank table with the rest on detail lines, and it is why
+        # entry/mark/return kept landing under the grid. The user has now chosen width over
+        # phone-wrapping explicitly, so every SCALAR moves into the table. Only the two
+        # things that are pictures rather than values stay on a line: the 5d coloured box
+        # strip and the entry/held provenance.
+        _pf1, _pdays = _perf_line(tk, conn)
+        _w1 = ""
+        for _part in (_pf1 or "").split("·"):
+            if _part.strip().startswith("1W"):
+                _w1 = _part.strip()[3:].strip()
+                break
+        rows.setdefault(_cc, []).append(
+            (em, tk[:9], f"{entry:,.2f}", f"{mark:,.2f}", f"{pnl:+,.0f}",
+             f"{pnl_pct:+.0f}%", _w1 or "—", _fvg))
         earliest = grp["entry_date"].min()
         try:
             days_held = (datetime.now().date() - datetime.strptime(str(earliest), "%Y-%m-%d").date()).days
@@ -39570,17 +39625,15 @@ def _fmt_paper(conn):
         ids_txt = "/".join(str(int(x)) for x in grp["trade_id"])
         note_txt = "; ".join(n for n in grp["notes"].dropna().unique() if n)
         note_txt = f" — {note_txt}" if note_txt else ""
-        details.append(f"• #{ids_txt} {leg} · {entry:,.2f} → {mark:,.2f} · entry {earliest}"
+        # What is LEFT on the line is only what a column cannot hold: which lots make up the
+        # position, when it was opened, the longer-horizon returns, and the box strip.
+        details.append(f"• #{ids_txt} {leg} · entry {earliest}"
                         + (f" ({days_held}d held)" if days_held is not None else "")
-                        + f" · {pnl_pct:+.0f}%"
                         + (f" · FV {_fv:,.2f}" if _fv else "")
                         + _earn_txt(tk) + note_txt)
-        # Price / week bar / trailing returns, matching what the dashboard grids show for the
-        # same holding (ID 385). Its own line: appended to the one above it would push past
-        # what reads comfortably on a phone.
-        _pf, _pdays = _perf_line(tk, conn)
+        _pf = _pf1
         if _pf:
-            details.append(f"   ↳ now {mark:,.2f} · {_pf}")
+            details.append(f"   ↳ {_pf}")
         if _pdays:
             details.append(f"   ↳ 5d {_pdays}")
     _expired = 0
@@ -39656,7 +39709,7 @@ def _fmt_paper(conn):
     for _cy in _order:
         _rr = list(rows[_cy])
         # P&L is column 2 since the ID 204 trim (was 4 when the grid carried Entry/Mark).
-        _sub = sum(float(str(r[2]).replace(",", "")) for r in _rr)
+        _sub = sum(float(str(r[4]).replace(",", "")) for r in _rr)   # P&L is col 4 now
         # Blended return on capital deployed, not the mean of the per-row percentages —
         # that would weight a 1-share lot like a 3,000-share one (user 2026-08-10).
         _cst = _cost_by.get(_cy, 0.0)
@@ -39664,22 +39717,24 @@ def _fmt_paper(conn):
         # US-only, so the India / EUR / JPY books can never populate it -- carrying a column
         # of dashes cost 5 cells and pushed MOTHERSON's table to 32, past the width where a
         # phone wraps it, in exchange for no information at all. The US table fits at 27.
-        _has_fv = any(r[3] != "—" for r in _rr)
+        _has_fv = any(r[7] != "—" for r in _rr)
         if not _has_fv:
-            _rr = [r[:3] for r in _rr]
-        _rr.append(("", "TOTAL", f"{_sub:+,.0f}") + (("",) if _has_fv else ()))
+            _rr = [r[:7] for r in _rr]
+        _rr.append(("", "TOTAL", "", "", f"{_sub:+,.0f}", "", "")
+                   + (("",) if _has_fv else ()))
         # The blended return moves to the legend rather than a 4th column -- it is ONE number
         # for the whole table, so spending a column on it (blank for every row but the last)
         # was the least efficient possible use of the width (ID 204).
         _blend = f" · return on capital {_sub / _cst * 100:+.2f}%" if _cst > 0 else ""
+        _hdr = ("", "Leg", "Entry", "Now", "P&L", "P&L%", "1W")
         parts.append("\n" + _pipe_table(
-            (("", "Leg", "P&L", "vsFV") if _has_fv else ("", "Leg", "P&L")), _rr,
-            right_cols=({2, 3} if _has_fv else {2}),
+            (_hdr + ("vsFV",)) if _has_fv else _hdr, _rr,
+            right_cols=({2, 3, 4, 5, 6, 7} if _has_fv else {2, 3, 4, 5, 6}),
             title=_CCY_TITLE.get(_cy, _cy),
             legend=(f"all values in {_cy}{_blend}"
                     + (" · vsFV = % above (+) or below (−) the DCF fair value of the company, "
                        "— when the model refuses" if _has_fv else "")
-                    + " · size, entry and mark are in the lines below")))
+                    + " · lot ids, entry date and the 5d bar are in the lines below")))
     if details:
         parts.append("\n" + "\n".join(details))
     parts.append(f"\n<i>{_note}</i>")

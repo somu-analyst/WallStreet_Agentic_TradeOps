@@ -38785,12 +38785,28 @@ def _wl_one_row(tk, r, conn):
                 wall_txt = f" · walls C{_cw}/P{_pw}"
         except Exception:
             pass
-        detail = (f"• {tk} ${spot:,.2f}{rsi_note}{si_txt}{day_txt}{wall_txt}"
-                  + (f" · earn {earn}" if earn and earn != '—' else "")
-                  + note_txt + range_line)
+        # COLUMNS, NOT LINES BELOW (user 2026-09-04, ID 413/414). RSI, short interest and
+        # the earnings date are scalars, so they belong in the grid. What stays on the line
+        # is what a column cannot hold: the 52w position BAR (a picture), the day range and
+        # the GEX walls (two numbers each), and any free-text note.
+        _rsi_col = "—"
+        if rsi is not None:
+            _rsi_col = f"{rsi:.0f}" + ("↑" if rsi > 70 else ("↓" if rsi < 30 else ""))
+        _si_col = f"{si['pct_float']:.1f}%" if si.get("pct_float") else "—"
+        # Earnings as DAYS AWAY, not a date: "Oct 27" costs six cells and still needs the
+        # reader to do the arithmetic that matters.
+        _earn_col = "—"
+        try:
+            if earn and earn != "—":
+                _ed = datetime.strptime(str(earn)[:10], "%Y-%m-%d").date()
+                _earn_col = f"{(_ed - datetime.now().date()).days}d"
+        except Exception:
+            _earn_col = str(earn)[:6] if earn and earn != "—" else "—"
+        row = row + (_rsi_col, _si_col, _earn_col)
+        detail = (f"• {tk} ${spot:,.2f}{day_txt}{wall_txt}" + note_txt + range_line)
         return row, detail
     except Exception:
-        return ("⚪", tk, "—", "—", "—"), None
+        return ("⚪", tk, "—", "—", "—", "—", "—", "—"), None
 
 
 def _fmt_watchlist(conn):
@@ -38818,7 +38834,12 @@ def _fmt_watchlist(conn):
             if detail:
                 details.append(detail)
         parts.append(f"\n<b>{_icon.get(cls, '•')} {_plural.get(cls, cls.title())}</b>")
-        parts.append(_pipe_table(("", "Tkr", "Spot", "Day%", "vs Target"), rows, right_cols={2, 3, 4}))
+        parts.append(_pipe_table(
+            ("", "Tkr", "Spot", "Day%", "vs Tgt", "RSI", "SI", "Earn"),
+            rows, right_cols={2, 3, 4, 5, 6, 7},
+            legend="RSI ↑ over 70, ↓ under 30 · SI = short interest, %% of float · "
+                   "Earn = days to the next report · day range, GEX walls and the 52w "
+                   "position bar are on the lines below"))
         if details:
             parts.append("\n".join(details))
     parts.append("<i>/watchlist add TICKER [target] [class] [note] · /watchlist rm TICKER</i>")

@@ -33425,6 +33425,119 @@ def _chart_trendlines(pivots, closes, kind, tol_pct=1.5, min_touches=3, max_dist
     return out
 
 
+# MEASURED ON OUR OWN DATA, 2026-09-03 (tools/measure_chart_patterns.py, ID 403).
+# 300 tickers, ~51,800 pattern fires, horizons 5/10/20 sessions, scored with no lookahead
+# (forward window starts at the bar the pattern could first be seen), against the SAME-horizon
+# unconditional rate, aggregated per date, Bonferroni critical |t| = 2.75 across 6 patterns.
+#
+# NOT ONE PATTERN CLEARS THE BAR. That is the headline and it is why these numbers ship
+# attached to the patterns rather than in a report nobody reads: the encyclopedia win-rates
+# ("head and shoulders works 83% of the time") are counted on the same history used to define
+# the pattern. Ours are counted forward, and the edges land between -1.5 and +1.9 points with
+# t-stats under 2.7.
+# The one consistent reading is the ASCENDING TRIANGLE, and it is consistently NEGATIVE:
+# -0.9 / -1.2 / -1.2 points at 5 / 10 / 20 days, i.e. slightly WORSE than doing nothing, which
+# is the opposite of its textbook bullish meaning.
+# hit% and base% below are the 10-day figures; `t` is 10-day.
+_PATTERN_STATS = {
+    "Ascending triangle":         {"hit": 51.6, "base": 52.8, "t": -2.49, "n": 20617},
+    "Descending triangle":        {"hit": 46.2, "base": 45.8, "t": 0.77,  "n": 17621},
+    "Double top":                 {"hit": 46.3, "base": 46.3, "t": -0.02, "n": 5560},
+    "Double bottom":              {"hit": 52.4, "base": 53.3, "t": -0.97, "n": 5528},
+    "Inverse head and shoulders": {"hit": 51.2, "base": 52.7, "t": -0.95, "n": 1283},
+    "Head and shoulders":         {"hit": 47.4, "base": 45.6, "t": 1.18,  "n": 1199},
+}
+_PATTERN_CRIT_T = 2.75          # Bonferroni bar for the 6 patterns tested
+
+
+def _chart_patterns(highs, lows, closes, w=5, tol=3.0):
+    """Classical chart patterns, each stamped with the bar it could FIRST have been known.
+
+    LOOKAHEAD IS THE WHOLE PROBLEM HERE, and it is why published pattern win-rates are worth
+    nothing. A fractal pivot at bar i is only confirmed at bar i+w, because you need w bars of
+    hindsight to know it was the extreme. So a pattern whose last pivot sits at bar j was not
+    visible to anyone until bar j+w, and any forward return has to start THERE. Score it from
+    the pivot instead and every pattern looks prophetic, because you are measuring a move you
+    already used to find the shape.
+
+    `known_i` on every hit is that bar. The measurement harness starts its forward window from
+    it, never from the pattern's own extremes.
+
+    `dir` is the CONVENTIONAL reading, not a claim: bearish for a double top, bullish for a
+    double bottom. Whether the convention is right is exactly what gets measured.
+    """
+    ph, pl = _chart_pivots(highs, lows, w=w)
+    out = []
+
+    def near(a, b):
+        return abs(a - b) / max(abs(b), 1e-9) * 100 <= tol
+
+    # DOUBLE TOP / BOTTOM — two extremes at the same price with a real pullback between.
+    for piv, name, direction, cmp_mid in ((ph, "Double top", "bearish", min),
+                                          (pl, "Double bottom", "bullish", max)):
+        for a in range(len(piv) - 1):
+            i1, p1 = piv[a]
+            i2, p2 = piv[a + 1]
+            if not near(p1, p2) or i2 - i1 < w * 2:
+                continue
+            mid = cmp_mid(closes[i1:i2]) if i2 > i1 else None
+            if mid is None:
+                continue
+            # The trough between the tops has to be a real one, or this is just a flat patch.
+            if abs(mid - p1) / max(abs(p1), 1e-9) * 100 < tol * 1.5:
+                continue
+            out.append({"name": name, "dir": direction, "known_i": i2 + w,
+                        "level": (p1 + p2) / 2})
+
+    # HEAD AND SHOULDERS — three extremes, the middle one clearly the furthest out, and the
+    # two shoulders at a similar price. The neckline is the level between them.
+    for piv, name, direction, better in ((ph, "Head and shoulders", "bearish", lambda x, y: x > y),
+                                         (pl, "Inverse head and shoulders", "bullish",
+                                          lambda x, y: x < y)):
+        for a in range(len(piv) - 2):
+            (i1, p1), (i2, p2), (i3, p3) = piv[a], piv[a + 1], piv[a + 2]
+            if not better(p2, p1) or not better(p2, p3):
+                continue
+            if not near(p1, p3):                       # shoulders must roughly match
+                continue
+            if abs(p2 - p1) / max(abs(p1), 1e-9) * 100 < tol:   # head must clear them
+                continue
+            out.append({"name": name, "dir": direction, "known_i": i3 + w,
+                        "level": (p1 + p3) / 2})
+
+    # TRIANGLES — one boundary flat, the other converging on it.
+    if len(ph) >= 2 and len(pl) >= 2:
+        for hi_a in range(len(ph) - 1):
+            for lo_a in range(len(pl) - 1):
+                (hi1, hp1), (hi2, hp2) = ph[hi_a], ph[hi_a + 1]
+                (li1, lp1), (li2, lp2) = pl[lo_a], pl[lo_a + 1]
+                last = max(hi2, li2)
+                if last - min(hi1, li1) < w * 3:
+                    continue
+                flat_top = near(hp1, hp2)
+                flat_bot = near(lp1, lp2)
+                rising_bot = lp2 > lp1 and not flat_bot
+                falling_top = hp2 < hp1 and not flat_top
+                if flat_top and rising_bot:
+                    out.append({"name": "Ascending triangle", "dir": "bullish",
+                                "known_i": last + w, "level": (hp1 + hp2) / 2})
+                elif flat_bot and falling_top:
+                    out.append({"name": "Descending triangle", "dir": "bearish",
+                                "known_i": last + w, "level": (lp1 + lp2) / 2})
+                elif falling_top and rising_bot:
+                    out.append({"name": "Symmetrical triangle", "dir": "neutral",
+                                "known_i": last + w, "level": (hp2 + lp2) / 2})
+    # De-duplicate: the same shape is found by several pivot pairs. Keep one per
+    # (name, known bar) or the counts inflate and every hit gets scored many times.
+    seen, uniq = set(), []
+    for p in sorted(out, key=lambda d: d["known_i"]):
+        k = (p["name"], p["known_i"])
+        if k in seen:
+            continue
+        seen.add(k); uniq.append(p)
+    return uniq
+
+
 def _chart_read(ticker, days=180, w=5, conn=None):
     """What a person would say looking at the chart: levels, trendlines, where price sits.
 
@@ -33480,9 +33593,22 @@ def _chart_read(ticker, days=180, w=5, conn=None):
         # "0.0x average volume" would read as a damning verdict on the breakout when in fact
         # nothing was measured. None means unknown and the renderer must say so.
         brk["vol_x"] = (vols[-1] / v20) if (v20 and vols[-1]) else None
+    # Patterns are reported with their MEASURED rate attached, never on their own. A pattern
+    # name printed bare is an implied claim, and the measurement says the claim is not there.
+    pats = []
+    try:
+        for p in _chart_patterns(highs, lows, closes, w=w):
+            if p["known_i"] < len(closes) - 60:
+                continue                      # only what is recent enough to still matter
+            st = _PATTERN_STATS.get(p["name"], {})
+            pats.append({**p, "date": dates[min(p["known_i"], len(dates) - 1)],
+                         "hit": st.get("hit"), "base": st.get("base"), "t": st.get("t"),
+                         "measured": bool(st) and abs(st.get("t", 0)) >= _PATTERN_CRIT_T})
+    except Exception:
+        pats = []
     return {"ticker": str(ticker).upper(), "asof": dates[-1], "spot": spot, "bars": len(rows),
             "pivot_highs": len(ph), "pivot_lows": len(pl),
-            "levels": levels, "trendlines": lines, "breakout": brk,
+            "levels": levels, "trendlines": lines, "breakout": brk, "patterns": pats,
             "range_52w": (min(lows), max(highs))}
 
 
@@ -36672,6 +36798,23 @@ def _fmt_chart_read(ticker):
                else "<i>volume not available for this session, so participation is unknown</i>")
         parts.append(f"\n⚡ <b>Broke {b['dir']}</b> through {b['level']:,.2f} "
                      f"({b['touches']} prior touches) {vol}.")
+    if r.get("patterns"):
+        pl_ = []
+        for p in r["patterns"][-4:]:
+            if p.get("hit") is not None:
+                edge = p["hit"] - p["base"]
+                score = (f"measured <b>{p['hit']:.1f}%</b> vs a {p['base']:.1f}% baseline "
+                         f"({edge:+.1f}pp, t={p['t']:.2f}) — "
+                         + ("<b>real edge</b>" if p["measured"] else "<b>not significant</b>"))
+            else:
+                score = "not measured"
+            pl_.append(f"• <b>{p['name']}</b> ({p['dir']}) around {p['date']} · {score}")
+        parts.append("\n<b>Patterns present</b>\n" + "\n".join(pl_))
+        parts.append("\n<i>Those percentages are OURS, measured on 300 tickers and ~51,800 "
+                     "occurrences with no lookahead — not the textbook figures, which are "
+                     "counted on the same history used to define the pattern. On our data NO "
+                     "pattern clears the significance bar, so the shape is worth seeing and "
+                     "is not worth trading on its own.</i>")
     parts.append(f"\n<i>Read from {r['bars']} sessions · {r['pivot_highs']} swing highs, "
                  f"{r['pivot_lows']} swing lows. This DESCRIBES the chart — it is not a "
                  f"forecast. No pattern here has been measured against forward returns yet, "

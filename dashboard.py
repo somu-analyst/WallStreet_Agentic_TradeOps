@@ -25173,6 +25173,35 @@ elif page == "📐 Chart Reader":
                 else:
                     st.caption("No line held enough swing points without being broken.")
 
+            if _cr.get("patterns"):
+                st.markdown("##### Patterns present, and what each is actually worth")
+                _pf = pd.DataFrame([{
+                    "Pattern": p["name"], "Says": p["dir"].title(), "Seen": p["date"],
+                    "Hit %": p.get("hit"), "Baseline %": p.get("base"),
+                    "Edge pp": (round(p["hit"] - p["base"], 1)
+                                if p.get("hit") is not None else None),
+                    "t": p.get("t"),
+                    "Verdict": ("real edge" if p.get("measured")
+                                else ("not significant" if p.get("hit") is not None
+                                      else "no directional claim")),
+                } for p in _cr["patterns"][-6:]])
+                st.dataframe(_pf, hide_index=True, use_container_width=True,
+                             column_config={
+                                 "Hit %": st.column_config.NumberColumn(format="%.1f%%"),
+                                 "Baseline %": st.column_config.NumberColumn(format="%.1f%%"),
+                                 "t": st.column_config.NumberColumn(format="%.2f")})
+                st.error(
+                    "**These percentages are ours, and none of them clears the bar.** Measured "
+                    "on 300 tickers and about 51,800 occurrences at 5, 10 and 20 sessions, with "
+                    "no lookahead — a pattern is scored from the bar it could first have been "
+                    "seen, not from its own extremes. Every edge lands between −1.5 and +1.9 "
+                    "points with |t| under 2.75, the Bonferroni bar for six patterns. The "
+                    "textbook figures are higher because they are counted on the same history "
+                    "used to define the pattern. The one consistent result is the **ascending "
+                    "triangle, which is consistently slightly NEGATIVE** — the opposite of its "
+                    "textbook bullish meaning. Read the shapes as context; do not trade them "
+                    "on their own.")
+
             if _cr["breakout"]:
                 _b = _cr["breakout"]
                 _vol = (f"on **{_b['vol_x']:.1f}×** average volume" if _b.get("vol_x")

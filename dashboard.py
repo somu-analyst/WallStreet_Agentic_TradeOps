@@ -25761,6 +25761,91 @@ elif page == "💧 Money Flow (Sankey)":
             # Where a company does not file a deeper cut this says so rather than inventing
             # one: Palantir reports "Rest of world" as a single line, and there is nothing
             # underneath it to show.
+            # ── Where the company physically IS, vs where its customers are (ID 351) ──
+            # Two different questions that a revenue split alone cannot separate. Apple books
+            # most revenue in the Americas AND holds most property there; a company can just
+            # as easily sell everywhere while owning almost nothing outside one country.
+            # Long-lived assets by geography is an ANNUAL disclosure, so this reads the 10-K
+            # regardless of the Quarter/Annual toggle above.
+            st.markdown("---")
+            st.markdown("#### 🌍 Where this company operates")
+            try:
+                _loc = {}
+                for _a in range(4):
+                    _loc = _TB_ENGINE._revenue_segments(
+                        _sk_tk, quarterly=False, basis="geography",
+                        attempt=_a, metric="assets") or {}
+                    if _loc:
+                        break
+            except Exception:
+                _loc = {}
+            _geo_rev = _sk_s.get("segments") or {}
+            # THE "GEOGRAPHY" SLOT IS NOT ALWAYS GEOGRAPHY. _revenue_segments falls back to
+            # whatever disaggregation the filer publishes, and for Apple that is iPhone /
+            # Services / Mac / iPad -- products. Printing those under "revenue by region"
+            # would be a plain falsehood on the most-searched ticker there is, so the labels
+            # are checked and the heading follows what is actually in the table.
+            _PLACES = ("UNITED STATES", "U.S.", "US", "AMERICA", "EUROPE", "EMEA", "APAC",
+                       "ASIA", "PACIFIC", "CHINA", "JAPAN", "INTERNATIONAL", "DOMESTIC",
+                       "REST OF WORLD", "ROW", "OTHER COUNTRIES", "GERMANY", "CANADA",
+                       "INDIA", "LATIN", "MIDDLE EAST", "AFRICA", "UK", "FOREIGN", "GLOBAL")
+            _tops = [k.upper() for k, v in _geo_rev.items() if not v.get("parent")]
+            _is_geo = bool(_tops) and sum(
+                any(p in k for p in _PLACES) for k in _tops) >= max(1, len(_tops) // 2)
+            _lc1, _lc2 = st.columns(2)
+            with _lc1:
+                st.markdown("**Where the customers are** — revenue by region" if _is_geo else
+                            "**How revenue splits** — this filer reports by product, not region")
+                if _geo_rev and not _is_geo:
+                    st.caption("Apple and others disaggregate revenue by product line rather "
+                               "than geography, so this is not a regional split — the "
+                               "operations table beside it still is.")
+                if _geo_rev:
+                    _tot_r = sum(v["now"] for v in _geo_rev.values() if not v.get("parent")) or 1
+                    st.dataframe(pd.DataFrame([
+                        {("Region" if _is_geo else "Source"): k, "Revenue": v["now"],
+                         "Share": v["now"] / _tot_r * 100}
+                        for k, v in sorted(_geo_rev.items(), key=lambda kv: -kv[1]["now"])
+                        if not v.get("parent")]), hide_index=True, use_container_width=True,
+                        column_config={
+                            "Revenue": st.column_config.NumberColumn(format="%.0f"),
+                            "Share": st.column_config.ProgressColumn(
+                                min_value=0.0, max_value=100.0, format="%.0f%%")})
+                else:
+                    st.caption("This filer does not disaggregate revenue by geography.")
+            with _lc2:
+                st.markdown("**Where the operations are** — long-lived assets by location")
+                if _loc:
+                    _tot_a = sum(v["now"] for v in _loc.values() if not v.get("parent")) or 1
+                    st.dataframe(pd.DataFrame([
+                        {"Location": k, "Assets": v["now"],
+                         "Share": v["now"] / _tot_a * 100}
+                        for k, v in sorted(_loc.items(), key=lambda kv: -kv[1]["now"])
+                        if not v.get("parent")]), hide_index=True, use_container_width=True,
+                        column_config={
+                            "Assets": st.column_config.NumberColumn(format="%.0f"),
+                            "Share": st.column_config.ProgressColumn(
+                                min_value=0.0, max_value=100.0, format="%.0f%%")})
+                else:
+                    st.caption("No geographic long-lived-assets table in the latest 10-K. "
+                               "Roughly half of large filers publish one; the rest disclose "
+                               "only revenue by region, and nothing is inferred here.")
+            if _loc and _geo_rev and _is_geo:
+                st.caption(
+                    "**These answer different questions.** Revenue by region is where the "
+                    "*customers* are; long-lived assets — property, plant and equipment — is "
+                    "where the *company* is. A business selling worldwide from one country "
+                    "looks very different in the right-hand table than the left, and that gap "
+                    "is where currency, tax and supply-chain exposure actually live. "
+                    "Both come from the company's own filing; assets are annual, so the "
+                    "right-hand figures are as of the last 10-K.")
+            elif _loc:
+                st.caption(
+                    "The right-hand table is the geographic one: long-lived assets — "
+                    "property, plant and equipment — by location, from the last 10-K. It is "
+                    "where the *company* physically is, which is a different question from "
+                    "where its revenue comes from.")
+
             st.markdown("---")
             st.markdown("#### 🔎 Drill into a number")
             _geo = _sk_s.get("segments") or {}

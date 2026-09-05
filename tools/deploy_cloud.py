@@ -20,10 +20,21 @@ WHAT IT REFUSES TO DO
     It will not restart anything if nothing changed. A no-op deploy should cost nothing and
     should not interrupt a conversation with the bot.
 
+WHY IT ALSO RUNS ON A SCHEDULE, NOT ONLY ON COMMIT
+    The post-commit hook (.git/hooks/post-commit) deploys within seconds of every commit to
+    main -- but a hook cannot retry itself, so a push that succeeds while the VM's own pull or
+    restart fails transiently (a network blip mid-deploy) leaves the VM stale with nothing to
+    say so. `NYSE_CodeSync` runs this on a schedule as the safety net: cheap when there is
+    nothing to do (a local file-diff plus one `git rev-parse` over ssh), and self-healing when
+    the VM has drifted for any reason -- including a hand-edit made directly on the VM, which
+    this always overwrites in cloud's favour. That direction is deliberate: the cloud tree is a
+    mirror, never an independent source, so "sync" here only ever means local -> cloud.
+
 Usage:
     python tools/deploy_cloud.py                 # sync, push, pull, restart if changed
     python tools/deploy_cloud.py --dry-run       # show what would move, touch nothing
     python tools/deploy_cloud.py --no-restart    # deploy the files, leave services alone
+    python tools/deploy_cloud.py --quiet         # for the scheduled job -- silent on a no-op
 """
 import os
 import subprocess
@@ -46,10 +57,27 @@ def sh(cmd, cwd=None, timeout=300):
 def main():
     dry = "--dry-run" in sys.argv
     no_restart = "--no-restart" in sys.argv
+    quiet = "--quiet" in sys.argv
     t0 = time.time()
 
+    # Buffered rather than printed directly through step 2: a --quiet scheduled run where
+    # nothing turns out to need doing should produce ZERO log lines, the same contract
+    # sync_trades.py already gives NYSE_TradeSync -- otherwise a job that fires every few
+    # minutes forever slowly turns its log into noise nobody reads. The buffer is flushed the
+    # moment there is real work to report; from there on this just prints normally, because
+    # by definition something is happening.
+    _buf = []
+    def _p(s=""):
+        _buf.append(s)
+        if not quiet:
+            print(s)
+    def _flush():
+        if quiet:
+            for s in _buf:
+                print(s)
+
     # 1. Compile gate. Cheap, and the one failure that guarantees a dead service.
-    print("[1/5] compile check")
+    _p("[1/5] compile check")
     import py_compile
     for f in CHECK:
         p = os.path.join(HERE, f)
@@ -58,39 +86,71 @@ def main():
         try:
             py_compile.compile(p, doraise=True)
         except py_compile.PyCompileError as e:
+            _flush()
             print(f"      FAILED {f}\n{str(e)[:400]}")
             print("      nothing deployed")
             return 1
-    print(f"      {len(CHECK)} files ok")
+    _p(f"      {len(CHECK)} files ok")
 
     # 2. Mirror.
-    print("[2/5] mirror to the cloud tree")
+    _p("[2/5] mirror to the cloud tree")
     rc, out = sh([sys.executable, os.path.join(HERE, "tools", "sync_cloud.py")]
                  + (["--dry-run"] if dry else []), cwd=HERE)
     changed = [l.strip() for l in out.splitlines()
                if l.strip().startswith(("write ", "copy ", "build ", "remove "))]
-    print(f"      {len(changed)} file(s) changed" + (f": {', '.join(changed[:4])}" if changed else ""))
+    _p(f"      {len(changed)} file(s) changed" + (f": {', '.join(changed[:4])}" if changed else ""))
     if dry:
+        _flush()
         print("      dry run -- stopping here")
         return 0
-    if not changed:
-        print("      nothing to deploy")
-        return 0
 
-    # 3. Commit and push the mirror.
-    print("[3/5] push the cloud repo")
-    sh(["git", "add", "-A"], cwd=CLOUD)
-    msg = "deploy: " + ", ".join(c.split()[-1] for c in changed[:3])
-    if len(changed) > 3:
-        msg += f" (+{len(changed)-3})"
-    rc, out = sh(["git", "-c", "user.name=somu-analyst",
-                  "-c", "user.email=srinivas.analystsas@gmail.com",
-                  "commit", "-q", "-m", msg], cwd=CLOUD)
-    rc, out = sh(["git", "push", "-q", "origin", "main"], cwd=CLOUD, timeout=300)
-    if rc != 0:
-        print(f"      push FAILED\n{out[:300]}")
-        return 1
-    print(f"      pushed: {msg}")
+    if not changed:
+        # A local file-diff proves the MIRROR matches the SOURCE -- it says nothing about
+        # whether the VM ever actually landed the last push. A push can succeed while the
+        # VM's own pull or restart fails transiently (a network blip mid-deploy), and that
+        # is exactly the shape of the original complaint this tool exists to prevent: the VM
+        # sat 12 commits behind for days, unnoticed, because nothing ever asked it directly
+        # (cloud row 31). Comparing HEAD -- ours vs the VM's checked-out commit -- is the one
+        # check that catches that specific failure, and it is cheap enough to run every time.
+        local_head = sh(["git", "rev-parse", "HEAD"], cwd=CLOUD)[1].strip()
+        rc, remote_out = sh(SSH + [VM, "cd /home/ubuntu/nyse && git rev-parse HEAD"], timeout=30)
+        remote_head = remote_out.strip()
+        if rc == 0 and remote_head == local_head:
+            # True no-op: quiet mode discards the buffer entirely, by design.
+            _p("      nothing to deploy")
+            return 0
+        if rc != 0:
+            # Nothing NEW locally, and the VM is unreachable to even ask -- worth a line even
+            # when quiet, since a dead VM is not the same silence as a healthy no-op.
+            _flush()
+            print(f"      nothing to deploy locally, but could not reach the VM to confirm "
+                  f"it is current: {remote_out[:200]}")
+            return 0
+        _flush()
+        print(f"      local mirror is current, but the VM is on {remote_head[:8]} vs "
+              f"{local_head[:8]} -- it fell behind a previous deploy. Catching it up.")
+    else:
+        _flush()
+
+    # 3. Commit and push the mirror -- only when there is something new to push. The
+    # reconcile-only case above has nothing to add to cloud's history; it just needs steps
+    # 4/5 re-run so the VM actually lands what GitHub already has.
+    if changed:
+        print("[3/5] push the cloud repo")
+        sh(["git", "add", "-A"], cwd=CLOUD)
+        msg = "deploy: " + ", ".join(c.split()[-1] for c in changed[:3])
+        if len(changed) > 3:
+            msg += f" (+{len(changed)-3})"
+        rc, out = sh(["git", "-c", "user.name=somu-analyst",
+                      "-c", "user.email=srinivas.analystsas@gmail.com",
+                      "commit", "-q", "-m", msg], cwd=CLOUD)
+        rc, out = sh(["git", "push", "-q", "origin", "main"], cwd=CLOUD, timeout=300)
+        if rc != 0:
+            print(f"      push FAILED\n{out[:300]}")
+            return 1
+        print(f"      pushed: {msg}")
+    else:
+        print("[3/5] push skipped -- nothing new, only reconciling the VM")
 
     # 4. Pull on the VM.
     print("[4/5] pull on the VM")

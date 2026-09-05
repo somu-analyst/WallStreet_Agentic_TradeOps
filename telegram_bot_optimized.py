@@ -28179,6 +28179,19 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
             # Names vary a lot by filer: PLTR "Summary of Revenue by Geography", AAPL
             # "Revenue - Disaggregated Net Sales", XOM "Schedule of Geographic Sales".
             # Prefer a details table; the "(Tables)" variants are empty templates.
+            # TABLES THAT SIT UNDER A SEGMENT HEADING AND CARRY NO SPLIT (ID 361).
+            # These were eating the six-attempt budget before the real table was reached, and
+            # they are the reason XOM, CVX, PFE, CAT and JNJ returned nothing even after the
+            # parse and the reconciliation were both fixed. Each one matches every keyword we
+            # search on and contains something else entirely:
+            #   (Narrative)  "Number of reportable segments: 4" -- a count, not a split
+            #   Goodwill     a goodwill roll-forward by segment
+            #   receivables / contract assets / liabilities -- balance-sheet lines
+            # Skipping them costs nothing: no filer puts the revenue split in one.
+            if _re.search(r"\(narrative\)|goodwill|receivable|contract (asset|liabilit)|"
+                          r"useful li(fe|ves)|accumulated depreciation|impairment",
+                          name, _re.I):
+                continue
             if _re.search(r"\(tables\)", name, _re.I):
                 continue
             # Two DIFFERENT disaggregations live in the same filing and answer different
@@ -28345,7 +28358,16 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                 # Taking [0] blindly collapsed Government and Commercial into one bucket
                 # called "Operating Segments". Drop the axis parts and keep what remains.
                 parts = [q.strip() for q in lab.split("|") if q.strip()]
-                keep = [q for q in parts if not _AXIS.search(q)]
+                # A PIPE PART THAT NAMES THE MEASURE IS NOT A SEGMENT (ID 361). Exxon files
+                # "United States | Sales and other operating revenue". The second part is the
+                # LINE ITEM being measured, not a parent business, but it survived the axis
+                # filter -- so every geography was recorded as a child of it, and children are
+                # excluded from the top-level split, which emptied the result. Dropping any
+                # part that matches the money-row pattern fixes it without touching the real
+                # nesting case (Alphabet's "Google Search & other | Google Services", where
+                # the parent is a genuine segment).
+                keep = [q for q in parts
+                        if not _AXIS.search(q) and not _MONEY.match(q.strip())]
                 # NESTING. Two surviving parts mean "child | parent": Alphabet files
                 # "Google Search & other | Google Services" as a CHILD of the segment
                 # "Google Services". Taking keep[0] alone flattened the tree and made the

@@ -28312,7 +28312,7 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                 vals.append(-_v if _cv.startswith("(") else _v)
             return vals
 
-        out, cur, cur_parent = {}, None, None
+        out, cur, cur_parent, _tbl_total = {}, None, None, None
         for _, r in tbl.iterrows():
             lab = str(r["0"]).strip()
             cells = _money_cells(r)
@@ -28328,6 +28328,15 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                     prior = (cells[1] * scale / unit_div) if len(cells) > 1 else None
                     out[cur] = {"now": now, "prior": prior, "parent": cur_parent}
                     cur = cur_parent = None
+                elif _tbl_total is None:
+                    # THE TABLE'S OWN TOTAL, captured rather than discarded (ID 361).
+                    # A money row with no segment above it is the consolidated line. It is
+                    # the only revenue figure guaranteed to cover the SAME PERIOD as the
+                    # members beside it, which is exactly what the caller's yfinance total
+                    # is not: MSFT parsed to 82,886 against a stated 90,007 and the split
+                    # was rejected as not reconciling, when the real fault was comparing a
+                    # filing to a different quarter.
+                    _tbl_total = cells[0] * scale / unit_div
                 continue                                  # a bare total, no segment -> skip
             if not has_val and not _BOILER.search(lab):
                 # The name sits on EITHER side of the pipe depending on the report:
@@ -28353,6 +28362,16 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         # test dropped iPhone from Apple's split, because iPhone is coincidentally about half
         # of total revenue and so looked like a total. A real total equals the revenue line;
         # a large segment merely resembles the rest of the business.
+        # PREFER THE FILING'S OWN TOTAL over the caller's (ID 361). The caller passes a
+        # revenue figure from yfinance's latest quarter; the table came from the newest
+        # 10-Q, and for a filer whose fiscal calendar is offset those are DIFFERENT PERIODS.
+        # Reconciling a June-quarter split against a September-quarter total rejects a
+        # perfectly good table -- that is what left MSFT, XOM, CVX and PFE empty after the
+        # parse was already fixed. When the table states its own consolidated line, that is
+        # the one the members must add up to, by construction.
+        if _tbl_total and _tbl_total > 0:
+            if not total or abs(_tbl_total - total) / max(total, 1) > 0.02:
+                total = _tbl_total
         if total:
             for k in [k for k, v in out.items()
                       if v["now"] > 0 and abs(v["now"] - total) / total < 0.02]:

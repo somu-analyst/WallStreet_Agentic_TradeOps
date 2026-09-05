@@ -28257,6 +28257,11 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         # table turned out to carry no sub-lines.
         cands = cands or fallback          # geography wins; segment-shaped is last resort
         best = cands[attempt] if attempt < len(cands) else None
+        # WHICH table was chosen, at debug level. Three separate fixes were aimed at the wrong
+        # half of this function because nobody could see what it had picked (ID 361); one log
+        # line ends that guessing permanently. Silent unless debug logging is on.
+        log.debug("segments %s basis=%s metric=%s attempt=%d -> %s (of %d candidates: %s)",
+                  ticker, basis, metric, attempt, best, len(cands), cands[:6])
         if not best:
             return {}
         html = _u.urlopen(_u.Request(f"{base}/{best}", headers=_SEC_UA), timeout=25).read()
@@ -28307,6 +28312,10 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         # Scanning also has to REJECT the footnote marker rather than parse it: "[1]" contains
         # a digit, so the old bare \d test reads it as money and yields a revenue of 1.
         _NUM = _re.compile(r"^\(?-?[\d,]+(\.\d+)?\)?$")
+        # The measure being reported, as opposed to the thing being reported ABOUT. Used only
+        # to decide which side of a "place | measure" label is the segment.
+        _MEASURE = _re.compile(r"\b(revenues?|sales|income|assets|expenses?|earnings)\b",
+                               _re.I)
 
         def _money_cells(row):
             """Every real number in the row, left to right. First = current period."""
@@ -28366,8 +28375,17 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                 # part that matches the money-row pattern fixes it without touching the real
                 # nesting case (Alphabet's "Google Search & other | Google Services", where
                 # the parent is a genuine segment).
-                keep = [q for q in parts
-                        if not _AXIS.search(q) and not _MONEY.match(q.strip())]
+                keep = [q for q in parts if not _AXIS.search(q)]
+                # DROP THE MEASURE, KEEP THE PLACE. _MONEY is anchored (^...$) and matches a
+                # bare "Revenues"; Exxon writes the axis out longhand as "United States |
+                # Sales and other operating revenue", which it does not match. So every
+                # geography was recorded as a CHILD of that phrase and children are excluded
+                # from the top-level split -- XOM, CVX, PFE and CAT all returned empty for
+                # this one reason. Matched loosely here because it only ever removes a part
+                # when another part survives, so it cannot empty the label.
+                _nm = [q for q in keep if not _MEASURE.search(q)]
+                if _nm:
+                    keep = _nm
                 # NESTING. Two surviving parts mean "child | parent": Alphabet files
                 # "Google Search & other | Google Services" as a CHILD of the segment
                 # "Google Services". Taking keep[0] alone flattened the tree and made the

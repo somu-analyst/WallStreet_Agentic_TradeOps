@@ -12554,6 +12554,11 @@ elif page == "📈 Insider / Congress / Whales":
             # matches into THIS roster instead — one 13F engine, real filings, no scrape to
             # maintain against their page layout). Every CIK verified directly against SEC EDGAR
             # company search before adding.
+            # Added 2026-09-05 (user searched VST expecting him and got nothing, ID 415).
+            # Thiel Macro LLC is the vehicle that files a 13F -- 29 filings, newest
+            # 2026-08-14, verified by date not by name. The Founders Fund entities file too,
+            # but those are the VC funds; "Peter Thiel" as an investor to follow is this one.
+            "Thiel Macro (Peter Thiel)": "0001562087",
             "Icahn (Carl Icahn)": "0000921669", "Duquesne (Druckenmiller)": "0001536411",
             "Appaloosa (Tepper)": "0001656456", "Lone Pine Capital": "0001061165",
             "Coatue Management": "0001135730", "Viking Global": "0001103804",

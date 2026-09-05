@@ -28188,7 +28188,11 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
             #   Goodwill     a goodwill roll-forward by segment
             #   receivables / contract assets / liabilities -- balance-sheet lines
             # Skipping them costs nothing: no filer puts the revenue split in one.
-            if _re.search(r"\(narrative\)|goodwill|receivable|contract (asset|liabilit)|"
+            # `narrative` is matched WITHOUT requiring parentheses: Exxon writes
+            # "(Narrative) (Details)" but Chevron writes "- Narrative (Details)", and the
+            # parenthesised form skipped one filer while the other kept selecting a two-row
+            # table whose only content is "Number of reportable segments not disclosed flag".
+            if _re.search(r"\bnarrative\b|goodwill|receivable|contract (asset|liabilit)|"
                           r"useful li(fe|ves)|accumulated depreciation|impairment",
                           name, _re.I):
                 continue

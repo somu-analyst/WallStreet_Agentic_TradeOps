@@ -30186,7 +30186,10 @@ def wrap_narrative(F, html=True):
                 continue
             _rows.append((
                 ("🟢" if _ix["pct"] >= 0 else "🔴"),
-                str(_ix["name"])[:12],
+                # Truncation made the two Nasdaqs identical -- both rendered "Nasda…", which
+                # is worse than a code nobody has to guess at.
+                {"S&P 500": "S&P", "Nasdaq 100": "NDX", "Nasdaq Comp": "COMP",
+                 "Russell 2000": "RUT"}.get(str(_ix["name"]), str(_ix["name"])[:6]),
                 f"{(_sh['open'] / _ix['prev'] - 1) * 100:+.2f}%",
                 f"{_sh['peak']:,.0f}",
                 f"{_sh['trough']:,.0f}",
@@ -30197,8 +30200,8 @@ def wrap_narrative(F, html=True):
                 ("", "Index", "Open", "Peak", "Trough", "Pk→Tr", "Day"),
                 _rows, right_cols={2, 3, 4, 5, 6},
                 title="📊 EVERY INDEX — SESSION SHAPE",
-                legend="Open = gap vs prior close · Pk→Tr = deepest intraday drawdown",
-                notes="A small Day% with a large Pk→Tr is a round trip, not a quiet session."))
+                legend="Open = gap vs prior close · Pk→Tr = deepest intraday drawdown · "
+                       "a small Day% with a large Pk→Tr is a round trip, not a quiet session"))
 
     # FOMC-today flag (user 2026-07-28: "where is today Fed meeting info, why that
     # missing" -- _FOMC_DATES already has the real schedule, the wrap just never checked

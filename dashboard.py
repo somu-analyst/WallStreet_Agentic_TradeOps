@@ -5660,6 +5660,33 @@ def _render_who_owns(key_prefix="who"):
     _c1.metric("Investors holding", _funds)
     _c2.metric("Latest quarter", _latest)
     _c3.metric("Holders that quarter", f"{_now['Fund'].nunique()}")
+    # SAY HOW MUCH OF THE ROSTER WAS ACTUALLY SEARCHED (ID 416). Holdings are stored per
+    # fund, and a fund with nothing stored simply cannot appear -- so a short holder list
+    # looks identical to a complete answer. That is how a real holder went missing: the
+    # Thiel search returned ten names and read as exhaustive.
+    # The roster dict lives inside another page's branch, so it is NOT reliably in scope
+    # here -- `globals().get` rather than a bare name, and the comparison is simply skipped
+    # when it is absent instead of guessing a total. The searched count is always stated,
+    # because that number is the honest one either way.
+    try:
+        _cvc = get_conn()
+        try:
+            _have_n = _cvc.execute(
+                "SELECT COUNT(DISTINCT cik) FROM edgar_13f").fetchone()[0] or 0
+        finally:
+            _cvc.close()
+    except Exception:
+        _have_n = None
+    _tot_n = len(globals().get("_EDGAR_FUNDS") or {}) or None
+    if _have_n and _tot_n and _have_n < _tot_n:
+        st.warning(
+            f"**Searched {_have_n} of {_tot_n} tracked investors.** Holdings are stored per "
+            f"fund and the remaining {_tot_n - _have_n} have not been downloaded yet, so this "
+            f"list is incomplete rather than definitive — a real holder can be missing from "
+            f"it. Run `python tools/backfill_13f.py` to close the gap.")
+    elif _have_n:
+        st.caption(f"Searched **{_have_n}** tracked investors — every fund whose filings are "
+                   f"stored. A fund with nothing stored cannot appear here.")
     _only_new = st.checkbox("Only show quarters where the position CHANGED",
                             value=False, key=f"{key_prefix}_chg",
                             help="Hides HELD rows, leaving opens, adds and trims.")

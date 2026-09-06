@@ -60,6 +60,32 @@ def main():
     quiet = "--quiet" in sys.argv
     t0 = time.time()
 
+    # --quiet is meant for a scheduled task, which on Windows means pythonw -- and pythonw
+    # does not merely hide the console, it discards stdout entirely. Printing "normally" in
+    # that context is printing into the void: even the case worth logging (the safety net
+    # actually found and fixed drift) would vanish along with the no-op noise it was built to
+    # suppress. Redirecting stdout to the same file the commit hook already writes means one
+    # log carries every deploy, hook-triggered or schedule-caught.
+    #
+    # Wrapped in try/except deliberately: the scheduled task self-disabled repeatedly under
+    # Task Scheduler regardless of HOW it was registered (PowerShell cmdlet, schtasks.exe, a
+    # cmd.exe wrapper) -- three different creation paths, same symptom, which points at
+    # something failing INSIDE the run rather than at how the task was made. This redirect is
+    # the one thing in this script that had never run under that exact execution context
+    # before, so it is the leading suspect even without a confirmed root cause. A logging
+    # convenience must never be able to take the actual deploy down with it -- if the log file
+    # cannot be opened for any reason, fall back to plain print() (silent under pythonw, same
+    # as before this feature existed) rather than crash.
+    if quiet:
+        try:
+            _log_path = os.path.join(HERE, "logs", "auto_deploy.log")
+            os.makedirs(os.path.dirname(_log_path), exist_ok=True)
+            _fh = open(_log_path, "a", encoding="utf-8")
+            sys.stdout = _fh
+            sys.stderr = _fh
+        except Exception:
+            pass
+
     # Buffered rather than printed directly through step 2: a --quiet scheduled run where
     # nothing turns out to need doing should produce ZERO log lines, the same contract
     # sync_trades.py already gives NYSE_TradeSync -- otherwise a job that fires every few
@@ -224,4 +250,24 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        # The scheduled task self-disabled three times in a row, under three different
+        # registration methods, always right after its first run -- strong evidence something
+        # here throws under Task Scheduler's specific execution context that never showed up
+        # run by hand. Whatever it is, "LastTaskResult=2 and nothing else" is not a diagnosis.
+        # This is the last line of defense: if it happens again, the actual traceback is on
+        # disk instead of one more blind guess.
+        import traceback
+        try:
+            crash_path = os.path.join(HERE, "logs", "deploy_cloud_crash.log")
+            os.makedirs(os.path.dirname(crash_path), exist_ok=True)
+            with open(crash_path, "a", encoding="utf-8") as f:
+                f.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+                traceback.print_exc(file=f)
+        except Exception:
+            pass
+        sys.exit(1)

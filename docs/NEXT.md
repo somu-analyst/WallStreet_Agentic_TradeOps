@@ -1,10 +1,27 @@
-﻿[RESUME AFTER] 2026-09-03 22:00  (limit-guard: block at 134177971 tokens >= 80000000)
+﻿[RESUME AFTER] 2026-09-06 04:00  (limit-guard: block at 97152480 tokens >= 80000000)
 # NEXT — handoff
 
 Updated 2026-09-04. Read `python tools/show_pending.py --cloud` before acting; this file is a
 summary, the sheet is the source of truth.
 
 ## Resume here (2026-09-04 session)
+
+**Read this first, it changes how to resume.** Another Claude Code session is (or was)
+working this SAME repo concurrently tonight -- its commit `c45ff7e "Log: 2026-09-04 session
+recap"` (docs/LOG.md only) landed between two of this session's own commits, authored by a
+different session identity. There is RIGHT NOW an uncommitted `telegram_bot_optimized.py`
+diff sitting in the working tree that this session did NOT write and deliberately did NOT
+commit or inspect further -- it may be that other session's in-progress edit. Before touching
+it: `git diff telegram_bot_optimized.py` to see what it is, and if it looks like real
+in-progress work (not something safe to discard), leave it alone or ask the user which
+session should own it. Do not blindly commit it, and do not blindly discard it either.
+
+Everything below this point IS this session's own verified work, pushed to origin/main as of
+`6564f69` (confirmed: `git status -sb` showed zero divergence from origin at handoff time).
+
+Health check at handoff (all green): `sync_trades.py` reports both `trades` (89/89) and
+`paper_trades` (14/14) in sync; local dashboard HTTP 200; cloud `nyse-bot`/`nyse-dashboard`
+both active.
 
 Full detail in `docs/LOG.md` (top entry) and Cloud Migration tracker IDs 24–45. Short version:
 

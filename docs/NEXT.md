@@ -1,8 +1,18 @@
-﻿[RESUME AFTER] 2026-09-06 04:00  (limit-guard: block at 97152480 tokens >= 80000000)
+﻿[RESUME AFTER] 2026-09-06 04:00  (limit-guard: block at 100555979 tokens >= 80000000)
 # NEXT — handoff
 
-Updated 2026-09-04. Read `python tools/show_pending.py --cloud` before acting; this file is a
-summary, the sheet is the source of truth.
+**2026-09-06 mid-day session (auto-resume via ClaudeResume):** committed the leftover
+`deploy_cloud.py` crash-logging fix (`7b778c8`) and fixed pattern-board ID 422 (`1c29336`,
+see today's LOG.md entry). Stopped there deliberately — usage limit was near and none of the
+big P1s below had been touched yet. Full pending list (11 main-sheet + 2 cloud-sheet
+actionable rows) is unchanged from before; run `python tools/show_pending.py` /
+`--cloud` and pick up from there. New row 423 (email/WhatsApp delivery) is BLOCKED on the
+user picking which content and approving the WhatsApp Business API phone signup — do not
+guess at scope.
+
+Updated 2026-09-04 (below this line is the prior session's handoff). Read
+`python tools/show_pending.py --cloud` before acting; this file is a summary, the sheet is
+the source of truth.
 
 ## Resume here (2026-09-04 session)
 

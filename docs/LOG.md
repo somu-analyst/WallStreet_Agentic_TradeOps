@@ -988,3 +988,39 @@ reporting Disabled), 411 (the alert was a 09:39 snapshot; both TSLA closes were 
 332/333 (self-improving agent), 334 (re-run at ~80 dates; at 57), 36 (blocked), cloud items.
 
 **Bot restart needed** for /ack, /margin and the daily pattern job.
+
+**Addendum (same day, new session):** usage-limit guard fired mid-session (ClaudeResume
+scheduled for 04:00). Found and committed (`7b778c8`) a leftover uncommitted fix from an
+earlier cut-off session: `deploy_cloud.py` now redirects stdout/stderr to
+`logs/auto_deploy.log` under `--quiet` (pythonw discards stdout, so the one case worth
+logging — drift found and fixed — was vanishing with the noise) and wraps `main()` to write
+an uncaught exception to `logs/deploy_cloud_crash.log` (Task Scheduler's `LastTaskResult=2`
+gave no diagnosis for why the scheduled job kept self-disabling after its first run under
+three different registration methods). Partial progress on Cloud row 50 — remote-HEAD
+reconciliation + periodic scheduling still open. `combined_ca_bundle.pem` sits untracked at
+repo root (gitignore has an explicit `!combined_ca_bundle.pem` exception so it's meant to be
+tracked) — not committed, no context on why it's there; flag for the user.
+
+Mid-session the user reported the pattern board (ID 422) showing only Descending triangle
+across a dozen tickers and asked for separate ascending/descending tables. Root cause was
+NOT detection (Ascending triangle actually has more measured occurrences, N=20629 vs 17627,
+and the scanner appends both directions symmetrically) — it was `_fmt_pattern_alerts`
+ordering all unacked rows by date/id and hard-capping the WHOLE list at 12; verified 9
+bullish rows (2 of them Ascending triangle) sat in `pattern_alerts` unacked but never
+reached the board because bearish completions filled every slot first. Fixed: two tables
+(BULLISH/BEARISH), each with its own cap (`telegram_bot_optimized.py`, commit `1c29336`).
+Fixing it surfaced a real send bug: two tables push the message past `_split_tg`'s
+3900-char cap far more often, and the sections were joined on single newlines, giving
+`_split_tg` no blank-line boundary to cut on — an over-cap message with nowhere to split is
+simply rejected by Telegram. Switched to blank-line joins; verified live against
+`US_data_OpenBB.db` (9 bullish + 12 bearish rows, splits into 2008/2925-char parts). Also
+found and fixed the same missing-chunking bug in `ack_command`'s `/ack` no-args branch,
+which sent the whole board through one `reply_text()` call with no splitting at all.
+
+Logged but NOT built (ID 423, needs user decisions first): "send daily mails and whatsapp
+messages" — which content (digest/board/alerts/all) and, for WhatsApp specifically, the
+official Business Cloud API needs a one-time Meta phone/business verification that can't be
+done silently. Full backlog (13 actionable rows across main + cloud tracker sheets) listed
+in this session's chat reply; none of the big P1s (cloud-hosting writeup, DB choice,
+FastAPI+HTMX security, self-improving-agent build) were started this session — each needs a
+real design decision, not something to rush through with the usage limit this close.

@@ -1,5 +1,20 @@
 # LOG
 
+## 2026-09-06 (continued) — Cloud project plan written; remaining backlog needs decisions
+
+Closed ID 316: `docs/CLOUD_PROJECT_PLAN.md` (commit `adbfce7`) — a repo-handoff doc (not an
+artifact, since the ask was specifically something a fresh Claude Code session executes from
+the repo link) pairing every build step with a validation gate (before/after + a fails-closed
+condition), a zero-cost table against Oracle's real Always Free limits, and a note that the
+existing instance's 2 OCPU/12GB leaves exactly 2 OCPU/12GB of free-tier headroom for a
+same-size second instance (ID 356) at $0.
+
+Remaining P1/P2 backlog (306, 316, 338, 361 partial all now done or logged) is now mostly
+architecture-decision items that need the user's input on WHAT, not just HOW: ID 356 (what
+exactly is publishable on the public instance — the licensing distinction is settled, the
+content scope is not), 308/312/313 (frontend/DB stack choices), 332/333 (self-improving-agent
+feasibility). Stopping here to check in rather than guessing at product scope on any of them.
+
 ## 2026-09-04 — The cloud dashboard window was never zoomed, it was fighting the user
 
 Traced "letters are zoomed on cloud, local is fine" to the actual cause instead of re-guessing

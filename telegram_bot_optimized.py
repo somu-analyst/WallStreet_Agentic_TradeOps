@@ -29030,6 +29030,17 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
 
     rev, net, tax = pick("revenue"), pick("net"), pick("tax") or 0.0
     if rev is None or net is None:
+        # ID 424: fired for AMZN, a company that obviously reports both lines every quarter --
+        # so this is a label-matching miss against `_SK_YF_ROWS`, not a real absence, the same
+        # bug CLASS as the ID 361 segment matcher (fixed by logging the real row names instead
+        # of guessing another regex blind). Log what yfinance actually returned so the NEXT
+        # occurrence gives a real row name to add, rather than another unverified guess.
+        try:
+            log.warning(f"_income_stmt {ticker}: no revenue/net match in "
+                        f"{'quarterly' if quarterly else 'annual'} statement, index="
+                        f"{list(df.index)[:40]!r}")
+        except Exception:
+            pass
         raise ValueError(f"{ticker}: the filed statement has no revenue or net income line")
     # BANKS AND INSURERS DO NOT REPORT GROSS PROFIT OR OPERATING INCOME. Berkshire's statement
     # carries Total Revenue, Pretax Income, Tax and Net Income and nothing in between, so

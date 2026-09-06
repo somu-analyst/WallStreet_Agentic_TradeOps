@@ -28299,9 +28299,13 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         # "Net revenue" (V), "Revenue from contract with customers" (GOOGL). Matching only
         # the first three meant Alphabet extracted nothing at all while its table sat there
         # fully populated.
+        # Trailing colon (Pfizer files "Revenues:") and the compound "sales AND OTHER
+        # OPERATING revenues" (Chevron) are real filed labels, verified against their own
+        # 2026 10-Qs (ID 361) -- not new guesses stacked on the old ones.
         _MONEY = _re.compile(
             r"^(net |total |operating )*(revenues?|sales)"
-            r"( from contract(s)? with customers)?$", _re.I)
+            r"( and other operating (revenues?|sales))?"
+            r"( from contract(s)? with customers)?:?$", _re.I)
         if metric == "assets":
             # The asset line is labelled as variously as the revenue one: "Long-lived
             # assets", "Long-lived assets, net", "PROPERTY, PLANT AND EQUIPMENT, NET".
@@ -28339,12 +28343,26 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
             return vals
 
         out, cur, cur_parent, _tbl_total = {}, None, None, None
+        # SEC's own XBRL-to-HTML renderer inserts a structural caption between every
+        # segment's label and its value row -- "Segment Reporting [Line Items]" (already
+        # matched by _BOILER), but also filer-specific text that restates the measure, e.g.
+        # CAT's "Sales and revenues by geographic region" and JNJ's "Sales by segment of
+        # business" (ID 361, verified against both filers' real 2026 10-Qs). Neither is a
+        # segment name, and being a no-value row that isn't boilerplate, either used to
+        # overwrite `cur` right before the value row committed -- clobbering the REAL label
+        # one row above it and misattributing every segment's value to this caption text
+        # instead. The caption is identified by REPETITION, not by wording: it is the same
+        # string every single time it appears, while a genuine segment name never repeats
+        # verbatim. Track labels already seen; a repeat is the caption, not a new segment.
+        seen_labels = set()
         for _, r in tbl.iterrows():
             lab = str(r["0"]).strip()
             cells = _money_cells(r)
             has_val = bool(cells)
             if not lab or lab.lower() == "nan":
                 continue
+            if not has_val and lab in seen_labels:
+                continue                                  # recurring axis caption, not a label
             if _MONEY.match(lab) and has_val:
                 if cur:                                   # belongs to the segment above it
                     now = cells[0] * scale / unit_div
@@ -28365,6 +28383,7 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                     _tbl_total = cells[0] * scale / unit_div
                 continue                                  # a bare total, no segment -> skip
             if not has_val and not _BOILER.search(lab):
+                seen_labels.add(lab)
                 # The name sits on EITHER side of the pipe depending on the report:
                 #   "United States | Geographic Concentration Risk"  -> name first
                 #   "Operating Segments | Government"                -> name LAST

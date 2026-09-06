@@ -25633,7 +25633,7 @@ elif page == "📐 Chart Reader":
                     "from the chart — prices this stock has actually turned at. The "
                     "**probabilities** are the *options market's*, backed out of implied "
                     "volatility: what people are paying real money for right now, not our "
-                    "opinion. That split is deliberate. We measured chart patterns (~51,800 "
+                    "opinion. That split is deliberate. We measured 23 chart patterns (~120,000 "
                     "cases) and level breakouts on our own history and **neither predicts "
                     "direction** — the breakout result even looked strong at +9.5 points until "
                     "random lines drawn from the same range scored +9.7. Drift is assumed "
@@ -25682,17 +25682,34 @@ elif page == "📐 Chart Reader":
                                  "Hit %": st.column_config.NumberColumn(format="%.1f%%"),
                                  "Baseline %": st.column_config.NumberColumn(format="%.1f%%"),
                                  "t": st.column_config.NumberColumn(format="%.2f")})
+                # The whole library, ranked. "Which of these is actually good" is the question
+                # a pattern list invites, and leaving it unanswered lets every shape look
+                # equally actionable.
+                _all = sorted(((v["hit"] - v["base"], k, v)
+                               for k, v in _TB_ENGINE._PATTERN_STATS.items()), reverse=True)
+                with st.expander("📊 All 23 patterns, ranked by measured edge", expanded=False):
+                    st.dataframe(pd.DataFrame([{
+                        "Pattern": k, "Edge pp": round(e, 1), "Hit %": v["hit"],
+                        "Baseline %": v["base"], "t": v["t"], "Fires": v["n"],
+                        "Clears bar": "yes" if abs(v["t"]) >= _TB_ENGINE._PATTERN_CRIT_T else "no",
+                    } for e, k, v in _all]), hide_index=True, use_container_width=True,
+                        column_config={
+                            "Hit %": st.column_config.NumberColumn(format="%.1f%%"),
+                            "Baseline %": st.column_config.NumberColumn(format="%.1f%%"),
+                            "t": st.column_config.NumberColumn(format="%.2f"),
+                            "Fires": st.column_config.NumberColumn(format="%d")})
                 st.error(
-                    "**These percentages are ours, and none of them clears the bar.** Measured "
-                    "on 300 tickers and about 51,800 occurrences at 5, 10 and 20 sessions, with "
-                    "no lookahead — a pattern is scored from the bar it could first have been "
-                    "seen, not from its own extremes. Every edge lands between −1.5 and +1.9 "
-                    "points with |t| under 2.75, the Bonferroni bar for six patterns. The "
-                    "textbook figures are higher because they are counted on the same history "
-                    "used to define the pattern. The one consistent result is the **ascending "
-                    "triangle, which is consistently slightly NEGATIVE** — the opposite of its "
-                    "textbook bullish meaning. Read the shapes as context; do not trade them "
-                    "on their own.")
+                    f"**These percentages are ours, and not one of the 23 clears the bar.** "
+                    f"Measured on 300 tickers and about 120,000 occurrences with no lookahead — "
+                    f"each pattern scored from the bar it could first have been seen, against "
+                    f"its own direction's baseline. The bar is |t| ≥ {_TB_ENGINE._PATTERN_CRIT_T}, "
+                    f"and it got *harder* as patterns were added, which is the correct "
+                    f"direction: testing 23 shapes and reporting the best is how noise gets "
+                    f"published. Best in the library is **{_all[0][1]} at {_all[0][0]:+.1f} "
+                    f"points** (t={_all[0][2]['t']:+.2f}) — still short. The most statistically "
+                    f"consistent result is the **ascending triangle at t=−2.49, and it is "
+                    f"NEGATIVE**: the textbook bullish breakout did slightly worse than doing "
+                    f"nothing. Read the shapes as context, not as evidence.")
 
             if _cr["breakout"]:
                 _b = _cr["breakout"]

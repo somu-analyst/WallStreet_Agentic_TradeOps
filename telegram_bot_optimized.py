@@ -33607,7 +33607,7 @@ def _chart_trendlines(pivots, closes, kind, tol_pct=1.5, min_touches=3, max_dist
 
 
 # MEASURED ON OUR OWN DATA, 2026-09-03 (tools/measure_chart_patterns.py, ID 403).
-# 300 tickers, ~51,800 pattern fires, horizons 5/10/20 sessions, scored with no lookahead
+# 300 tickers, ~120,000 pattern fires across 23 shapes, scored with no lookahead
 # (forward window starts at the bar the pattern could first be seen), against the SAME-horizon
 # unconditional rate, aggregated per date, Bonferroni critical |t| = 2.75 across 6 patterns.
 #
@@ -33620,15 +33620,34 @@ def _chart_trendlines(pivots, closes, kind, tol_pct=1.5, min_touches=3, max_dist
 # -0.9 / -1.2 / -1.2 points at 5 / 10 / 20 days, i.e. slightly WORSE than doing nothing, which
 # is the opposite of its textbook bullish meaning.
 # hit% and base% below are the 10-day figures; `t` is 10-day.
+# FULL LIBRARY, re-measured 2026-09-06 (ID 420): 19 classical + 5 harmonic, ~120,000 fires
+# across 300 tickers, each occurrence scored against ITS OWN direction's baseline.
+# NOT ONE OF THE 23 CLEARS THE BAR. The two closest are both BEARISH and both fall short:
+# bear flag +2.2 (t=2.19) and rounding top +2.1 (t=2.06). The most statistically consistent
+# result in the whole table is the ascending triangle at t=-2.49, and it is NEGATIVE -- the
+# textbook bullish breakout pattern did slightly worse than doing nothing.
+# Adding patterns RAISES the bar (3.23 now, was 2.75 at six), which is the correct direction:
+# testing more shapes and reporting the best of them is how noise gets published.
 _PATTERN_STATS = {
-    "Ascending triangle":         {"hit": 51.6, "base": 52.8, "t": -2.49, "n": 20617},
-    "Descending triangle":        {"hit": 46.2, "base": 45.8, "t": 0.77,  "n": 17621},
-    "Double top":                 {"hit": 46.3, "base": 46.3, "t": -0.02, "n": 5560},
-    "Double bottom":              {"hit": 52.4, "base": 53.3, "t": -0.97, "n": 5528},
-    "Inverse head and shoulders": {"hit": 51.2, "base": 52.7, "t": -0.95, "n": 1283},
-    "Head and shoulders":         {"hit": 47.4, "base": 45.6, "t": 1.18,  "n": 1199},
+    "Ascending triangle":         {"hit": 51.6, "base": 52.8, "t": -2.49, "n": 20629},
+    "Rising wedge":               {"hit": 48.6, "base": 48.0, "t": 1.39,  "n": 20621},
+    "Descending triangle":        {"hit": 46.2, "base": 45.8, "t": 0.73,  "n": 17627},
+    "Falling wedge":              {"hit": 52.8, "base": 53.7, "t": -1.69, "n": 15610},
+    "Bull flag":                  {"hit": 51.9, "base": 53.2, "t": -1.55, "n": 6987},
+    "Double top":                 {"hit": 46.3, "base": 46.3, "t": -0.01, "n": 5566},
+    "Double bottom":              {"hit": 52.4, "base": 53.3, "t": -0.92, "n": 5529},
+    "Rounding top":               {"hit": 48.3, "base": 46.1, "t": 2.06,  "n": 5447},
+    "Rounding bottom":            {"hit": 50.0, "base": 51.1, "t": -0.98, "n": 5160},
+    "Triple top":                 {"hit": 45.4, "base": 45.8, "t": -0.38, "n": 5108},
+    "Bear flag":                  {"hit": 48.3, "base": 46.1, "t": 2.19,  "n": 4442},
+    "Triple bottom":              {"hit": 52.7, "base": 53.5, "t": -0.79, "n": 4438},
+    "Bull pennant":               {"hit": 52.5, "base": 53.1, "t": -0.56, "n": 3170},
+    "Cup and handle":             {"hit": 54.7, "base": 54.9, "t": -0.09, "n": 1467},
+    "Bear pennant":               {"hit": 44.8, "base": 44.8, "t": -0.02, "n": 1322},
+    "Inverse head and shoulders": {"hit": 51.3, "base": 52.7, "t": -0.89, "n": 1284},
+    "Head and shoulders":         {"hit": 47.4, "base": 45.6, "t": 1.12,  "n": 1200},
 }
-_PATTERN_CRIT_T = 2.75          # Bonferroni bar for the 6 patterns tested
+_PATTERN_CRIT_T = 3.23          # Bonferroni bar across the 23 directional patterns tested
 
 
 # HARMONIC PATTERNS — XABCD structures defined by Fibonacci retracement bands (ID 419).
@@ -33796,6 +33815,100 @@ def _chart_patterns(highs, lows, closes, w=5, tol=3.0):
                 elif falling_top and rising_bot:
                     out.append({"name": "Symmetrical triangle", "dir": "neutral",
                                 "known_i": last + w, "level": (hp2 + lp2) / 2})
+    # ── TRIPLE TOP / BOTTOM — three turns at one price. Strictly a stronger double, and
+    #    worth separating because the extra touch is the whole folk claim.
+    for piv, name, direction in ((ph, "Triple top", "bearish"), (pl, "Triple bottom", "bullish")):
+        for a in range(len(piv) - 2):
+            (i1, p1), (i2, p2), (i3, p3) = piv[a], piv[a + 1], piv[a + 2]
+            if near(p1, p2) and near(p2, p3) and (i3 - i1) >= w * 3:
+                out.append({"name": name, "dir": direction, "known_i": i3 + w,
+                            "level": (p1 + p2 + p3) / 3})
+
+    # ── WEDGES — both boundaries slope the SAME way and converge. That is what separates a
+    #    wedge from a channel, and the direction of the squeeze is the signal, not the slope:
+    #    a rising wedge is read as bearish precisely because price is making highs with
+    #    shrinking conviction.
+    if len(ph) >= 2 and len(pl) >= 2:
+        for a in range(len(ph) - 1):
+            for b in range(len(pl) - 1):
+                (hi1, hp1), (hi2, hp2) = ph[a], ph[a + 1]
+                (li1, lp1), (li2, lp2) = pl[b], pl[b + 1]
+                last = max(hi2, li2)
+                if last - min(hi1, li1) < w * 3:
+                    continue
+                top_w, bot_w = abs(hp2 - hp1), abs(lp2 - lp1)
+                if min(top_w, bot_w) / max(abs(hp1), 1e-9) * 100 < tol * 0.5:
+                    continue                      # too flat to be a wedge; that is a triangle
+                conv = abs(hp2 - lp2) < abs(hp1 - lp1) * 0.85
+                if not conv:
+                    continue
+                if hp2 > hp1 and lp2 > lp1:
+                    out.append({"name": "Rising wedge", "dir": "bearish",
+                                "known_i": last + w, "level": lp2})
+                elif hp2 < hp1 and lp2 < lp1:
+                    out.append({"name": "Falling wedge", "dir": "bullish",
+                                "known_i": last + w, "level": hp2})
+
+    # ── RECTANGLE / RANGE — four alternating turns between two flat bounds. The pattern is
+    #    the ABSENCE of a trend, so it is filed neutral and only the break is directional.
+    if len(ph) >= 2 and len(pl) >= 2:
+        for a in range(len(ph) - 1):
+            for b in range(len(pl) - 1):
+                (hi1, hp1), (hi2, hp2) = ph[a], ph[a + 1]
+                (li1, lp1), (li2, lp2) = pl[b], pl[b + 1]
+                if near(hp1, hp2) and near(lp1, lp2) and abs(hp1 - lp1) / max(abs(lp1), 1e-9) > 0.03:
+                    out.append({"name": "Rectangle range", "dir": "neutral",
+                                "known_i": max(hi2, li2) + w, "level": (hp2 + lp2) / 2})
+
+    # ── FLAGS AND PENNANTS — a sharp impulse, then a shallow drift against it. Continuation
+    #    patterns, so the direction is the IMPULSE's, not the drift's. The impulse is measured
+    #    on closes over the run-up rather than from pivots: the point of a flag is that the
+    #    move happened fast, and pivot spacing cannot express speed.
+    for i in range(w * 4, len(closes) - 1):
+        base = closes[i - w * 4]
+        if base <= 0:
+            continue
+        imp = (closes[i - w * 2] / base - 1) * 100
+        if abs(imp) < 8:
+            continue                              # not an impulse worth flagging
+        seg = closes[i - w * 2:i + 1]
+        if len(seg) < w:
+            continue
+        drift = (seg[-1] / seg[0] - 1) * 100
+        spread = (max(seg) - min(seg)) / max(min(seg), 1e-9) * 100
+        # The consolidation must be SMALL relative to the impulse and lean against it.
+        if spread > abs(imp) * 0.5 and spread > 6:
+            continue
+        if imp > 0 and -6 < drift <= 1:
+            out.append({"name": ("Bull pennant" if spread < 4 else "Bull flag"),
+                        "dir": "bullish", "known_i": i, "level": seg[-1]})
+        elif imp < 0 and -1 <= drift < 6:
+            out.append({"name": ("Bear pennant" if spread < 4 else "Bear flag"),
+                        "dir": "bearish", "known_i": i, "level": seg[-1]})
+
+    # ── ROUNDING BOTTOM / TOP and CUP-AND-HANDLE. A rounding base is a slow U: the extreme
+    #    sits in the MIDDLE of the window and both ends are well above it. The handle is the
+    #    small pullback that follows, which is what distinguishes a cup from a plain base.
+    span = w * 10
+    for i in range(span, len(closes) - 1, w):
+        seg = closes[i - span:i + 1]
+        if len(seg) < span or min(seg) <= 0:
+            continue
+        lo_i, hi_i = seg.index(min(seg)), seg.index(max(seg))
+        mid_lo = span * 0.30 <= lo_i <= span * 0.70
+        mid_hi = span * 0.30 <= hi_i <= span * 0.70
+        depth = (min(seg[0], seg[-1]) / min(seg) - 1) * 100
+        if mid_lo and depth > 8 and abs(seg[-1] / seg[0] - 1) * 100 < 8:
+            # A handle is a modest fade off the right rim, no deeper than a third of the cup.
+            tail = closes[i:min(i + w * 2, len(closes))]
+            handle = tail and (max(tail) - min(tail)) / max(min(tail), 1e-9) * 100 < depth / 3
+            out.append({"name": ("Cup and handle" if handle else "Rounding bottom"),
+                        "dir": "bullish", "known_i": i, "level": max(seg[0], seg[-1])})
+        elif mid_hi and (max(seg) / max(seg[0], seg[-1]) - 1) * 100 > 8 \
+                and abs(seg[-1] / seg[0] - 1) * 100 < 8:
+            out.append({"name": "Rounding top", "dir": "bearish",
+                        "known_i": i, "level": min(seg[0], seg[-1])})
+
     # De-duplicate: the same shape is found by several pivot pairs. Keep one per
     # (name, known bar) or the counts inflate and every hit gets scored many times.
     seen, uniq = set(), []
@@ -33886,7 +33999,12 @@ def _chart_read(ticker, days=180, w=5, conn=None):
             harm.append({**hp, "date": dates[min(hp["known_i"], len(dates) - 1)],
                          "hit": hs.get("hit"), "base": hs.get("base"), "t": hs.get("t"),
                          "n": hs.get("n"),
-                         "measured": bool(hs.get("t")) and abs(hs.get("t") or 0) >= 3.00})
+                         # ONE bar for both families. Harmonics and classical shapes were
+                         # tested in the same run, so they share the same multiplicity
+                         # correction; giving harmonics a softer threshold would be choosing
+                         # the bar after seeing the numbers.
+                         "measured": bool(hs.get("t"))
+                         and abs(hs.get("t") or 0) >= _PATTERN_CRIT_T})
     except Exception:
         harm = []
     return {"ticker": str(ticker).upper(), "asof": dates[-1], "spot": spot, "bars": len(rows),
@@ -37286,11 +37404,20 @@ def _fmt_chart_read(ticker):
                 score = "not measured"
             pl_.append(f"• <b>{p['name']}</b> ({p['dir']}) around {p['date']} · {score}")
         parts.append("\n<b>Patterns present</b>\n" + "\n".join(pl_))
-        parts.append("\n<i>Those percentages are OURS, measured on 300 tickers and ~51,800 "
-                     "occurrences with no lookahead — not the textbook figures, which are "
-                     "counted on the same history used to define the pattern. On our data NO "
-                     "pattern clears the significance bar, so the shape is worth seeing and "
-                     "is not worth trading on its own.</i>")
+        # RANK them, because "which of these is any good" is the actual question and a flat
+        # list makes every pattern look equally worth acting on. Best and worst measured, out
+        # of the whole 23-pattern library, so today's shape has somewhere to sit.
+        _rk = sorted(((v["hit"] - v["base"], k, v) for k, v in _PATTERN_STATS.items()),
+                     reverse=True)
+        _bt, _wt = _rk[0], _rk[-1]
+        parts.append(
+            f"\n<i>Those percentages are OURS — 300 tickers, ~120,000 occurrences across 23 "
+            f"patterns, scored with no lookahead against each pattern's own direction. They "
+            f"are not the textbook figures, which are counted on the same history used to "
+            f"define the shape. <b>Not one of the 23 clears the bar</b> (|t| {_PATTERN_CRIT_T}). "
+            f"Best in the whole library is <b>{_bt[1]} {_bt[0]:+.1f}pp</b> (t={_bt[2]['t']:+.2f}), "
+            f"worst is <b>{_wt[1]} {_wt[0]:+.1f}pp</b>. Read the shape as context; it is not "
+            f"evidence.</i>")
 
     # ── What could happen next, priced by the OPTIONS market ──────────────────────────
     o = _chart_outlook(ticker)
@@ -37309,7 +37436,7 @@ def _fmt_chart_read(ticker):
             "chart — they are prices this stock has actually turned at. The PROBABILITIES are "
             "the options market's, backed out of implied volatility, i.e. what people are "
             "paying real money for right now. Nothing here is our forecast, and that is "
-            "deliberate: we measured chart patterns (~51,800 cases) and level breakouts on our "
+            "deliberate: we measured 23 chart patterns (~120,000 cases) and level breakouts on our "
             "own history and neither predicts direction — the breakout result even looked "
             "strong until random lines scored the same. Drift is assumed ZERO, so these are "
             "not a view on whether the stock goes up.</i>")

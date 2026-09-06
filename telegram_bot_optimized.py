@@ -36374,6 +36374,241 @@ async def eod_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
         log.warning(f"EOD lane spawn failed: {e}")
 
 
+_PATTERN_ALERT_DDL = """
+CREATE TABLE IF NOT EXISTS pattern_alerts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker       TEXT NOT NULL,
+    pattern      TEXT NOT NULL,
+    direction    TEXT,
+    completed    TEXT NOT NULL,          -- session the pattern finished on
+    detected_on  TEXT,
+    level        REAL,
+    entry        REAL, stop REAL, target1 REAL, target2 REAL,
+    hit          REAL, base REAL, tstat REAL,
+    acked        INTEGER DEFAULT 0,
+    acked_on     TEXT,
+    sends        INTEGER DEFAULT 0,
+    last_sent    TEXT,
+    UNIQUE (ticker, pattern, completed)
+)"""
+
+
+def _scan_new_patterns(conn, tickers=None, w=5, days=180, fresh_bars=2):
+    """Patterns that COMPLETED in the last `fresh_bars` sessions, across the universe.
+
+    Only new completions. Running the detector over full history would re-report every shape
+    a stock has ever made, so the filter is on `known_i` -- the bar the pattern could first
+    have been seen -- sitting at the very end of the series. `fresh_bars=2` allows for a run
+    on a day when the newest bar is still landing.
+
+    Returns dicts ready to insert, each carrying its OWN measured hit rate. That is not
+    decoration: all 23 patterns measured out short of the bar, so an alert that named a shape
+    without its number would imply an edge the data does not support.
+    """
+    own = conn is None
+    if own:
+        conn = get_conn()
+    out = []
+    try:
+        if tickers is None:
+            # YOUR NAMES BY DEFAULT, not the whole universe. Measured on the real data: 250
+            # tickers produced 195 completions in a single session, so the full ~730 would
+            # push roughly 570 alerts a day onto a board that only clears when you
+            # acknowledge it. That is not an alert board, it is a wall, and the useful
+            # signals would be buried in it. Watchlist + real book + paper book is ~30 names
+            # and yields a handful a day. Pass `tickers` explicitly to scan wider.
+            seen, tickers = set(), []
+            for tbl in ("watchlist", "trades", "paper_trades"):
+                try:
+                    for (t,) in conn.execute(f"SELECT DISTINCT ticker FROM {tbl}"):
+                        u = str(t or "").upper()
+                        if u and u not in seen:
+                            seen.add(u); tickers.append(u)
+                except Exception:
+                    continue
+        for tk in tickers:
+            try:
+                rows = conn.execute(
+                    "SELECT trade_date, high, low, close FROM stock_history WHERE ticker=? "
+                    "ORDER BY trade_date DESC LIMIT ?", (tk, days)).fetchall()
+            except Exception:
+                continue
+            if len(rows) < 60:
+                continue
+            rows = rows[::-1]
+            dts = [r[0] for r in rows]
+            hi = [float(r[1] or 0) for r in rows]
+            lo = [float(r[2] or 0) for r in rows]
+            cl = [float(r[3] or 0) for r in rows]
+            if min(cl) <= 0:
+                continue
+            edge = len(cl) - 1
+            try:
+                found = list(_chart_patterns(hi, lo, cl, w=w))
+            except Exception:
+                found = []
+            try:
+                found += list(_harmonic_patterns(hi, lo, cl, w=w))
+            except Exception:
+                pass
+            for p in found:
+                if p.get("dir") == "neutral":
+                    continue                    # a range makes no call; nothing to alert on
+                k = p.get("known_i", -1)
+                if not (edge - fresh_bars <= k <= edge):
+                    continue
+                st = _PATTERN_STATS.get(p["name"]) or _HARMONIC_STATS.get(p["name"]) or {}
+                out.append({
+                    "ticker": tk, "pattern": p["name"], "direction": p["dir"],
+                    "completed": dts[min(k, edge)], "level": p.get("level"),
+                    "entry": p.get("entry"), "stop": p.get("stop"),
+                    "target1": p.get("target1"), "target2": p.get("target2"),
+                    "hit": st.get("hit"), "base": st.get("base"), "tstat": st.get("t"),
+                })
+    finally:
+        if own:
+            conn.close()
+    return out
+
+
+def _record_pattern_alerts(conn, found):
+    """Insert new completions, ignoring ones already on the board. Returns how many are new.
+
+    The UNIQUE (ticker, pattern, completed) key is what stops a setup re-firing as a brand
+    new alert every day it stays on the chart -- it stays ONE alert that keeps being re-sent
+    until acknowledged, which is what was asked for.
+    """
+    conn.execute(_PATTERN_ALERT_DDL)
+    today = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
+    n = 0
+    for f in found:
+        try:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO pattern_alerts (ticker, pattern, direction, completed, "
+                "detected_on, level, entry, stop, target1, target2, hit, base, tstat) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f["ticker"], f["pattern"], f["direction"], f["completed"], today,
+                 f["level"], f["entry"], f["stop"], f["target1"], f["target2"],
+                 f["hit"], f["base"], f["tstat"]))
+            n += cur.rowcount or 0
+        except Exception:
+            continue
+    conn.commit()
+    return n
+
+
+def _fmt_pattern_alerts(conn, limit=12):
+    """The open board: everything unacknowledged, newest first. '' when the board is clear."""
+    conn.execute(_PATTERN_ALERT_DDL)
+    rows = conn.execute(
+        "SELECT id, ticker, pattern, direction, completed, entry, stop, target1, hit, base, "
+        "tstat, sends FROM pattern_alerts WHERE acked=0 ORDER BY completed DESC, id DESC "
+        "LIMIT ?", (limit,)).fetchall()
+    if not rows:
+        return ""
+    total = conn.execute("SELECT COUNT(*) FROM pattern_alerts WHERE acked=0").fetchone()[0]
+    tbl, details = [], []
+    for (aid, tk, pat, d, comp, entry, stop, t1, hit, base, tstat, sends) in rows:
+        arrow = "🟢" if d == "bullish" else "🔴"
+        edge = (hit - base) if (hit is not None and base is not None) else None
+        tbl.append((arrow, tk[:8], pat[:16], comp[5:],
+                    (f"{edge:+.1f}" if edge is not None else "—")))
+        line = f"• <b>#{aid} {tk}</b> {pat} ({d}) completed {comp}"
+        if sends:
+            line += f" · <i>re-sent {sends}x</i>"
+        if entry:
+            line += (f"\n   entry {entry:,.2f}"
+                     + (f" · stop {stop:,.2f}" if stop else "")
+                     + (f" · target {t1:,.2f}" if t1 else ""))
+        if hit is not None:
+            line += (f"\n   measured {hit:.1f}% vs {base:.1f}% base ({edge:+.1f}pp, "
+                     f"t={tstat:+.2f}) — <b>does not clear the bar</b>")
+        else:
+            line += "\n   <i>too rare to have a measured rate</i>"
+        details.append(line)
+    msg = _report(
+        f"📐 PATTERN BOARD — {total} open",
+        ("", "Tkr", "Pattern", "Done", "Edge"), tbl, right_cols={4},
+        legend="Edge = measured hit rate minus its baseline, in points",
+        notes="These stay on the board until you acknowledge them.",
+        details=details)
+    msg += ("\n\n<i>Every one of the 23 patterns we measured falls short of the significance "
+            "bar, so treat these as <b>things to look at</b>, not signals. Acknowledge with "
+            "<code>/ack ID</code>, or <code>/ack all</code> to clear the board.</i>")
+    return msg
+
+
+async def pattern_alert_job(ctx):
+    """Daily: find newly completed patterns, then re-send the whole unacknowledged board.
+
+    Deliberately re-sends EVERYTHING still open rather than only what is new -- the request
+    was for alerts that persist until acknowledged, and a board that quietly stops mentioning
+    an old setup is the same as forgetting it.
+    """
+    conn = get_conn()
+    try:
+        found = _scan_new_patterns(conn)
+        new_n = _record_pattern_alerts(conn, found)
+        msg = _fmt_pattern_alerts(conn)
+        if not msg:
+            return
+        if new_n:
+            msg = f"🆕 <b>{new_n} new pattern(s) completed</b>\n\n" + msg
+        conn.execute("UPDATE pattern_alerts SET sends = sends + 1, last_sent = ? "
+                     "WHERE acked = 0", (datetime.now(timezone.utc).replace(
+                         tzinfo=None).strftime("%Y-%m-%d %H:%M"),))
+        conn.commit()
+    except Exception:
+        log.warning("pattern_alert_job failed", exc_info=True)
+        return
+    finally:
+        conn.close()
+    _, chat_id = load_creds()
+    try:
+        for part in _split_tg(msg):
+            await ctx.bot.send_message(chat_id=chat_id, text=part, parse_mode=H)
+    except Exception as e:
+        log.warning(f"pattern_alert_job send failed: {e}")
+
+
+async def ack_command(update, ctx):
+    """/ack ID [ID...] | /ack all — clear alerts off the board."""
+    args = ctx.args if hasattr(ctx, "args") else []
+    conn = get_conn()
+    try:
+        conn.execute(_PATTERN_ALERT_DDL)
+        now = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M")
+        if not args:
+            msg = _fmt_pattern_alerts(conn)
+            await update.message.reply_text(
+                msg or "📐 Pattern board is clear — nothing waiting.", parse_mode=H)
+            return
+        if str(args[0]).lower() == "all":
+            n = conn.execute("UPDATE pattern_alerts SET acked=1, acked_on=? WHERE acked=0",
+                             (now,)).rowcount
+            conn.commit()
+            await update.message.reply_text(
+                f"✅ Acknowledged <b>{n}</b> alert(s). Board is clear.", parse_mode=H)
+            return
+        ids = [int(a) for a in args if str(a).isdigit()]
+        if not ids:
+            await update.message.reply_text(
+                "Usage: <code>/ack 12</code> · <code>/ack 12 13</code> · "
+                "<code>/ack all</code>", parse_mode=H)
+            return
+        n = conn.execute(
+            f"UPDATE pattern_alerts SET acked=1, acked_on=? WHERE acked=0 AND id IN "
+            f"({','.join('?' * len(ids))})", (now, *ids)).rowcount
+        conn.commit()
+        left = conn.execute("SELECT COUNT(*) FROM pattern_alerts WHERE acked=0").fetchone()[0]
+        await update.message.reply_text(
+            f"✅ Acknowledged <b>{n}</b> alert(s) · <b>{left}</b> still open.", parse_mode=H)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ /ack failed: {e}", parse_mode=H)
+    finally:
+        conn.close()
+
+
 async def heat_streamer_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """15-min job: push heat/fade STATE CHANGES only (one alert per ticker|state per
     day via alert_dedup). Market-hours gated; silently no-ops if the lane is off."""
@@ -45476,6 +45711,7 @@ def main():
     app.add_handler(CommandHandler("rs", rs_command))
     app.add_handler(CommandHandler("breakout", breakout_command))
     app.add_handler(CommandHandler("chart", chart_command))
+    app.add_handler(CommandHandler("ack", ack_command))
     app.add_handler(CommandHandler("zrev", zrev_command))
     app.add_handler(CommandHandler("riskoff", riskoff_command))
     app.add_handler(CommandHandler("rovalidate", rovalidate_command))
@@ -45658,6 +45894,13 @@ def main():
         # quarters are skipped, so this is cheap; `first` is offset so it never collides with
         # the reddit snapshot on startup.
         job_queue.run_repeating(edgar_13f_job, interval=7 * 24 * 3600, first=900)
+        # Pattern board (ID 421). Once a day: patterns complete on a CLOSE, so anything more
+        # frequent would re-send the same board without new information. It deliberately
+        # re-sends every unacknowledged alert, not just the new ones -- a board that stops
+        # mentioning an old setup has forgotten it, which is the opposite of the ask.
+        # `first` is offset well past the other startup jobs so a restart does not fire four
+        # scans at once.
+        job_queue.run_repeating(pattern_alert_job, interval=24 * 3600, first=1200)
         _spawn_watchdog()
         log.info("Scheduled intraday-lane supervisor (auto-start during market hours)")
 

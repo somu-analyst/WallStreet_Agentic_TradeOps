@@ -12638,6 +12638,22 @@ elif page == "📈 Insider / Congress / Whales":
             # 13F-HR filings (2026-07-16, 2026-05-11, 2026-02-03) -- an active, current filer.
             "CrossMark Global Holdings": "0001539204",
         }
+        # THE DB ROSTER WINS when it exists (ID 418). The dict above is now a SEED, not the
+        # list: investor_roster is maintained by tools/sync_13f_roster.py, which discovers
+        # filers, resolves them against EDGAR and date-verifies each one, so the roster can
+        # grow without editing this file. Falling back to the dict means a missing table or a
+        # failed sync degrades to yesterday's behaviour instead of an empty page.
+        try:
+            _rc = get_conn()
+            try:
+                _rrows = _rc.execute(
+                    "SELECT fund, cik FROM investor_roster ORDER BY fund").fetchall()
+            finally:
+                _rc.close()
+            if _rrows:
+                _EDGAR_FUNDS = {r[0]: r[1] for r in _rrows}
+        except Exception:
+            pass
         _ef1, _ef2 = st.columns([2, 1])
         _fpick = _ef1.selectbox("Fund", list(_EDGAR_FUNDS) + ["(enter CIK manually)"], key="edgar_fund")
         if _fpick == "(enter CIK manually)":

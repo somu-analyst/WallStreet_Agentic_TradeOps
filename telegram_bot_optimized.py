@@ -36627,40 +36627,67 @@ def _record_pattern_alerts(conn, found):
 
 
 def _fmt_pattern_alerts(conn, limit=12):
-    """The open board: everything unacknowledged, newest first. '' when the board is clear."""
+    """The open board: everything unacknowledged, newest first, in TWO tables split by
+    direction. '' when the board is clear.
+
+    Was ONE combined list capped at `limit` total (ID 422): on a broad down day, bearish
+    completions alone filled all 12 slots and bullish completions -- present in the DB,
+    just outranked on completed-date/id -- never made it onto the board at all. Each
+    direction now gets its own `limit`-sized slice so one side can never crowd out the other.
+    """
     conn.execute(_PATTERN_ALERT_DDL)
     rows = conn.execute(
         "SELECT id, ticker, pattern, direction, completed, entry, stop, target1, hit, base, "
-        "tstat, sends FROM pattern_alerts WHERE acked=0 ORDER BY completed DESC, id DESC "
-        "LIMIT ?", (limit,)).fetchall()
+        "tstat, sends FROM pattern_alerts WHERE acked=0 "
+        "ORDER BY completed DESC, id DESC").fetchall()
     if not rows:
         return ""
-    total = conn.execute("SELECT COUNT(*) FROM pattern_alerts WHERE acked=0").fetchone()[0]
-    tbl, details = [], []
-    for (aid, tk, pat, d, comp, entry, stop, t1, hit, base, tstat, sends) in rows:
-        arrow = "🟢" if d == "bullish" else "🔴"
-        edge = (hit - base) if (hit is not None and base is not None) else None
-        tbl.append((arrow, tk[:8], pat[:16], comp[5:],
-                    (f"{edge:+.1f}" if edge is not None else "—")))
-        line = f"• <b>#{aid} {tk}</b> {pat} ({d}) completed {comp}"
-        if sends:
-            line += f" · <i>re-sent {sends}x</i>"
-        if entry:
-            line += (f"\n   entry {entry:,.2f}"
-                     + (f" · stop {stop:,.2f}" if stop else "")
-                     + (f" · target {t1:,.2f}" if t1 else ""))
-        if hit is not None:
-            line += (f"\n   measured {hit:.1f}% vs {base:.1f}% base ({edge:+.1f}pp, "
-                     f"t={tstat:+.2f}) — <b>does not clear the bar</b>")
-        else:
-            line += "\n   <i>too rare to have a measured rate</i>"
-        details.append(line)
-    msg = _report(
-        f"📐 PATTERN BOARD — {total} open",
-        ("", "Tkr", "Pattern", "Done", "Edge"), tbl, right_cols={4},
-        legend="Edge = measured hit rate minus its baseline, in points",
-        notes="These stay on the board until you acknowledge them.",
-        details=details)
+    total = len(rows)
+
+    def _section(sub_rows):
+        tbl, details = [], []
+        for (aid, tk, pat, d, comp, entry, stop, t1, hit, base, tstat, sends) in sub_rows:
+            arrow = "🟢" if d == "bullish" else "🔴"
+            edge = (hit - base) if (hit is not None and base is not None) else None
+            tbl.append((arrow, tk[:8], pat[:16], comp[5:],
+                        (f"{edge:+.1f}" if edge is not None else "—")))
+            line = f"• <b>#{aid} {tk}</b> {pat} ({d}) completed {comp}"
+            if sends:
+                line += f" · <i>re-sent {sends}x</i>"
+            if entry:
+                line += (f"\n   entry {entry:,.2f}"
+                         + (f" · stop {stop:,.2f}" if stop else "")
+                         + (f" · target {t1:,.2f}" if t1 else ""))
+            if hit is not None:
+                line += (f"\n   measured {hit:.1f}% vs {base:.1f}% base ({edge:+.1f}pp, "
+                         f"t={tstat:+.2f}) — <b>does not clear the bar</b>")
+            else:
+                line += "\n   <i>too rare to have a measured rate</i>"
+            details.append(line)
+        return tbl, details
+
+    bull_rows = [r for r in rows if r[3] == "bullish"][:limit]
+    bear_rows = [r for r in rows if r[3] == "bearish"][:limit]
+    bull_tbl, bull_details = _section(bull_rows)
+    bear_tbl, bear_details = _section(bear_rows)
+
+    shown = len(bull_rows) + len(bear_rows)
+    # Sections joined on BLANK lines (not single "\n") -- _split_tg only ever cuts on a
+    # blank-line boundary outside a <pre> block, and with two tables now this message
+    # regularly exceeds its 3900-char cap (ID 422 fix: a single joined-by-"\n" block that
+    # goes over cap has nowhere to split and Telegram just rejects the whole send).
+    parts = [hdr(f"📐 PATTERN BOARD — {total} open" + (f" ({shown} shown)" if shown < total else ""))]
+    if bull_tbl:
+        parts.append(_pipe_table(("", "Tkr", "Pattern", "Done", "Edge"), bull_tbl,
+                                  right_cols={4}, title="🟢 BULLISH")
+                      + "\n" + "\n".join(bull_details))
+    if bear_tbl:
+        parts.append(_pipe_table(("", "Tkr", "Pattern", "Done", "Edge"), bear_tbl,
+                                  right_cols={4}, title="🔴 BEARISH")
+                      + "\n" + "\n".join(bear_details))
+    parts.append("<i>Edge = measured hit rate minus its baseline, in points. "
+                  "These stay on the board until you acknowledge them.</i>")
+    msg = "\n\n".join(parts)
     msg += ("\n\n<i>Every one of the 23 patterns we measured falls short of the significance "
             "bar, so treat these as <b>things to look at</b>, not signals. Acknowledge with "
             "<code>/ack ID</code>, or <code>/ack all</code> to clear the board.</i>")
@@ -36709,8 +36736,15 @@ async def ack_command(update, ctx):
         now = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M")
         if not args:
             msg = _fmt_pattern_alerts(conn)
-            await update.message.reply_text(
-                msg or "📐 Pattern board is clear — nothing waiting.", parse_mode=H)
+            if not msg:
+                await update.message.reply_text(
+                    "📐 Pattern board is clear — nothing waiting.", parse_mode=H)
+                return
+            # Two tables (ID 422) push this past Telegram's 4,096-char cap far more often
+            # than the old single-table board did -- chunk it the same way pattern_alert_job
+            # already does, or a long board silently fails to send at all.
+            for part in _split_tg(msg):
+                await update.message.reply_text(part, parse_mode=H)
             return
         if str(args[0]).lower() == "all":
             n = conn.execute("UPDATE pattern_alerts SET acked=1, acked_on=? WHERE acked=0",

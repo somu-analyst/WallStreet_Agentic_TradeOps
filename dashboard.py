@@ -26212,6 +26212,27 @@ elif page == "📡 Macro/Event Hub":
             except Exception as e:
                 st.error(f"Regime error: {e}")
 
+            # Investor leverage and cash (ID 389). Filed alongside the regime read because it
+            # answers the same question from the other side: the regime panel reads price and
+            # credit, this reads how much borrowed money is behind them.
+            st.markdown("---")
+            try:
+                _mgc = _tbmod.get_conn()
+                try:
+                    _have = _mgc.execute(
+                        "SELECT COUNT(*) FROM finra_margin").fetchone()[0]
+                except Exception:
+                    _have = 0
+                if not _have:
+                    with st.spinner("Loading FINRA margin history…"):
+                        _tbmod._finra_margin_sync(_mgc)
+                _mg = _tbmod._fmt_margin(_mgc)
+                _mgc.close()
+                if _mg:
+                    _render_tg(_mg)
+            except Exception as _mge:
+                st.caption(f"Margin data unavailable: {_mge}")
+
         with _tb_flow:
             # ── Premium leaderboards ────────────────────────────────────────────────────
             # The in-cell bar is the whole point of this layout: rank is readable at a

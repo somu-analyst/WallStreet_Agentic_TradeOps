@@ -36374,6 +36374,135 @@ async def eod_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
         log.warning(f"EOD lane spawn failed: {e}")
 
 
+_FINRA_MARGIN_DDL = """
+CREATE TABLE IF NOT EXISTS finra_margin (
+    ym          TEXT PRIMARY KEY,       -- YYYY-MM
+    debit       REAL,                   -- margin debt, $ millions
+    cash_free   REAL,                   -- free credit, cash accounts
+    margin_free REAL,                   -- free credit, margin accounts
+    loaded_on   TEXT
+)"""
+_FINRA_MARGIN_URL = "https://www.finra.org/sites/default/files/2021-03/margin-statistics.xlsx"
+
+
+def _finra_margin_sync(conn=None):
+    """Load FINRA's margin-statistics file into `finra_margin`. Returns rows stored.
+
+    This is the leverage-and-cash series the positioning question needs (ID 389), and it goes
+    back to 1997-02 -- 355 months. That history is what makes a PERCENTILE honest here: our
+    own captured data covers months, so any "highest since" claim off it would be a statement
+    about our storage rather than about the market. FINRA's own file is not.
+
+    Monthly and published with a lag of several weeks, so it describes where investors were,
+    not where they are. Reported in $ millions, as filed.
+    """
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        import urllib.request as _u
+        conn.execute(_FINRA_MARGIN_DDL)
+        raw = _u.urlopen(_u.Request(_FINRA_MARGIN_URL, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}), timeout=60).read()
+        df = pd.read_excel(io.BytesIO(raw))
+        today = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
+        cols = list(df.columns)
+        n = 0
+        for _, r in df.iterrows():
+            try:
+                ym = str(r[cols[0]]).strip()[:7]
+                if len(ym) != 7 or "-" not in ym:
+                    continue
+                vals = [pd.to_numeric(r[c], errors="coerce") for c in cols[1:4]]
+                conn.execute(
+                    "INSERT INTO finra_margin (ym, debit, cash_free, margin_free, loaded_on) "
+                    "VALUES (?,?,?,?,?) ON CONFLICT(ym) DO UPDATE SET debit=excluded.debit, "
+                    "cash_free=excluded.cash_free, margin_free=excluded.margin_free, "
+                    "loaded_on=excluded.loaded_on",
+                    (ym, *[None if pd.isna(v) else float(v) for v in vals], today))
+                n += 1
+            except Exception:
+                continue
+        conn.commit()
+        return n
+    except Exception:
+        log.warning("finra_margin_sync failed", exc_info=True)
+        return 0
+    finally:
+        if own:
+            conn.close()
+
+
+def _fmt_margin(conn=None):
+    """Leverage vs cash, with the percentile taken over the real 29-year series."""
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        conn.execute(_FINRA_MARGIN_DDL)
+        rows = conn.execute(
+            "SELECT ym, debit, cash_free, margin_free FROM finra_margin "
+            "WHERE debit IS NOT NULL ORDER BY ym").fetchall()
+        if len(rows) < 24:
+            return ""
+        ym = [r[0] for r in rows]
+        debit = [float(r[1]) for r in rows]
+        cash = [float((r[2] or 0) + (r[3] or 0)) for r in rows]
+        # RATIO, not the level. Margin debt in raw dollars is meaningless across 29 years of
+        # inflation and market-cap growth -- $1.4tn now and $104bn in 1997 says more about the
+        # size of the market than about leverage. Debt per dollar of idle cash is scale-free
+        # and does compare.
+        ratio = [d / c if c else None for d, c in zip(debit, cash)]
+        cur = ratio[-1]
+        hist = [x for x in ratio if x is not None]
+        pct = sum(1 for x in hist if x <= cur) / len(hist) * 100
+        yoy = (debit[-1] / debit[-13] - 1) * 100 if len(debit) > 13 else None
+        cash_yoy = (cash[-1] / cash[-13] - 1) * 100 if len(cash) > 13 else None
+        hi = max(hist); hi_i = hist.index(hi)
+        rows_t = [
+            ("Margin debt", f"${debit[-1]/1e6:,.2f}T",
+             (f"{yoy:+.1f}%" if yoy is not None else "—")),
+            ("Idle cash", f"${cash[-1]/1e6:,.2f}T",
+             (f"{cash_yoy:+.1f}%" if cash_yoy is not None else "—")),
+            ("Debt per $1 cash", f"{cur:,.2f}x", f"{pct:.0f}th pct"),
+        ]
+        note = ("Leverage is high relative to idle cash" if pct >= 80 else
+                "Leverage is low relative to idle cash" if pct <= 20 else
+                "Leverage is unremarkable relative to idle cash")
+        return _report(
+            f"🏦 INVESTOR LEVERAGE & CASH — {ym[-1]}",
+            ("Measure", "Level", "Change"), rows_t, right_cols={1, 2},
+            legend=f"FINRA monthly · {len(hist)} months from {ym[0]} · $ trillions",
+            notes=f"{note}. Percentile is over the FULL series back to {ym[0]}, not our own "
+                  f"capture window. Peak was {hi:,.2f}x in {ym[hi_i]}.",
+            details=["<i>This is POSITIONING, not a signal. It is monthly and published weeks "
+                     "late, so it describes where investors were, not where they are — and it "
+                     "has not been tested against forward returns here, so no claim is made "
+                     "that a high reading precedes anything.</i>"])
+    except Exception:
+        log.warning("fmt_margin failed", exc_info=True)
+        return ""
+    finally:
+        if own:
+            conn.close()
+
+
+async def margin_command(update, ctx):
+    """/margin — investor leverage and idle cash, from FINRA."""
+    conn = get_conn()
+    try:
+        if conn.execute(_FINRA_MARGIN_DDL) is not None:
+            have = conn.execute("SELECT COUNT(*) FROM finra_margin").fetchone()[0]
+        if not have:
+            await update.message.reply_text("🏦 Loading FINRA margin history…", parse_mode=H)
+            _finra_margin_sync(conn)
+        msg = _fmt_margin(conn)
+    finally:
+        conn.close()
+    await update.message.reply_text(
+        msg or "🏦 No margin data available.", parse_mode=H)
+
+
 _PATTERN_ALERT_DDL = """
 CREATE TABLE IF NOT EXISTS pattern_alerts (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45712,6 +45841,7 @@ def main():
     app.add_handler(CommandHandler("breakout", breakout_command))
     app.add_handler(CommandHandler("chart", chart_command))
     app.add_handler(CommandHandler("ack", ack_command))
+    app.add_handler(CommandHandler("margin", margin_command))
     app.add_handler(CommandHandler("zrev", zrev_command))
     app.add_handler(CommandHandler("riskoff", riskoff_command))
     app.add_handler(CommandHandler("rovalidate", rovalidate_command))

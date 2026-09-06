@@ -33631,6 +33631,94 @@ _PATTERN_STATS = {
 _PATTERN_CRIT_T = 2.75          # Bonferroni bar for the 6 patterns tested
 
 
+# HARMONIC PATTERNS — XABCD structures defined by Fibonacci retracement bands (ID 419).
+# Each entry is (AB/XA band, BC/AB band, CD/BC band, AD/XA band). These ratios are the
+# pattern: a Gartley is not "a shape that looks like an M", it is a structure where AB
+# retraces 61.8% of XA and D lands at 78.6% of XA. That precision is why harmonics are
+# testable in a way head-and-shoulders is not -- there is nothing to eyeball.
+# The Gartley here is the "222" (Gartley's book, page 222), which is the AD=0.786 variant.
+_HARMONICS = {
+    "Gartley 222": ((0.55, 0.68), (0.35, 0.90), (1.10, 1.70), (0.75, 0.83)),
+    "Bat":         ((0.35, 0.55), (0.35, 0.90), (1.55, 2.70), (0.85, 0.92)),
+    "Butterfly":   ((0.72, 0.83), (0.35, 0.90), (1.55, 2.30), (1.22, 1.65)),
+    "Crab":        ((0.35, 0.65), (0.35, 0.90), (2.55, 3.70), (1.55, 1.68)),
+    "Shark":       ((0.35, 0.65), (1.10, 1.65), (1.55, 2.30), (0.85, 1.15)),
+}
+
+
+# MEASURED 2026-09-05 on 300 tickers, no lookahead, each occurrence scored against ITS OWN
+# direction's baseline, aggregated per date. Bonferroni bar across 12 patterns tested: |t| 3.00.
+# NOTHING CLEARS IT. Gartley 222 is the worst of them at -6.3 points, i.e. the textbook entry
+# did slightly WORSE than doing nothing over the next 10 sessions.
+# These numbers moved a lot when the baseline was fixed to be per-occurrence rather than
+# per-pattern-name -- Butterfly fell from +9.7 to +5.0 and Bat from +6.2 to -1.8 -- which is
+# worth remembering before believing any harmonic win-rate published anywhere.
+_HARMONIC_STATS = {
+    "Gartley 222": {"hit": 42.4, "base": 48.7, "t": -1.42, "n": 121},
+    "Butterfly":   {"hit": 58.4, "base": 53.5, "t": 1.12,  "n": 118},
+    "Shark":       {"hit": 49.6, "base": 52.4, "t": -0.86, "n": 189},
+    "Bat":         {"hit": 50.0, "base": 51.8, "t": -0.29, "n": 54},
+    "Crab":        {"hit": None, "base": None, "t": None,  "n": 11},
+}
+
+
+def _harmonic_patterns(highs, lows, closes, w=5):
+    """Gartley/Bat/Butterfly/Crab/Shark on alternating swing points, with entry and stop.
+
+    THE STRUCTURE. Five alternating pivots X-A-B-C-D. A BULLISH pattern runs low-high-low-
+    high-low, so D is a low and the convention is to buy there; bearish is the mirror. Each
+    leg is measured as a RATIO of an earlier leg and must fall inside the band above.
+
+    NO LOOKAHEAD, same as the classical detector: D is a fractal pivot and is not confirmed
+    until w bars later, so `known_i` is D's index plus w and any forward test must start
+    there. Scoring from D itself would be measuring a bounce that was used to find D.
+
+    Entry/stop/target are the TEXTBOOK levels, not our advice: entry at D, stop beyond X
+    (the point the structure says must not break), targets at the 38.2% and 61.8%
+    retracements of the AD leg. They are reported so the pattern is actionable to read --
+    whether they WORK is the separate question the measurement answers.
+    """
+    ph, pl = _chart_pivots(highs, lows, w=w)
+    pts = sorted([(i, p, "H") for i, p in ph] + [(i, p, "L") for i, p in pl])
+    # Collapse consecutive same-type pivots, keeping the more extreme one: two highs in a row
+    # are not a swing, and letting both through invents legs that never happened.
+    seq = []
+    for i, p, k in pts:
+        if seq and seq[-1][2] == k:
+            if (k == "H" and p > seq[-1][1]) or (k == "L" and p < seq[-1][1]):
+                seq[-1] = (i, p, k)
+            continue
+        seq.append((i, p, k))
+    out = []
+    for a in range(len(seq) - 4):
+        (xi, xp, xk), (ai, ap, _), (bi, bp, _), (ci, cp, _), (di, dp, dk) = seq[a:a + 5]
+        bull = xk == "L"                       # X low -> D low -> buy at D
+        xa, ab, bc, cd = abs(ap - xp), abs(bp - ap), abs(cp - bp), abs(dp - cp)
+        if min(xa, ab, bc, cd) <= 0:
+            continue
+        r_ab, r_bc, r_cd = ab / xa, bc / ab, cd / bc
+        # AD IS MEASURED FROM A, NOT FROM X. The convention states D as a retracement of the
+        # XA leg travelled back from A: a 0.786 Gartley means |A-D| is 78.6% of |A-X|.
+        # Measuring |D-X|/XA instead gives the COMPLEMENT (0.214 for that same Gartley), which
+        # is why the first version found exactly zero patterns in 10,000 bars.
+        r_ad = abs(ap - dp) / xa
+        for name, (b_ab, b_bc, b_cd, b_ad) in _HARMONICS.items():
+            if not (b_ab[0] <= r_ab <= b_ab[1] and b_bc[0] <= r_bc <= b_bc[1]
+                    and b_cd[0] <= r_cd <= b_cd[1] and b_ad[0] <= r_ad <= b_ad[1]):
+                continue
+            ad = abs(dp - ap)
+            t1 = dp + ad * 0.382 * (1 if bull else -1)
+            t2 = dp + ad * 0.618 * (1 if bull else -1)
+            out.append({"name": name, "dir": "bullish" if bull else "bearish",
+                        "known_i": di + w, "entry": dp, "stop": xp,
+                        "target1": t1, "target2": t2,
+                        "ratios": {"AB/XA": r_ab, "BC/AB": r_bc,
+                                   "CD/BC": r_cd, "AD/XA": r_ad},
+                        "points": {"X": xp, "A": ap, "B": bp, "C": cp, "D": dp}})
+            break                              # one pattern per structure, best-fit first
+    return out
+
+
 def _chart_patterns(highs, lows, closes, w=5, tol=3.0):
     """Classical chart patterns, each stamped with the bar it could FIRST have been known.
 
@@ -33787,10 +33875,24 @@ def _chart_read(ticker, days=180, w=5, conn=None):
                          "measured": bool(st) and abs(st.get("t", 0)) >= _PATTERN_CRIT_T})
     except Exception:
         pats = []
+    # Harmonics carry an entry/stop/target, so they get a longer window than the classical
+    # shapes: a setup from three months back is still a level someone is watching.
+    harm = []
+    try:
+        for hp in _harmonic_patterns(highs, lows, closes, w=w):
+            if hp["known_i"] < len(closes) - 90:
+                continue
+            hs = _HARMONIC_STATS.get(hp["name"], {})
+            harm.append({**hp, "date": dates[min(hp["known_i"], len(dates) - 1)],
+                         "hit": hs.get("hit"), "base": hs.get("base"), "t": hs.get("t"),
+                         "n": hs.get("n"),
+                         "measured": bool(hs.get("t")) and abs(hs.get("t") or 0) >= 3.00})
+    except Exception:
+        harm = []
     return {"ticker": str(ticker).upper(), "asof": dates[-1], "spot": spot, "bars": len(rows),
             "pivot_highs": len(ph), "pivot_lows": len(pl),
             "levels": levels, "trendlines": lines, "breakout": brk, "patterns": pats,
-            "range_52w": (min(lows), max(highs))}
+            "harmonics": harm, "range_52w": (min(lows), max(highs))}
 
 
 def _daily_history(ticker, years=6, conn=None):
@@ -37114,6 +37216,33 @@ def _chart_projection(ticker, conn=None, horizon_days=None, zs=(1.0, 2.0)):
             conn.close()
 
 
+def _split_tg(text, cap=3900):
+    """Split a long HTML report into sendable chunks on blank lines, never inside a <pre>.
+
+    Telegram's limit is 4,096 characters and it REJECTS an over-length message rather than
+    truncating it, so a report that grows past the cap stops arriving entirely. Splitting on
+    blank lines keeps each table and its legend together.
+
+    The <pre> depth counter is the part that matters: a monospace block contains blank lines
+    of its own, and cutting inside one would send an unclosed tag, which Telegram refuses.
+    So a boundary only counts when every block opened so far has been closed.
+    """
+    if len(text) <= cap:
+        return [text]
+    out, buf, depth = [], "", 0
+    for para in text.split("\n\n"):
+        depth += para.count("<pre>") - para.count("</pre>")
+        candidate = (buf + "\n\n" + para) if buf else para
+        if len(candidate) > cap and buf and depth == 0:
+            out.append(buf)
+            buf = para
+        else:
+            buf = candidate
+    if buf:
+        out.append(buf)
+    return out
+
+
 def _fmt_chart_read(ticker):
     """Render _chart_read as the sentences a person would say about the chart."""
     r = _chart_read(ticker)
@@ -37185,6 +37314,25 @@ def _fmt_chart_read(ticker):
             "strong until random lines scored the same. Drift is assumed ZERO, so these are "
             "not a view on whether the stock goes up.</i>")
 
+    if r.get("harmonics"):
+        hl = []
+        for h in r["harmonics"][-3:]:
+            sc = (f"measured <b>{h['hit']:.1f}%</b> vs {h['base']:.1f}% base "
+                  f"({h['hit'] - h['base']:+.1f}pp, n={h['n']}) — "
+                  + ("<b>real edge</b>" if h["measured"] else "<b>not significant</b>")
+                  ) if h.get("hit") is not None else f"too rare to measure (n={h.get('n', 0)})"
+            hl.append(f"• <b>{h['name']}</b> ({h['dir']}) completed {h['date']}\n"
+                      f"   entry {h['entry']:,.2f} · stop {h['stop']:,.2f} · "
+                      f"targets {h['target1']:,.2f} / {h['target2']:,.2f}\n"
+                      f"   {sc}")
+        parts.append("\n<b>Harmonic setups</b>\n" + "\n".join(hl))
+        parts.append("\n<i>Entry, stop and targets are the TEXTBOOK levels for the pattern — "
+                     "entry at D, stop beyond X, targets at 38.2% and 61.8% of the AD leg — "
+                     "not our recommendation. On our data no harmonic clears the bar either, "
+                     "and the Gartley 222 is the worst of them at 6.3 points BELOW its "
+                     "baseline. Use the levels as a plan someone else is also watching, not "
+                     "as evidence the trade works.</i>")
+
     # ── The forward cone, as text: where it can travel and how likely each edge is ──────
     pj = _chart_projection(ticker)
     if pj and pj.get("bands"):
@@ -37217,7 +37365,15 @@ async def chart_command(update, ctx):
     tk = str(args[0]).upper()
     await update.message.reply_text(f"📐 Reading {tk}'s chart…", parse_mode=H)
     try:
-        await update.message.reply_text(_fmt_chart_read(tk), parse_mode=H)
+        msg = _fmt_chart_read(tk)
+        # SPLIT RATHER THAN TRUNCATE. Adding harmonics took LLY to 4,061 characters against
+        # Telegram's 4,096 cap -- 35 to spare, so the next section added anywhere would have
+        # started silently dropping the end of the report. Splitting on BLANK LINES keeps
+        # whole sections together, and the <pre> counter is what makes it safe: cutting
+        # inside a monospace block would leave an unclosed tag and Telegram rejects the
+        # whole message, which fails louder but no less completely.
+        for part in _split_tg(msg):
+            await update.message.reply_text(part, parse_mode=H)
     except Exception as e:
         await update.message.reply_text(f"⚠️ Chart read failed for {tk}: {e}", parse_mode=H)
 

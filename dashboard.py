@@ -25640,6 +25640,31 @@ elif page == "📐 Chart Reader":
                     "**zero**, so none of this is a view on whether the stock rises; it is the "
                     "spread of outcomes the market is currently pricing.")
 
+            if _cr.get("harmonics"):
+                st.markdown("##### Harmonic setups — entry, stop and target")
+                _hdf = pd.DataFrame([{
+                    "Pattern": h["name"], "Says": h["dir"].title(), "Completed": h["date"],
+                    "Entry (D)": round(h["entry"], 2), "Stop (X)": round(h["stop"], 2),
+                    "Target 1": round(h["target1"], 2), "Target 2": round(h["target2"], 2),
+                    "Hit %": h.get("hit"), "Baseline %": h.get("base"),
+                    "Verdict": ("real edge" if h.get("measured")
+                                else ("not significant" if h.get("hit") is not None
+                                      else "too rare to measure")),
+                } for h in _cr["harmonics"][-5:]])
+                st.dataframe(_hdf, hide_index=True, use_container_width=True,
+                             column_config={
+                                 "Hit %": st.column_config.NumberColumn(format="%.1f%%"),
+                                 "Baseline %": st.column_config.NumberColumn(format="%.1f%%")})
+                st.warning(
+                    "**These levels are the textbook ones, not a recommendation.** Entry at D, "
+                    "stop beyond X, targets at 38.2% and 61.8% of the AD leg — that is how the "
+                    "pattern is defined, and it is why harmonics are worth drawing: everyone "
+                    "using them is watching the same prices. What they are *not* is predictive. "
+                    "Measured across 300 tickers with no lookahead, **no harmonic clears the "
+                    "significance bar**, and the **Gartley 222 is the worst at 6.3 points below "
+                    "its baseline** — the textbook long did slightly worse than doing nothing. "
+                    "Treat the levels as a shared plan, not as evidence.")
+
             if _cr.get("patterns"):
                 st.markdown("##### Patterns present, and what each is actually worth")
                 _pf = pd.DataFrame([{

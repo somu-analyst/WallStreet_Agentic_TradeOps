@@ -1024,3 +1024,20 @@ done silently. Full backlog (13 actionable rows across main + cloud tracker shee
 in this session's chat reply; none of the big P1s (cloud-hosting writeup, DB choice,
 FastAPI+HTMX security, self-improving-agent build) were started this session — each needs a
 real design decision, not something to rush through with the usage limit this close.
+
+Session continued after the auto-resume. Reconciled tracker ID 306 (stale IN PROGRESS —
+the Oracle migration actually completed 2026-08-28/29, just never marked DONE). Also hit a
+second mid-session bug report: `/sankey AMZN` failed with "no revenue or net income line" —
+confirmed this is a label-matching miss (Amazon obviously reports both every quarter), same
+bug class as ID 361's segment matcher, but could not reproduce or safely rewrite the matcher
+because this sandbox has zero live yfinance/network access right now (even AAPL basic price
+history returns empty). Added a diagnostic log at the failure site instead (commit
+`84a31a0`) so the real mismatched row names get captured on the next live occurrence rather
+than guessing another regex blind — verified via a mock DataFrame. ID 424, still open,
+needs the user to retry `/sankey AMZN` live and share the new log line.
+
+Closed ID 338: published the Oracle Always Free setup guide as an artifact
+(https://claude.ai/code/artifact/ef366ebf-db35-4e6b-bd1d-a7fbd19606c9), sourced from the
+real 08-27..29 migration traps (Custom-vs-Monthly budget schedule, Cloud Shell FIPS mode
+rejecting ed25519, null root-compartment-id, invalid TERMINATED wait-state) rather than
+generic Oracle docs, written to be reusable for the second/public instance (row 356) later.

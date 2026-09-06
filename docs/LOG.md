@@ -965,3 +965,26 @@ reporting Disabled), 411 (the alert was a 09:39 snapshot; both TSLA closes were 
 
 **Next**: 412 (Market Wrap session table for S&P/Nasdaq/Russell — logged, not started),
 361 (source revenue from the same filing as the segment table), 386, 334 (re-run at ~80 dates).
+
+## 2026-09-06 — pattern library, alert board, investor leverage
+
+**Shipped**
+- Full pattern library (420): 19 classical + 5 harmonic, ~120,000 occurrences re-measured
+  together. NOT ONE of the 23 clears the bar. Best are bear flag +2.2pp (t=2.19) and rounding
+  top +2.2 (t=2.06); the most consistent result is the ascending triangle at t=-2.49 and it is
+  NEGATIVE. Adding patterns raised the Bonferroni bar 2.75 -> 3.23, which is correct.
+- Harmonics (419) with textbook entry/stop/targets. Two bugs caught: the AD ratio was measured
+  from X not A (its complement -> zero detections in 10,000 bars), and the harness picked its
+  baseline by pattern NAME while harmonics fire both ways (Butterfly +9.7 -> +5.0, Bat +6.2 -> -1.8).
+- Pattern alert board (421): daily scan, re-sent until acknowledged, /ack ID | all. Scoped to the
+  user's own names because 250 tickers produced 195 completions in ONE session -- the full
+  universe would be ~570/day on a board that only clears manually.
+- 13F roster (417/418): 79 -> 116 investors, names from a public list but every CIK date-verified.
+  Roster moved into the DB (investor_roster) so it grows without a code edit. 274,396 holdings.
+- Investor leverage (389): FINRA margin file, 355 months back to 1997. $1.42T debt, +38.6% YoY,
+  3.35x idle cash = 100th percentile. Positioning, explicitly not a signal.
+
+**Still open**: 361 (CVX/PFE/CAT/JNJ share a label-AFTER-value row order -- diagnosed, not fixed),
+332/333 (self-improving agent), 334 (re-run at ~80 dates; at 57), 36 (blocked), cloud items.
+
+**Bot restart needed** for /ack, /margin and the daily pattern job.

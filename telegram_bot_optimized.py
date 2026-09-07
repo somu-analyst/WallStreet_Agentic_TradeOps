@@ -28249,7 +28249,11 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                 # order they appear in the filing. Collecting both into one list lost that
                 # precedence and handed Alphabet's geography slot to its segment table,
                 # because "Revenue by Segment" happens to be filed first.
-                if _re.search(r"disaggregat|revenue by geograph|geographic (sales|revenue)",
+                # "revenue by geograph" missed Pfizer's real title verbatim: it files
+                # "Revenues BY Geographic Area" (plural), so the un-pluralised literal
+                # substring never matched and the true table lost to the segment-shaped
+                # fallback, which is titled first in the filing (ID 361).
+                if _re.search(r"disaggregat|revenues? by geograph|geographic (sales|revenue)",
                               name, _re.I):
                     cands.append(fn.group(1))
                 elif _re.search(r"segment.*(revenue|sales)|(revenue|sales).*segment|"
@@ -28354,9 +28358,18 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         # instead. The caption is identified by REPETITION, not by wording: it is the same
         # string every single time it appears, while a genuine segment name never repeats
         # verbatim. Track labels already seen; a repeat is the caption, not a new segment.
+        # "[Member]" is XBRL's own suffix for a real dimension VALUE -- Pfizer's geography
+        # table names its regions "U.S. [Member]", "International Developed Markets
+        # [Member]" -- as opposed to "[Line Items]" (the fact-group boilerplate) or a bare
+        # "[1]" footnote marker. _BOILER's blanket "any bracket = noise" test cannot tell
+        # these apart, so it was silently discarding every real segment label in this shape
+        # of table alongside the actual noise (ID 361). Strip the suffix here, before either
+        # check runs, so what remains is judged on its own -- "[Line Items]" still matches
+        # _BOILER on "line items" alone with no bracket needed, so nothing else changes.
+        _MEMBER_SUFFIX = _re.compile(r"\s*\[(member|domain)\]\s*$", _re.I)
         seen_labels = set()
         for _, r in tbl.iterrows():
-            lab = str(r["0"]).strip()
+            lab = _MEMBER_SUFFIX.sub("", str(r["0"]).strip())
             cells = _money_cells(r)
             has_val = bool(cells)
             if not lab or lab.lower() == "nan":

@@ -1,5 +1,24 @@
 # LOG
 
+## 2026-09-06 (continued further) — Sankey segment parser: 7/9, real remaining scope found
+
+User chose to keep grinding row 361 rather than open an architecture decision. Fixed PFE
+(commit `8cb4e0a`): a plural miss in the geography title-match regex ("revenue by geograph"
+vs PFE's actual "Revenues by Geographic Area"), plus `_BOILER`'s blanket bracket check
+discarding real segment labels that carry XBRL's own "[Member]" suffix. Verified live against
+SEC EDGAR, zero regression across all 11 previously-working tickers.
+
+Dumped CAT's and CVX's full raw tables to get a REAL diagnosis instead of another guess. CAT:
+real geography rows exist cleanly, but the same table also files standard ASC-280 reconciling
+lines ("Corporate Items", "Eliminations and Reconciling Items") as top-level labels
+indistinguishable in shape from a real place — filtering them needs either an accounting-
+category rule (not filer-specific wording, but still unverified against a wide sample) or a
+smarter reconciliation search. CVX: this quarter's filing has NO plain US-vs-International
+row at all, only a business-line cross ("U.S. | Upstream", "U.S. | Downstream", etc.) —
+recovering a plain split means summing children across different parents, a real feature
+addition that risks the legitimate nesting case it shares code with (Alphabet). Left both
+open rather than force either fix blind; full diagnosis is in tracker row 361's Next Step.
+
 ## 2026-09-06 (continued) — Cloud project plan written; remaining backlog needs decisions
 
 Closed ID 316: `docs/CLOUD_PROJECT_PLAN.md` (commit `adbfce7`) — a repo-handoff doc (not an

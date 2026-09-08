@@ -268,6 +268,7 @@ except Exception:
     pass
 import numpy as np
 import pandas as pd
+import pandas_market_calendars as mcal
 import yfinance as yf
 from scipy.stats import norm
 # Module-level imports the folded-in second-copy code relies on (their imports lived
@@ -1517,10 +1518,10 @@ def _et_now():
 
 
 def _market_is_open():
-    """True during the US equity regular session (Mon-Fri 09:30-16:00 ET). Weekday+time
-    only (holiday-agnostic) — enough to switch a LIVE vs EOD price display."""
+    """True during the US equity regular session (Mon-Fri 09:30-16:00 ET, real trading
+    days only — a market holiday is never "open" even though it can fall on a weekday)."""
     now = _et_now()
-    if now.weekday() >= 5:
+    if not _is_trading_day(now.date()):
         return False
     mins = now.hour * 60 + now.minute
     return 570 <= mins < 960          # 09:30 .. 16:00 ET
@@ -12399,7 +12400,7 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE, force=False):
     global _LAST_OFFHOURS_PUSH
     if not force:
         _now_et = _et_now()
-        if _now_et.weekday() >= 5:                  # markets shut all weekend — nothing moves
+        if not _is_trading_day(_now_et.date()):      # market shut — nothing moves (weekend or holiday)
             return
         hour_min = _now_et.hour * 60 + _now_et.minute
         # Cadence throttled HERE so one code path serves both sessions: RTH every 10 min,
@@ -13670,7 +13671,7 @@ def _live_opt_mid(tk, strike, typ, expiry_s, max_age=90):
     try:
         _n = _et_now()
         _t = _n.hour * 60 + _n.minute
-        if _n.weekday() >= 5 or not (9 * 60 + 30 <= _t < 16 * 60):
+        if not _is_trading_day(_n.date()) or not (9 * 60 + 30 <= _t < 16 * 60):
             return None                                   # not RTH — BS reprice is right
         key = (str(tk).upper(), str(expiry_s)[:10])
         hit = _LIVE_CHAIN_CACHE.get(key)
@@ -14708,10 +14709,27 @@ def _ensure_data_health_table(conn):
     conn.commit()
 
 
+_NYSE_CAL = None
+
+
+def _is_trading_day(d):
+    """True iff `d` (date) is a real NYSE session -- weekday AND not a market holiday.
+
+    Backed by pandas_market_calendars (already a listed dependency, already the source
+    of truth run_all_offhours.py uses for the exact same question via its own
+    is_trading_day/NYSE.schedule) rather than a hand-maintained holiday list -- a second
+    list would drift from the real calendar the moment either one is edited alone.
+    """
+    global _NYSE_CAL
+    if _NYSE_CAL is None:
+        _NYSE_CAL = mcal.get_calendar("NYSE")
+    return not _NYSE_CAL.schedule(start_date=d, end_date=d).empty
+
+
 def _last_expected_eod():
     """Most recent trading day whose EOD capture should already exist (ISO).
     Before the EOD lane has had time to land (18:00 ET) we only expect the
-    PREVIOUS weekday.
+    PREVIOUS trading day.
 
     The cutoff is NY-clock, not UTC (user 2026-08-14). It used to be a hardcoded
     22:30 UTC, which is 18:30 ET in EDT but **17:30 ET in EST** — earlier than the
@@ -14720,14 +14738,18 @@ def _last_expected_eod():
     MAX(audit_date) and flashed a red banner over data that was merely unfinished.
     An ET cutoff is the same moment in both halves of the year, so it cannot drift.
 
-    The scheduler now audits the captured day directly at lane completion, so this
-    is the backstop path (bot job + dashboard live refresh), not the primary one.
+    MARKET HOLIDAYS (ID 425, 2026-09-08): a `weekday() >= 5` check only skips
+    Sat/Sun, so a Monday holiday (Labor Day, 2026-09-07) was scored as an expected
+    trading day and fired capture_stale/derive_stale/stock_stale plus every
+    _derive_scope_watch check downstream -- 7 false alerts for a day the exchange
+    was simply closed. Walking back with the real calendar until a genuine session
+    is found fixes both the "today" and the "previous day" cases at once.
     """
     ny = _et_now()
     d = ny.date()
     if ny.hour < 18:
         d -= timedelta(days=1)
-    while d.weekday() >= 5:
+    while not _is_trading_day(d):
         d -= timedelta(days=1)
     return d.isoformat()
 
@@ -15179,7 +15201,7 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
     Runs every 5 min during market hours. Deduplicates via SQLite so
     each alert fires at most once per calendar day (survives restarts)."""
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    if now_utc.weekday() >= 5:
+    if not _is_trading_day(now_utc.date()):  # ID 425: weekday-only skipped weekends, not holidays
         return
     hour_min = now_utc.hour * 60 + now_utc.minute
     if not (14 * 60 + 30 <= hour_min <= 21 * 60):
@@ -15639,7 +15661,7 @@ async def intraday_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """15-min scheduled alert: futures snapshot + OI changes for open position tickers."""
     # Only fire Mon-Fri during US market hours (14:30-21:00 UTC = 9:30 AM - 4:00 PM ET)
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    if now_utc.weekday() >= 5:  # Saturday=5, Sunday=6
+    if not _is_trading_day(now_utc.date()):  # weekend or market holiday
         return
     hour_min = now_utc.hour * 60 + now_utc.minute
     if not (14 * 60 + 30 <= hour_min <= 21 * 60):
@@ -30861,7 +30883,7 @@ async def catchup_alert(ctx, replay=False):
     throttle window it silently degrades to missed-only rather than sending nothing.
     """
     now = _et_now()
-    if now.weekday() >= 5:
+    if not _is_trading_day(now.date()):
         return
     if replay:
         try:
@@ -35092,7 +35114,7 @@ async def catalyst_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """Daily pre-market (~8:20 AM ET) nudge: earnings + macro catalysts within 3 days on the book.
     Weekday gated; the one intraday-ish heads-up so EOD signals aren't blindsided by a scheduled event."""
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    if now_utc.weekday() >= 5:
+    if not _is_trading_day(now_utc.date()):  # ID 425: weekday-only skipped weekends, not holidays
         return
     _, chat_id = load_creds()
     conn = get_conn()
@@ -35114,7 +35136,7 @@ async def earnings_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """Daily pre-market Earnings Radar: upcoming IV-crush candidates (/earnvol)
     + post-earnings drift (/pead). Weekday gated; run once daily."""
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    if now_utc.weekday() >= 5:
+    if not _is_trading_day(now_utc.date()):  # ID 425: weekday-only skipped weekends, not holidays
         return
     _, chat_id = load_creds()
     conn = get_conn()
@@ -35258,7 +35280,7 @@ async def building_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """Scheduled positioning streamer: push NEW Increasing/Confirmed builds once
     per day (dedup by ticker|bias|stage). Market-hours / weekday gated."""
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    if now_utc.weekday() >= 5:
+    if not _is_trading_day(now_utc.date()):  # ID 425: weekday-only skipped weekends, not holidays
         return
     hour_min = now_utc.hour * 60 + now_utc.minute
     if not (14 * 60 + 30 <= hour_min <= 21 * 60):
@@ -35653,7 +35675,7 @@ async def action_board_alert(ctx: ContextTypes.DEFAULT_TYPE):
     independent DB-first scanners (reversal, z-rev, 52wk, OI-build, UOA) agree on
     direction. Weekday gated; freshens the scn_* fires as a side effect."""
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    if now_utc.weekday() >= 5:
+    if not _is_trading_day(now_utc.date()):  # ID 425: weekday-only skipped weekends, not holidays
         return
     _, chat_id = load_creds()
     conn = get_conn()
@@ -36194,7 +36216,7 @@ async def intraday_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
     pattern as the dashboard). Heartbeat-gated → a manual start is never duplicated;
     crash isolation and the bot's async loop stay untouched (separate process)."""
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    if now_utc.weekday() >= 5:
+    if not _is_trading_day(now_utc.date()):  # ID 425: weekday-only skipped weekends, not holidays
         return
     hm = now_utc.hour * 60 + now_utc.minute
     if not (13 * 60 + 25 <= hm <= 20 * 60 + 55):    # EDT/EST union session window
@@ -36361,7 +36383,7 @@ async def eod_lane_supervisor(ctx: ContextTypes.DEFAULT_TYPE):
     """
     global _LAST_EOD_SPAWN
     now_et = _et_now()
-    if now_et.weekday() >= 5:
+    if not _is_trading_day(now_et.date()):
         return
     hm = now_et.hour * 60 + now_et.minute
     if not (17 * 60 + 30 <= hm <= 23 * 60):
@@ -36819,7 +36841,7 @@ async def heat_streamer_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """15-min job: push heat/fade STATE CHANGES only (one alert per ticker|state per
     day via alert_dedup). Market-hours gated; silently no-ops if the lane is off."""
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    if now_utc.weekday() >= 5:
+    if not _is_trading_day(now_utc.date()):  # ID 425: weekday-only skipped weekends, not holidays
         return
     hm = now_utc.hour * 60 + now_utc.minute
     if not (13 * 60 + 40 <= hm <= 21 * 60):      # EDT/EST union session window
@@ -45691,7 +45713,7 @@ async def wan_streamer_alert(ctx: ContextTypes.DEFAULT_TYPE):
     """Streamer job: push newly-fired actionable ensemble signals to Telegram.
     Market-hours / weekday gated. One alert per TICKER|SIGNAL|CONF per day."""
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    if now_utc.weekday() >= 5:
+    if not _is_trading_day(now_utc.date()):  # ID 425: weekday-only skipped weekends, not holidays
         return
     hour_min = now_utc.hour * 60 + now_utc.minute
     if not (14 * 60 + 30 <= hour_min <= 21 * 60):

@@ -1,3 +1,17 @@
+## 2026-09-08 (continued even further) — CVX fixed, row 361 fully closed at 9/9
+
+Went back for CVX rather than leave it at "needs a real feature, too risky to rush."
+Built the cross-parent aggregation it needed (a name can appear under several DIFFERENT
+parents - "U.S. | Upstream" and "U.S. | Downstream" - and the real geography figure is
+their sum), generalizing the CAT fix from "protect the top-level entry" to "first
+occurrence wins, accumulate only across genuinely different parents." Hit one more real
+snag along the way: CVX also files an Operating-Segments-scoped DUPLICATE of the same
+crossed cells further down the same table, which a bare merged-flag couldn't tell apart
+from a genuine third business line - fixed by tracking the actual set of parents already
+merged in. Verified against CVX's real filed total exactly, zero regression across all
+12 other tickers on both geography and segment bases, Alphabet's nesting case included.
+Row 361 (the SEC segment/geography parser, open since 2026-08-27) is now fully closed.
+
 ## 2026-09-08 (continued further) — CAT segment split: 3 stacked bugs, one ticker
 
 Continued row 361 (user chose pure engineering over the open architecture decisions).

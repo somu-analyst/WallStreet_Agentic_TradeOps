@@ -1,3 +1,17 @@
+## 2026-09-08 (continued further) — CAT segment split: 3 stacked bugs, one ticker
+
+Continued row 361 (user chose pure engineering over the open architecture decisions).
+CAT looked like it should already have worked from the seen-labels/reconciling-items
+fixes earlier this session but stayed empty - traced it down to THREE independent bugs
+on the same table: _MONEY never matched CAT's actual compound label "Sales and revenues"
+at all (upstream of everything else fixed so far), a region name reused at a deeper
+nested level silently overwrote its own clean top-level entry, and CAT renders genuinely
+positive revenue in accounting parens for this specific concept so every real value
+parsed negative and broke both the fake-total cleanup and the reconciliation search.
+Fixed all three; verified against CAT's real filed total exactly, zero regression across
+the 11 other tickers. 8/9 now - only CVX remains, confirmed to need a real feature
+(cross-parent aggregation) rather than a bug fix, correctly left alone this round.
+
 ## 2026-09-08 (continued) — India holidays fixed too, via NSE's own official list
 
 Closed ID 426 (logged as follow-up scope when ID 425 was fixed). Rather than leave the

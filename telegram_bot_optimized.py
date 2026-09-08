@@ -42033,7 +42033,7 @@ def _nse_bhavcopy(day=None, back=8, timeout=30):
             dt = datetime.strptime(ds, "%Y-%m-%d")
         except ValueError:
             continue
-        if dt.weekday() >= 5:                     # NSE is shut at the weekend
+        if not _india_is_trading_day(dt.date()):   # NSE is shut (weekend or holiday, ID 426)
             continue
         try:
             raw = _u.urlopen(_u.Request(_NSE_BHAV.format(d=dt.strftime("%d%m%Y")),
@@ -42072,6 +42072,84 @@ def _india_conn():
     c = sqlite3.connect(_INDIA_DB, timeout=30)
     c.execute("PRAGMA journal_mode=WAL")
     return c
+
+
+def _india_holidays_refresh(conn=None, year=None):
+    """Cache NSE's OWN official Capital-Market-segment trading holidays for `year`
+    (default: current IST/UTC-ish year). Best-effort and silent on any failure -- this
+    is reference data, not a live lane, and a stale or empty cache just means
+    _india_is_trading_day() falls back to weekday-only (its pre-fix behavior), never
+    a worse answer than before (ID 426).
+
+    NOT pandas_market_calendars: tested against real 2026 Indian holidays and it was
+    wrong on Republic Day and Gandhi Jayanti (right on Independence Day) -- unreliable
+    in a way that is worse than the plain weekday check it would have replaced. NSE
+    publishes its own list at this exact endpoint; reading it directly removes the
+    guessing rather than trading one guess for another.
+    """
+    year = year or datetime.now().year
+    own = conn is None
+    if own:
+        conn = _india_conn()
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS india_holidays (
+            trade_date TEXT, description TEXT, fetched_at TEXT, PRIMARY KEY (trade_date))""")
+        import urllib.request as _u, json as _j
+        req = _u.Request("https://www.nseindia.com/api/holiday-master?type=trading",
+                          headers={"User-Agent": _NSE_UA, "Accept": "application/json"})
+        data = _j.loads(_u.urlopen(req, timeout=15).read())
+        rows = data.get("CM") or []          # Capital Market segment = cash/equity trading
+        now_s = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M")
+        got_year = False
+        for r in rows:
+            try:
+                d = datetime.strptime(r["tradingDate"], "%d-%b-%Y").date()
+            except Exception:
+                continue
+            if d.year != year:
+                continue
+            got_year = True
+            conn.execute(
+                "INSERT INTO india_holidays (trade_date, description, fetched_at) VALUES (?,?,?) "
+                "ON CONFLICT(trade_date) DO UPDATE SET description=excluded.description, "
+                "fetched_at=excluded.fetched_at",
+                (d.isoformat(), str(r.get("description", "")), now_s))
+        if got_year:
+            conn.commit()
+        return got_year
+    except Exception:
+        return False
+    finally:
+        if own:
+            conn.close()
+
+
+def _india_is_trading_day(d, conn=None):
+    """True iff NSE cash-market is open on date `d`. Weekday AND not an NSE-published
+    holiday. Falls back to weekday-only when the cache has nothing for `d`'s year
+    (API never reachable from here, or NSE has not published that year yet) -- this can
+    only ADD accuracy over the pre-ID-426 behavior, never subtract it."""
+    if d.weekday() >= 5:
+        return False
+    own = conn is None
+    if own:
+        conn = _india_conn()
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS india_holidays (
+            trade_date TEXT, description TEXT, fetched_at TEXT, PRIMARY KEY (trade_date))""")
+        n = conn.execute("SELECT COUNT(*) FROM india_holidays WHERE trade_date LIKE ?",
+                          (f"{d.year}-%",)).fetchone()[0]
+        if not n:
+            if not _india_holidays_refresh(conn, d.year):
+                return True                  # no data reachable -- weekday check already passed
+        hit = conn.execute("SELECT 1 FROM india_holidays WHERE trade_date=?",
+                            (d.isoformat(),)).fetchone()
+        return hit is None
+    except Exception:
+        return True                          # never let this check be the reason a push is silent
+    finally:
+        if own:
+            conn.close()
 
 
 def _india_store(conn=None, df=None, day=None):
@@ -42553,15 +42631,15 @@ async def india_news_job(ctx: ContextTypes.DEFAULT_TYPE):
     monthly one the last weekday of the month, so one job serves all three horizons the user
     asked for without three separate schedules."""
     now = _et_now()
-    if now.weekday() >= 5:
+    if not _india_is_trading_day(now.date()):   # weekend or NSE holiday (ID 426)
         return
     conn = get_conn()
     try:
         _ensure_alert_dedup_table(conn)
         today = now.date().isoformat()
-        # Month-end = no further weekday left in this month.
+        # Month-end = no further TRADING day left in this month.
         _nxt = now.date() + timedelta(days=1)
-        while _nxt.weekday() >= 5:
+        while not _india_is_trading_day(_nxt):
             _nxt += timedelta(days=1)
         horizon = ("monthly" if _nxt.month != now.month
                    else ("weekly" if now.weekday() == 4 else "daily"))

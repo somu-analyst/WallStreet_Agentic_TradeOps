@@ -29,6 +29,8 @@ Built on Open Interest flow, dealer gamma positioning, a 24-model signal ensembl
 
 📹 **[Full video tour — all 35 pages](docs/media/dashboard-full-tour.mp4)** (MP4, ~2 min, ~5 MB). GitHub doesn't inline-preview committed MP4s (only files dragged into its web editor get a native player), so this opens/downloads rather than plays in place — click through for the complete page-by-page tour.
 
+🎥 **[Watch inline instead →](https://claude.ai/code/artifact/6304dd46-d666-4d66-b132-69a93cac070c)** — a shorter, six-stop walkthrough (Command Center → GEX → Money Flow Sankey → 13F → Portfolio → Backtest Lab) recorded end to end against real live data, playing directly in the page instead of downloading.
+
 **📱 Telegram bot** — a styled chat mockup populated with **real, live-pulled output** from `high_prob_signals_engine`, `compute_capflow`, and the verdict-grounding RAG layer (actual GOOG numbers, actual headline hits) — not an actual phone screenshot, but not fabricated numbers either.
 
 ![Telegram demo](docs/media/telegram-demo.gif)

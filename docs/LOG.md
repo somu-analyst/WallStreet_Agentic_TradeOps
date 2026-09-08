@@ -1,3 +1,13 @@
+## 2026-09-08 (continued) — India holidays fixed too, via NSE's own official list
+
+Closed ID 426 (logged as follow-up scope when ID 425 was fixed). Rather than leave the
+India/NSE weekday checks with the known-unreliable library data, found NSE's own public
+holiday-master JSON endpoint and built a proper cache (India_data.db, falls back to
+weekday-only when nothing is cached for a year - can only add accuracy, never regress).
+Verified against the exact 2 holidays the library got wrong (Republic Day, Gandhi
+Jayanti) plus all 20 real 2026 NSE holidays, including lunar-calendar ones (Diwali,
+Holi, Eid) no fixed-rule calendar library could compute in the first place.
+
 ## 2026-09-08 — Demo video, and market holidays stopped firing false alerts
 
 Built and published a live, six-stop dashboard walkthrough (Command Center → GEX → Money

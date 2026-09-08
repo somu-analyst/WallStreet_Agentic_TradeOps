@@ -1,4 +1,25 @@
-# LOG
+## 2026-09-08 — Demo video, and market holidays stopped firing false alerts
+
+Built and published a live, six-stop dashboard walkthrough (Command Center → GEX → Money
+Flow Sankey → 13F → Portfolio → Backtest Lab) recorded via Playwright against the real
+local dashboard with actual data, not mockups - title cards mask each page's real load
+time so nothing shows as dead buffering. Hosted as an artifact (embedded as a base64
+video, since artifact asset uploads are unavailable on this account) and linked into
+README.md's existing Demo section as an inline-playable alternative to the download-only
+committed MP4. Also did a full mirror-and-revert exercise on the public repo per the
+user's own back-and-forth (private backup created and verified, a stripped showcase
+version tried and explicitly reverted back to the full original) - ended on: origin stays
+the single working repo as before, no more pushes to the private mirror.
+
+Fixed ID 425: `_last_expected_eod()` and 14 other call sites only checked `weekday() >= 5`
+to detect a closed market, which correctly skips weekends but not named holidays - a
+Monday holiday (Labor Day, 2026-09-07) was scored as an expected trading day and fired 7
+false alerts. Replaced with a real NYSE calendar via `pandas_market_calendars` (already a
+dependency, already used the same way in run_all_offhours.py) rather than a hand-rolled
+holiday list. Verified against all 10 US 2026 holidays plus 2030-2040 to confirm it needs
+no yearly maintenance. Logged ID 426 as a separate follow-up: the equivalent India/NSE
+checks were NOT given the same fix, because the library's NSE calendar tested wrong on 2
+of 3 real Indian holidays checked - flagged rather than shipped.
 
 ## 2026-09-06 (continued further) — Sankey segment parser: 7/9, real remaining scope found
 

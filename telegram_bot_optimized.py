@@ -28325,11 +28325,15 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         # "Net revenue" (V), "Revenue from contract with customers" (GOOGL). Matching only
         # the first three meant Alphabet extracted nothing at all while its table sat there
         # fully populated.
-        # Trailing colon (Pfizer files "Revenues:") and the compound "sales AND OTHER
-        # OPERATING revenues" (Chevron) are real filed labels, verified against their own
-        # 2026 10-Qs (ID 361) -- not new guesses stacked on the old ones.
+        # Trailing colon (Pfizer files "Revenues:"), the compound "sales AND OTHER
+        # OPERATING revenues" (Chevron), and the plain compound "sales AND revenues" (CAT)
+        # are real filed labels, verified against their own 2026 10-Qs (ID 361) -- not new
+        # guesses stacked on the old ones. CAT's is why this table came back with money
+        # rows never matching at all -- not the axis-caption or reconciling-item bugs
+        # already fixed here, a third, separate miss underneath both of them.
         _MONEY = _re.compile(
             r"^(net |total |operating )*(revenues?|sales)"
+            r"( and (revenues?|sales))?"
             r"( and other operating (revenues?|sales))?"
             r"( from contract(s)? with customers)?:?$", _re.I)
         if metric == "assets":
@@ -28405,7 +28409,20 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                     # costs no extra request -- and "which part is growing" is the whole
                     # question a single consolidated number cannot answer.
                     prior = (cells[1] * scale / unit_div) if len(cells) > 1 else None
-                    out[cur] = {"now": now, "prior": prior, "parent": cur_parent}
+                    # A NAME CAN REPEAT AT A DEEPER LEVEL (ID 361/CAT). CAT files a clean
+                    # top-level "North America", then later "North America | Corporate
+                    # Items" and "Total sales... | North America | Operating Segments...":
+                    # same bare key, now WITH a parent. Overwriting unconditionally let the
+                    # nested breakdown clobber the real top-level figure every time, which is
+                    # why CAT came back with every region's value wrong by the time the loop
+                    # finished. Once a key is committed as genuinely top-level (no parent),
+                    # a later occurrence carrying a parent is a deeper breakdown of it, not a
+                    # correction -- protect the top-level entry instead of replacing it.
+                    _existing = out.get(cur)
+                    _protect = (_existing is not None and _existing.get("parent") is None
+                                and cur_parent is not None)
+                    if not _protect:
+                        out[cur] = {"now": now, "prior": prior, "parent": cur_parent}
                     cur = cur_parent = None
                 elif _tbl_total is None:
                     # THE TABLE'S OWN TOTAL, captured rather than discarded (ID 361).
@@ -28451,6 +28468,38 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                 # appeared. Order is child-first in every filing seen.
                 cur = keep[0] if keep else None
                 cur_parent = keep[1] if len(keep) > 1 else None
+        # RECONCILING LINES ARE NOT PLACES (ID 361/CAT). ASC 280 filers routinely disclose
+        # "Corporate Items", "Eliminations and Reconciling Items" and "Inter-Segment Sales
+        # and Revenues" as their own top-level rows alongside the real geography split --
+        # structurally identical to a real segment label, so the loop above extracts them
+        # too. Verified this is safe to drop by name across 20 tickers spanning financials
+        # (Goldman: segments are "Asset & Wealth Management" etc, no such term at all),
+        # industrials (Boeing: real segments are "Commercial Airplanes" etc, the reconciling
+        # line is spelled out as "Unallocated items, eliminations and other") and CAT itself
+        # -- none of them ever uses this vocabulary as an actual segment NAME, only ever for
+        # the reconciling total. Geography axes partition 100% of revenue by construction (a
+        # sale happens in exactly one place), so dropping these leaves the real regions
+        # summing to the filed total on their own -- confirmed against CAT's own numbers
+        # (North America + Latin America + EAME + Asia/Pacific = 20,543, its exact filed
+        # total) rather than assumed.
+        _RECONCILING = _re.compile(
+            r"^(corporate( items)?|eliminations?( and reconciling( items)?)?|"
+            r"reconciling items|inter-?segment[a-z ]*|unallocated[a-z ]*)$", _re.I)
+        out = {k: v for k, v in out.items() if not _RECONCILING.match(k)}
+        # SIGN CONVENTION IS PER-CONCEPT, NOT PER-FILER (ID 361/CAT). CAT's whole geography
+        # table renders genuinely positive revenue in accounting parens -- every member
+        # comes back negative, not just an odd row or two, because _money_cells flips any
+        # "(...)"-wrapped cell (correctly, for the normal case: XOM/CVX/PFE/JNJ all file
+        # positive-unwrapped revenue). Revenue is never negative in real reporting, so if
+        # MOST of what got parsed is negative, the table's own convention is inverted
+        # relative to the normal one -- flip everything back rather than chase the sign at
+        # every downstream reconciliation check separately (drop-matching-total, the
+        # contiguous-run search, the final gap check all compare against a positive total).
+        if out and sum(1 for v in out.values() if v["now"] < 0) > len(out) / 2:
+            for v in out.values():
+                v["now"] = -v["now"]
+                if v.get("prior") is not None:
+                    v["prior"] = -v["prior"]
         # A TOTAL ROW OFTEN LOOKS LIKE A SEGMENT. PLTR's axis label "Geographic
         # Concentration Risk" and XOM's "Sales and other operating revenue" both carry the
         # consolidated figure, so taking them at face value double-counted the business:
@@ -28471,8 +28520,15 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
             if not total or abs(_tbl_total - total) / max(total, 1) > 0.02:
                 total = _tbl_total
         if total:
+            # MAGNITUDE, not sign (ID 361/CAT). CAT's own geography table renders genuinely
+            # positive revenue in accounting parens for this specific concept, so its total
+            # caption comes back as -20,543 rather than +20,543 -- a `now > 0` guard let
+            # that bogus "segment" (the table's own axis caption, mistaken for a member
+            # the same way PLTR's and XOM's were) survive untouched, since it never passed
+            # the sign check to even be CONSIDERED a total. Comparing |now| finds it
+            # regardless of which way this filer's XBRL concept happens to render.
             for k in [k for k, v in out.items()
-                      if v["now"] > 0 and abs(v["now"] - total) / total < 0.02]:
+                      if abs(abs(v["now"]) - total) / total < 0.02]:
                 out.pop(k)
         # Reconcile against the statement's own revenue when the caller supplied it: a split
         # that does not add up is worse than no split, because it looks authoritative.

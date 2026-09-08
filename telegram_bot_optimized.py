@@ -28418,11 +28418,47 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
                     # finished. Once a key is committed as genuinely top-level (no parent),
                     # a later occurrence carrying a parent is a deeper breakdown of it, not a
                     # correction -- protect the top-level entry instead of replacing it.
+                    # FIRST WRITE WINS, with one exception. A name can recur several times
+                    # in one filing (ID 361/CAT: a clean top-level "North America", then
+                    # "North America | Corporate Items" further down -- same key, same
+                    # underlying place, worse scope every time it repeats), so the natural
+                    # reading order -- top of the table, before any scoped sub-schedule --
+                    # is kept and later repeats of the SAME (child, parent) combo are
+                    # ignored rather than blindly overwriting with a narrower-scoped figure.
+                    # THE EXCEPTION: SAME CHILD, DIFFERENT PARENT -> ACCUMULATE (ID 361/CVX).
+                    # CVX has no plain "U.S." row at all, only "U.S. | Upstream" and "U.S. |
+                    # Downstream", each a genuine geographic slice of a DIFFERENT business
+                    # line -- summing recovers the plain geography figure those crossed cells
+                    # add up to by construction. A child that only ever appears under ONE
+                    # parent (Alphabet's "Google Search & other" under "Google Services",
+                    # always) never hits this branch. The "__merged__" sentinel (not None)
+                    # keeps a THIRD same-named occurrence under yet another parent (a filer
+                    # with 3+ crossed business lines) accumulating too, rather than being
+                    # silently ignored as a same-key repeat once the first merge has already
+                    # cleared the real parent name.
                     _existing = out.get(cur)
-                    _protect = (_existing is not None and _existing.get("parent") is None
-                                and cur_parent is not None)
-                    if not _protect:
+                    if _existing is None:
                         out[cur] = {"now": now, "prior": prior, "parent": cur_parent}
+                    elif cur_parent is not None and _existing.get("parent") is not None:
+                        # Track every parent actually merged in, not just "a merge
+                        # happened" -- a bare "__merged__" flag can't tell a genuinely
+                        # NEW parent (accumulate) from a REPEAT of one already summed
+                        # (CVX also files "Operating Segments | U.S. | Upstream" as a
+                        # scoped duplicate of the plain "U.S. | Upstream" cell; without
+                        # this set it re-added the same Upstream figure a second time
+                        # and inflated "U.S." past its real value).
+                        _seen = _existing.get("_parents_seen")
+                        if _seen is None:
+                            _seen = {_existing["parent"]}
+                            _existing["_parents_seen"] = _seen
+                        if cur_parent not in _seen:
+                            _existing["now"] += now
+                            if prior is not None and _existing.get("prior") is not None:
+                                _existing["prior"] += prior
+                            _seen.add(cur_parent)
+                            _existing["parent"] = "__merged__"
+                        # else: a repeat of an already-merged parent -- ignore it
+                    # else: top-level protect, or a same-parent repeat -- first write wins
                     cur = cur_parent = None
                 elif _tbl_total is None:
                     # THE TABLE'S OWN TOTAL, captured rather than discarded (ID 361).
@@ -28542,8 +28578,15 @@ def _revenue_segments(ticker, quarterly=True, unit_div=1e6, total=None,
         # Children never take part in the top-level reconciliation: they are already counted
         # inside their parent, so leaving them in doubles the sum and the axis check throws
         # away a perfectly good split (the same trap Visa's stacked axes sprang).
-        kids = {k: v for k, v in out.items() if v.get("parent")}
-        out = {k: v for k, v in out.items() if not v.get("parent")}
+        # "__merged__" (ID 361/CVX) marks a child summed across 2+ different parents into
+        # its own complete top-level figure -- it belongs in `out`, not `kids`, same as a
+        # real parent=None entry; only a genuine single-parent child stays a child.
+        kids = {k: v for k, v in out.items() if v.get("parent") not in (None, "__merged__")}
+        out = {k: v for k, v in out.items() if v.get("parent") in (None, "__merged__")}
+        for v in out.values():
+            if v.get("parent") == "__merged__":
+                v["parent"] = None
+            v.pop("_parents_seen", None)
         if total and len(out) > 2:
             # Pick the run that lands CLOSEST to the total, not the first one merely within
             # tolerance. Alphabet files Google Services 94,540 + Google Cloud 24,768 =

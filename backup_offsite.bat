@@ -9,8 +9,4 @@ set DST=G:\My Drive\NYSE_backup
 robocopy "%SRC%\openbb_chains" "%DST%\openbb_chains" *.parquet /XO /NP /R:2 /W:5
 robocopy "%SRC%" "%DST%" US_data_OpenBB.db /XO /NP /R:2 /W:5
 
-rem IDEA_TRACKER.xlsx is gitignored (*.xlsx, same as the DB) so it has NO git history at
-rem all -- this weekly copy is its only backup.
-robocopy "%SRC%\NYSE_DATA\docs" "%DST%\docs" IDEA_TRACKER.xlsx /XO /NP /R:2 /W:5
-
 echo [%date% %time%] backup done >> "%SRC%\NYSE_DATA\logs\backup_offsite.log"

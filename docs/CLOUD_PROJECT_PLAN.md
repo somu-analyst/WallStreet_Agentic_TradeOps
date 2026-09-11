@@ -25,7 +25,7 @@ the moment it happens.
 
 | Resource | Always Free limit | This system's actual usage |
 |---|---|---|
-| Ampere A1 compute | 4 OCPU + 24 GB RAM total, across up to 4 instances | 1 instance, 2 OCPU / 12 GB — **exactly half the ceiling** |
+| Ampere A1 compute | 2 OCPU + 12 GB RAM TOTAL for the tenancy (corrected 2026-09-11 — this table previously said 4/24, which was simply wrong, verified against Oracle's live docs) | 1 instance, 2 OCPU / 12 GB — **the entire allowance, zero headroom left** |
 | Block storage | 200 GB total, all volumes combined | ~5.3 GB database + ~50 GB boot volume |
 | Outbound data transfer | 10 TB / month | Nightly capture + Telegram + dashboard traffic — far under |
 | Object storage | 20 GB | Unused |
@@ -35,10 +35,13 @@ the moment it happens.
 relying on them if this document is more than a few months old — Oracle can change the
 allowance.)*
 
-**The headroom that matters for ID 356 (a second, public instance):** one A1 instance at
-2 OCPU / 12 GB leaves exactly 2 OCPU / 12 GB of free-tier room for a second instance before
-hitting the 4/24 ceiling. A second instance the same size as the first fits for $0 — it does
-not need to be smaller, and it does not need a second Oracle account.
+**Correction (2026-09-11): there is NO free ARM headroom for ID 356 (a second, public
+instance).** The existing VM at 2 OCPU / 12 GB already uses the entire Always Free ARM
+allowance for the tenancy — confirmed against Oracle's live documentation and verified live
+via SSH (the VM's own nproc/free -h match exactly, no other instance in this project's
+history was ever left running). A second instance would need either the AMD Micro shape
+(`VM.Standard.E2.1.Micro`, 1 OCPU / 1 GB — workable for a lightweight read-only public page,
+not for running the full engine) or a paid shape.
 
 **Non-negotiable before creating any resource:**
 1. A budget alarm must exist, **Schedule = Monthly** (not Custom/one-time — a Custom budget
@@ -64,7 +67,7 @@ you're about to modify is actually in the state the docs claim.
 | A3 | Last night's capture actually ran | `sqlite3 <db path> "select trade_date, count(*) from options_openbb where trade_date = (select max(trade_date) from options_openbb) group by 1;"` | a trade_date within the last 1–2 business days, count in the hundreds of thousands (a normal night), not zero |
 | A4 | No public attack surface | From OUTSIDE the VM: `nmap -p- <public-ip>` (or any external port scanner) | only port 22 (SSH) responds, nothing else |
 | A5 | Budget alarm is real, not decorative | Console → Billing & Cost Management → Budgets → `limit_use` | Schedule = **Monthly**, an email address is listed under the alert rule, not blank |
-| A6 | Compute usage is inside the free ceiling | Console → Compute → Instances, sum OCPU/RAM across every instance in the tenancy | total ≤ 4 OCPU / 24 GB |
+| A6 | Compute usage is inside the free ceiling | Console → Compute → Instances, sum OCPU/RAM across every instance in the tenancy | total ≤ 2 OCPU / 12 GB |
 
 If any row fails, stop and fix that row before doing anything else in this document — a
 build on top of a system that's already silently wrong just adds a second thing to debug.
@@ -152,7 +155,8 @@ was checked.
 - **Action:** none — this is a read-only close-out check.
 - **Validation gate:** re-run Section A (A1–A6) against the NEW instance. All six must pass.
   If this is a second instance alongside the first, re-check A6 across **both** instances
-  combined, not each one separately — the 4 OCPU / 24 GB ceiling is tenancy-wide.
+  combined, not each one separately — the 2 OCPU / 12 GB ceiling is tenancy-wide, and the
+  first instance alone already uses all of it (see the Zero-cost guarantee section above).
 
 ---
 

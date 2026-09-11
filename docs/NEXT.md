@@ -1,4 +1,4 @@
-﻿[RESUME AFTER] 2026-09-06 04:00  (limit-guard: block at 100555979 tokens >= 80000000)
+﻿[RESUME AFTER] 2026-09-08 09:00  (limit-guard: block at 125879797 tokens >= 80000000)
 # NEXT — handoff
 
 **2026-09-06 mid-day session (auto-resume via ClaudeResume):** committed the leftover

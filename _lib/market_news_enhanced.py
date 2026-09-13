@@ -106,18 +106,43 @@ def get_marketwatch_rss(limit=5):
         return []
 
 def get_benzinga_rss(limit=5):
-    """Get Benzinga markets RSS feed (free public feed; /markets is the clean section)"""
-    try:
-        url = "https://www.benzinga.com/markets/feed"
+    """Get Benzinga's RSS feed. free public feed, best-effort.
 
-        response = requests.get(url, timeout=10)
+    ID 433 (2026-09-13): the section-specific feed this used to read
+    (/markets/feed) is gone - Benzinga retired per-section RSS at some point,
+    and every plausible replacement path (/markets/options/feed,
+    /news/management/feed, feeds.benzinga.com/benzinga - that last one has a
+    broken cert, SSLError not 404) also fails. Only the generic
+    https://www.benzinga.com/feed still answers, and it was ALSO silently
+    403-ing before this fix because the request carried no User-Agent -
+    Benzinga's bot protection treats a bare request as automated traffic.
+
+    Even fixed, the generic feed is evergreen SEO content (crypto
+    "Price Prediction 2025/2026/2030" listicles) more often than real news -
+    a live check found ALL 10 items were that exact pattern. Real-time
+    Benzinga news now appears to be gated behind their paid News API
+    (benzinga.com/apis), not available via free RSS. Filtered out here so
+    this returns an honest [] rather than mislabeling listicles as news;
+    get_aggregated_news()'s other sources (Google/Yahoo/MarketWatch) carry
+    the real load.
+    """
+    try:
+        url = "https://www.benzinga.com/feed"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+        response = requests.get(url, timeout=10, headers=headers)
         if response.status_code == 200:
+            import re as _re
             import xml.etree.ElementTree as ET
             root = ET.fromstring(response.content)
 
+            _seo_listicle = _re.compile(r"price prediction", _re.I)
+
             news = []
-            for item in root.findall('.//item')[:limit]:
+            for item in root.findall('.//item'):
                 title = item.find('title').text if item.find('title') is not None else ""
+                if not title or _seo_listicle.search(title):
+                    continue
                 link = item.find('link').text if item.find('link') is not None else ""
 
                 if len(title) > 80:
@@ -129,6 +154,8 @@ def get_benzinga_rss(limit=5):
                     'source': 'Benzinga',
                     'datetime': ''
                 })
+                if len(news) >= limit:
+                    break
 
             return news
 

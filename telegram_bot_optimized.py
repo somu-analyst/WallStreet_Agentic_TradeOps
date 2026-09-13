@@ -39539,7 +39539,7 @@ async def bookmarks_view(query):
     await query.message.reply_text(msg, parse_mode=H)
 
 
-_WL_CLASSES = ("STOCK", "ETF", "BOND", "COMMODITY")
+_WL_CLASSES = ("STOCK", "ETF", "BOND", "COMMODITY", "COMPOUNDER")
 
 
 def _wl_setup(conn):
@@ -39567,6 +39567,8 @@ def _wl_norm_class(word):
         return "COMMODITY"
     if w in ("STOCK", "STOCKS", "EQUITY"):
         return "STOCK"
+    if w in ("COMPOUNDER", "COMPOUNDERS", "BORING"):
+        return "COMPOUNDER"
     return None
 
 
@@ -39877,8 +39879,9 @@ def _fmt_watchlist(conn):
     if df.empty:
         return ("👀 <b>WATCHLIST</b>\n\nNothing tracked yet. Add one:\n"
                 "<code>/watchlist add TICKER [target_price] [note]</code>")
-    _icon = {"STOCK": "📈", "ETF": "🧺", "BOND": "🏦", "COMMODITY": "🛢️"}
-    _plural = {"STOCK": "Stocks", "ETF": "ETFs", "BOND": "Bonds", "COMMODITY": "Commodities"}
+    _icon = {"STOCK": "📈", "ETF": "🧺", "BOND": "🏦", "COMMODITY": "🛢️", "COMPOUNDER": "🐢"}
+    _plural = {"STOCK": "Stocks", "ETF": "ETFs", "BOND": "Bonds", "COMMODITY": "Commodities",
+               "COMPOUNDER": "Compounders (steady, beat the market for years)"}
     parts = [hdr("WATCHLIST")]
     for cls in _WL_CLASSES:
         sub = df[df["asset_class"].fillna("Stock").str.upper() == cls]

@@ -26909,7 +26909,7 @@ if page == "🌍 Global Opportunities":
 if page == "👀 Watchlist":
     _page_header("👀 Watchlist", _PAGE_HELP["👀 Watchlist"])
 
-    _WL_CLASSES = ["Stock", "ETF", "Bond", "Commodity"]
+    _WL_CLASSES = ["Stock", "ETF", "Bond", "Commodity", "Compounder"]
 
     def _wl_setup(conn):
         conn.execute(
@@ -27154,8 +27154,9 @@ if page == "👀 Watchlist":
         except Exception:
             _wl_paths = {}
 
-        _WL_ICON = {"Stock": "📈", "ETF": "🧺", "Bond": "🏦", "Commodity": "🛢️"}
-        _WL_PLURAL = {"Stock": "Stocks", "ETF": "ETFs", "Bond": "Bonds", "Commodity": "Commodities"}
+        _WL_ICON = {"Stock": "📈", "ETF": "🧺", "Bond": "🏦", "Commodity": "🛢️", "Compounder": "🐢"}
+        _WL_PLURAL = {"Stock": "Stocks", "ETF": "ETFs", "Bond": "Bonds", "Commodity": "Commodities",
+                      "Compounder": "Compounders (steady, beat the market for years)"}
         for _wcls in _WL_CLASSES:
             _cls_rows = [r for r in _wl_rows if r.get("Class", "Stock") == _wcls]
             if not _cls_rows:

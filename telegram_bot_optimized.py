@@ -30774,8 +30774,56 @@ def _eod_digest(conn, max_news=5, max_uoa=8, max_plays=6, edition="evening"):
 
 
 
+def _send_email(subject, telegram_html_body):
+    """Best-effort email send via SMTP, gated on env keys exactly like _LLM_PROVIDERS --
+    a missing/unset key means "not configured", never an error, so this is a safe no-op
+    until the user actually sets it up (ID 423, 2026-09-14: built the email half now
+    since it needs no external signup; WhatsApp stays blocked on the user's own Meta
+    Business API phone verification, which cannot be automated).
+
+    SETUP (one-time, user does this): a Gmail App Password (myaccount.google.com/
+    apppasswords -- needs 2FA on already), dropped into api_keys.env as three lines:
+        EMAIL_SMTP_USER=youraddress@gmail.com
+        EMAIL_SMTP_PASS=<the 16-char app password>
+        EMAIL_TO=youraddress@gmail.com
+    _load_api_keys() picks it up the same as every other key -- merges, re-encrypts,
+    deletes the plaintext file.
+
+    The body reuses the SAME Telegram HTML the digest already renders -- Telegram's tag
+    subset (<b> <i> <code> <pre> <a href>) is valid HTML, so no second template to
+    maintain or drift from what the Telegram message actually says.
+    """
+    user = os.environ.get("EMAIL_SMTP_USER")
+    pw = os.environ.get("EMAIL_SMTP_PASS")
+    to = os.environ.get("EMAIL_TO") or user
+    if not (user and pw and to):
+        return False
+    try:
+        import smtplib
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = user
+        msg["To"] = to
+        # Telegram's <blockquote expandable> isn't standard HTML -- degrade it to a plain
+        # blockquote so email clients don't choke on an attribute they don't recognize.
+        html = re.sub(r"<blockquote[^>]*>", "<blockquote>", telegram_html_body)
+        msg.attach(MIMEText(re.sub(r"<[^>]+>", "", html), "plain"))
+        msg.attach(MIMEText(f"<html><body style='font-family:sans-serif'>{html}</body></html>", "html"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as s:
+            s.login(user, pw)
+            s.sendmail(user, [to], msg.as_string())
+        return True
+    except Exception:
+        log.warning("email send failed", exc_info=True)
+        return False
+
+
 async def _digest_push(ctx, txt):
-    """Send a digest to the configured chat, chunked to Telegram's limit."""
+    """Send a digest to the configured chat, chunked to Telegram's limit -- plus email,
+    best-effort, if EMAIL_SMTP_* keys are configured (ID 423)."""
     try:
         _, chat_id = load_creds()
     except Exception:
@@ -30786,6 +30834,11 @@ async def _digest_push(ctx, txt):
                                        parse_mode=H, disable_web_page_preview=True)
         except Exception:
             log.warning("digest push failed", exc_info=True); return
+    try:
+        _subj = (re.sub(r"<[^>]+>", "", txt.split(chr(10), 1)[0]) or "Daily Digest").strip()[:120]
+        _send_email(_subj, txt)
+    except Exception:
+        log.debug("digest email skipped", exc_info=True)
 
 
 async def digest_morning_alert(ctx):

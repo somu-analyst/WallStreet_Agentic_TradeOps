@@ -34642,6 +34642,99 @@ _MACRO_EVENT_INFO = {
         "series": None,
         "unit": "",
     },
+    "PPI · inflation": {
+        "full": "Producer Price Index",
+        "what": ("What businesses pay each other for goods and services, before it reaches "
+                 "the consumer. An early read on where consumer inflation is heading next."),
+        "freq": "Monthly, ~mid-month, 8:30am ET",
+        "why": ("Producer costs tend to feed through to consumer prices with a lag, so this "
+                "print is watched as an early warning a day or two before CPI."),
+        "read": [("Hotter than expected",
+                  "Cost pressure building at the business level → yields UP, growth stocks hit"),
+                 ("Cooler than expected", "Cost pressure easing → supports the case for rate cuts"),
+                 ("In line", "IV crush; markets wait for CPI for the fuller inflation picture")],
+        "series": None,
+        "unit": "",
+    },
+    "Retail Sales": {
+        "full": "Retail Sales",
+        "what": "How much US consumers spent at stores and online last month.",
+        "freq": "Monthly, ~mid-month, 8:30am ET",
+        "why": "Consumer spending is most of US economic activity, so this is a direct read on economic strength.",
+        "read": [("Much stronger than expected", "Economy resilient → Fed can stay tight → yields UP"),
+                 ("Much weaker than expected", "Consumer pulling back → recession worry → equities can fall"),
+                 ("Near expectations", "Usually a smaller move; not a headline-grabbing release")],
+        "series": None,
+        "unit": "",
+    },
+    "Jobless Claims": {
+        "full": "Initial Jobless Claims",
+        "what": "How many people filed for unemployment benefits for the first time last week.",
+        "freq": "Weekly, every Thursday, 8:30am ET",
+        "why": ("The most frequent labor-market read available — a fast-moving signal between "
+                 "the once-a-month jobs report."),
+        "read": [("Much higher than expected", "Labor market weakening → rate-cut odds rise → yields DOWN"),
+                 ("Much lower than expected", "Labor market still tight → Fed can stay patient → yields UP"),
+                 ("Near expectations", "Usually a non-event; one week of noise")],
+        "series": None,
+        "unit": "",
+    },
+    "Consumer Confidence": {
+        "full": "Consumer Confidence Index",
+        "what": "A survey of how upbeat or worried US households feel about the economy and their own finances.",
+        "freq": "Monthly, ~end of month, 10:00am ET",
+        "why": "A leading indicator — how people FEEL tends to show up in how they SPEND a month or two later.",
+        "read": [("Much stronger than expected", "Consumers upbeat → supports spending → mildly risk-on"),
+                 ("Much weaker than expected", "Consumers worried → spending may slow → mildly risk-off"),
+                 ("Near expectations", "Rarely a big market mover on its own")],
+        "series": None,
+        "unit": "",
+    },
+    "GDP": {
+        "full": "Gross Domestic Product",
+        "what": "The total value of everything the US economy produced last quarter — the broadest single measure of economic growth.",
+        "freq": "Quarterly, ~last week of Jan/Apr/Jul/Oct, 8:30am ET",
+        "why": "The headline scorecard for the whole economy — recession is technically defined by two straight negative quarters of this number.",
+        "read": [("Much stronger than expected", "Economy running hot → Fed can stay tight → yields UP"),
+                 ("Much weaker than expected", "Growth slowing or negative → recession worry → equities can fall"),
+                 ("Near expectations", "Usually a smaller move; the components (consumer spend, trade) get more attention than the headline")],
+        "series": None,
+        "unit": "",
+    },
+    "ADP Employment": {
+        "full": "ADP National Employment Report",
+        "what": "Private-sector payroll processor ADP's own count of jobs added last month — released two days before the official government jobs report.",
+        "freq": "Monthly, Wednesday before the jobs report, 8:15am ET",
+        "why": ("Watched as an early, IMPERFECT preview of Friday's Non-Farm Payrolls — the two "
+                 "numbers frequently diverge by a wide margin, so treat it as a hint, not a forecast."),
+        "read": [("Much stronger than expected", "Hints at a strong Friday jobs report → yields UP into it"),
+                 ("Much weaker than expected", "Hints at a weak Friday jobs report → rate-cut odds rise"),
+                 ("Near expectations", "Limited reaction; the market still waits for the real number Friday")],
+        "series": None,
+        "unit": "",
+    },
+    "ISM Manufacturing": {
+        "full": "Institute for Supply Management Manufacturing Survey",
+        "what": "A survey of purchasing managers at manufacturing companies — a reading above 50 means the sector is expanding, below 50 means it's contracting.",
+        "freq": "Monthly, 1st business day, 10:00am ET",
+        "why": "One of the earliest reads each month on business conditions, watched closely for turning points in the economic cycle.",
+        "read": [("Above 50, rising", "Manufacturing expanding and accelerating → risk-on"),
+                 ("Below 50, falling", "Manufacturing contracting and worsening → growth worry, yields DOWN"),
+                 ("Near prior reading", "Steady-state; the sub-components (new orders, prices paid) matter more than the headline")],
+        "series": None,
+        "unit": "",
+    },
+    "ISM Services": {
+        "full": "Institute for Supply Management Services Survey",
+        "what": "The same survey concept as ISM Manufacturing, but for the much larger services side of the economy — above 50 means expansion.",
+        "freq": "Monthly, 3rd business day, 10:00am ET",
+        "why": "Services are most of the US economy, so this often matters more than the manufacturing survey despite getting less attention.",
+        "read": [("Above 50, rising", "Services expanding and accelerating → risk-on"),
+                 ("Below 50, falling", "Services contracting → broad economic worry, yields DOWN"),
+                 ("Near prior reading", "Steady-state; watch the prices-paid sub-index for inflation hints")],
+        "series": None,
+        "unit": "",
+    },
 }
 
 
@@ -34945,7 +35038,13 @@ def _fmt_macro_event_block(n, ds, label):
             f"{abs(n)}d ago" if abs(n) > 1 else "yesterday"))
     if not info:
         return f"📅 <b>{label}</b> — {_dt} ({when})"
-    out = [f"📅 <b>{info['full']} ({label.split('·')[-1].strip()})</b> — {_dt} ({when})",
+    # The parenthetical is a short category tag from the "X · category" label convention
+    # (e.g. "PPI · inflation" -> "(inflation)"). Newer labels added without that convention
+    # (ID 430: Retail Sales, GDP, ADP, ISM...) have no "·", so skip it rather than print the
+    # full name twice ("Retail Sales (Retail Sales)").
+    _tag = label.split("·")[-1].strip() if "·" in label else None
+    _title = f"{info['full']} ({_tag})" if _tag else info["full"]
+    out = [f"📅 <b>{_title}</b> — {_dt} ({when})",
            f"    <i>{info['what']}</i>",
            f"    <b>Frequency:</b> {info['freq']}",
            f"    <b>Why it moves markets:</b> {info['why']}"]
@@ -35010,12 +35109,37 @@ def _fmt_macro_event_block(n, ds, label):
     return "\n".join(out)
 
 
+    # Raw calendar text -> our _MACRO_EVENT_INFO key, for event types with NO hand-curated
+    # date list of their own. CPI/PCE/FOMC/Jobs are DELIBERATELY excluded here even though the
+    # live calendar also reports them -- its dates for those don't exactly match the curated
+    # ones (this was tried and produced two "FOMC decision" entries three days apart), and the
+    # curated list is the one with a real BLS series ID wired up for the "actual print"
+    # section. Only event types with NOTHING else covering them get merged in.
+_MACRO_CALENDAR_MAP = (
+    ("ppi", "PPI · inflation"),
+    ("retail sales", "Retail Sales"),
+    ("jobless claims", "Jobless Claims"),
+    ("consumer confidence", "Consumer Confidence"),
+    ("gdp", "GDP"),
+    ("adp", "ADP Employment"),
+    ("ism manufacturing", "ISM Manufacturing"),
+    ("ism services", "ISM Services"),
+)
+
+
 def _macro_events(days=7, back=3):
     """Major macro catalysts from `back` days ago to `days` ahead: (n, date, label).
 
     `back` exists because an event does not stop mattering the moment it prints — the
     reaction, and whether it held, is the tradeable part (user 2026-08-07). n is negative
     for events that have already happened.
+
+    Two sources, merged: a hand-curated calendar (FOMC/CPI/PCE/Jobs, has real BLS series IDs
+    so the "actual print" section can populate) plus the same live calendar the pre-event
+    brief already uses (catches PPI, Retail Sales, Jobless Claims, Consumer Confidence and
+    anything else it knows about) -- ID 430: /catalysts only ever knew the hand-curated four,
+    so a real, correctly-detected event like PPI (proven by the pre-event brief firing on it)
+    never appeared here at all, which read as "only one event ever shows up".
     """
     today = datetime.now().date()
     evs = [(d, "FOMC decision") for d in _FOMC_DATES]
@@ -35026,6 +35150,25 @@ def _macro_events(days=7, back=3):
         while m > 12:
             m -= 12; y += 1
         evs.append((_first_friday(y, m).strftime("%Y-%m-%d"), "Jobs · NFP"))
+    try:
+        import sys as _sys
+        _lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_lib")
+        if _lib_dir not in _sys.path:
+            _sys.path.insert(0, _lib_dir)
+        from market_news_enhanced import get_economic_calendar_detailed
+        for row in get_economic_calendar_detailed():
+            raw = str(row.get("event", "")).lower()
+            label = next((v for k, v in _MACRO_CALENDAR_MAP if k in raw), None)
+            if not label:
+                continue                          # unmapped event type -- skip, don't guess
+            try:
+                du = int(row.get("days_until", 999))
+            except Exception:
+                continue
+            ds = (today + timedelta(days=du)).isoformat()
+            evs.append((ds, label))
+    except Exception:
+        log.debug("live macro calendar merge failed", exc_info=True)
     out = set()
     for ds, label in evs:
         try:
@@ -35134,7 +35277,11 @@ def _fmt_catalysts(macro, earn, days=7, geo=None):
             _r = []
             for n, ds, lbl in _fwd:
                 _i = _MACRO_EVENT_INFO.get(lbl, {})
-                _r.append(("TODAY" if n == 0 else f"{n}d", (_i.get("full") or lbl)[:16],
+                # Full name, not the jargon short code (ID 430, user 2026-09-12) -- widened
+                # from 16 to 32 chars so "Producer Price Index" etc. fit whole; the couple of
+                # genuinely long official titles (FOMC, ISM) still show complete in the
+                # detailed block below this table.
+                _r.append(("TODAY" if n == 0 else f"{n}d", (_i.get("full") or lbl)[:32],
                            (_i.get("freq", "").split("—")[-1].strip() or "-")[:11]))
             parts.append(_pipe_table(("When", "Event", "Time"), _r,
                                      title="🌍 MACRO — COMING UP"))
@@ -35149,7 +35296,7 @@ def _fmt_catalysts(macro, earn, days=7, geo=None):
                     _val = f"{_a['actual']:,.1f}"
                 else:
                     _val = "n/a"
-                _r2.append((f"{abs(n)}d ago", (_i.get("full") or lbl)[:16], _val))
+                _r2.append((f"{abs(n)}d ago", (_i.get("full") or lbl)[:32], _val))
             parts.append(_pipe_table(("When", "Event", "Printed"), _r2,
                                      title="🌍 MACRO — JUST HAPPENED"))
         # MEASURED, not asserted. Tested on 113 NFP releases since 2015 before writing this.

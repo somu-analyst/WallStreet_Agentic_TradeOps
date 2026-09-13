@@ -425,6 +425,68 @@ def get_economic_calendar_detailed():
     })
     
     # ========================================
+    # 8. OTHER SIGNIFICANT INDICATORS
+    # ========================================
+
+    # ADP Employment (private payrolls) - Wednesday before the jobs report, watched as an
+    # early, imperfect preview of Friday's official number.
+    for i in range(3):
+        month_start = (current_month + timedelta(days=32*i)).replace(day=1)
+        days_ahead = (2 - month_start.weekday()) % 7  # Wednesday is 2
+        if days_ahead == 0:
+            days_ahead = 7
+        first_wed = month_start + timedelta(days=days_ahead)
+        adp_date = first_wed + timedelta(days=7)  # typically the FIRST Wed is early; ADP
+                                                    # usually lands the Wed of NFP week itself
+        days_until = (adp_date - today).days
+        if 0 <= days_until <= 21:
+            calendar.append({
+                'event': '💵 ADP Employment',
+                'date': adp_date.strftime('%b %d'),
+                'days_until': days_until,
+                'impact': 'MEDIUM',
+                'category': 'Labor',
+                'description': 'Private-sector payrolls (preview of Friday\'s jobs report)'
+            })
+
+    # ISM Manufacturing PMI - 1st business day of month
+    for i in range(3):
+        month_start = (current_month + timedelta(days=32*i)).replace(day=1)
+        d = month_start
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+        days_until = (d - today).days
+        if 0 <= days_until <= 21:
+            calendar.append({
+                'event': '🏭 ISM Manufacturing',
+                'date': d.strftime('%b %d'),
+                'days_until': days_until,
+                'impact': 'MEDIUM',
+                'category': 'Growth',
+                'description': 'Institute for Supply Management Manufacturing survey (>50 = expansion)'
+            })
+
+    # ISM Services PMI - 3rd business day of month
+    for i in range(3):
+        month_start = (current_month + timedelta(days=32*i)).replace(day=1)
+        d, n_biz = month_start, 0
+        while n_biz < 3:
+            if d.weekday() < 5:
+                n_biz += 1
+            if n_biz < 3:
+                d += timedelta(days=1)
+        days_until = (d - today).days
+        if 0 <= days_until <= 21:
+            calendar.append({
+                'event': '💼 ISM Services',
+                'date': d.strftime('%b %d'),
+                'days_until': days_until,
+                'impact': 'MEDIUM',
+                'category': 'Growth',
+                'description': 'Institute for Supply Management Services survey (>50 = expansion)'
+            })
+
+    # ========================================
     # SORT & DEDUPLICATE
     # ========================================
     
@@ -440,7 +502,12 @@ def get_economic_calendar_detailed():
     # Sort by days until
     unique_calendar.sort(key=lambda x: x['days_until'])
     
-    return unique_calendar[:10]  # Return top 10 upcoming events
+    # Cap raised 10 -> 25 (ID 430): events are appended section-by-section, not in date order,
+    # so a fixed top-10 silently dropped later-added sections (ADP/ISM/GDP) on any date that
+    # tied or lost to an earlier-appended section already at the cap. Callers (e.g. the bot's
+    # _macro_events) re-filter by their own date window anyway, so a larger return list here
+    # is free -- nothing downstream assumes exactly 10.
+    return unique_calendar[:25]
 
 if __name__ == "__main__":
     print("Testing news sources...")

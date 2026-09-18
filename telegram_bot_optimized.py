@@ -16423,9 +16423,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ic_view(query)
         elif data == "building_view":
             await building_view(query)
-        elif data == "uoa_view" or data.startswith(("uoa_view:", "uoa_live:")):
+        elif data in ("uoa_view", "uoa_live") or data.startswith(("uoa_view:", "uoa_live:")):
             await uoa_view(query, [t for t in data.partition(":")[2].split(",") if t] or None,
-                           live=data.startswith("uoa_live:"))
+                           live=data.startswith("uoa_live"))
         elif data == "vrp_view":
             await vrp_view(query)
         elif data == "rs_view":
@@ -37650,7 +37650,8 @@ def _cboe_chain_rows(tk, timeout=25):
     return rows, ts
 
 
-def _uoa_live_scan(tickers, min_vol=300, min_ratio=2.0, min_dte=7, top=50, workers=8):
+def _uoa_live_scan(tickers, min_vol=300, min_ratio=2.0, min_dte=7, top=50, workers=8,
+                   max_tickers=25):
     """LIVE unusual options for the named tickers: TODAY's per-contract volume vs standing
     OI, pulled from the CBOE feed instead of last night's capture (user 2026-09-16: "i want
     live today data also for unusal options data").
@@ -37666,7 +37667,7 @@ def _uoa_live_scan(tickers, min_vol=300, min_ratio=2.0, min_dte=7, top=50, worke
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    tks = sorted({str(t).strip().upper() for t in (tickers or []) if str(t).strip()})[:25]
+    tks = sorted({str(t).strip().upper() for t in (tickers or []) if str(t).strip()})[:max_tickers]
     meta = {"as_of": "", "tickers": tks, "failed": []}
     if not tks:
         return [], meta
@@ -37697,6 +37698,113 @@ def _uoa_live_scan(tickers, min_vol=300, min_ratio=2.0, min_dte=7, top=50, worke
                             "notional": r["vol"] * r["strike"] * 100})
     out.sort(key=lambda r: r["notional"], reverse=True)
     return out[:top], meta
+
+
+# The names most investors actually own or trade: index ETFs, the mega-caps, and the
+# retail-favourite momentum names. The cloud job snapshots these plus the open book and
+# the watchlist (user 2026-09-18: "keep data ready at least for major stocks investors bought").
+_UOA_LIVE_CORE = ["SPY", "QQQ", "IWM", "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META",
+                  "TSLA", "AVGO", "AMD", "PLTR", "NFLX", "MU", "ORCL", "INTC", "SMCI",
+                  "COIN", "MSTR", "HOOD", "SOFI", "JPM", "BAC", "UNH", "LLY", "WMT",
+                  "COST", "BA", "DIS"]
+
+_UOA_LIVE_DDL = """
+CREATE TABLE IF NOT EXISTS uoa_live (
+    snap_ts TEXT NOT NULL, trade_date TEXT NOT NULL, feed_as_of TEXT,
+    ticker TEXT NOT NULL, strike REAL NOT NULL, side TEXT NOT NULL, expiry TEXT NOT NULL,
+    dte INTEGER, vol REAL, oi REAL, ratio REAL, notional REAL,
+    PRIMARY KEY (snap_ts, ticker, strike, side, expiry));
+CREATE TABLE IF NOT EXISTS uoa_live_runs (
+    snap_ts TEXT PRIMARY KEY, trade_date TEXT NOT NULL, feed_as_of TEXT,
+    tickers TEXT, n_rows INTEGER, failed TEXT);
+"""
+
+
+def _uoa_live_universe(conn, cap=50):
+    """Core names first, then the open book and watchlist; US listings only (CBOE has no
+    chain for .NS and friends, so those would only ever fail)."""
+    extra = []
+    for sql in ("SELECT DISTINCT UPPER(ticker) FROM trades WHERE status='OPEN'",
+                "SELECT DISTINCT UPPER(ticker) FROM watchlist"):
+        try:
+            extra += [r[0] for r in conn.execute(sql).fetchall() if r[0]]
+        except Exception:
+            pass                                    # table absent on a fresh DB
+    return [t for t in dict.fromkeys(_UOA_LIVE_CORE + extra) if "." not in t][:cap]
+
+
+def _uoa_live_snapshot(conn=None, tickers=None):
+    """One cloud capture of live UOA for the major names, stored so every reader gets it
+    without a fetch. ACCRUING and deliberately never purged: the feed has no history, so a
+    snapshot not taken is gone -- same rule as the other accruing tables in CLAUDE.md.
+
+    Opens its own connection when none is passed because the job runs it on a worker
+    thread, and sqlite connections are bound to the thread that made them.
+    """
+    own = conn is None
+    conn = conn or get_conn()
+    try:
+        tks = list(tickers) if tickers else _uoa_live_universe(conn)
+        rows, meta = _uoa_live_scan(tks, top=100000, max_tickers=len(tks), workers=4)
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("America/New_York"))
+        snap, day = now.strftime("%Y-%m-%d %H:%M"), now.strftime("%Y-%m-%d")
+        conn.executescript(_UOA_LIVE_DDL)
+        conn.executemany("INSERT OR REPLACE INTO uoa_live VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                         [(snap, day, meta["as_of"], r["ticker"], r["strike"], r["side"],
+                           r["expiry"], r["dte"], r["vol"], r["oi"], r["ratio"], r["notional"])
+                          for r in rows])
+        conn.execute("INSERT OR REPLACE INTO uoa_live_runs VALUES (?,?,?,?,?,?)",
+                     (snap, day, meta["as_of"], ",".join(meta["tickers"]), len(rows),
+                      " | ".join(meta["failed"])))
+        conn.commit()
+        return {"snap_ts": snap, "rows": len(rows), "tickers": len(meta["tickers"]),
+                "failed": meta["failed"]}
+    finally:
+        if own:
+            conn.close()
+
+
+def _uoa_live_latest(conn=None, top=50):
+    """Newest stored cloud snapshot in _uoa_live_scan's (rows, meta) shape, so every
+    renderer takes it unchanged. meta["snap_ts"] is empty when nothing is stored yet."""
+    own = conn is None
+    conn = conn or get_conn()
+    meta = {"as_of": "", "tickers": [], "failed": [], "snap_ts": ""}
+    try:
+        run = conn.execute("SELECT snap_ts, feed_as_of, tickers, failed FROM uoa_live_runs "
+                           "ORDER BY snap_ts DESC LIMIT 1").fetchone()
+        if not run:
+            return [], meta
+        meta.update(snap_ts=run[0], as_of=run[1] or "",
+                    tickers=[t for t in (run[2] or "").split(",") if t],
+                    failed=[f for f in (run[3] or "").split(" | ") if f])
+        cols = ("ticker", "strike", "side", "expiry", "dte", "vol", "oi", "ratio", "notional")
+        rows = [dict(zip(cols, r)) for r in conn.execute(
+            "SELECT ticker, strike, side, expiry, dte, vol, oi, ratio, notional FROM uoa_live "
+            "WHERE snap_ts=? ORDER BY notional DESC LIMIT ?", (run[0], top))]
+        return rows, meta
+    except sqlite3.OperationalError:                # tables not created yet
+        return [], meta
+    finally:
+        if own:
+            conn.close()
+
+
+async def uoa_live_job(ctx):
+    """Cloud live-UOA capture, every 30 min from 9:45 AM to 4:15 PM ET on weekdays. The
+    feed is 15 min delayed, so 9:45 is the first read of the open and 4:15 the close."""
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York"))
+    if now.weekday() >= 5 or not (9 * 60 + 45 <= now.hour * 60 + now.minute <= 16 * 60 + 15):
+        return
+    try:
+        res = await asyncio.to_thread(_uoa_live_snapshot)
+        log.info("uoa_live snapshot %s: %d unusual contracts over %d names%s", res["snap_ts"],
+                 res["rows"], res["tickers"],
+                 f", no chain for {len(res['failed'])}" if res["failed"] else "")
+    except Exception:
+        log.warning("uoa_live snapshot failed", exc_info=True)
 
 
 def _knum(n):
@@ -37736,9 +37844,12 @@ async def _send_uoa(msg, rows, tickers=None, meta=None):
     if live:
         src = (f"<i>LIVE CBOE chain, 15-min delayed · as of {meta.get('as_of') or 'n/a'} · OI is the "
                f"OCC's once-a-day number, so ratios keep growing through the session.</i>\n")
+        if meta.get("snap_ts"):
+            src += (f"<i>Cloud snapshot of {len(meta.get('tickers') or [])} major names, captured "
+                    f"{meta['snap_ts']} ET — refreshes every 30 min in market hours.</i>\n")
         if meta.get("failed"):
             src += f"<i>No chain for: {', '.join(meta['failed'])}</i>\n"
-    txt = (f"🐋 <b>Unusual Options Activity — {'LIVE · ' if live else ''}{tks or 'fresh flow'}</b>\n"
+    txt = (f"🐋 <b>Unusual Options Activity — {'LIVE · ' if live else ''}{tks or ('major names' if live else 'fresh flow')}</b>\n"
            + src +
            "<i>today's volume ≫ standing OI = new positioning. Calls=bullish lean, puts=bearish. "
            "Flow ≠ certainty (could be hedges/spreads). Not advice.</i>\n\n" + table + "\n\n" + best)
@@ -37761,11 +37872,15 @@ async def uoa_command(update, ctx):
     tickers = [t for a in args if a.lstrip("-") not in ("LIVE", "TODAY", "NOW")
                for t in a.split(",") if t][:20]
     if live and not tickers:
-        await update.message.reply_text(
-            "Live mode needs tickers — it fetches one chain per name:\n"
-            "<code>/uoa live NVDA TSLA</code>\n"
-            "Plain <code>/uoa</code> scans the whole universe from last night's capture.",
-            parse_mode=H)
+        # No tickers = the cloud's latest stored snapshot of the major names -- no fetch.
+        rows, meta = await asyncio.to_thread(_uoa_live_latest)
+        if not meta.get("snap_ts"):
+            await update.message.reply_text(
+                "No live snapshot stored yet — the cloud captures the major names every 30 min "
+                "from 9:45 AM to 4:15 PM ET. To fetch right now: <code>/uoa live NVDA TSLA</code>",
+                parse_mode=H)
+            return
+        await _send_uoa(update.message, rows, None, meta)
         return
     await update.message.reply_text(
         "🐋 Reading today's live chains…" if live else "🐋 Scanning unusual options flow…",
@@ -37783,8 +37898,9 @@ async def uoa_command(update, ctx):
 
 
 async def uoa_view(query, tickers=None, live=False):
-    if live and tickers:
-        rows, meta = await asyncio.to_thread(_uoa_live_scan, tickers)
+    if live:
+        rows, meta = ((await asyncio.to_thread(_uoa_live_scan, tickers)) if tickers
+                      else (await asyncio.to_thread(_uoa_live_latest)))
         await _send_uoa(query.message, rows, tickers, meta)
         return
     conn = get_conn()
@@ -46604,6 +46720,9 @@ def main():
         _sched_once(job_queue, oi_flow_alert, (16, 50), "oi_flow",
                     "OI & flow", days=(1, 2, 3, 4, 5))
         job_queue.run_repeating(news_refresh, interval=1800, first=20)  # news ingest every 30 min
+        # Live UOA snapshot of the major names, every 30 min; the job itself gates to
+        # 9:45 AM-4:15 PM ET weekdays (user 2026-09-18, tracker 445).
+        job_queue.run_repeating(uoa_live_job, interval=1800, first=90, name="uoa_live")
         job_queue.run_daily(record_hiprob_recs, time=dt_time(21, 30, 0))  # persist recs 5:30pm EDT / 4:30pm EST
         job_queue.run_daily(record_short_interest, time=dt_time(21, 40, 0))  # SI snapshot 5:40pm EDT / 4:40pm EST
         job_queue.run_daily(record_earnings_history, time=dt_time(21, 45, 0))  # est/actual EPS 5:45pm EDT / 4:45pm EST

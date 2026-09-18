@@ -24484,11 +24484,14 @@ def _ss_dataframe(_tbo, conn, choice, tks, live=False):
         # had no way to show its unusual contracts (user 2026-09-16).
         meta = None
         if live:
-            if not tks:
-                return pd.DataFrame([{"Note": "Live mode reads one chain per name — type the "
-                                              "ticker(s) above, e.g. NVDA TSLA. Leave live off "
-                                              "to scan the whole universe from last night's capture."}])
-            rows, meta = _tbo._uoa_live_scan(list(tks))
+            if tks:
+                rows, meta = _tbo._uoa_live_scan(list(tks))
+            else:                     # blank = the cloud's stored snapshot of the major names
+                rows, meta = _tbo._uoa_live_latest(conn)
+                if not meta.get("snap_ts"):
+                    return pd.DataFrame([{"Note": "No live snapshot stored yet — the cloud captures "
+                                                  "the major names every 30 min from 9:45 AM to "
+                                                  "4:15 PM ET. Type ticker(s) above to fetch now."}])
         else:
             rows = _tbo._uoa_scan(conn, tickers=list(tks), top=50) if tks else _tbo._uoa_scan(conn)
         if tks and not rows:
@@ -24501,10 +24504,13 @@ def _ss_dataframe(_tbo, conn, choice, tks, live=False):
                            for r in rows])
         if meta:
             _fail = f" · no chain for {', '.join(meta['failed'])}" if meta.get("failed") else ""
+            _snap = (f" Cloud snapshot of {len(meta.get('tickers') or [])} major names, captured "
+                     f"{meta['snap_ts']} ET (every 30 min in market hours)."
+                     if meta.get("snap_ts") else "")
             df.attrs["caption"] = (f"🔴 LIVE CBOE chain, 15-min delayed — as of "
                                    f"{meta.get('as_of') or 'n/a'}. Open interest is the OCC's "
                                    f"once-a-day number, so ratios keep growing through the "
-                                   f"session.{_fail}")
+                                   f"session.{_snap}{_fail}")
         return df
     if choice.startswith("🧭"):                                   # Positioning builder
         rows = _tbo._positioning_scan(conn)
@@ -24569,9 +24575,10 @@ if page == "⚙️ Strategy Scanners":
     _ss_tk_in = _c2.text_input("Tickers (optional; blank = sensible defaults)", "", key="ss_tks")
     # Live only exists for UOA: it pulls today's CBOE chain per name (user 2026-09-16).
     _ss_live = _c3.checkbox("🔴 Live (today)", key="ss_live",
-                            help="Unusual options only. Reads today's chain from CBOE "
-                                 "(15-min delayed) instead of last night's capture. Needs "
-                                 "tickers — one fetch per name.") if _ss_choice.startswith("🐋") else False
+                            help="Unusual options only. Today's chain from CBOE (15-min "
+                                 "delayed) instead of last night's capture. Tickers typed = "
+                                 "fetched now; blank = the cloud's latest snapshot of the "
+                                 "major names (refreshed every 30 min in market hours).") if _ss_choice.startswith("🐋") else False
     if st.button("▶️ Run scan", type="primary", key="ss_btn"):
         _ss_tks = tuple([x.strip().upper() for x in re.split(r"[ ,]+", _ss_tk_in) if x.strip()])
         with st.spinner("Reading today's live chains…" if _ss_live else "Running scan…"):

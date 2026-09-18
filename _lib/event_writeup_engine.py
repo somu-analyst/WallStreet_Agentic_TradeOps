@@ -896,7 +896,7 @@ class EventWriteupEngine:
                         "FOMC": "FOMC decision"}.get(str(ev.get("name", "")).strip())
                 if not _lbl:
                     _n = str(ev.get("name", "")).lower()
-                    _lbl = ("Jobs · NFP" if ("job" in _n or "payroll" in _n) else
+                    _lbl = ("Jobs · NFP" if (("job" in _n or "payroll" in _n) and "claim" not in _n) else
                             "CPI · inflation" if "cpi" in _n else
                             "PCE · Fed gauge" if "pce" in _n else
                             "FOMC decision" if "fomc" in _n or "fed" in _n else None)
@@ -919,7 +919,14 @@ class EventWriteupEngine:
             lines.append(f"  {ev['release_time']} ET — {ev['name']} "
                          + ("(due — not released yet)" if pending else "release"))
             if ev.get("actual") is not None:
-                beat = ev.get("estimate") is not None and ev["actual"] < ev["estimate"] if "inflation" in ev["name"].lower() else ev["actual"] > ev.get("estimate")
+                # Parenthesised on purpose: "A and B if C else D" binds as "(A and B) if C
+                # else D", so every non-inflation print was compared against a None estimate
+                # and the whole writeup raised (2026-09-17 jobless claims, both slots lost).
+                # Same day's other half: "job" matched inside "jobless claims" above, which
+                # attached the NFP number to a claims release -- hence the "claim" guard.
+                est = ev.get("estimate")
+                beat = est is not None and (ev["actual"] < est if "inflation" in ev["name"].lower()
+                                            else ev["actual"] > est)
                 surprise = ""
                 if ev.get("estimate") is not None:
                     surprise = f" (est {ev['estimate']}{ev.get('unit','')}, {'beat' if beat else 'miss'})"

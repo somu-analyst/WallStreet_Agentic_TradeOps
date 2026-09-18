@@ -37638,13 +37638,19 @@ def _cboe_chain_rows(tk, timeout=25):
         rows.append({"ticker": str(tk).upper(), "strike": int(kraw) / 1000.0, "side": cp,
                      "expiry": exp.isoformat(), "vol": float(o.get("volume") or 0),
                      "oi": float(o.get("open_interest") or 0)})
-    # The feed stamps UTC with no zone ("2026-09-18 07:58:44" at 04:38 ET). Shown bare it
-    # repeats the dashboard's "Refreshed 22:11" bug (ID 439), so convert and name the zone.
+    # "As of" = the NEWEST TRADE in the chain, not the feed's `timestamp`. That field is
+    # only when CBOE generated the file (UTC, no zone): pre-market on 2026-09-18 it read
+    # 07:10 ET while every volume in it was from the previous day's close -- yesterday's
+    # flow labelled as this morning's. `last_trade_time` is New York wall clock already.
+    last = max((str(o.get("last_trade_time") or "") for o in data.get("options") or []),
+               default="")
+    if last:
+        return rows, last[:16].replace("T", " ") + " ET"
     ts = str(payload.get("timestamp") or "")
     try:
         from zoneinfo import ZoneInfo
         ts = (datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
-              .astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET"))
+              .astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET (feed time)"))
     except ValueError:
         pass
     return rows, ts

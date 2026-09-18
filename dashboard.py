@@ -49,6 +49,17 @@ except Exception:
     _TB_ENGINE = None
 
 
+# Every write to trades/paper_trades goes through these two, which are the ENGINE's (never a
+# copy): tools/sync_trades.py syncs both tables laptop<->cloud by trade_id, newest updated_at
+# wins, so the stamp format/clock and the id range must match the bot's exactly (ID 446).
+def _trade_stamp():
+    return _TB_ENGINE._trade_stamp()
+
+
+def _next_trade_id(conn, table="trades"):
+    return _TB_ENGINE._next_trade_id(conn, table)
+
+
 def _flag_of(tk):
     """Country flag for a symbol — ONE resolver, shared with the bot (ID 201).
 
@@ -10861,7 +10872,7 @@ elif page == "💼 Portfolio & Suggestions":
                 _ac = get_conn()
                 for _, _er in _expired.iterrows():
                     _ac.execute("UPDATE trades SET status='CLOSED',exit_date=?,exit_reason=?,updated_at=? WHERE trade_id=?",
-                                (_today_str,"Expired",datetime.now().isoformat(),int(_er["trade_id"])))
+                                (_today_str,"Expired",_trade_stamp(),int(_er["trade_id"])))
                 _ac.commit(); _ac.close()
                 st.info(f"Auto-closed {len(_expired)} expired position(s).")
                 trades = trades[~trades["trade_id"].isin(_expired["trade_id"])]
@@ -11339,7 +11350,7 @@ elif page == "💼 Portfolio & Suggestions":
                                             _dh=(cd-_ed.date()).days
                                             _cc=get_conn()
                                             _cc.execute("UPDATE trades SET status='CLOSED',exit_date=?,exit_price=?,exit_reason=?,pnl=?,pnl_pct=?,days_held=?,updated_at=? WHERE trade_id=?",
-                                                        (cd.strftime("%Y-%m-%d"),cp,cr,round(_rp,2),round(_rpc,1),_dh,datetime.now().isoformat(),pos["ID"]))
+                                                        (cd.strftime("%Y-%m-%d"),cp,cr,round(_rp,2),round(_rpc,1),_dh,_trade_stamp(),pos["ID"]))
                                             _cc.commit(); _cc.close()
                                             st.success(f"Closed! P&L ${_rp:,.2f} ({_rpc:+.1f}%)")
                                             st.rerun()
@@ -11348,7 +11359,7 @@ elif page == "💼 Portfolio & Suggestions":
                                     nn=st.text_area("📝 Notes",value=pos.get("Notes",""),key=f"nn_{pos['ID']}",height=60)
                                     if st.form_submit_button("💾 Save Notes"):
                                         try:
-                                            _nc=get_conn(); _nc.execute("UPDATE trades SET notes=?,updated_at=? WHERE trade_id=?",(nn,datetime.now().isoformat(),pos["ID"]))
+                                            _nc=get_conn(); _nc.execute("UPDATE trades SET notes=?,updated_at=? WHERE trade_id=?",(nn,_trade_stamp(),pos["ID"]))
                                             _nc.commit(); _nc.close(); st.success("Saved!")
                                         except Exception as _ne: st.error(f"{_ne}")
                             with _et2:
@@ -11380,7 +11391,7 @@ elif page == "💼 Portfolio & Suggestions":
                                                             (_etk,("STOCK" if _is_stk_e else _eot.lower()),int(_eqt),
                                                              (0.0 if _is_stk_e else float(_estk)),float(_eep),
                                                              ("" if _is_stk_e else _eexp.strftime("%Y-%m-%d")),
-                                                             _estrat,_eed.strftime("%Y-%m-%d"),datetime.now().isoformat(),pos["ID"]))
+                                                             _estrat,_eed.strftime("%Y-%m-%d"),_trade_stamp(),pos["ID"]))
                                                 _ec.commit(); _ec.close()
                                                 st.success(f"Updated {_etk} " + ("shares" if _is_stk_e else f"{_eot} ${_estk:.0f}"))
                                                 st.rerun()
@@ -11413,15 +11424,15 @@ elif page == "💼 Portfolio & Suggestions":
                     try:
                         _nc = get_conn()
                         _nc.execute("""INSERT INTO trades
-                            (ticker, option_type, strike, entry_price, quantity, expiry,
+                            (trade_id, ticker, option_type, strike, entry_price, quantity, expiry,
                              strategy, notes, status, entry_date, created_at, updated_at)
-                            VALUES (?,?,?,?,?,?,?,?,'OPEN',?,?,?)""",
-                            (_tk, ("STOCK" if _is_stk_a else _ot.lower()),
+                            VALUES (?,?,?,?,?,?,?,?,?,'OPEN',?,?,?)""",
+                            (_next_trade_id(_nc), _tk, ("STOCK" if _is_stk_a else _ot.lower()),
                              (0.0 if _is_stk_a else float(_stk)), float(_ep), int(_qty),
                              ("" if _is_stk_a else _exp.strftime("%Y-%m-%d")),
                              ("stock" if (_is_stk_a and _strat == "manual") else _strat), _notes,
                              _edate.strftime("%Y-%m-%d"),
-                             datetime.now().isoformat(), datetime.now().isoformat()))
+                             datetime.now().isoformat(), _trade_stamp()))
                         _nc.commit(); _nc.close()
                         st.success(f"✅ Added {_tk} " + (f"{_qty:g} shares @ ${_ep:.2f}" if _is_stk_a
                                                           else f"{_ot} ${_stk:.0f}  entry ${_ep:.2f}"))
@@ -16728,9 +16739,11 @@ elif page == "🎯 Next-Day Exit Planner":
                     if _sa_tk and _sa_px > 0:
                         try:
                             _gp_conn.execute(
-                                "INSERT INTO trades (ticker, option_type, strike, expiry, entry_price, "
-                                "quantity, entry_date, notes, status) VALUES (?, 'STOCK', 0, '', ?, ?, ?, ?, 'OPEN')",
-                                (_sa_tk, float(_sa_px), int(_sa_q), _sa_dt.strftime("%Y-%m-%d"), None))
+                                "INSERT INTO trades (trade_id, ticker, option_type, strike, expiry, entry_price, "
+                                "quantity, entry_date, notes, status, updated_at) "
+                                "VALUES (?, ?, 'STOCK', 0, '', ?, ?, ?, ?, 'OPEN', ?)",
+                                (_next_trade_id(_gp_conn), _sa_tk, float(_sa_px), int(_sa_q),
+                                 _sa_dt.strftime("%Y-%m-%d"), None, _trade_stamp()))
                             _gp_conn.commit()
                             st.success(f"Added {_sa_q} {_sa_tk} @ ${_sa_px:.2f} (entry {_sa_dt})")
                             st.rerun()
@@ -16769,7 +16782,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                 "UPDATE trades SET quantity=?, entry_price=?, entry_date=?, notes=?, updated_at=? "
                                 "WHERE trade_id=?",
                                 (int(_se_q) * (1 if _sk_qty0 >= 0 else -1), float(_se_px), _se_dt or None,
-                                 _se_nt or None, _now_et().strftime("%Y-%m-%d %H:%M:%S"), _sk_id))
+                                 _se_nt or None, _trade_stamp(), _sk_id))
                             _gp_conn.commit()
                             st.success("Saved."); st.cache_data.clear(); st.rerun()
                         except Exception as _e:
@@ -16786,7 +16799,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                     "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, exit_reason=?, "
                                     "pnl=?, updated_at=? WHERE trade_id=?",
                                     ((float(_sc_px) or None), _sc_dt.strftime("%Y-%m-%d"), "manual (stock)",
-                                     _pnl, _now_et().strftime("%Y-%m-%d %H:%M:%S"), _sk_id))
+                                     _pnl, _trade_stamp(), _sk_id))
                                 _gp_conn.commit()
                                 st.success(f"Closed (P&L ${_pnl:,.0f})." if _pnl is not None else "Closed.")
                                 st.cache_data.clear(); st.rerun()
@@ -16822,10 +16835,12 @@ elif page == "🎯 Next-Day Exit Planner":
                         _sq = -abs(int(_na_qty)) if (_na_side == "short" or _na_qty < 0) else abs(int(_na_qty))
                         try:
                             _gp_conn.execute(
-                                "INSERT INTO trades (ticker, option_type, strike, expiry, entry_price, "
-                                "quantity, entry_date, notes, status) VALUES (?,?,?,?,?,?,?,?, 'OPEN')",
-                                (_na_tk, _na_typ, float(_na_K), _na_exp, float(_na_px), int(_sq),
-                                 _na_date.strftime("%Y-%m-%d"), _na_notes or None))
+                                "INSERT INTO trades (trade_id, ticker, option_type, strike, expiry, entry_price, "
+                                "quantity, entry_date, notes, status, updated_at) "
+                                "VALUES (?,?,?,?,?,?,?,?,?, 'OPEN', ?)",
+                                (_next_trade_id(_gp_conn), _na_tk, _na_typ, float(_na_K), _na_exp,
+                                 float(_na_px), int(_sq),
+                                 _na_date.strftime("%Y-%m-%d"), _na_notes or None, _trade_stamp()))
                             _gp_conn.commit()
                             st.success(f"Added {_na_side} {_na_qty}× {_na_tk} ${_na_K:.0f}{_na_typ[0].upper()} {_na_exp}.")
                             st.cache_data.clear(); st.rerun()
@@ -16898,7 +16913,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                     "notes=?, updated_at=? WHERE trade_id=?",
                                     (_ed_tk, _ed_typ, float(_ed_K), int(_sq), _ed_exp, float(_ed_px),
                                      _ed_entry_date or None, (_ed_iv or None), (_ed_sl or None), (_ed_tp or None),
-                                     _ed_notes or None, _now_et().strftime("%Y-%m-%d %H:%M:%S"), _tid))
+                                     _ed_notes or None, _trade_stamp(), _tid))
                                 _gp_conn.commit()
                                 st.success("Saved."); st.cache_data.clear(); st.rerun()
                             except Exception as _e:
@@ -16940,7 +16955,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                         "WHERE trade_id=?",
                                         (_px0, _cl_date.strftime("%Y-%m-%d"), _cl_reason or "manual",
                                          round(_pnl, 2), round(_pnlp, 2), _dh,
-                                         _now_et().strftime("%Y-%m-%d %H:%M:%S"), _tid))
+                                         _trade_stamp(), _tid))
                                     _gp_conn.commit()
                                     st.success(f"Closed at ${_px0:.2f} · P&L ${_pnl:,.0f} ({_pnlp:+.1f}%).")
                                     st.cache_data.clear(); st.rerun()
@@ -16952,7 +16967,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                 _gp_conn.execute(
                                     "UPDATE trades SET status='OPEN', exit_price=NULL, exit_date=NULL, "
                                     "exit_reason=NULL, pnl=NULL, updated_at=? WHERE trade_id=?",
-                                    (_now_et().strftime("%Y-%m-%d %H:%M:%S"), _tid))
+                                    (_trade_stamp(), _tid))
                                 _gp_conn.commit()
                                 st.success("Re-opened."); st.cache_data.clear(); st.rerun()
                             except Exception as _e:
@@ -23754,11 +23769,13 @@ if page == "💡 Action Board":
                             i = _byn[int(lab.split(":")[0])]
                             for (typ, K, exp, px, sgn) in i["legs"]:
                                 _c.execute(
-                                    "INSERT INTO trades (ticker, option_type, strike, expiry, entry_price, "
-                                    "quantity, entry_date, notes, status) VALUES (?,?,?,?,?,?,?,?, 'OPEN')",
-                                    (i["Ticker"], typ, float(K), exp, float(px), int(sgn * _qn),
+                                    "INSERT INTO trades (trade_id, ticker, option_type, strike, expiry, "
+                                    "entry_price, quantity, entry_date, notes, status, updated_at) "
+                                    "VALUES (?,?,?,?,?,?,?,?,?, 'OPEN', ?)",
+                                    (_next_trade_id(_c), i["Ticker"], typ, float(K), exp, float(px),
+                                     int(sgn * _qn),
                                      _now_et().strftime("%Y-%m-%d"),
-                                     f"ActionBoard {i['Source']}: {i['Why']}"))
+                                     f"ActionBoard {i['Source']}: {i['Why']}", _trade_stamp()))
                                 _added += 1
                         _c.commit()
                     st.success(f"Added {_added} leg(s) as OPEN positions — they now appear in Portfolio, "
@@ -27555,13 +27572,14 @@ if page == "📝 Paper Trading":
                     st.error("Couldn't get a live price — enter one manually.")
                 else:
                     _pt_conn.execute(
-                        "INSERT INTO paper_trades (ticker, option_type, strike, expiry, entry_price, "
-                        "quantity, entry_date, status, notes, updated_at) "
-                        "VALUES (?,?,?,?,?,?,?, 'OPEN', ?, ?)",
-                        (_pa_tk, _pa_typ.upper(), _pa_strike, _pa_exp, float(_entry_px),
+                        "INSERT INTO paper_trades (trade_id, ticker, option_type, strike, expiry, "
+                        "entry_price, quantity, entry_date, status, notes, updated_at) "
+                        "VALUES (?,?,?,?,?,?,?,?, 'OPEN', ?, ?)",
+                        (_next_trade_id(_pt_conn, "paper_trades"),
+                         _pa_tk, _pa_typ.upper(), _pa_strike, _pa_exp, float(_entry_px),
                          float(_pa_qty) if _pa_typ == "Stock" else int(_pa_qty),
                          _pa_entry_date.strftime("%Y-%m-%d"), _pa_note or None,
-                         datetime.now().isoformat()))
+                         _trade_stamp()))
                     _pt_conn.commit()
                     st.success(f"Added demo {_pa_tk} {_pa_qty:+g} @ ${_entry_px:.2f}."); st.rerun()
 
@@ -28026,7 +28044,7 @@ if page == "📝 Paper Trading":
                     "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=?, "
                     "updated_at=? WHERE trade_id=?",
                     (_pexit, _now_et().strftime("%Y-%m-%d"),
-                     datetime.now().isoformat(), int(_pid)))
+                     _trade_stamp(), int(_pid)))
             _pt_conn.commit()
             _lots_txt = f" across {len(_pids)} lots" if len(_pids) > 1 else ""
             st.success(f"Closed{_lots_txt} — P&L ${_pnl_total:+,.0f}."); st.rerun()

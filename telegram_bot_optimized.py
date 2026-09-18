@@ -1805,12 +1805,49 @@ def _render_payoff_chart(spot_grid, payoff_grid, title):
         return None
 
 
+# ── trades / paper_trades write helpers (tracker 446, 2026-09-18) ────────────────────
+# tools/sync_trades.py syncs both tables laptop <-> cloud BY trade_id, and the row with the
+# newer updated_at wins. So every write must (1) stamp updated_at comparably on both hosts
+# and (2) mint trade_ids the other host can never mint. Before this, neither held.
+
+def _trade_stamp():
+    """updated_at for trades/paper_trades: explicit UTC, one format on every host.
+
+    datetime.now() is New York time on the laptop and UTC on the VM, and the old stamps mixed
+    isoformat ('...T04:30:02.9') with strftime ('... 22:17:19'). Compared as text, an OPEN
+    stamped at 4 AM beat a CLOSE stamped at 10 PM the same day -- which is how a position
+    closed on the cloud kept coming back.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _on_cloud():
+    """True on the VM. It runs the mirrored tree, where this file is cloud_bot.py
+    (tools/sync_cloud.py renames it); NYSE_SITE_LABEL=Cloud is the explicit override."""
+    return (os.path.basename(__file__).startswith("cloud_")
+            or os.environ.get("NYSE_SITE_LABEL", "").strip().lower() == "cloud")
+
+
+def _next_trade_id(conn, table="trades"):
+    """A new trade_id from THIS host's own range: cloud 1,000,000-1,999,999, laptop below.
+
+    AUTOINCREMENT alone cannot keep the hosts apart: SQLite moves its counter past any
+    explicit id written into the table, and the sync writes the other host's ids in. After
+    the first cloud trade synced down, the laptop's next id was 1,000,004 -- exactly the
+    cloud's next -- and the sync would then have treated two different trades as one.
+    """
+    lo, hi = (1_000_000, 1_999_999) if _on_cloud() else (1, 999_999)
+    cur = conn.execute(f"SELECT MAX(trade_id) FROM {table} WHERE trade_id BETWEEN ? AND ?",
+                       (lo, hi)).fetchone()[0]
+    return (cur or lo - 1) + 1
+
+
 def _update_trade_field(trade_id, field, value):
     conn = get_conn()
     try:
         conn.execute(
             f"UPDATE trades SET {field} = ?, updated_at = ? WHERE trade_id = ?",
-            (value, datetime.now().isoformat(), int(trade_id)),
+            (value, _trade_stamp(), int(trade_id)),
         )
         conn.commit()
         ok = True
@@ -1870,7 +1907,7 @@ def _close_trade_now(trade_id, reason="telegram_quick_exit"):
                 float(round(pnl, 2)),
                 float(round(pnl_pct, 2)),
                 int(days_held),
-                datetime.now().isoformat(),
+                _trade_stamp(),
                 int(trade_id),
             ),
         )
@@ -1973,7 +2010,7 @@ def _close_expired_positions() -> list:
                     WHERE trade_id=?
                 """, (expd, float(round(intrinsic, 2)), reason,
                       float(round(pnl, 2)), float(round(pnl_pct, 2)),
-                      days_held, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), tid))
+                      days_held, _trade_stamp(), tid))
             else:
                 # The demo book has no pnl/reason columns, so the settlement reason is
                 # appended to `notes` rather than dropped -- otherwise a row would close
@@ -1982,7 +2019,7 @@ def _close_expired_positions() -> list:
                     "UPDATE paper_trades SET status='CLOSED', exit_date=?, exit_price=?, "
                     "notes=TRIM(COALESCE(notes,'') || ' | ' || ?), updated_at=? WHERE trade_id=?",
                     (expd, float(round(intrinsic, 2)), reason,
-                     datetime.now().isoformat(), tid))
+                     _trade_stamp(), tid))
             conn.commit()
             closed.append((tid, tk))
             log.info(f"Auto-closed expired {_tbl} position: {tk} trade_id={tid} expiry={expd}")
@@ -2027,8 +2064,7 @@ def _insert_paired_trade(parent_trade_id, mode="buy"):
 
     conn = get_conn()
     try:
-        nxt = pd.read_sql("SELECT COALESCE(MAX(trade_id), 0) AS m FROM trades", conn).iloc[0]["m"]
-        new_id = int(nxt) + 1
+        new_id = _next_trade_id(conn)          # this host's own id range (see its docstring)
         conn.execute(
             """
             INSERT INTO trades (
@@ -2055,7 +2091,7 @@ def _insert_paired_trade(parent_trade_id, mode="buy"):
                 "OPEN",
                 note,
                 now.isoformat(),
-                now.isoformat(),
+                _trade_stamp(),
                 acct,
             ),
         )
@@ -2110,8 +2146,7 @@ def _insert_new_trade(
 
     conn = get_conn()
     try:
-        nxt = pd.read_sql("SELECT COALESCE(MAX(trade_id), 0) AS m FROM trades", conn).iloc[0]["m"]
-        new_id = int(nxt) + 1
+        new_id = _next_trade_id(conn)          # this host's own id range (see its docstring)
         conn.execute(
             """
             INSERT INTO trades (
@@ -2138,7 +2173,7 @@ def _insert_new_trade(
                 "OPEN",
                 notes or "Added from Telegram Positions",
                 now.isoformat(),
-                now.isoformat(),
+                _trade_stamp(),
                 account_type,
             ),
         )
@@ -2199,8 +2234,8 @@ def _create_group_from_trades(trade_ids, group_name=None):
         
         # Update all trades with the new group_id
         placeholders = ",".join("?" * len(trade_ids))
-        conn.execute(f"UPDATE trades SET group_id = ? WHERE trade_id IN ({placeholders})", 
-                    [new_group_id] + list(trade_ids))
+        conn.execute(f"UPDATE trades SET group_id = ?, updated_at = ? WHERE trade_id IN ({placeholders})", 
+                    [new_group_id, _trade_stamp()] + list(trade_ids))
         conn.commit()
         ok = True
         msg = f"Created group #{new_group_id} with {len(trade_ids)} positions"
@@ -2217,7 +2252,8 @@ def _ungroup_trade(trade_id):
     """Remove a trade from its group."""
     conn = get_conn()
     try:
-        conn.execute("UPDATE trades SET group_id = NULL WHERE trade_id = ?", (int(trade_id),))
+        conn.execute("UPDATE trades SET group_id = NULL, updated_at = ? WHERE trade_id = ?",
+                     (_trade_stamp(), int(trade_id)))
         conn.commit()
         ok, msg = True, f"Removed trade #{trade_id} from group"
     except Exception as e:
@@ -13046,7 +13082,7 @@ def _reopen_trade(conn, trade_id):
         "UPDATE trades SET status='OPEN', exit_date=NULL, exit_time=NULL, exit_price=NULL, "
         "exit_reason=NULL, pnl=NULL, pnl_pct=NULL, days_held=NULL, updated_at=?, "
         "notes=COALESCE(notes,'')||? WHERE trade_id=?",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        (_trade_stamp(),
          f" | reopened {datetime.now().strftime('%Y-%m-%d')}", trade_id))
     conn.commit()
     return label, f"↩️ Reopened <b>{label}</b> (id {trade_id})."
@@ -17022,7 +17058,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             gid = _safe_int(data.replace("grpdel_", ""), 0)
             conn = get_conn()
             try:
-                conn.execute("UPDATE trades SET group_id=NULL WHERE group_id=?", (gid,))
+                conn.execute("UPDATE trades SET group_id=NULL, updated_at=? WHERE group_id=?",
+                             (_trade_stamp(), gid))
                 conn.commit()
                 await query.message.reply_text(
                     f"✅ Group #{gid} dissolved (trades kept as individual).",
@@ -41176,11 +41213,13 @@ async def paper_command(update, ctx):
                     msg = "❌ Couldn't get a price — pass @PRICE explicitly."
                 else:
                     conn.execute(
-                        "INSERT INTO paper_trades (ticker, option_type, strike, expiry, entry_price, "
-                        "quantity, entry_date, status, updated_at) VALUES (?,?,?,?,?,?,?, 'OPEN', ?)",
-                        (p["tk"], p["typ"], p["strike"], p["expiry"], float(px), p["qty"],
+                        "INSERT INTO paper_trades (trade_id, ticker, option_type, strike, expiry, "
+                        "entry_price, quantity, entry_date, status, updated_at) "
+                        "VALUES (?,?,?,?,?,?,?,?, 'OPEN', ?)",
+                        (_next_trade_id(conn, "paper_trades"),
+                         p["tk"], p["typ"], p["strike"], p["expiry"], float(px), p["qty"],
                          p["entry_date"] or datetime.now().strftime("%Y-%m-%d"),
-                         datetime.now().isoformat()))
+                         _trade_stamp()))
                     conn.commit()
                     new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                     _set_pos_meta(conn, "paper_trades", new_id,
@@ -41219,7 +41258,7 @@ async def paper_command(update, ctx):
                         "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=?, "
                         "updated_at=? WHERE trade_id=?",
                         (exit_px, datetime.now().strftime("%Y-%m-%d"),
-                         datetime.now().isoformat(), pid))
+                         _trade_stamp(), pid))
                     conn.commit()
                     msg = f"✅ Closed demo #{pid} @ ${exit_px:.2f} — P&L ${pnl:+,.0f}."
         else:

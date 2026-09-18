@@ -58,6 +58,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCAL_DB = os.environ.get("NYSE_DB_PATH", r"C:\Users\srini\Options_chain_data\US_data_OpenBB.db")
@@ -116,11 +117,39 @@ def _cloud_rows(table):
     return {row["trade_id"]: row for row in data}
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _instant(stamp):
+    """updated_at -> a comparable UTC instant (or the epoch when missing/unreadable).
+
+    It used to be compared as TEXT, which is wrong twice over (tracker 446, 2026-09-18,
+    "closing a position on cloud does not stick - it comes back"):
+      * FORMAT: rows carry both '2026-09-17T04:30:02.928790' (isoformat) and
+        '2026-09-17 22:17:19' (strftime). As text 'T' > ' ', so ANY T-stamp beat ANY
+        space-stamp from the same day -- an OPEN from 4 AM beat a CLOSE from 10 PM.
+      * CLOCK: datetime.now() is New York time on the laptop and UTC on the VM, so the
+        same wall-clock instant was written four hours apart depending on who wrote it.
+    Writers now stamp explicit UTC ('...Z', _trade_stamp() in the bot). Legacy NAIVE stamps
+    are read as UTC: exact for the VM's, and a laptop ET stamp then reads as older than it
+    really was -- the safe direction, since any edit made after this fix still wins.
+    """
+    s = str(stamp or "").strip()
+    if not s:
+        return _EPOCH
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00").replace(" ", "T", 1))
+    except ValueError:
+        return _EPOCH
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _newer(a, b):
     """True if row a's updated_at is strictly newer than row b's. Missing/NULL loses to
     anything real -- an old row that was never touched should not block a real sync."""
-    au, bu = a.get("updated_at") or "", b.get("updated_at") or ""
-    return au > bu
+    return _instant(a.get("updated_at")) > _instant(b.get("updated_at"))
 
 
 def diff(local, cloud):

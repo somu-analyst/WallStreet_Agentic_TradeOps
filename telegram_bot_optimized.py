@@ -3460,12 +3460,18 @@ async def debate_cmd(update, ctx):
 
 
 
-# Known FOMC meeting dates (approximate — update quarterly)
+# FOMC DECISION dates (day 2 of each 2-day meeting; statement at 2:00 PM ET).
+# THE single source -- _lib/market_news_enhanced.py reads this list, it does not copy it.
 _FOMC_DATES = [
     "2025-03-19", "2025-05-07", "2025-06-18", "2025-07-30",
     "2025-09-17", "2025-10-29", "2025-12-10",
     "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
     "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
+    # 2027 + Jan 2028: the Fed's tentative schedule (press release 2025-09-05), verified
+    # 2026-09-16. Without these the list ran out in December and FOMC silently vanished.
+    "2027-01-27", "2027-03-17", "2027-04-28", "2027-06-09",
+    "2027-07-28", "2027-09-15", "2027-10-27", "2027-12-08",
+    "2028-01-26",
 ]  # Dec 2026 verified 2026-07-24: 2-day meeting Dec 8-9, decision announced day 2 (12-09,
    # not 12-16 -- a second _FOMC_DATES definition further down had drifted from this one;
    # consolidated to this single list, see _fomc_context below).
@@ -16417,8 +16423,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ic_view(query)
         elif data == "building_view":
             await building_view(query)
-        elif data == "uoa_view":
-            await uoa_view(query)
+        elif data == "uoa_view" or data.startswith(("uoa_view:", "uoa_live:")):
+            await uoa_view(query, [t for t in data.partition(":")[2].split(",") if t] or None,
+                           live=data.startswith("uoa_live:"))
         elif data == "vrp_view":
             await vrp_view(query)
         elif data == "rs_view":
@@ -37525,7 +37532,7 @@ async def tax_command(update, ctx):
 
 
 # ── UNUSUAL OPTIONS ACTIVITY (volume >> open interest = fresh flow) ─
-def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15):
+def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15, tickers=None):
     """Unusual options activity: contracts where today's volume >> standing OI
     (vol/OI ratio high) = new positioning/smart-money flow. Calls=bullish lean,
     puts=bearish. Excludes near-dated (< min_dte) to skip 0DTE/weekly index churn
@@ -37536,18 +37543,25 @@ def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15):
     candidate formats on every one, then discarded ~99% of them on the vol/ratio filter.
     Dates here are always ISO, so the format loop was dead weight; filtering in SQL first
     and parsing once, vectorised, does the same work for a fraction of the cost.
+
+    `tickers` (2026-09-16) screens just those names with the SAME thresholds. The market-
+    wide top-N meant a stock outside it had no way to show its unusual contracts at all.
     """
     try:
         ld = conn.execute("SELECT MAX(trade_date_now) FROM options_change").fetchone()[0]
         if not ld:
             return []
-        df = pd.read_sql("""
+        tks = sorted({str(t).strip().upper() for t in (tickers or []) if str(t).strip()})
+        # Bare `ticker IN (...)`, never UPPER(ticker) in a WHERE: stored tickers are all
+        # upper-case and wrapping the column defeats the ticker index (CLAUDE.md).
+        tk_sql = f" AND ticker IN ({','.join('?' * len(tks))})" if tks else ""
+        df = pd.read_sql(f"""
             SELECT UPPER(ticker) AS ticker, strike, expiry_date,
                    vol_Call_now, vol_Put_now, openInt_Call_now, openInt_Put_now
             FROM options_change
             WHERE trade_date_now=?
-              AND (vol_Call_now >= ? OR vol_Put_now >= ?)""",
-            conn, params=(ld, min_vol, min_vol))
+              AND (vol_Call_now >= ? OR vol_Put_now >= ?){tk_sql}""",
+            conn, params=(ld, min_vol, min_vol, *tks))
     except Exception:
         return []
     if df.empty:
@@ -37582,9 +37596,107 @@ def _uoa_scan(conn, min_vol=300, min_ratio=2.0, min_dte=7, top=15):
 
     out = m[["ticker", "strike", "side", "dte", "expiry", "vol", "oi",
              "ratio", "notional"]].to_dict("records")
-    _persist_scanner_fires(conn, "uoa",
-        [(r["ticker"], "BULL" if r["side"] == "C" else "BEAR", min(99, 50 + r["ratio"] * 5)) for r in out])
+    # Only the market-wide scan counts as a scanner fire. A ticker-filtered call surfaces
+    # contracts that would not make the market-wide top N, and recording those would
+    # quietly change what the scn_uoa hit-rate measures.
+    if not tickers:
+        _persist_scanner_fires(conn, "uoa",
+            [(r["ticker"], "BULL" if r["side"] == "C" else "BEAR", min(99, 50 + r["ratio"] * 5)) for r in out])
     return out
+
+
+_CBOE_OPT_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
+_CBOE_CHAIN_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{}.json"
+
+
+def _cboe_chain_rows(tk, timeout=25):
+    """Every live contract for one ticker from the CBOE CDN — the SAME keyless, 15-min
+    delayed feed NYSE_intraday.py already snapshots, but read per contract instead of
+    summarised. Returns (rows, feed timestamp): rows carry today's volume and the
+    standing OI, which is exactly what a vol/OI ratio needs.
+
+    Measured 2026-09-17: AAPL = 3,540 contracts, 1.6MB, 0.7s.
+    """
+    import json
+    import urllib.request
+    sym = str(tk).upper().lstrip("^").replace(".", "")
+    req = urllib.request.Request(_CBOE_CHAIN_URL.format(sym),
+                                 headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    data = payload.get("data") or {}
+    rows = []
+    for o in data.get("options") or []:
+        m = _CBOE_OPT_RE.match(str(o.get("option", "")))
+        if not m:
+            continue
+        _, ymd, cp, kraw = m.groups()
+        try:
+            exp = datetime.strptime(ymd, "%y%m%d").date()
+        except ValueError:
+            continue
+        rows.append({"ticker": str(tk).upper(), "strike": int(kraw) / 1000.0, "side": cp,
+                     "expiry": exp.isoformat(), "vol": float(o.get("volume") or 0),
+                     "oi": float(o.get("open_interest") or 0)})
+    # The feed stamps UTC with no zone ("2026-09-18 07:58:44" at 04:38 ET). Shown bare it
+    # repeats the dashboard's "Refreshed 22:11" bug (ID 439), so convert and name the zone.
+    ts = str(payload.get("timestamp") or "")
+    try:
+        from zoneinfo import ZoneInfo
+        ts = (datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+              .astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET"))
+    except ValueError:
+        pass
+    return rows, ts
+
+
+def _uoa_live_scan(tickers, min_vol=300, min_ratio=2.0, min_dte=7, top=50, workers=8):
+    """LIVE unusual options for the named tickers: TODAY's per-contract volume vs standing
+    OI, pulled from the CBOE feed instead of last night's capture (user 2026-09-16: "i want
+    live today data also for unusal options data").
+
+    Same bar as _uoa_scan, so the two are directly comparable. Row shape is identical too,
+    so every renderer takes either one. Two honest limits, both surfaced in the output:
+    the feed is 15-minute delayed, and OI is the OCC's once-a-day number, so early in the
+    session a genuine build shows a smaller ratio than it will by the close.
+
+    Needs explicit tickers -- one HTTP call per name -- so it is capped at 25 and a
+    700-name sweep stays the nightly _uoa_scan's job. Records no scanner fires: these
+    contracts are not the market-wide top N that scn_uoa's hit-rate is measured on.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    tks = sorted({str(t).strip().upper() for t in (tickers or []) if str(t).strip()})[:25]
+    meta = {"as_of": "", "tickers": tks, "failed": []}
+    if not tks:
+        return [], meta
+    today = datetime.now().date()
+
+    def _one(tk):
+        try:
+            return tk, _cboe_chain_rows(tk)
+        except Exception as e:                      # one dead symbol must not kill the scan
+            return tk, e
+
+    out = []
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(tks)))) as ex:
+        for tk, res in ex.map(_one, tks):
+            if isinstance(res, Exception):
+                meta["failed"].append(f"{tk} ({res})")
+                continue
+            rows, ts = res
+            meta["as_of"] = max(meta["as_of"], ts or "")
+            for r in rows:
+                if r["vol"] < min_vol or r["oi"] <= 0:
+                    continue
+                dte = (datetime.strptime(r["expiry"], "%Y-%m-%d").date() - today).days
+                ratio = r["vol"] / r["oi"]
+                if dte < min_dte or ratio < min_ratio:
+                    continue
+                out.append({**r, "dte": dte, "ratio": ratio,
+                            "notional": r["vol"] * r["strike"] * 100})
+    out.sort(key=lambda r: r["notional"], reverse=True)
+    return out[:top], meta
 
 
 def _knum(n):
@@ -37595,9 +37707,19 @@ def _knum(n):
     return f"{n:.0f}"
 
 
-async def _send_uoa(msg, rows):
+async def _send_uoa(msg, rows, tickers=None, meta=None):
+    tks = ", ".join(tickers or [])
+    live = meta is not None
     if not rows:
-        await msg.reply_text("No unusual options activity (vol≫OI) in the latest snapshot.", parse_mode=H)
+        if live:
+            await msg.reply_text(f"No contract for <b>{tks}</b> has cleared the unusual bar so far today "
+                                 f"(vol ≥300, vol÷OI ≥2, DTE ≥7) — live chain as of "
+                                 f"{meta.get('as_of') or 'n/a'}.", parse_mode=H)
+        elif tks:
+            await msg.reply_text(f"No unusual options activity for <b>{tks}</b> in the latest snapshot "
+                                 "(needs vol ≥300, vol÷OI ≥2, DTE ≥7).", parse_mode=H)
+        else:
+            await msg.reply_text("No unusual options activity (vol≫OI) in the latest snapshot.", parse_mode=H)
         return
     _data = []
     for r in rows:
@@ -37610,32 +37732,67 @@ async def _send_uoa(msg, rows):
     top = rows[0]
     best = (f"<b>Biggest:</b> {top['ticker']} {top['strike']:g}{top['side']} exp {top['expiry']} · "
             f"vol {_knum(top['vol'])} vs OI {_knum(top['oi'])} ({top['ratio']:.1f}x) · ${_knum(top['notional'])} notional")
-    txt = ("🐋 <b>Unusual Options Activity — fresh flow</b>\n"
+    src = ""
+    if live:
+        src = (f"<i>LIVE CBOE chain, 15-min delayed · as of {meta.get('as_of') or 'n/a'} · OI is the "
+               f"OCC's once-a-day number, so ratios keep growing through the session.</i>\n")
+        if meta.get("failed"):
+            src += f"<i>No chain for: {', '.join(meta['failed'])}</i>\n"
+    txt = (f"🐋 <b>Unusual Options Activity — {'LIVE · ' if live else ''}{tks or 'fresh flow'}</b>\n"
+           + src +
            "<i>today's volume ≫ standing OI = new positioning. Calls=bullish lean, puts=bearish. "
            "Flow ≠ certainty (could be hedges/spreads). Not advice.</i>\n\n" + table + "\n\n" + best)
+    _cb = _head = "uoa_live" if live else "uoa_view"   # Refresh keeps mode + tickers (<= 64 bytes)
+    for _t in (tickers or []):
+        if len(_cb) + len(_t) + 1 > 64:
+            break
+        _cb += (":" if _cb == _head else ",") + _t
     await msg.reply_text(txt[:4000], parse_mode=H,
-                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="uoa_view"),
+                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data=_cb),
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
 
 
 async def uoa_command(update, ctx):
-    """/uoa — unusual options activity: contracts with volume >> open interest (fresh flow)."""
-    await update.message.reply_text("🐋 Scanning unusual options flow…", parse_mode=H)
+    """/uoa [live] [TICKERS] — unusual options activity: contracts with volume >> open
+    interest (fresh flow). Tickers = the same thresholds for just those names; `live`
+    reads today's CBOE chain instead of last night's capture."""
+    args = [a.strip().upper() for a in (getattr(ctx, "args", []) or []) if a.strip()]
+    live = any(a.lstrip("-") in ("LIVE", "TODAY", "NOW") for a in args)
+    tickers = [t for a in args if a.lstrip("-") not in ("LIVE", "TODAY", "NOW")
+               for t in a.split(",") if t][:20]
+    if live and not tickers:
+        await update.message.reply_text(
+            "Live mode needs tickers — it fetches one chain per name:\n"
+            "<code>/uoa live NVDA TSLA</code>\n"
+            "Plain <code>/uoa</code> scans the whole universe from last night's capture.",
+            parse_mode=H)
+        return
+    await update.message.reply_text(
+        "🐋 Reading today's live chains…" if live else "🐋 Scanning unusual options flow…",
+        parse_mode=H)
+    if live:
+        rows, meta = await asyncio.to_thread(_uoa_live_scan, tickers)
+        await _send_uoa(update.message, rows, tickers, meta)
+        return
     conn = get_conn()
     try:
-        rows = _uoa_scan(conn)
+        rows = _uoa_scan(conn, tickers=tickers, top=50) if tickers else _uoa_scan(conn)
     finally:
         conn.close()
-    await _send_uoa(update.message, rows)
+    await _send_uoa(update.message, rows, tickers)
 
 
-async def uoa_view(query):
+async def uoa_view(query, tickers=None, live=False):
+    if live and tickers:
+        rows, meta = await asyncio.to_thread(_uoa_live_scan, tickers)
+        await _send_uoa(query.message, rows, tickers, meta)
+        return
     conn = get_conn()
     try:
-        rows = _uoa_scan(conn)
+        rows = _uoa_scan(conn, tickers=tickers, top=50) if tickers else _uoa_scan(conn)
     finally:
         conn.close()
-    await _send_uoa(query.message, rows)
+    await _send_uoa(query.message, rows, tickers)
 
 
 # ── VARIANCE RISK PREMIUM (implied vol vs realized vol) ──────────

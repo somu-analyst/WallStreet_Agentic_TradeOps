@@ -46,9 +46,11 @@ MACRO_KEYWORDS = {
     "nonfarm": ("Jobs Report", "Labor", "HIGH", "08:30"),
     "non-farm": ("Jobs Report", "Labor", "HIGH", "08:30"),
     "payroll": ("Jobs Report", "Labor", "HIGH", "08:30"),
+    "jobs report": ("Jobs Report", "Labor", "HIGH", "08:30"),
     "unemployment": ("Unemployment Rate", "Labor", "HIGH", "08:30"),
     "jobless claims": ("Jobless Claims", "Labor", "MEDIUM", "08:30"),
     "initial claims": ("Jobless Claims", "Labor", "MEDIUM", "08:30"),
+    "adp employment": ("ADP Employment", "Labor", "MEDIUM", "08:15"),
     "gdp": ("GDP", "Growth", "HIGH", "08:30"),
     "gross domestic": ("GDP", "Growth", "HIGH", "08:30"),
     "retail sales": ("Retail Sales", "Consumer", "HIGH", "08:30"),
@@ -176,6 +178,33 @@ CREATE TABLE IF NOT EXISTS market_regime_alerts (
 
 def _now_et() -> datetime:
     return datetime.now(ET)
+
+
+def _macro_spec(name: str) -> Optional[Tuple[str, str, str, str]]:
+    """(canonical name, category, impact, ET release time) for an event name, from this
+    engine's own MACRO_KEYWORDS. Longest keyword first, so "core pce" wins over "pce"."""
+    low = (name or "").lower()
+    for key in sorted(MACRO_KEYWORDS, key=len, reverse=True):
+        if key in low:
+            return MACRO_KEYWORDS[key]
+    return None
+
+
+def released_minutes_ago(ev, now_et: Optional[datetime] = None) -> Optional[float]:
+    """Minutes since an event's scheduled release, New York time. Negative = not out yet;
+    None = no usable date/time. Accepts a MarketEvent or its asdict() form.
+
+    The post-event writeup used to run for anything dated today, so an FOMC decision due
+    at 2:00 PM was written up in the morning as "Markets reacting to ..." (2026-09-15).
+    """
+    get = ev.get if isinstance(ev, dict) else (lambda k: getattr(ev, k, None))
+    try:
+        hh, mm = (int(x) for x in str(get("release_time")).split(":")[:2])
+        at = datetime.strptime(str(get("event_date"))[:10], "%Y-%m-%d").replace(
+            hour=hh, minute=mm, tzinfo=ET)
+    except (TypeError, ValueError):
+        return None
+    return ((now_et or _now_et()) - at).total_seconds() / 60
 
 
 def _fmt_pct(v: Optional[float], signed: bool = True) -> str:
@@ -306,20 +335,25 @@ class EventWriteupEngine:
                     days_until = row.get("days_until", 99)
                     if days_until < -days_back or days_until > days_ahead:
                         continue
+                    # Name, time and impact come from this engine's own release table.
+                    # Every heuristic row used to be stamped 08:30 under its display name,
+                    # so an FOMC decision (2:00 PM) read "08:30 ET - FOMC Meeting release".
+                    # No spec = no known release time: "Earnings Week" and "Fed
+                    # Communications" are not releases anything can be reacting to.
+                    spec = _macro_spec(row.get("event", ""))
+                    if not spec:
+                        continue
+                    name, category, impact, release_time = spec
                     ev_date = (today + timedelta(days=days_until)).isoformat()
-                    raw_name = row.get("event", "Event")
-                    name = re.sub(r"[^\w\s]", "", raw_name).strip()
-                    for emoji in ("🏛️", "💼", "📊", "📈", "🏭", "💰", "🛍️"):
-                        name = name.replace(emoji, "").strip()
                     eid = f"{ev_date}_{_slug(name)}"
                     if eid not in events:
                         events[eid] = MarketEvent(
                             event_id=eid,
-                            name=name or raw_name,
-                            category=row.get("category", "Macro"),
+                            name=name,
+                            category=category,
                             event_date=ev_date,
-                            release_time="08:30",
-                            impact=row.get("impact", "MEDIUM"),
+                            release_time=release_time,
+                            impact=impact,
                             source="heuristic",
                         )
             except Exception:
@@ -830,9 +864,15 @@ class EventWriteupEngine:
         if es_pct is not None and abs(es_pct) >= 0.5:
             hook_parts.append(f"S&P {_fmt_pct(es_pct)}")
 
+        # Only say markets are reacting to a release once it has actually come out.
+        mins = released_minutes_ago(ev, now_et)
+        pending = mins is not None and mins < 0
         lines.append("⚡ WHAT JUST HAPPENED?")
         if hook_parts:
             lines.append("In today's session, " + ", ".join(hook_parts) + ".")
+        elif pending:
+            lines.append(f"{ev['name']} is due at {ev['release_time']} ET and has not been released yet — "
+                         f"session still developing as of {now_et.strftime('%H:%M ET')}.")
         else:
             lines.append(f"Markets reacting to {ev['name']} — session still developing as of {now_et.strftime('%H:%M ET')}.")
         lines.append("")
@@ -842,7 +882,9 @@ class EventWriteupEngine:
         # the print. So a release whose time had passed still read "08:30 ET - Jobs Report
         # release" with no numbers (user 2026-08-07). Enrich from the bot's BLS reader, which
         # already exists; imported lazily to avoid a circular import at module load.
-        if ev.get("actual") is None:
+        # Not before release: the reader returns the LATEST print, which before 2:00 PM on
+        # decision day is the previous meeting's -- it would print as today's result.
+        if ev.get("actual") is None and not pending:
             try:
                 import sys as _s2, os as _o2
                 _root = _o2.path.dirname(_o2.path.dirname(_o2.path.abspath(__file__)))
@@ -874,7 +916,8 @@ class EventWriteupEngine:
 
         lines.append("TIMELINE")
         if ev.get("release_time"):
-            lines.append(f"  {ev['release_time']} ET — {ev['name']} release")
+            lines.append(f"  {ev['release_time']} ET — {ev['name']} "
+                         + ("(due — not released yet)" if pending else "release"))
             if ev.get("actual") is not None:
                 beat = ev.get("estimate") is not None and ev["actual"] < ev["estimate"] if "inflation" in ev["name"].lower() else ev["actual"] > ev.get("estimate")
                 surprise = ""

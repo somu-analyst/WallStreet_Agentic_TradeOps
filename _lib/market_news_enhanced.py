@@ -193,26 +193,54 @@ def get_aggregated_news(limit=5):
     
     return unique_news[:limit]
 
+def _bot_release_dates(name):
+    """Release dates from the bot's hand-curated calendar (_FOMC_DATES / _CPI_DATES /
+    _PCE_DATES) -- read from the engine, never a copy of it.
+
+    This module used to keep its OWN FOMC list, and it drifted: Nov 4 and Dec 16 where the
+    Fed's schedule says Oct 28 and Dec 9, and 2026 only. CPI and PCE were guessed (the 13th;
+    two days before month end) and landed on the wrong day (CPI 2026-07-13 vs the real
+    07-15). If the bot's lists can't be read, return nothing: a missing event is visible,
+    an invented one gets reported as fact.
+    """
+    import os
+    import sys
+    for modname in ("telegram_bot_optimized", "__main__"):   # the bot runs as __main__
+        dates = getattr(sys.modules.get(modname), name, None)
+        if dates:
+            break
+    else:
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if root not in sys.path:
+                sys.path.insert(0, root)
+            import telegram_bot_optimized as _tb
+            dates = getattr(_tb, name, None) or []
+        except Exception:
+            dates = []
+    out = []
+    for d in dates:
+        try:
+            out.append(datetime.strptime(d, "%Y-%m-%d"))
+        except ValueError:
+            continue
+    return out
+
+
 def get_economic_calendar_detailed():
     """Get upcoming economic events (next 14 days)"""
     calendar = []
-    today = datetime.now()
+    # Midnight, not "now": every date below is a midnight datetime, and (date - now).days
+    # truncates, so an event TOMORROW read as days_until=0 -- today. That put the Sept 16
+    # FOMC decision on Sept 15 (and July 29's on July 28).
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     
     # ========================================
     # 1. FOMC MEETINGS (Federal Reserve)
     # ========================================
-    fomc_dates_2026 = [
-        datetime(2026, 1, 28),
-        datetime(2026, 3, 18),
-        datetime(2026, 4, 29),
-        datetime(2026, 6, 17),
-        datetime(2026, 7, 29),
-        datetime(2026, 9, 16),
-        datetime(2026, 11, 4),
-        datetime(2026, 12, 16)
-    ]
+    fomc_dates = _bot_release_dates("_FOMC_DATES")   # decision day (day 2), 2:00 PM ET
     
-    for fomc_date in fomc_dates_2026:
+    for fomc_date in fomc_dates:
         days_until = (fomc_date - today).days
         if 0 <= days_until <= 21:
             calendar.append({
@@ -271,10 +299,8 @@ def get_economic_calendar_detailed():
     # 3. INFLATION DATA
     # ========================================
     
-    # CPI (Consumer Price Index) - typically 10th-15th of month
-    for i in range(3):
-        month_start = (current_month + timedelta(days=32*i)).replace(day=1)
-        cpi_date = month_start.replace(day=13)  # Usually around 13th
+    # CPI (Consumer Price Index) - the bot's curated release dates (was a guessed 13th)
+    for cpi_date in _bot_release_dates("_CPI_DATES"):
         
         days_until = (cpi_date - today).days
         if 0 <= days_until <= 21:
@@ -303,12 +329,8 @@ def get_economic_calendar_detailed():
                 'description': 'Producer Price Index'
             })
     
-    # PCE (Fed's preferred inflation gauge) - end of month
-    for i in range(3):
-        month_start = (current_month + timedelta(days=32*i)).replace(day=1)
-        # Last business day of month
-        last_day = (month_start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
-        pce_date = last_day - timedelta(days=2)  # Usually 2 days before month end
+    # PCE (Fed's preferred inflation gauge) - the bot's curated release dates (was guessed)
+    for pce_date in _bot_release_dates("_PCE_DATES"):
         
         days_until = (pce_date - today).days
         if 0 <= days_until <= 21:

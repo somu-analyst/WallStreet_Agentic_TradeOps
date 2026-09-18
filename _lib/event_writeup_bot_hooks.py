@@ -2,23 +2,31 @@
 """
 Telegram bot hooks for event writeups — import from telegram_bot_optimized.py.
 
-Scheduled times (ET):
+Scheduled times (New York wall clock, so they hold across DST):
   8:25 AM  — pre-event brief (T-5 min before typical 8:30 releases)
   9:35 AM  — post-open reaction writeup
   10:05 AM — post-event follow-up (30 min after 9:30 open)
+  2:35 PM  — post-FOMC writeup (decision at 2:00 PM)
   Every 15 min during market hours — anomaly scan (deduped)
+
+A post writeup covers only events released within the last POST_WINDOW_MIN minutes, so an
+event is never written up before it happens and a morning release isn't re-sent at 2:35.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
 
 import os as _os  # PRIMARY DB = OpenBB (matches the bot); override via env NYSE_DB_PATH
 DB_PATH = _os.environ.get("NYSE_DB_PATH") or r"C:\Users\srini\Options_chain_data\US_data_OpenBB.db"
+
+ET = ZoneInfo("America/New_York")
+POST_WINDOW_MIN = 120   # a post writeup covers releases from the last 2 hours
 
 
 def _ensure_dedup(conn):
@@ -45,19 +53,21 @@ def _already_sent(conn, today_str, grp_key, atype) -> bool:
         return True
 
 
-def _in_market_hours(now_utc) -> bool:
-    if now_utc.weekday() >= 5:
+def _in_market_hours(now_et) -> bool:
+    """9:25 AM - 4:00 PM New York time. This used to compare UTC against a fixed 14:25-21:00,
+    which is 9:25-4:00 only in winter: for the eight months of EDT it gated 10:25 AM-5:00 PM,
+    and every ET time in this file was derived as UTC-5, an hour off (same bug as ID 249)."""
+    if now_et.weekday() >= 5:
         return False
-    hm = now_utc.hour * 60 + now_utc.minute
-    return 14 * 60 + 25 <= hm <= 21 * 60  # ~9:25 AM - 4:00 PM ET
+    hm = now_et.hour * 60 + now_et.minute
+    return 9 * 60 + 25 <= hm <= 16 * 60
 
 
 async def event_pre_brief_alert(ctx):
     """8:25 AM ET — pre-event brief for today's macro releases."""
     from event_writeup_engine import EventWriteupEngine
 
-    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    now_et = now_utc - timedelta(hours=5)
+    now_et = datetime.now(ET)
     today_str = now_et.date().isoformat()
 
     engine = EventWriteupEngine()
@@ -88,16 +98,22 @@ async def event_post_writeup_alert(ctx):
     """Post-release / post-open writeup."""
     from event_writeup_engine import EventWriteupEngine
 
-    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    if not _in_market_hours(now_utc):
+    now_et = datetime.now(ET)
+    if not _in_market_hours(now_et):
         return
-    now_et = now_utc - timedelta(hours=5)
     today_str = now_et.date().isoformat()
 
     from telegram_bot_optimized import get_conn, load_creds, H
 
     engine = EventWriteupEngine()
-    events = engine.events_today()
+    from event_writeup_engine import released_minutes_ago
+    # Only releases that have happened, and recently. Before, anything dated today got a
+    # "Markets reacting to ..." writeup at 9:35/10:05 -- including a 2:00 PM FOMC decision.
+    events = []
+    for ev in engine.events_today():
+        mins = released_minutes_ago(ev, now_et)
+        if mins is not None and 0 <= mins <= POST_WINDOW_MIN:
+            events.append(ev)
     if not events:
         anomalies = engine.detect_intraday_anomalies()
         if not anomalies:
@@ -137,10 +153,9 @@ async def event_anomaly_scan(ctx):
     """Lightweight anomaly scan during market hours — only alerts on HIGH/CRITICAL."""
     from event_writeup_engine import EventWriteupEngine
 
-    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    if not _in_market_hours(now_utc):
+    now_et = datetime.now(ET)
+    if not _in_market_hours(now_et):
         return
-    now_et = now_utc - timedelta(hours=5)
     today_str = now_et.date().isoformat()
 
     from telegram_bot_optimized import get_conn, load_creds, H
@@ -256,12 +271,17 @@ def register_event_writeup_jobs(job_queue, log_fn=None):
         if lib not in sys.path:
             sys.path.insert(0, lib)
 
-        job_queue.run_daily(event_pre_brief_alert, time=dt_time(13, 25, 0))   # 8:25 AM ET
-        job_queue.run_daily(event_post_writeup_alert, time=dt_time(14, 35, 0))  # 9:35 AM ET
-        job_queue.run_daily(event_post_writeup_alert, time=dt_time(15, 5, 0))   # 10:05 AM ET
+        # New York wall-clock times (ID 249). A naive dt_time is read as UTC, so 13:25 was
+        # 8:25 AM only in winter -- in summer the "pre" brief ran at 9:25, after the 8:30
+        # releases it previews.
+        job_queue.run_daily(event_pre_brief_alert, time=dt_time(8, 25, 0, tzinfo=ET),
+                            name="event_pre_0825")
+        for hh, mm in ((9, 35), (10, 5), (14, 35)):    # 14:35 = 35 min after an FOMC decision
+            job_queue.run_daily(event_post_writeup_alert, time=dt_time(hh, mm, 0, tzinfo=ET),
+                                name=f"event_post_{hh:02d}{mm:02d}")
         job_queue.run_repeating(event_anomaly_scan, interval=900, first=120)
         if log_fn:
-            log_fn.info("Scheduled event writeup jobs (pre 8:25, post 9:35/10:05, anomaly 15m)")
+            log_fn.info("Scheduled event writeup jobs (ET: pre 8:25, post 9:35/10:05/14:35, anomaly 15m)")
     except Exception as e:
         if log_fn:
             log_fn.warning(f"Could not register event writeup jobs: {e}")

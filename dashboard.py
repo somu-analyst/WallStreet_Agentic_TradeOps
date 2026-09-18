@@ -27,6 +27,18 @@ import warnings, sys, os
 
 warnings.filterwarnings("ignore")
 
+
+def _now_et():
+    """New York wall-clock time as a NAIVE datetime -- a drop-in for datetime.now().
+
+    The dashboard also runs on the Oracle VM, whose clock is UTC. A bare datetime.now()
+    there printed "Refreshed 22:11" beside "market AFTER" (really 18:11 ET), and stamped
+    anything done after 8 PM ET into the DB with TOMORROW's date (user 2026-09-17, ID 439).
+    Naive on purpose so every existing strftime/arithmetic site keeps working unchanged.
+    """
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+
 # Load the bot engine ONCE at module scope (main ScriptRunner thread) so the many lazy
 # `import telegram_bot_optimized` calls inside @st.cache_data functions don't trip CPython's
 # concurrent-import race (KeyError: 'telegram_bot_optimized') the first time the Action Board
@@ -1460,7 +1472,7 @@ def _cusip_sector_map(cusips):
         with get_conn() as _c:
             _c.executemany(
                 "INSERT OR REPLACE INTO cusip_ticker_map VALUES (?,?,?)",
-                [(c, t, datetime.now().strftime("%Y-%m-%d")) for c, t in _resolved.items()])
+                [(c, t, _now_et().strftime("%Y-%m-%d")) for c, t in _resolved.items()])
             _c.commit()
         _have.update(_resolved)
     out = {}
@@ -2102,7 +2114,7 @@ def _gp_live_strip():
         _cols[_i].metric(f"{_tk} {_arrow}".strip(), f"${_px:,.2f}",
                          (f"{_chg:+.2f} ({_pct:+.2f}%)" if _pct is not None else None))
     st.session_state["_live_last_px"] = _now
-    st.caption(f"live · {datetime.now().strftime('%H:%M:%S')} — quotes update in place; "
+    st.caption(f"live · {_now_et().strftime('%H:%M:%S')} ET — quotes update in place; "
                "tables below refresh on the slower interval")
 
 
@@ -2313,7 +2325,7 @@ def _save_market_snapshot(df):
     """Persist market snapshot rows to DB (dedupes by minute)."""
     if df.empty:
         return
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    ts = _now_et().strftime("%Y-%m-%d %H:%M")
     with get_conn() as c:
         # Skip if we already saved this minute
         existing = c.execute("SELECT 1 FROM market_snapshots WHERE timestamp=? LIMIT 1", (ts,)).fetchone()
@@ -2499,7 +2511,7 @@ def _dh_banner():
                                help="Acknowledge — stops the daily banner/Telegram nag"):
                 with sqlite3.connect(DB_PATH) as _c:
                     _c.execute("UPDATE data_health_alerts SET status='ACK', ack_at=? WHERE alert_id=?",
-                               (datetime.now().strftime("%Y-%m-%d %H:%M"), int(_a["alert_id"])))
+                               (_now_et().strftime("%Y-%m-%d %H:%M"), int(_a["alert_id"])))
                     _c.commit()
                 st.rerun()
     except Exception:
@@ -3653,7 +3665,7 @@ def _log_sentiment(ticker, source, label, score=None):
     sentiment is noisy/reflexive, so we record it for eyeballing, not as a validated edge).
     Keyed by ticker+date+source; idempotent within a day."""
     try:
-        today_s = datetime.now().strftime("%Y-%m-%d")
+        today_s = _now_et().strftime("%Y-%m-%d")
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS sentiment_log ("
@@ -7166,7 +7178,7 @@ def _catchup_panel(where=""):
     try:
         _c = get_conn()
         try:
-            _today = datetime.now().strftime("%Y-%m-%d")
+            _today = _now_et().strftime("%Y-%m-%d")
             _sent = {r[0] for r in _c.execute(
                 "SELECT grp_key FROM alert_dedup WHERE alert_date=? AND atype='sched'",
                 (_today,))}
@@ -7175,7 +7187,7 @@ def _catchup_panel(where=""):
     except Exception as _e:
         st.caption(f"Catch-up status unavailable: {_e}")
         return
-    _now = datetime.now().strftime("%H:%M")
+    _now = _now_et().strftime("%H:%M")
     _rows, _missing = [], []
     for _k, _t, _lbl in _SCHED:
         _done = _k in _sent
@@ -7666,7 +7678,7 @@ if page == "🌍 Market Overview":
     with st.spinner("Loading global market data..."):
         snap = fetch_market_snapshot()
 
-    _pulled_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _pulled_at = _now_et().strftime("%Y-%m-%d %H:%M:%S")
 
     # World map — same choropleth the bot renders, but interactive here so hovering works
     # and every labelled country shows its index and % move (user 2026-08-03: "I want it
@@ -10840,7 +10852,7 @@ elif page == "💼 Portfolio & Suggestions":
         st.error(f"Could not load trades: {_e}")
 
     if not trades.empty and "expiry" in trades.columns:
-        _today_str = datetime.now().strftime("%Y-%m-%d")
+        _today_str = _now_et().strftime("%Y-%m-%d")
         # STOCK legs have no expiry (empty string sorts < today) — never auto-close them
         _is_stk_row = trades["option_type"].astype(str).str.upper().str.startswith("S")
         _expired = trades[(trades["expiry"] < _today_str) & (trades["expiry"].astype(str).str.len() >= 8) & ~_is_stk_row]
@@ -13837,7 +13849,7 @@ elif page == "\U0001f9e0 Smart Money Hub":
             "SELECT trade_date_now FROM options_change ORDER BY "
             "trade_date_now DESC LIMIT 1"
         ).fetchone()
-        _td = _td_row[0] if _td_row else datetime.now().strftime("%Y-%m-%d")
+        _td = _td_row[0] if _td_row else _now_et().strftime("%Y-%m-%d")
         _td2_row = conn.execute(
             "SELECT trade_date FROM stock_daily ORDER BY "
             "trade_date DESC LIMIT 1"
@@ -14296,7 +14308,7 @@ if page == "\U0001f4d0 GEX Command":     # section 3 of 3 on the merged page
         "SELECT trade_date_now FROM options_change ORDER BY "
         "trade_date_now DESC LIMIT 1"
     ).fetchone()
-    _ga_today = _ga_td[0] if _ga_td else datetime.now().strftime("%Y-%m-%d")
+    _ga_today = _ga_td[0] if _ga_td else _now_et().strftime("%Y-%m-%d")
     _ga_td2 = _ga_conn.execute(
         "SELECT trade_date FROM stock_daily ORDER BY "
         "trade_date DESC LIMIT 1"
@@ -15912,21 +15924,21 @@ Stop: buy back at <b>${_cred*2:.2f}</b>
                     _ga_conn.execute(
                         "UPDATE gamma_wall_trades SET status='CLOSED',exit_date=?,exit_price=?,"
                         "exit_reason='50%_PROFIT',pnl_dollar=?,pnl_pct=50 WHERE id=?",
-                        (datetime.now().strftime("%Y-%m-%d"), _cred*0.5, _pnl, _p["id"]))
+                        (_now_et().strftime("%Y-%m-%d"), _cred*0.5, _pnl, _p["id"]))
                     _ga_conn.commit(); st.rerun()
                 if _bc2.button(f"\U0001f6d1 STOP 2×", key=f"p_stop_{_p['id']}"):
                     _pnl = -_cred * 2.0 * 100 * int(_p["quantity"])
                     _ga_conn.execute(
                         "UPDATE gamma_wall_trades SET status='CLOSED',exit_date=?,exit_price=?,"
                         "exit_reason='2X_STOP',pnl_dollar=?,pnl_pct=-200 WHERE id=?",
-                        (datetime.now().strftime("%Y-%m-%d"), _cred*2, _pnl, _p["id"]))
+                        (_now_et().strftime("%Y-%m-%d"), _cred*2, _pnl, _p["id"]))
                     _ga_conn.commit(); st.rerun()
                 if _bc3.button(f"\U0001f4cb EXPIRED", key=f"p_exp_{_p['id']}"):
                     _pnl = _cred * 100 * int(_p["quantity"])
                     _ga_conn.execute(
                         "UPDATE gamma_wall_trades SET status='CLOSED',exit_date=?,exit_price=0,"
                         "exit_reason='EXPIRED',pnl_dollar=?,pnl_pct=100 WHERE id=?",
-                        (datetime.now().strftime("%Y-%m-%d"), _pnl, _p["id"]))
+                        (_now_et().strftime("%Y-%m-%d"), _pnl, _p["id"]))
                     _ga_conn.commit(); st.rerun()
                 if _bc4.button(f"✏️ Manual", key=f"p_man_{_p['id']}"):
                     _mc_pr = st.number_input("Close price", min_value=0.0, step=0.01,
@@ -15936,7 +15948,7 @@ Stop: buy back at <b>${_cred*2:.2f}</b>
                         _ga_conn.execute(
                             "UPDATE gamma_wall_trades SET status='CLOSED',exit_date=?,exit_price=?,"
                             "exit_reason='MANUAL',pnl_dollar=?,pnl_pct=? WHERE id=?",
-                            (datetime.now().strftime("%Y-%m-%d"), _mc_pr,
+                            (_now_et().strftime("%Y-%m-%d"), _mc_pr,
                              _pnl, (_cred-_mc_pr)/_cred*100, _p["id"]))
                         _ga_conn.commit(); st.rerun()
 
@@ -16757,7 +16769,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                 "UPDATE trades SET quantity=?, entry_price=?, entry_date=?, notes=?, updated_at=? "
                                 "WHERE trade_id=?",
                                 (int(_se_q) * (1 if _sk_qty0 >= 0 else -1), float(_se_px), _se_dt or None,
-                                 _se_nt or None, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _sk_id))
+                                 _se_nt or None, _now_et().strftime("%Y-%m-%d %H:%M:%S"), _sk_id))
                             _gp_conn.commit()
                             st.success("Saved."); st.cache_data.clear(); st.rerun()
                         except Exception as _e:
@@ -16774,7 +16786,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                     "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, exit_reason=?, "
                                     "pnl=?, updated_at=? WHERE trade_id=?",
                                     ((float(_sc_px) or None), _sc_dt.strftime("%Y-%m-%d"), "manual (stock)",
-                                     _pnl, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _sk_id))
+                                     _pnl, _now_et().strftime("%Y-%m-%d %H:%M:%S"), _sk_id))
                                 _gp_conn.commit()
                                 st.success(f"Closed (P&L ${_pnl:,.0f})." if _pnl is not None else "Closed.")
                                 st.cache_data.clear(); st.rerun()
@@ -16886,7 +16898,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                     "notes=?, updated_at=? WHERE trade_id=?",
                                     (_ed_tk, _ed_typ, float(_ed_K), int(_sq), _ed_exp, float(_ed_px),
                                      _ed_entry_date or None, (_ed_iv or None), (_ed_sl or None), (_ed_tp or None),
-                                     _ed_notes or None, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _tid))
+                                     _ed_notes or None, _now_et().strftime("%Y-%m-%d %H:%M:%S"), _tid))
                                 _gp_conn.commit()
                                 st.success("Saved."); st.cache_data.clear(); st.rerun()
                             except Exception as _e:
@@ -16928,7 +16940,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                         "WHERE trade_id=?",
                                         (_px0, _cl_date.strftime("%Y-%m-%d"), _cl_reason or "manual",
                                          round(_pnl, 2), round(_pnlp, 2), _dh,
-                                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _tid))
+                                         _now_et().strftime("%Y-%m-%d %H:%M:%S"), _tid))
                                     _gp_conn.commit()
                                     st.success(f"Closed at ${_px0:.2f} · P&L ${_pnl:,.0f} ({_pnlp:+.1f}%).")
                                     st.cache_data.clear(); st.rerun()
@@ -16940,7 +16952,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                 _gp_conn.execute(
                                     "UPDATE trades SET status='OPEN', exit_price=NULL, exit_date=NULL, "
                                     "exit_reason=NULL, pnl=NULL, updated_at=? WHERE trade_id=?",
-                                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _tid))
+                                    (_now_et().strftime("%Y-%m-%d %H:%M:%S"), _tid))
                                 _gp_conn.commit()
                                 st.success("Re-opened."); st.cache_data.clear(); st.rerun()
                             except Exception as _e:
@@ -17532,7 +17544,7 @@ elif page == "🎯 Next-Day Exit Planner":
                 # number with no timestamp hides that (user 2026-08-03, tracker 110 + 112).
                 try:
                     _pl_state = _market_state()
-                    _pl_now = datetime.now().strftime("%H:%M:%S")
+                    _pl_now = _now_et().strftime("%H:%M:%S")
                     _pl_age = None
                     try:
                         _pl_oc = _cached_option_chain(
@@ -17544,7 +17556,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                 _pl_age = pd.to_datetime(_pl_all["lastTradeDate"]).max()
                     except Exception:
                         pass
-                    _pl_msg = (f"🕐 Refreshed **{_pl_now}** · market **{_pl_state}**")
+                    _pl_msg = (f"🕐 Refreshed **{_pl_now} ET** · market **{_pl_state}**")
                     if _pl_age is not None and _pl_age == _pl_age:
                         _pl_local = _pl_age.tz_convert("America/New_York") if _pl_age.tzinfo else _pl_age
                         _stale_d = (pd.Timestamp.now(tz="America/New_York") - _pl_local).days                             if _pl_age.tzinfo else None
@@ -17554,7 +17566,7 @@ elif page == "🎯 Next-Day Exit Planner":
                                         "column is a stale mark, not a live price")
                     st.caption(_pl_msg)
                 except Exception:
-                    st.caption(f"🕐 Refreshed {datetime.now().strftime('%H:%M:%S')}")
+                    st.caption(f"🕐 Refreshed (ET) {_now_et().strftime('%H:%M:%S')}")
                 _fdf = pd.DataFrame(_flat)
                 # Column order (user 2026-07-22): move the Ex-Div..Shorts block to sit AFTER
                 # Est Open, so the price columns (Entry/Now/Prev Cls/Est Open) stay adjacent and
@@ -20257,7 +20269,7 @@ if page == "🔬 OI Comparison Charts":
         st.warning("Need at least 2 trade dates in DB for comparison.")
         st.stop()
 
-    _today = datetime.now().strftime("%Y-%m-%d")
+    _today = _now_et().strftime("%Y-%m-%d")
     _stale = dates[0] != _today
     st.info(
         f"📅 Latest snapshot in DB: **{dates[0]}**"
@@ -22099,7 +22111,7 @@ if page == "📐 DMA & Mean Reversion":
         })
     st.download_button("⬇️ Download filtered results (CSV)",
                        _disp.to_csv(index=False).encode("utf-8"),
-                       file_name=f"dma_screen_{datetime.now().strftime('%Y%m%d')}.csv",
+                       file_name=f"dma_screen_{_now_et().strftime('%Y%m%d')}.csv",
                        mime="text/csv", key="dma_csv")
 
     with st.expander("📊 Backtest: how often do these signals actually work? (10y, DB-grounded, not external claims)"):
@@ -23011,7 +23023,7 @@ def _hiprob_persist(res):
     """Log today's scan results (INSERT OR IGNORE → same rec counted once per day)."""
     if not res:
         return 0
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = _now_et().strftime("%Y-%m-%d")
     n = 0
     with get_conn() as c:
         _hiprob_ensure(c)
@@ -23054,7 +23066,7 @@ def _hiprob_settle_px(c, tk, expiry):
 
 def _hiprob_settle():
     """Settle every OPEN rec whose expiry has passed: WIN/LOSS + realized P&L."""
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = _now_et().strftime("%Y-%m-%d")
     n = 0
     with get_conn() as c:
         _hiprob_ensure(c)
@@ -23745,7 +23757,7 @@ if page == "💡 Action Board":
                                     "INSERT INTO trades (ticker, option_type, strike, expiry, entry_price, "
                                     "quantity, entry_date, notes, status) VALUES (?,?,?,?,?,?,?,?, 'OPEN')",
                                     (i["Ticker"], typ, float(K), exp, float(px), int(sgn * _qn),
-                                     datetime.now().strftime("%Y-%m-%d"),
+                                     _now_et().strftime("%Y-%m-%d"),
                                      f"ActionBoard {i['Source']}: {i['Why']}"))
                                 _added += 1
                         _c.commit()
@@ -24119,8 +24131,8 @@ if page == "🎯 High-Prob Options":
                     _cur = _cd_conn.execute(
                         "INSERT INTO rec_basket(created, start_date, capital, method, params, note) "
                         "VALUES (?,?,?,?,?,?)",
-                        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                         datetime.now().strftime("%Y-%m-%d"), float(_cap0), _meth,
+                        (_now_et().strftime("%Y-%m-%d %H:%M:%S"),
+                         _now_et().strftime("%Y-%m-%d"), float(_cap0), _meth,
                          f"perTk={_perTk};risk%={_riskPct};maxPos={_maxPos};minPop={_minPop}",
                          _note or ""))
                     _bid = _cur.lastrowid
@@ -24321,9 +24333,10 @@ if page == "🎡 Wheel / CSP":
         st.info("Pick tickers, then **Scan wheel setups**.")
 
 
-def _ss_dataframe(_tbo, conn, choice, tks):
+def _ss_dataframe(_tbo, conn, choice, tks, live=False):
     """Reuse telegram_bot_optimized scanner functions → clean DataFrame (one engine,
-    two front-ends). tks is a tuple of upper-case tickers (may be empty for defaults)."""
+    two front-ends). tks is a tuple of upper-case tickers (may be empty for defaults).
+    live=True (UOA only) reads today's CBOE chain instead of last night's capture."""
     default = _tbo._hiprob_default_tickers()
     if choice.startswith("💰"):                                   # Rich-IV premium seller (tastytrade mechanics)
         rows = _tbo._premium_scan(conn, list(tks) or None)
@@ -24467,11 +24480,32 @@ def _ss_dataframe(_tbo, conn, choice, tks):
                                f"🧭 Direction lean: {_d['lean']} (low confidence).{_ndtxt}")
         return df
     if choice.startswith("🐋"):                                   # Unusual options activity
-        rows = _tbo._uoa_scan(conn)
-        return pd.DataFrame([{"Ticker": r["ticker"], "Contract": f"{r['strike']:g}{r['side']}",
-                              "Expiry": r["expiry"], "Volume": int(r["vol"]), "OI": int(r["oi"]),
-                              "Vol/OI": round(r["ratio"], 1), "Notional $": _tbo._knum(r["notional"])}
-                             for r in rows])
+        # The ticker box used to be ignored here, so a stock outside the market-wide top 15
+        # had no way to show its unusual contracts (user 2026-09-16).
+        meta = None
+        if live:
+            if not tks:
+                return pd.DataFrame([{"Note": "Live mode reads one chain per name — type the "
+                                              "ticker(s) above, e.g. NVDA TSLA. Leave live off "
+                                              "to scan the whole universe from last night's capture."}])
+            rows, meta = _tbo._uoa_live_scan(list(tks))
+        else:
+            rows = _tbo._uoa_scan(conn, tickers=list(tks), top=50) if tks else _tbo._uoa_scan(conn)
+        if tks and not rows:
+            _when = "so far today" if live else "in the latest snapshot"
+            return pd.DataFrame([{"Note": f"No contract for {', '.join(tks)} cleared the unusual-flow bar "
+                                          f"{_when}: volume ≥300, volume ÷ OI ≥2, DTE ≥7."}])
+        df = pd.DataFrame([{"Ticker": r["ticker"], "Contract": f"{r['strike']:g}{r['side']}",
+                            "Expiry": r["expiry"], "Volume": int(r["vol"]), "OI": int(r["oi"]),
+                            "Vol/OI": round(r["ratio"], 1), "Notional $": _tbo._knum(r["notional"])}
+                           for r in rows])
+        if meta:
+            _fail = f" · no chain for {', '.join(meta['failed'])}" if meta.get("failed") else ""
+            df.attrs["caption"] = (f"🔴 LIVE CBOE chain, 15-min delayed — as of "
+                                   f"{meta.get('as_of') or 'n/a'}. Open interest is the OCC's "
+                                   f"once-a-day number, so ratios keep growing through the "
+                                   f"session.{_fail}")
+        return df
     if choice.startswith("🧭"):                                   # Positioning builder
         rows = _tbo._positioning_scan(conn)
         _stg = {"S": "Starting", "I": "Increasing", "C": "Confirmed"}
@@ -24530,21 +24564,31 @@ if page == "⚙️ Strategy Scanners":
                 "🎓 Lynch (GARP / PEG<1)", "🎓 Buffett (durable compounder)",
                 "🎓 Munger (great biz, fair price)", "🎓 Greenblatt (magic formula)",
                 "🎓 Fisher (quality growth)", "🎓 O'Neil (CANSLIM momentum)"]
-    _c1, _c2 = st.columns([2, 3])
+    _c1, _c2, _c3 = st.columns([2, 3, 1.5])
     _ss_choice = _c1.selectbox("Scanner", _ss_opts, key="ss_choice")
     _ss_tk_in = _c2.text_input("Tickers (optional; blank = sensible defaults)", "", key="ss_tks")
+    # Live only exists for UOA: it pulls today's CBOE chain per name (user 2026-09-16).
+    _ss_live = _c3.checkbox("🔴 Live (today)", key="ss_live",
+                            help="Unusual options only. Reads today's chain from CBOE "
+                                 "(15-min delayed) instead of last night's capture. Needs "
+                                 "tickers — one fetch per name.") if _ss_choice.startswith("🐋") else False
     if st.button("▶️ Run scan", type="primary", key="ss_btn"):
         _ss_tks = tuple([x.strip().upper() for x in re.split(r"[ ,]+", _ss_tk_in) if x.strip()])
-        with st.spinner("Running scan…"):
+        with st.spinner("Reading today's live chains…" if _ss_live else "Running scan…"):
             _ss_conn = _tbo.get_conn()
             try:
-                st.session_state["_ss_df"] = _ss_dataframe(_tbo, _ss_conn, _ss_choice, _ss_tks)
+                st.session_state["_ss_df"] = _ss_dataframe(_tbo, _ss_conn, _ss_choice, _ss_tks,
+                                                           live=_ss_live)
             finally:
                 _ss_conn.close()
-        st.session_state["_ss_for"] = _ss_choice
+        st.session_state["_ss_for"] = _ss_choice + (" · LIVE" if _ss_live else "")
     _ss_df = st.session_state.get("_ss_df")
     if _ss_df is not None:
         st.caption(f"Results — {st.session_state.get('_ss_for', '')}")
+        # Scanners attach their own provenance/summary line (risk-off, vectorbt, live UOA).
+        # It was being set and never rendered on this page.
+        if isinstance(_ss_df, pd.DataFrame) and _ss_df.attrs.get("caption"):
+            st.caption(_ss_df.attrs["caption"])
         if isinstance(_ss_df, pd.DataFrame) and not _ss_df.empty:
             _pinned_df(_ss_df, hide_index=True, use_container_width=True)
         else:
@@ -26990,7 +27034,7 @@ if page == "👀 Watchlist":
                         "INSERT INTO watchlist (ticker, target_price, note, added_date, status, asset_class) "
                         "VALUES (?, ?, ?, ?, 'ACTIVE', ?)",
                         (_wa_tk, (_wa_target or None), (_wa_note or None),
-                         datetime.now().strftime("%Y-%m-%d"), _wa_class))
+                         _now_et().strftime("%Y-%m-%d"), _wa_class))
                     _wl_conn.commit()
                     st.success(f"Added {_wa_tk} ({_wa_class})."); st.rerun()
             else:
@@ -27974,7 +28018,7 @@ if page == "📝 Paper Trading":
                 _pt_conn.execute(
                     "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_date=?, "
                     "updated_at=? WHERE trade_id=?",
-                    (_pexit, datetime.now().strftime("%Y-%m-%d"),
+                    (_pexit, _now_et().strftime("%Y-%m-%d"),
                      datetime.now().isoformat(), int(_pid)))
             _pt_conn.commit()
             _lots_txt = f" across {len(_pids)} lots" if len(_pids) > 1 else ""

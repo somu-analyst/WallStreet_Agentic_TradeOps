@@ -13,7 +13,7 @@ paths:
 - DB-first singles: `/rs` (vs SPY) · `/breakout` 52wk · `/zrev` price z · `/vrp` (ATM IV vs MAD realized vol; high→sell premium).
 - `/ratings [TICKERS]` — analyst up/downgrades + PT moves 45d (keyless yf `upgrades_downgrades`, Benzinga-via-Yahoo). Net = ups−dns + ½·(PT±). Benzinga RSS also feeds briefing + News page.
 - Intraday: `/live` minute writeup · `/heat` heat/reversal scan (z = day move ÷ ATR20·√elapsed; 🔥 z≥1.5+pace≥1.5 trending · 🌀 z≥2 stalling) · `heat_streamer_alert` pushes state CHANGES only. Read `US_intraday.db`; OI is daily → volume/price/IV edge only.
-- Flow/positioning: `/uoa` vol/OI ≥2, DTE≥7 · `/building` new OI staged S/I/C.
+- Flow/positioning: `/uoa [TICKERS]` vol/OI ≥2, DTE≥7 (tickers = same bar for just those names; filtered calls never write scanner fires) · `/building` new OI staged S/I/C.
 - `/tax [INCOME]` — lots, ST→LT flip, Pub 550 protective-put clock (chronological vs RUNNING restarted clock; GOOG↔GOOGL class match = first 4 chars & len ±1), QCC, wash sale. Engine `_tax_scan/_fmt_tax`; same panel dashboard Portfolio → P&L. NOT advice.
 - `/allocate [sharpe|minvar|rp]` covariance optimizer · `/ic` factor rank-IC validation.
 - Tools: `/plan` game plan · `/add` one-line add (order-free: `TICKER 375P YYYY-MM-DD ±QTY @PX [entry-date]` | `TICKER stock QTY @PX [date]`; wizard step 1 accepts typed ticker, 10-min gate in `ai_chat_handler`) · `/journal` · `/bookmarks` · `/tv` · `/terminal` (dashboard; tunnel parked — env `NYSE_MINIAPP_TUNNEL=1` re-enables).

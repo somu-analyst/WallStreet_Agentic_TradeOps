@@ -48,9 +48,16 @@ KEY = os.environ.get("NYSE_VM_KEY", r"C:\Users\srini\oci-nyse.key")
 SSH = ["ssh", "-i", KEY, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=25"]
 CHECK = ["telegram_bot_optimized.py", "dashboard.py", "NYSE_OpenBB.py", "run_all_offhours.py"]
 
+# NYSE_CodeSync runs this via pythonw (no console of its own), but every ssh/git child process
+# spawned below is a CONSOLE app -- Windows gives each one its OWN fresh window unless told not
+# to, regardless of the parent having none. Same fix already applied in sync_trades.py; this
+# file never got it, so every scheduled tick was popping a visible window per ssh/git call
+# (user 2026-09-23, "many popup of cmd windows").
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
 
 def sh(cmd, cwd=None, timeout=300):
-    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, **_NO_WINDOW)
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 

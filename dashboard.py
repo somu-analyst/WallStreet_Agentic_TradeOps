@@ -12615,6 +12615,11 @@ elif page == "📈 Insider / Congress / Whales":
             "Tudor Investment (PTJ)": "0000923093", "Fisher Asset Mgmt": "0000850529",
             "Trian (Peltz)": "0001345471", "Oaktree Capital (Marks)": "0000949509",
             "Point72 (Cohen)": "0001603466",
+            # Added 2026-10-07 (user: "do we have Brad Gerstner", found LEGENDS_DATA/dashboard
+            # narrative text for him existed but was never wired into this live-tracked list --
+            # a hand-typed snapshot (Q1 2026) sitting next to 116 funds that actually refresh
+            # weekly. CIK verified against SEC EDGAR company search before adding.
+            "Altimeter Capital (Gerstner)": "0001541617",
             # CIK CORRECTED 2026-09-02 (ID 381). Was 0001663801 "Gates Foundation": a real
             # EDGAR entity, which is why it passed the original name check, but a SECONDARY
             # filer whose last 13F-HR is dated 2024-11-14 -- so the row had been quietly

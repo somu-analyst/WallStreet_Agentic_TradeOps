@@ -13033,7 +13033,7 @@ def _recs_performance(conn, limit_open=1000):
             mtm = ((net - cost_to_close) if "debit" not in (strat or "").lower()
                    else (cost_to_close - net)) * 100
             out["bf_open" if bf else "open"].append(
-                {"tk": tk, "strat": strat, "mtm": mtm, "exp": str(exp)[:10]})
+                {"tk": tk, "strat": strat, "mtm": mtm, "exp": str(exp)[:10], "cap": float(cap or 0)})
         except Exception:
             log.debug("rec MTM failed", exc_info=True)
     return out
@@ -13056,6 +13056,11 @@ def _recs_perf_report(conn):
         rows.append(("⏳", "Open (MTM)", str(len(op)), f"{w/len(op)*100:.0f}%"))
         rows.append(("📈", "Unrealised", f"${sum(r['mtm'] for r in op):,.0f}", ""))
     parts.append(_pipe_table(("", "Metric", "Value", "Win%"), rows, right_cols={2, 3}))
+    # Shared by both the settled and open bridge views below -- defined here, once, so
+    # neither block depends on the other having run first (found while adding the open
+    # view: it originally lived only inside `if se:` and would NameError when se was empty
+    # but op was not).
+    _cap_lim = BRIDGE_CAPITAL * BRIDGE_MAX_TRADE_RISK_PCT
     # realized per-strategy breakdown (tracker 450): what settled, not the open MTM book
     if se:
         sagg = {}
@@ -13070,7 +13075,6 @@ def _recs_perf_report(conn):
                                  right_cols={2, 3, 4, 5}))
         # Bridge view (tracker 458/464): spreads whose lot fits the per-trade cap are what the
         # 10k bridge would actually size; cash-secured puts are shown as reference only.
-        _cap_lim = BRIDGE_CAPITAL * BRIDGE_MAX_TRADE_RISK_PCT
         brows = []
         for lbl, keep in (
                 ("Fits cap", lambda r: "spread" in r["strat"].lower() and r["cap"] <= _cap_lim),
@@ -13097,6 +13101,20 @@ def _recs_perf_report(conn):
                  for k, v in sorted(agg.items(), key=lambda x: -x[1][1])]
         parts.append("\n<b>By strategy (open, marked to market)</b>")
         parts.append(_pipe_table(("", "Strategy", "#", "P&L$"), srows, right_cols={2, 3}))
+
+        # Bridge's OWN open book (tracker 458 slice 3): which currently-open positions are
+        # the ones it actually sized and alerted on, and what are they worth right now --
+        # the live companion to the settled bridge view above.
+        _b_open = [r for r in op if r["cap"] > 0 and r["cap"] <= _cap_lim
+                  and "spread" in r["strat"].lower()]
+        if _b_open:
+            tot = sum(r["mtm"] for r in _b_open)
+            parts.append(f"\n<b>🌉 Bridge's open book — {len(_b_open)} position(s), "
+                        f"live MTM {tot:+,.0f}</b>")
+            brows2 = [(r["tk"], r["strat"][:20], r["exp"], f"{r['mtm']:+,.0f}")
+                     for r in sorted(_b_open, key=lambda r: r["mtm"])]
+            parts.append(_pipe_table(("Tkr", "Strategy", "Exp", "MTM$"), brows2,
+                                     right_cols={3}))
     if bse or bop:                             # reconstructed — NOT part of the track record
         brows = []
         if bse:

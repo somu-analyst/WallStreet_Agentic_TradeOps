@@ -5312,8 +5312,11 @@ async def positions_view(query):
     log.info("positions_view ENTER (card renderer)")   # TRACE 2026-07-18
     _close_expired_positions()
     conn = get_conn()
-    trades = pd.read_sql(
-        "SELECT * FROM trades WHERE status='OPEN' AND UPPER(option_type)<>'STOCK' ORDER BY ticker, created_at DESC LIMIT 50", conn)
+    # Was reading `trades` alone, options only -- the exact same two gaps ID 270 fixed for
+    # the scheduled push but never applied here (tracker 440, 2026-10-07): a stock-only
+    # paper book made the manual /positions command show "No open positions" too, with
+    # nothing to tap Close on. Shares the one helper so this cannot drift from the push again.
+    trades = _open_positions(conn, options_only=False).head(50)
     conn.close()
 
     if trades.empty:
@@ -12476,8 +12479,11 @@ async def position_monitor(ctx: ContextTypes.DEFAULT_TYPE, force=False):
     _, chat_id = load_creds()
     conn = get_conn()
     try:
-        # BOTH books (ID 270) -- the real one is empty, the holdings are in paper.
-        trades = _open_positions(conn)
+        # BOTH books, AND stock legs (tracker 440, 2026-10-07): options_only=True (the
+        # default) was silently dropping every STOCK row, and this user's entire paper
+        # book is stock -- position_monitor saw an empty frame and returned with no log
+        # line at all, every single tick, for three weeks.
+        trades = _open_positions(conn, options_only=False)
     except Exception:
         conn.close(); return
     conn.close()
@@ -15376,7 +15382,9 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
     try:
         _ensure_alert_dedup_table(conn)
-        trades = _open_positions(conn)          # both books (ID 270)
+        # both books, AND stock legs (tracker 440) -- options_only=True dropped every
+        # STOCK row, so a stock-only paper book alerted on nothing, ever.
+        trades = _open_positions(conn, options_only=False)
     except Exception:
         conn.close(); return
     if trades.empty:

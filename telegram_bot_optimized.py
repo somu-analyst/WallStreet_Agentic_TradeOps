@@ -3512,6 +3512,17 @@ _FOMC_DATES = [
    # not 12-16 -- a second _FOMC_DATES definition further down had drifted from this one;
    # consolidated to this single list, see _fomc_context below).
 
+# FOMC MINUTES dates — derived, not a second hand-typed calendar (same rule as everywhere
+# else: never hand-duplicate a schedule that is already a function of one). The Fed
+# publishes minutes exactly 3 weeks after each decision, same weekday (always a Wednesday).
+# Tracker 472, user 2026-10-07: "today fed minutes... why is not coming in events" -
+# _FOMC_DATES only ever modeled the DECISION day; minutes had no calendar entry anywhere,
+# so every event surface (catalysts, wrap, per-ticker event risk) silently skipped it.
+_FOMC_MINUTES_DATES = [
+    (datetime.strptime(d, "%Y-%m-%d").date() + timedelta(days=21)).isoformat()
+    for d in _FOMC_DATES
+]
+
 def _get_event_risk(ticker: str, vix_val: float = 0.0) -> dict:
     """Return upcoming event risk for a ticker.
     Keys: has_event, event_type, event_days, event_date_str,
@@ -12873,6 +12884,16 @@ async def record_hiprob_recs(context=None):
         scan_ts = _et_now().strftime("%Y-%m-%d %H:%M:%S")
         rows = _hiprob_scan(tuple(_hiprob_default_tickers()[:40])) or []
         added = 0
+        # Bridge sizing (tracker 458, slice 2): find new recs the 10k paper book would
+        # actually take, size them against the caps, and alert for a MANUAL trade --
+        # the user chose manual-first, automatic later. open_risk accumulates across this
+        # batch so two qualifying recs found in the same run don't both get sized as if
+        # the book were still empty.
+        _cap_lim = BRIDGE_CAPITAL * BRIDGE_MAX_TRADE_RISK_PCT
+        _open_risk = conn.execute(
+            "SELECT COALESCE(SUM(capital),0) FROM hiprob_recs WHERE status='OPEN' AND "
+            "COALESCE(src,'LIVE')='LIVE' AND capital<=?", (_cap_lim,)).fetchone()[0] or 0.0
+        _bridge_alerts = []
         for it in rows:
             d = it[1] if isinstance(it, tuple) else it
             tk = str(d.get("tk") or "").upper()
@@ -12896,9 +12917,31 @@ async def record_hiprob_recs(context=None):
                  float(d.get("credit") or 0), float(_cur_price(tk, 0.0)[0] or 0),
                  float(d.get("risk") or 0), scan_ts))
             added += 1
+
+            risk = float(d.get("risk") or 0)
+            if "spread" in strat.lower() and 0 < risk <= _cap_lim:
+                n, reason = _bridge_size(risk, _open_risk)
+                if n >= 1:
+                    _open_risk += risk * n
+                    _bridge_alerts.append((tk, strat, setup, risk, n))
+
         _settle_recs(conn)              # close out anything that expired since last run
         conn.commit(); conn.close()
-        log.info(f"record_hiprob_recs: +{added} new recs")
+        log.info(f"record_hiprob_recs: +{added} new recs, {len(_bridge_alerts)} bridge-sized")
+
+        if _bridge_alerts and context is not None:
+            try:
+                _, chat_id = load_creds()
+                lines = [f"🌉 <b>Bridge — {len(_bridge_alerts)} setup(s) fit your 10k caps today</b>",
+                         "<i>Manual trade — size and act yourself, this does not place orders.</i>"]
+                for tk, strat, setup, risk, n in _bridge_alerts:
+                    lines.append(f"  • <b>{tk}</b> {strat} {setup} — {n} lot(s), "
+                                f"${risk*n:,.0f} max loss")
+                await context.bot.send_message(chat_id=int(chat_id), text="\n".join(lines),
+                                               parse_mode=H)
+            except Exception as e:
+                log.warning(f"bridge alert send failed: {e}")
+
         return added
     except Exception as e:
         log.warning(f"record_hiprob_recs failed: {e}")
@@ -15464,6 +15507,9 @@ async def position_alerts(ctx: ContextTypes.DEFAULT_TYPE):
     for _msg in alert_msgs:
         try:
             await ctx.bot.send_message(chat_id=int(chat_id), text=_msg, parse_mode=H)
+            # Was silent on success (tracker 440, 2026-09-18: "not arriving" could not be
+            # told apart from "nothing fired" without this — both looked like no log line).
+            log.info(f"position_alerts: sent ({_msg[:40]!r}...)")
         except Exception as _ae:
             log.warning(f"position_alerts send failed: {_ae}")
 
@@ -30564,6 +30610,13 @@ def wrap_narrative(F, html=True):
                       "Rate decision at 2:00pm ET, press conference 2:30pm ET. Historically the "
                       "highest-vol window of the session — expect wide intraday swings and a real "
                       "chance of a late-day reversal once the presser starts. Check /macro afterward."))
+    # Same gap, same fix, for minutes (tracker 472): decision day had this flag since
+    # 2026-07-28, minutes never did because no calendar entry for it existed anywhere.
+    elif _today_iso in _FOMC_MINUTES_DATES:
+        L.append(_sec("🏛", "FOMC MINUTES TODAY",
+                      "Minutes from the prior meeting released 2:00pm ET — the detailed account "
+                      "of how split the committee was. Usually a smaller move than a decision day, "
+                      "but can reprice odds for the next meeting. Check /macro afterward."))
 
     # Full indices table -- "index is saying" (user 2026-07-28): the narrative above only
     # names the single biggest mover; the other 4 tracked indices were computed in F but
@@ -34885,6 +34938,20 @@ _MACRO_EVENT_INFO = {
         "series": None,
         "unit": "",
     },
+    "FOMC minutes": {
+        "full": "FOMC meeting minutes",
+        "what": "The detailed account of the prior decision's debate — released 3 weeks after "
+                "that meeting, always 2:00pm ET.",
+        "freq": "8 times a year, 3 weeks after each decision",
+        "why": ("Shows HOW split the committee was and what they actually argued about, which "
+                "the short post-meeting statement doesn't say. Usually a smaller move than the "
+                "decision itself, but can reprice the next meeting's odds."),
+        "read": [("More hawkish than the statement implied", "Yields UP, equities soft"),
+                 ("More dovish than the statement implied", "Yields DOWN, equities firm"),
+                 ("Consistent with the statement", "Minor move; old news priced in")],
+        "series": None,
+        "unit": "",
+    },
     "PPI · inflation": {
         "full": "Producer Price Index",
         "what": ("What businesses pay each other for goods and services, before it reaches "
@@ -35386,6 +35453,7 @@ def _macro_events(days=7, back=3):
     """
     today = datetime.now().date()
     evs = [(d, "FOMC decision") for d in _FOMC_DATES]
+    evs += [(d, "FOMC minutes") for d in _FOMC_MINUTES_DATES]
     evs += [(d, "CPI · inflation") for d in _CPI_DATES]
     evs += [(d, "PCE · Fed gauge") for d in _PCE_DATES]
     for m_off in range(0, 3):                               # Jobs report = first Friday, next 3 months
@@ -37671,6 +37739,10 @@ async def _status_push(ctx, section_key, body_html, cap=None):
                 await ctx.bot.edit_message_text(chat_id=int(chat_id), message_id=int(msg_id),
                                                 text=combined, parse_mode=H)
                 _LAST_STATUS_EDIT = time.time()
+                # Was fully silent on success (tracker 440: "messages not arriving" was
+                # indistinguishable in logs from "nothing fired" for every section this
+                # function serves, not only positions).
+                log.info(f"_status_push[{section_key}]: edited OK")
                 return
             except Exception as e:
                 if "not modified" in str(e).lower():
@@ -37681,6 +37753,7 @@ async def _status_push(ctx, section_key, body_html, cap=None):
         _set_app_setting(conn, "status_msg_id", m.message_id)
         _set_app_setting(conn, "status_msg_date", today)
         _LAST_STATUS_EDIT = time.time()
+        log.info(f"_status_push[{section_key}]: sent fresh OK (msg_id={m.message_id})")
     finally:
         conn.close()
 

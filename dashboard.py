@@ -22872,10 +22872,17 @@ if page == "📺 TradingView":
         st.info("Enter a symbol and hit **Capture** (after launching the bridge & logging in).")
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
+def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045,
+                 exact_expiry=None, strike_filter=None):
     """Scan live option chains for >=min_pop probability-of-profit setups: premium selling
     (cash-secured puts, put/call credit spreads) + deep-ITM call debit spreads (buying).
-    POP from the IV-implied lognormal at expiry. Returns trades sorted by POP then return-on-risk."""
+    POP from the IV-implied lognormal at expiry. Returns trades sorted by POP then return-on-risk.
+
+    This is a SEPARATE implementation from the bot's _hiprob_scan (different output schema:
+    Strategy/_k1/_k2/_net here vs kind/setup/credit there), not a duplicate call -- so
+    exact_expiry/strike_filter (tracker 469) are mirrored here by hand, same as the two
+    scanners already keep lockstep logic independently elsewhere in this codebase.
+    """
     import datetime as _dt
     out = []
 
@@ -22898,14 +22905,21 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
             except Exception:
                 exps = []
             exp = dte = None
-            for e in exps:
-                try:
-                    d = (_dt.datetime.strptime(e, "%Y-%m-%d").date() - _dt.date.today()).days
-                except Exception:
-                    continue
-                if dte_lo <= d <= dte_hi:
-                    exp, dte = e, d
-                    break
+            if exact_expiry:
+                if exact_expiry in exps:
+                    exp = exact_expiry
+                    dte = (_dt.datetime.strptime(exact_expiry, "%Y-%m-%d").date()
+                           - _dt.date.today()).days
+                # else: ticker has no such expiry listed -- skip, do not approximate
+            else:
+                for e in exps:
+                    try:
+                        d = (_dt.datetime.strptime(e, "%Y-%m-%d").date() - _dt.date.today()).days
+                    except Exception:
+                        continue
+                    if dte_lo <= d <= dte_hi:
+                        exp, dte = e, d
+                        break
             if not exp:
                 continue
             T = max(dte, 1) / 365.0
@@ -22916,6 +22930,35 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
             for df in (puts, calls):
                 df["mid"] = ((df["bid"].fillna(0) + df["ask"].fillna(0)) / 2).where(
                     (df["bid"] > 0) & (df["ask"] > 0), df["lastPrice"])
+
+            if strike_filter:
+                # Exact-strike mode: this one strike, not the auto-picked nearest-qualifying
+                # one, and not gated by min_pop -- the user asked for it by name.
+                Kf = float(strike_filter)
+                side = puts if Kf < spot else calls
+                cand = side[side["mid"] > 0.01]
+                if cand.empty:
+                    continue
+                row = cand.iloc[(cand["strike"] - Kf).abs().to_numpy().argsort()[0]]
+                Kr, cr = float(row["strike"]), float(row["mid"])
+                iv = float(row.get("impliedVolatility") or 0)
+                if Kf < spot:
+                    pop = _pa(spot, Kr - cr, T, iv) if iv > 0 else None
+                    legs, be = f"Sell {Kr:g}P", Kr - cr
+                else:
+                    pa = _pa(spot, Kr + cr, T, iv) if iv > 0 else None
+                    pop = (1 - pa) if pa is not None else None
+                    legs, be = f"Sell {Kr:g}C (naked)", None
+                if pop is not None:
+                    out.append({"Ticker": tk, "Strategy": "Strike search", "DTE": dte,
+                                "Expiry": exp, "Legs": legs, "POP %": round(pop * 100, 1),
+                                "Credit/Debit": f"+${cr:.2f}",
+                                "Max profit": f"${cr*100:,.0f}",
+                                "Max loss": f"${(Kr-cr)*100:,.0f}" if Kf < spot else "undefined",
+                                "Ret/risk": "", "Breakeven": f"${be:.2f}" if be else "",
+                                "_pop": pop, "_ror": cr / max(Kr, 0.01) * 100,
+                                "_exp": exp, "_spot0": spot, "_k1": Kr, "_k2": 0.0, "_net": cr})
+                continue
 
             # ── cash-secured put (sell) ──
             pl = puts[(puts["strike"] < spot) & (puts["mid"] > 0.05)].sort_values("strike", ascending=False).reset_index(drop=True)
@@ -23004,6 +23047,11 @@ def _hiprob_ensure(c):
         k1 REAL, k2 REAL, net REAL, spot0 REAL, capital REAL,
         status TEXT DEFAULT 'OPEN', settle_px REAL, pnl REAL,
         UNIQUE(rec_date, ticker, strategy, legs, expiry))""")
+    # Same provenance columns the bot migrates (tracker 462); keeps dashboard rows separable.
+    _have = {r[1] for r in c.execute("PRAGMA table_info(hiprob_recs)")}
+    for _col in ("scan_ts", "chain_src"):
+        if _col not in _have:
+            c.execute(f"ALTER TABLE hiprob_recs ADD COLUMN {_col} TEXT")
     c.commit()
 
 
@@ -23046,10 +23094,12 @@ def _hiprob_persist(res):
             try:
                 cap = _hiprob_capital(d["Strategy"], d["_k1"], d["_k2"], d["_net"])
                 c.execute("INSERT OR IGNORE INTO hiprob_recs(rec_date,ticker,strategy,legs,expiry,"
-                          "dte,pop,ror,k1,k2,net,spot0,capital) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          "dte,pop,ror,k1,k2,net,spot0,capital,scan_ts,chain_src) "
+                          "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'dashboard_live')",
                           (today, d["Ticker"], d["Strategy"], d["Legs"], d["_exp"], int(d["DTE"]),
                            float(d["_pop"]) * 100, float(d["_ror"]), float(d["_k1"]),
-                           float(d["_k2"]), float(d["_net"]), float(d["_spot0"]), float(cap)))
+                           float(d["_k2"]), float(d["_net"]), float(d["_spot0"]), float(cap),
+                           _now_et().strftime("%Y-%m-%d %H:%M:%S")))
                 n += c.execute("SELECT changes()").fetchone()[0]
             except Exception:
                 continue
@@ -23826,6 +23876,14 @@ if page == "🎯 High-Prob Options":
     _minpop = _hc2.slider("Min POP %", 70, 95, 80, 1)
     _dtew = _hc3.select_slider("Target DTE", options=["7-21", "20-45", "30-60", "45-90"], value="20-45")
     _lo, _hi = (int(x) for x in _dtew.split("-"))
+    # Exact expiry / strike search (tracker 469) — optional, off by default. Setting either
+    # switches the scan from "find me a qualifying setup" to "show me exactly this one".
+    _hc4, _hc5 = st.columns([1, 1])
+    _use_exp = _hc4.checkbox("Search an exact expiry instead of the DTE window")
+    _exact_expiry = _hc4.date_input("Expiry date", disabled=not _use_exp).isoformat() if _use_exp else None
+    _use_strike = _hc5.checkbox("Search one exact strike")
+    _strike_filter = _hc5.number_input("Strike", min_value=0.0, step=1.0,
+                                       disabled=not _use_strike) if _use_strike else None
     if st.button("🔎 Scan for setups", type="primary"):
         _tlist = [t.strip() for t in _tks.split(",") if t.strip()]
         if "ALL" in _tlist:                      # full universe from the DB (~92 names)
@@ -23840,15 +23898,21 @@ if page == "🎯 High-Prob Options":
         else:
             _tickers = tuple(_tlist[:20])
         with st.spinner(f"Scanning option chains ({len(_tickers)} tickers)…"):
-            _res = _hiprob_scan(_tickers, _lo, _hi, _minpop / 100.0)
+            _res = _hiprob_scan(_tickers, _lo, _hi, _minpop / 100.0,
+                                exact_expiry=_exact_expiry, strike_filter=_strike_filter)
         st.session_state["_hiprob_res"] = _res
         st.session_state["_hiprob_meta"] = (_minpop, _dtew)
-        try:                                     # 📒 auto-log every suggestion as a paper trade
-            _new_n = _hiprob_persist(_res)
-            if _new_n:
-                st.toast(f"📒 {_new_n} new recommendation(s) logged to the tracker below")
-        except Exception as _e:
-            st.caption(f"(tracker logging failed: {_e})")
+        if _exact_expiry or _strike_filter:
+            # A one-off lookup is not a system recommendation -- persisting it would pollute
+            # the realized track record with a result the engine never actually picked.
+            st.caption("🔎 Exact-expiry/strike search — not logged to the Recommendation Tracker.")
+        else:
+            try:                                 # 📒 auto-log every suggestion as a paper trade
+                _new_n = _hiprob_persist(_res)
+                if _new_n:
+                    st.toast(f"📒 {_new_n} new recommendation(s) logged to the tracker below")
+            except Exception as _e:
+                st.caption(f"(tracker logging failed: {_e})")
     _res = st.session_state.get("_hiprob_res")
     if _res is not None:
         if not _res:
@@ -23908,8 +23972,16 @@ if page == "🎯 High-Prob Options":
             _v = _v[pd.to_datetime(_v["rec_date"]) >= pd.Timestamp.now() - pd.Timedelta(days=_nd)]
 
         # ── headline scoreboard for the filtered slice ──
-        _set = _v[_v["status"].isin(["WIN", "LOSS"])]
-        _wins = int((_set["status"] == "WIN").sum()); _loss = int((_set["status"] == "LOSS").sum())
+        # The bot settles to status 'SETTLED'; the dashboard settler writes 'WIN'/'LOSS'. Read
+        # both, so the scoreboard counts what has actually settled (it showed 0 before, with
+        # 693 settled rows in the DB).
+        # LIVE only: BACKFILL rows are reconstructed hindsight and must never be pooled into
+        # the track record (CLAUDE.md, hiprob_recs). They stay out of this scoreboard.
+        _set = _v[_v["status"].isin(["WIN", "LOSS", "SETTLED"])
+                  & pd.to_numeric(_v["pnl"], errors="coerce").notna()
+                  & (_v["src"].fillna("LIVE") == "LIVE" if "src" in _v.columns else True)]
+        _wins = int((pd.to_numeric(_set["pnl"], errors="coerce") > 0).sum())
+        _loss = int(len(_set) - _wins)
         _pnl = float(pd.to_numeric(_set["pnl"], errors="coerce").fillna(0).sum())
         _cap_open = float(pd.to_numeric(_v.loc[_v["status"] == "OPEN", "capital"], errors="coerce").fillna(0).sum())
         _cap_set = float(pd.to_numeric(_set["capital"], errors="coerce").fillna(0).sum())
@@ -23924,6 +23996,37 @@ if page == "🎯 High-Prob Options":
                    help="Sum of max-loss across EVERY open rec — a book nobody could actually "
                         "hold. Use the 💰 Capital Deployed panel below for a real, size-constrained "
                         "basket.")
+
+        # ══ Realized by strategy + Bridge view: the same numbers as the Telegram /recperf
+        #    report, so both surfaces agree (user 2026-10-05: every feature in both). ══
+        _rs = _set.copy()
+        _rs["_pnl"] = pd.to_numeric(_rs["pnl"], errors="coerce").fillna(0.0)
+        _rs["_cap"] = pd.to_numeric(_rs["capital"], errors="coerce").fillna(0.0)
+        _rs["_won"] = _rs["_pnl"] > 0
+        if not _rs.empty:
+            st.markdown("#### Realized by strategy")
+            _g = (_rs.groupby("strategy")
+                  .agg(n=("_pnl", "size"), win=("_won", "mean"), pnl=("_pnl", "sum"), per=("_pnl", "mean"))
+                  .reset_index().sort_values("pnl", ascending=False))
+            st.dataframe(pd.DataFrame({
+                "Strategy": _g["strategy"], "Settled": _g["n"],
+                "Win %": (_g["win"] * 100).round(0), "P&L $": _g["pnl"].round(0),
+                "Per trade $": _g["per"].round(0)}), hide_index=True, use_container_width=True)
+            try:
+                import telegram_bot_optimized as _tbp
+                _lim = _tbp.BRIDGE_CAPITAL * _tbp.BRIDGE_MAX_TRADE_RISK_PCT
+            except Exception:
+                _lim = 200.0
+            _sp = _rs[_rs["strategy"].str.lower().str.contains("spread")]
+            _bgroups = {"Fits cap": _sp[_sp["_cap"] <= _lim],
+                        "Over cap": _sp[_sp["_cap"] > _lim],
+                        "CSP ref": _rs[_rs["strategy"].str.lower().str.contains("cash-secured")]}
+            _brows = [{"Group": k, "Settled": len(g), "Win %": round(g["_won"].mean() * 100),
+                       "P&L $": round(g["_pnl"].sum()), "Per trade $": round(g["_pnl"].mean())}
+                      for k, g in _bgroups.items() if not g.empty]
+            if _brows:
+                st.markdown(f"#### Bridge view · 10k caps · max loss ≤ ${_lim:,.0f} per lot")
+                st.dataframe(pd.DataFrame(_brows), hide_index=True, use_container_width=True)
 
         # ══ 💰 CAPITAL DEPLOYED (user ask 2026-07-31: "if i want to start with 10k, what
         #    should i take and track them"). The scoreboard above answers "were the recs

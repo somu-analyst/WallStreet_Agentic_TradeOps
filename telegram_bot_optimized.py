@@ -12619,6 +12619,37 @@ def _recs_ensure_src(conn):
         conn.execute("ALTER TABLE hiprob_recs ADD COLUMN src TEXT DEFAULT 'LIVE'")
         conn.execute("UPDATE hiprob_recs SET src='LIVE' WHERE src IS NULL")
         conn.commit()
+    # Provenance for live-vs-backtest matching (tracker 462): the exact second the scan read
+    # its chains, and where those chains came from. rec_date alone cannot prove look-ahead
+    # was avoided. Older rows stay NULL, which is honest: their timing was never recorded.
+    for _col, _ddl in (("scan_ts", "TEXT"), ("chain_src", "TEXT")):
+        if _col not in cols:
+            conn.execute(f"ALTER TABLE hiprob_recs ADD COLUMN {_col} {_ddl}")
+    conn.commit()
+
+
+# ── Paper bridge: sizing caps for manual trades on the research signals (tracker 458) ──
+BRIDGE_CAPITAL = 10_000.0
+BRIDGE_MAX_TRADE_RISK_PCT = 0.02     # max loss on one trade, share of capital
+BRIDGE_MAX_OPEN_RISK_PCT = 0.10      # max total max-loss across open paper trades
+
+
+def _bridge_size(risk_per_contract, open_risk):
+    """Contracts allowed under the per-trade and total open-risk caps.
+
+    `risk_per_contract` is the defined max loss of one lot in dollars (the scanner's `risk`).
+    Returns (contracts, reason). contracts == 0 means reject, and the reason says which cap.
+    """
+    if not risk_per_contract or risk_per_contract <= 0:
+        return 0, "no defined max loss"
+    per_trade = BRIDGE_CAPITAL * BRIDGE_MAX_TRADE_RISK_PCT
+    room = BRIDGE_CAPITAL * BRIDGE_MAX_OPEN_RISK_PCT - float(open_risk or 0)
+    if room <= 0:
+        return 0, "total open-risk cap reached"
+    n = int(min(per_trade, room) // risk_per_contract)
+    if n < 1:
+        return 0, "one lot exceeds the per-trade or remaining open-risk room"
+    return n, "ok"
 
 
 # ── Liquidity gate + realistic fill, shared by both hiprob scanners (2026-08-02) ──────
@@ -12839,6 +12870,7 @@ async def record_hiprob_recs(context=None):
         conn = get_conn()
         _recs_ensure_src(conn)
         today = _et_now().date()
+        scan_ts = _et_now().strftime("%Y-%m-%d %H:%M:%S")
         rows = _hiprob_scan(tuple(_hiprob_default_tickers()[:40])) or []
         added = 0
         for it in rows:
@@ -12857,12 +12889,12 @@ async def record_hiprob_recs(context=None):
                 continue
             conn.execute(
                 "INSERT INTO hiprob_recs (rec_date,ticker,strategy,legs,expiry,dte,pop,ror,"
-                "k1,k2,net,spot0,capital,status,src) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN','LIVE')",
+                "k1,k2,net,spot0,capital,status,src,scan_ts,chain_src) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN','LIVE',?,'yfinance_live')",
                 (today.isoformat(), tk, strat, setup, exp, dte,
                  float(d.get("pop") or 0) * 100, float(d.get("ret") or 0), k1, k2,
                  float(d.get("credit") or 0), float(_cur_price(tk, 0.0)[0] or 0),
-                 float(d.get("risk") or 0)))
+                 float(d.get("risk") or 0), scan_ts))
             added += 1
         _settle_recs(conn)              # close out anything that expired since last run
         conn.commit(); conn.close()
@@ -12934,16 +12966,16 @@ def _recs_performance(conn, limit_open=1000):
     _settle_recs(conn)
     out = {"settled": [], "open": [], "bf_settled": [], "bf_open": [],
            "asof": _et_now().strftime("%Y-%m-%d %H:%M ET")}
-    for rid, tk, strat, k1, k2, net, exp, st, spx, pnl, src in conn.execute(
+    for rid, tk, strat, k1, k2, net, exp, st, spx, pnl, src, cap in conn.execute(
             "SELECT rec_id,ticker,strategy,k1,k2,net,expiry,status,settle_px,pnl,"
-            "COALESCE(src,'LIVE') FROM hiprob_recs ORDER BY rec_id DESC LIMIT ?", (limit_open,)):
+            "COALESCE(src,'LIVE'),capital FROM hiprob_recs ORDER BY rec_id DESC LIMIT ?", (limit_open,)):
         k1 = float(k1 or 0); k2 = float(k2 or 0); net = float(net or 0)
         # reconstructed recs were never actually issued — kept in their own buckets so the
         # headline track record stays a record of real calls, not of hindsight
         bf = (src == "BACKFILL")
         if st == "SETTLED" and pnl is not None:
             out["bf_settled" if bf else "settled"].append(
-                {"tk": tk, "strat": strat, "pnl": float(pnl)})
+                {"tk": tk, "strat": strat, "pnl": float(pnl), "cap": float(cap or 0)})
             continue
         try:                                   # mark-to-market from real BB quotes
             is_put = "put" in (strat or "").lower()
@@ -12981,6 +13013,37 @@ def _recs_perf_report(conn):
         rows.append(("⏳", "Open (MTM)", str(len(op)), f"{w/len(op)*100:.0f}%"))
         rows.append(("📈", "Unrealised", f"${sum(r['mtm'] for r in op):,.0f}", ""))
     parts.append(_pipe_table(("", "Metric", "Value", "Win%"), rows, right_cols={2, 3}))
+    # realized per-strategy breakdown (tracker 450): what settled, not the open MTM book
+    if se:
+        sagg = {}
+        for r in se:
+            a = sagg.setdefault(r["strat"][:22], [0, 0, 0.0])
+            a[0] += 1; a[1] += 1 if r["pnl"] > 0 else 0; a[2] += r["pnl"]
+        srows = [("🟢" if v[2] > 0 else "🔴", k[:18], str(v[0]), f"{v[1]/v[0]*100:.0f}%",
+                  f"{v[2]:+,.0f}", f"{v[2]/v[0]:+,.0f}")
+                 for k, v in sorted(sagg.items(), key=lambda x: -x[1][2])]
+        parts.append("\n<b>By strategy (settled, realized)</b>")
+        parts.append(_pipe_table(("", "Strategy", "#", "Win%", "P&L$", "Per trade$"), srows,
+                                 right_cols={2, 3, 4, 5}))
+        # Bridge view (tracker 458/464): spreads whose lot fits the per-trade cap are what the
+        # 10k bridge would actually size; cash-secured puts are shown as reference only.
+        _cap_lim = BRIDGE_CAPITAL * BRIDGE_MAX_TRADE_RISK_PCT
+        brows = []
+        for lbl, keep in (
+                ("Fits cap", lambda r: "spread" in r["strat"].lower() and r["cap"] <= _cap_lim),
+                ("Over cap", lambda r: "spread" in r["strat"].lower() and r["cap"] > _cap_lim),
+                ("CSP ref", lambda r: "cash-secured" in r["strat"].lower())):
+            grp = [r for r in se if keep(r)]
+            if not grp:
+                continue
+            w = sum(1 for r in grp if r["pnl"] > 0)
+            tot = sum(r["pnl"] for r in grp)
+            brows.append(("🟢" if tot > 0 else "🔴", lbl, str(len(grp)),
+                          f"{w/len(grp)*100:.0f}%", f"{tot:+,.0f}", f"{tot/len(grp):+,.0f}"))
+        if brows:
+            parts.append(f"\n<b>Bridge view · 10k caps: {_cap_lim:,.0f} max loss per lot</b>")
+            parts.append(_pipe_table(("", "Group", "#", "Win%", "P&L$", "Per trade$"), brows,
+                                     right_cols={2, 3, 4, 5}))
     # per-strategy breakdown on the marked book
     if op:
         agg = {}
@@ -29214,7 +29277,24 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
     if df is None or df.empty:
         raise ValueError(f"no income statement published for {ticker}")
 
-    def pick(key, col=0):
+    def _has(key, col):
+        for name in _SK_YF_ROWS[key]:
+            if name in df.index:
+                try:
+                    if float(df.loc[name].iloc[col]) == float(df.loc[name].iloc[col]):
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    # The newest column is often a quarter the filer has not reported on every line yet
+    # (AMZN 2026-06-30: Total Revenue NaN while the quarter before it is complete). Read the
+    # latest column where the two headline lines both exist, and use that one column for every
+    # figure and for the year-over-year offset, so periods never mix.
+    col0 = next((c for c in range(df.shape[1]) if _has("revenue", c) and _has("net", c)), 0)
+
+    def pick(key, col=None):
+        col = col0 if col is None else col
         for name in _SK_YF_ROWS[key]:
             if name in df.index:
                 try:
@@ -29235,7 +29315,7 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
         try:
             log.warning(f"_income_stmt {ticker}: no revenue/net match in "
                         f"{'quarterly' if quarterly else 'annual'} statement, index="
-                        f"{list(df.index)[:40]!r}")
+                        f"{list(df.index)!r}")
         except Exception:
             pass
         raise ValueError(f"{ticker}: the filed statement has no revenue or net income line")
@@ -29273,7 +29353,7 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
         for key, lbl in (("revenue", "Total revenue"), ("gross", "Gross profit"),
                          ("opinc", "Operating income"), ("net", "Net income"),
                          ("tax", "Taxes"), ("rnd", "R&D"), ("sga", "SG&A")):
-            now, then = pick(key), pick(key, back)
+            now, then = pick(key), pick(key, col0 + back)
             if now is not None and then not in (None, 0):
                 yoy[lbl] = (now / then - 1) * 100
 
@@ -29282,7 +29362,7 @@ def _income_stmt(ticker, quarterly=True, unit_div=1e6):
         name = (t.info or {}).get("shortName") or name
     except Exception:
         pass
-    period = str(df.columns[0])[:10]
+    period = str(df.columns[col0])[:10]
     # Where the business actually comes from. Best-effort and never fatal: no filing, a
     # foreign issuer or an unparseable table simply leaves this empty and the diagram shows
     # one revenue node, exactly as before.
@@ -31540,8 +31620,18 @@ async def tv_view(query, symbol=None):
                                     parse_mode=H, reply_markup=_kb_tv(symbol))
 
 
-def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
-    """Scan option chains for >=min_pop POP setups (CSP, credit spreads). Returns compact text rows."""
+def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045,
+                 exact_expiry=None, strike_filter=None):
+    """Scan option chains for >=min_pop POP setups (CSP, credit spreads). Returns compact text rows.
+
+    exact_expiry (YYYY-MM-DD): use THIS expiry instead of the nearest one inside [dte_lo,dte_hi].
+    A ticker without that exact date listed is skipped, not approximated.
+
+    strike_filter: show the single strike CLOSEST to this number and stop there — the auto
+    "walk outward until POP clears min_pop" search is for discovery; this is for "what does
+    MY strike look like", so min_pop does not gate it (tracker 469, user asked for exact
+    strike search, not just automatic picks).
+    """
     import datetime as _dt
     from scipy.stats import norm as _nm
     out = []
@@ -31566,14 +31656,21 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
             if not spot:
                 continue
             exp = dte = None
-            for e in (t.options or []):
-                try:
-                    d = (_dt.datetime.strptime(e, "%Y-%m-%d").date() - _dt.date.today()).days
-                except Exception:
-                    continue
-                if dte_lo <= d <= dte_hi:
-                    exp, dte = e, d
-                    break
+            if exact_expiry:
+                if exact_expiry in (t.options or []):
+                    exp = exact_expiry
+                    dte = (_dt.datetime.strptime(exact_expiry, "%Y-%m-%d").date()
+                           - _dt.date.today()).days
+                # else: this ticker does not have that expiry -- skip it, do not approximate
+            else:
+                for e in (t.options or []):
+                    try:
+                        d = (_dt.datetime.strptime(e, "%Y-%m-%d").date() - _dt.date.today()).days
+                    except Exception:
+                        continue
+                    if dte_lo <= d <= dte_hi:
+                        exp, dte = e, d
+                        break
             if not exp:
                 continue
             T = max(dte, 1) / 365.0
@@ -31618,6 +31715,31 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045):
             # always a bad quote rather than a real market, and it is exactly what manufactured
             # the ~100% POPs. Still low enough to leave genuinely quiet index names alone.
             iv_ref = max(iv_ref, 0.15)
+
+            if strike_filter:
+                # Exact-strike mode: show THIS strike, not the auto-picked nearest-qualifying
+                # one, and don't gate it on min_pop -- the user asked for this strike
+                # specifically, so a sub-80% POP is information, not a reason to hide it.
+                Kf = float(strike_filter)
+                side, is_put = (puts, True) if Kf < spot else (calls, False)
+                cand = side[side["_liq"]]
+                if cand.empty:
+                    continue
+                row = cand.iloc[(cand["strike"] - Kf).abs().to_numpy().argsort()[0]]
+                Kr, cr = float(row["strike"]), float(row["_sell"])
+                if is_put:
+                    pop = _pa(spot, Kr - cr, T, iv_ref)
+                    setup, be, risk = f"{Kr:g}P", Kr - cr, (Kr - cr) * 100
+                else:
+                    pa = _pa(spot, Kr + cr, T, iv_ref)
+                    pop = (1 - pa) if pa is not None else None
+                    setup, be, risk = f"{Kr:g}C", None, None   # naked call: undefined max loss
+                if pop is not None:
+                    out.append({"tk": tk, "kind": "SEARCH", "setup": setup, "credit": cr,
+                                "risk": risk, "be": be, "pop": pop, "dte": dte,
+                                "ret": cr / max(Kr, 0.01) * 100})
+                continue
+
             pl = puts[(puts["strike"] < spot) & (puts["mid"] > 0.05) & puts["_liq"]].sort_values("strike", ascending=False).reset_index(drop=True)
             for i in range(len(pl)):
                 K = float(pl.loc[i, "strike"]); cr = float(pl.loc[i, "_sell"]); iv = iv_ref
@@ -31676,10 +31798,17 @@ def _fmt_hiprob(rows):
     narrow tables (~≤36 chars). Bias encoded as a P/C suffix (no emoji column)."""
     spreads = [r for r in rows if r["kind"] in ("PS", "CS")][:12]
     csps = [r for r in rows if r["kind"] == "CSP"][:8]
+    search = [r for r in rows if r["kind"] == "SEARCH"][:12]
     dtes = [r["dte"] for r in rows]
     dte_lbl = (f"{min(dtes)}d" if len(set(dtes)) == 1 else f"{min(dtes)}-{max(dtes)}d") if dtes else ""
     parts = ["🎯 <b>High-Prob Options — ≥80% POP</b>",
              f"<i>premium selling · defined/cash-secured risk · {dte_lbl} · not advice</i>"]
+    if search:
+        rs = [(r["tk"], r["setup"], f"{r['credit']:.2f}", f"{r['pop']*100:.0f}") for r in search]
+        parts.append(_pipe_table(("Tkr", "Strike", "Cr", "POP%"), rs, right_cols={2, 3},
+                                 title="Strike search — not gated by 80%",
+                                 legend="The exact strike you asked for · POP shown as-is, "
+                                        "even below 80% · P=put sold, C=call sold naked"))
     if spreads:
         rd = [(r["tk"], r["setup"], f"{r['credit']:.2f}", f"{r['risk']:.0f}") for r in spreads]
         parts.append(_pipe_table(("Tkr", "Setup", "Cr", "Rsk"), rd, right_cols={2, 3},
@@ -31694,13 +31823,30 @@ def _fmt_hiprob(rows):
 
 
 async def hiprob_command(update, ctx):
-    """/hiprob [TICKERS] — high-probability (>=80% POP) option setups: premium selling + spreads."""
+    """/hiprob [TICKERS] [YYYY-MM-DD] [STRIKE] — high-probability (>=80% POP) option setups.
+
+    An exact date token pins the expiry instead of the usual 20-45 DTE window; a plain number
+    token searches that one strike instead of auto-picking (tracker 469). Both optional, order
+    does not matter: /hiprob TSLA 2026-11-20 400.
+    """
+    import re as _re
     args = list(getattr(ctx, "args", []) or [])
-    tks = [a.upper() for a in args] if args else _hiprob_default_tickers()
+    tks, exact_expiry, strike_filter = [], None, None
+    for a in args:
+        if _re.match(r"^\d{4}-\d{2}-\d{2}$", a):
+            exact_expiry = a
+        elif _re.match(r"^\d+(\.\d+)?$", a):
+            strike_filter = float(a)
+        else:
+            tks.append(a.upper())
+    if not tks:
+        tks = _hiprob_default_tickers()
     await update.message.reply_text("🎯 Scanning for ≥80% POP option setups…", parse_mode=H)
-    rows = _hiprob_scan(tuple(tks[:10]))
+    rows = _hiprob_scan(tuple(tks[:10]), exact_expiry=exact_expiry, strike_filter=strike_filter)
     if not rows:
-        await update.message.reply_text("No ≥80% POP setups right now. Try <code>/hiprob SPY QQQ IWM</code>.", parse_mode=H)
+        msg = ("No match for that exact expiry/strike." if (exact_expiry or strike_filter)
+               else "No ≥80% POP setups right now. Try <code>/hiprob SPY QQQ IWM</code>.")
+        await update.message.reply_text(msg, parse_mode=H)
         return
     await update.message.reply_text(_fmt_hiprob(rows)[:4000], parse_mode=H,
                                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="hiprob_view"),
@@ -44540,25 +44686,40 @@ def _fmt_dealer(rows=None):
         return None
     body = []
     for r in rows:
-        # extreme against its own history is the signal; the sign is not
-        st = "🟢" if r["pctile"] >= 90 else "🔴" if r["pctile"] <= 10 else "🟡"
+        # extreme against its own history is the signal; the sign is not. Bull/bear read
+        # directly as LONG/SHORT (2026-09-29: user found the generic 🟢/🔴/🟡 dots meaningless
+        # here specifically, unlike elsewhere in the bot where color alone is the convention).
+        st = "🐂" if r["pctile"] >= 90 else "🐻" if r["pctile"] <= 10 else "➖"
         # no '%' suffix on the value: it costs a column and the header already says Net%
         body.append((st, r["name"][:9], f"{r['net_pct']:+.1f}", f"{r['pctile']:.0f}"))
     out = [_pipe_table(("ST", "Market", "Net%", "Pct"), body, right_cols={2, 3},
-                       title=f"🏦 DEALER POSITIONING — CFTC week of {rows[0]['date']}")]
+                       title=f"🏦 DEALER POSITIONING — CFTC week of {rows[0]['date']}",
+                       legend="Net%=dealers' (long−short)÷open-interest, sign is NOT the signal (dealers run "
+                              "structurally short index futures) · Pct=where TODAY ranks in its OWN 3yr history "
+                              "(50=normal, 90+=most-long ever, 10-=most-short ever) · 🐂 stretched long "
+                              "🐻 stretched short ➖ normal · full explanation below")]
 
     movers = sorted(rows, key=lambda r: -abs(r["chg"]))[:3]
     out.append(_pipe_table(("Market", "Wk change"),
                            [(m["name"][:9], f"{m['chg']:+,.0f}") for m in movers],
-                           right_cols={1}, title="📊 Biggest shifts this week"))
+                           right_cols={1}, title="📊 Biggest shifts this week",
+                           legend="Contracts dealers added/removed net this week — the fastest-moving "
+                                  "positions, regardless of whether they're extreme yet."))
 
+    # Where to actually go check this in the bot, by CFTC group — not a trade call, just
+    # the closest existing tool that shows current (not weekly-stale) positioning.
+    _GRP_WATCH = {"EQUITY": "/gex SPY (or the relevant index ETF)", "VOL": "/regime",
+                  "RATES": "/macro", "FX": "/macro"}
     ext = [r for r in rows if r["pctile"] >= 90 or r["pctile"] <= 10]
     if ext:
-        out.append("<b>Stretched vs their own history:</b>")
+        out.append("<b>🎯 Stretched vs their own history (the actionable part):</b>")
         for r in ext:
             side = "LONG" if r["pctile"] >= 90 else "SHORT"
+            watch = _GRP_WATCH.get(r.get("group"), "/macro")
             out.append(f"  • <b>{r['name']}</b> — dealers unusually {side} "
-                       f"({_ordinal(r['pctile'])} pctile of {r['n']} weeks)")
+                       f"({_ordinal(r['pctile'])} pctile of {r['n']} weeks). A stretched "
+                       f"position tends to unwind, not extend. <i>Action: watch {watch} for "
+                       f"a live read — this report is a week stale by the time it posts.</i>")
     else:
         out.append("<i>Nothing stretched — every market sits inside its normal "
                    "dealer-positioning range.</i>")
@@ -44567,7 +44728,7 @@ def _fmt_dealer(rows=None):
                "Traders in Financial Futures report. It is where dealers hedge the options "
                "they have written, so it is the one dealer view that is measured rather than "
                "assumed — /gex infers option inventory from a sign convention, this does not."
-               "\n\nHOW TO READ IT: Net%OI is dealer long minus short as a share of open "
+               "\n\nHOW TO READ IT: Net% is dealer long minus short as a share of open "
                "interest; Pct is where that sits in its own 3-year history. Dealers are "
                "ALWAYS net short equity index futures, so the negative sign means nothing — "
                "only the percentile and the weekly change do. Data is as of the Tuesday of "

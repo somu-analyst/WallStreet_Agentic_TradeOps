@@ -24319,7 +24319,12 @@ if page == "🎯 High-Prob Options":
             _sp["_d"] = pd.to_datetime(_sp["rec_date"])
 
             def _agg(g):
-                w = int((g["status"] == "WIN").sum()); n = len(g)
+                # Was checking status=='WIN' literally -- every settled row actually has
+                # status=='SETTLED' (the bot's own settlement path, not the dashboard's
+                # separate WIN/LOSS writer), so this always read 0 wins regardless of real
+                # P&L (user 2026-10-08: "wins are showing 0%, its not correct"). The page's
+                # own caption below already states the real rule -- use it.
+                w = int((g["pnl"] >= 0).sum()); n = len(g)
                 return pd.Series({"Recs": n, "Wins": w, "Losses": n - w,
                                   "Win %": round(w / max(n, 1) * 100, 1),
                                   "Capital $": round(g["capital"].sum()),
@@ -24356,7 +24361,13 @@ if page == "🎯 High-Prob Options":
             "expiry": "Expiry", "dte": "DTE", "pop": "POP %", "net": "Cr/Db $",
             "spot0": "Spot @rec", "capital": "Capital $", "status": "Status",
             "settle_px": "Settle px", "pnl": "P&L $"})
-        _disp["Status"] = _disp["Status"].map({"OPEN": "⏳ OPEN", "WIN": "🟢 WIN", "LOSS": "🔴 LOSS"}).fillna(_disp["Status"])
+        # Same root bug as _agg above: real rows are 'OPEN'/'SETTLED', never literally
+        # 'WIN'/'LOSS', so every settled row fell through to raw "SETTLED" text with no
+        # win/loss color at all. Derive it from P&L sign, same rule as the page's caption.
+        _pnl_num = pd.to_numeric(_disp["P&L $"], errors="coerce")
+        _disp["Status"] = _disp["Status"].where(_disp["Status"] == "OPEN",
+            _pnl_num.map(lambda p: "🟢 WIN" if pd.notna(p) and p >= 0 else "🔴 LOSS"))
+        _disp["Status"] = _disp["Status"].replace({"OPEN": "⏳ OPEN"})
         _pinned_df(_disp, hide_index=True, use_container_width=True,
                      column_config={"POP %": st.column_config.NumberColumn(format="%.0f%%"),
                                     "Capital $": st.column_config.NumberColumn(format="$%.0f"),

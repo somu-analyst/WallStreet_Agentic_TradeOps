@@ -33037,6 +33037,98 @@ async def _send_pairs(msg, rows):
                                                              InlineKeyboardButton("⬅️ Menu", callback_data="menu_main")]]))
 
 
+# ── Strategy Catalog (tracker 481): a curated list of strategy IDEAS, with honest status.
+# Built after a user prompt asked for an auto-scraping pipeline that would seed strategies as
+# "production-grade" with fabricated backtest numbers -- that is exactly backwards for this
+# project (CLAUDE.md: walk-forward, Bonferroni correction, never trust an unvalidated signal).
+# This stores what we ACTUALLY know: real stats where we have them, "not yet tested" where we
+# don't, and a pointer to an existing command instead of a duplicate implementation.
+_STRAT_STATUSES = ("VALIDATED", "EXISTING COMMAND", "NOT YET TESTED")
+
+
+def _strategy_catalog_setup(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS strategy_catalog(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT UNIQUE, taxonomy TEXT,
+        asset_class TEXT, description TEXT, entry_rule TEXT, exit_rule TEXT,
+        research_note TEXT, status TEXT, sharpe REAL, max_dd REAL, win_rate REAL,
+        t_stat REAL, p_value REAL, test_window TEXT, existing_command TEXT,
+        added_date TEXT)""")
+    conn.commit()
+
+
+def _strategy_catalog_seed(conn):
+    """Idempotent (INSERT OR IGNORE on the UNIQUE title) -- safe to call every time."""
+    _strategy_catalog_setup(conn)
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = [
+        ("Volume-confirmed down-day reversal", "Mean Reversion", "Equity",
+         "A down day on unusually LOW relative volume is more likely to keep falling; a down "
+         "day on unusually HIGH relative volume is more likely to recover. Tested, not folklore.",
+         "Rank stocks by (volume / 20d avg volume) on a down day", "Next-day close",
+         "Validated 2026-10-07 on 36yr/792-ticker stock_history, cross-sectional daily IC "
+         "(not the banned pooled method), after excluding ~0.017% genuine data-error rows.",
+         "VALIDATED", None, None, None, 3.12, 0.0019, "1990-2026, both halves independently significant",
+         None, today),
+        ("Cross-asset statistical arbitrage (pairs)", "Statistical Arbitrage", "Equity",
+         "Within-sector pairs whose price spread has stretched (|z|>=2) tend to converge.",
+         "Pair z-score >= 2 in magnitude", "Z reverts toward 0",
+         "Well-established academic concept (pairs trading); this project already runs it live.",
+         "EXISTING COMMAND", None, None, None, None, None, None, "/pairs", today),
+        ("Midnight liquidity sweep (stop-run reversal)", "Intraday Reversal", "Equity",
+         "A 5-min bar that pokes above yesterday's high but CLOSES back below it (or the "
+         "inverse at yesterday's low) is read as a stop-run, not a breakout, and faded.",
+         "5m bar wicks past prior-day H/L but closes back inside", "Target: intraday VWAP",
+         "From a user-shared prompt template (tracker 481) -- a real, testable idea, not yet "
+         "run against our data. US_intraday.db only keeps a rolling window (~2 months), too "
+         "short for a real test today; needs either more accrued history or a stock_history "
+         "daily-bar proxy test first.",
+         "NOT YET TESTED", None, None, None, None, None, None, None, today),
+    ]
+    for r in rows:
+        try:
+            conn.execute("""INSERT OR IGNORE INTO strategy_catalog
+                (title, taxonomy, asset_class, description, entry_rule, exit_rule,
+                 research_note, status, sharpe, max_dd, win_rate, t_stat, p_value,
+                 test_window, existing_command, added_date)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", r)
+        except Exception:
+            log.debug("strategy_catalog seed row failed", exc_info=True)
+    conn.commit()
+
+
+def _fmt_strategy_catalog(conn):
+    _strategy_catalog_seed(conn)
+    rows = conn.execute("""SELECT title, taxonomy, status, t_stat, p_value, existing_command,
+        research_note FROM strategy_catalog ORDER BY
+        CASE status WHEN 'VALIDATED' THEN 0 WHEN 'EXISTING COMMAND' THEN 1 ELSE 2 END""").fetchall()
+    if not rows:
+        return "No strategies in the catalog yet."
+    parts = [hdr("📚 STRATEGY CATALOG")]
+    icon = {"VALIDATED": "✅", "EXISTING COMMAND": "🔗", "NOT YET TESTED": "⏳"}
+    body = []
+    for title, tax, status, t, p, cmd, note in rows:
+        stat_s = f"t={t:.2f} p={p:.4f}" if t is not None else (cmd or "—")
+        body.append((icon.get(status, "•"), title[:28], tax[:16], stat_s[:16]))
+    parts.append(_pipe_table(("", "Strategy", "Type", "Status/Stat"), body,
+                             legend="✅ validated against real data · 🔗 already a live command, "
+                                    "not duplicated · ⏳ a real idea, not yet tested"))
+    parts.append("")
+    for title, tax, status, t, p, cmd, note in rows:
+        parts.append(f"<b>{title}</b> [{status}]\n<i>{note}</i>")
+    return "\n\n".join(parts)
+
+
+async def strategies_command(update, ctx):
+    """/strategies — the curated strategy catalog: what's validated, what's a live command
+    already, and what's a real but untested idea. Honest status, no fabricated numbers."""
+    conn = get_conn()
+    try:
+        msg = _fmt_strategy_catalog(conn)
+    finally:
+        conn.close()
+    await _safe_reply(update.message, msg)
+
+
 async def pairs_command(update, ctx):
     """/pairs — stat mean-reversion: within-sector pairs whose spread is stretched (|z|≥2)."""
     await update.message.reply_text("🔗 Scanning pairs…", parse_mode=H)
@@ -46882,6 +46974,7 @@ def main():
     app.add_handler(CommandHandler("wheel", wheel_command))
     app.add_handler(CommandHandler("cc", cc_command))
     app.add_handler(CommandHandler("pairs", pairs_command))
+    app.add_handler(CommandHandler("strategies", strategies_command))   # curated catalog, tracker 481
     app.add_handler(CommandHandler("season", season_command))
     app.add_handler(CommandHandler("rotate", rotate_command))
     app.add_handler(CommandHandler("revert", revert_command))

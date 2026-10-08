@@ -6666,6 +6666,7 @@ _PAGE_HELP = {
     "🎯 Prop Trading Screen":    "Prop-desk style trade ideas. Scans for high-conviction setups using OI, PCR, and momentum filters — shows entry/exit levels and risk:reward.",
     "💼 Portfolio & Suggestions": "Your open and closed positions. Track unrealized P&L, Greeks, IV rank, earnings alerts, and get per-leg roll suggestions. Add/close/edit trades here.",
     "👀 Watchlist":              "Stocks you're thinking about buying but haven't yet. Add a ticker (+ optional target price / note) and it's tracked with the same components as the rest of the dashboard — live spot, day%, distance to target, next earnings/ex-div, short interest, PCR, RSI/MACD/BB technicals, and a rollup BULL/BEAR/NEUTRAL read. No entry price or P&L (nothing's bought yet) — remove a ticker once you act on it or lose interest.",
+    "📚 Strategy Catalog":       "A curated list of strategy ideas with an HONEST status on each — validated against our own real data, already a live command elsewhere (not duplicated), or a real idea that hasn't been tested yet. No fabricated backtest numbers; a strategy only shows stats once it has actually cleared this project's own validation bar.",
     "📝 Paper Trading":          "Demo positions — 'what if I took this trade?' without risking real capital. Its own isolated table (never touches your real Portfolio, tax clock, or Exit Planner), so it's safe to experiment in. Same one-line add grammar as adding a real position. Mirrored in Telegram via /paper.",
     "📊 Backtest Lab":           "Test OI-based trading signals against historical data. See what win rate and P&L your strategy would have produced over the selected date range.",
     "🔮 Live Position Predictor": "Monte Carlo simulation for a single position. Models 10,000 price paths to estimate tomorrow's expected P&L, probability of profit, and VaR.",
@@ -6748,6 +6749,7 @@ with st.sidebar:
             "💼 Portfolio & Suggestions",
             "🧮 Valuation (DCF)",
             "👀 Watchlist",
+            "📚 Strategy Catalog",
             "📝 Paper Trading",
             "🔮 Live Position Predictor",
             "⚡ Trade Risk Calculator",
@@ -27569,6 +27571,40 @@ if page == "👀 Watchlist":
                 _wl_conn.execute("UPDATE watchlist SET status='REMOVED' WHERE id=?", (_wl_map[_wl_rm_pick],))
                 _wl_conn.commit()
                 st.success("Removed."); st.rerun()
+
+# ===================================================================
+# ──  PAGE: STRATEGY CATALOG — honest status, no fabricated numbers (tracker 481)
+# ===================================================================
+if page == "📚 Strategy Catalog":
+    _page_header("📚 Strategy Catalog", _PAGE_HELP["📚 Strategy Catalog"])
+    try:
+        import telegram_bot_optimized as _tb_sc
+    except Exception as _e:
+        st.error(f"Could not load the catalog: {_e}")
+        _tb_sc = None
+    if _tb_sc is not None:
+        _sc_conn = get_conn()
+        _tb_sc._strategy_catalog_seed(_sc_conn)
+        _sc_rows = pd.read_sql(
+            "SELECT title, taxonomy, asset_class, status, sharpe, win_rate, t_stat, p_value, "
+            "test_window, existing_command, description, entry_rule, exit_rule, research_note "
+            "FROM strategy_catalog ORDER BY CASE status WHEN 'VALIDATED' THEN 0 "
+            "WHEN 'EXISTING COMMAND' THEN 1 ELSE 2 END", _sc_conn)
+        _sc_conn.close()
+        _icon = {"VALIDATED": "✅", "EXISTING COMMAND": "🔗", "NOT YET TESTED": "⏳"}
+        for _, r in _sc_rows.iterrows():
+            with st.expander(f"{_icon.get(r['status'], '•')} {r['title']}  —  {r['status']}"):
+                st.caption(f"**{r['taxonomy']}** · {r['asset_class']}")
+                st.write(r["description"])
+                st.markdown(f"**Entry:** {r['entry_rule']}  \n**Exit:** {r['exit_rule']}")
+                if r["status"] == "VALIDATED":
+                    st.success(f"t = {r['t_stat']:.2f}, p = {r['p_value']:.4f} — "
+                              f"{r['test_window']}")
+                elif r["status"] == "EXISTING COMMAND":
+                    st.info(f"Already live: `{r['existing_command']}` — not duplicated here.")
+                else:
+                    st.warning("Not yet tested against real data.")
+                st.caption(r["research_note"])
 
 # ===================================================================
 # ──  PAGE: PAPER TRADING — demo positions, isolated from the real book

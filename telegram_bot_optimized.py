@@ -22300,6 +22300,7 @@ async def signal_ticker_detail(query, ticker):
     # Live price line (OI itself is EOD; the PRICE should be live during market hours)
     _px_line = ""
     _pxv = 0.0            # must exist even if the price lookup below fails
+    _islive = False       # same -- used for the title date below, must survive a failed lookup
     try:
         _dbc = pd.read_sql("SELECT close FROM stock_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT 1",
                            conn, params=(tk,))
@@ -22307,13 +22308,25 @@ async def signal_ticker_detail(query, ticker):
         _pxv, _islive, _asof = _cur_price(tk, db_close=_dbclose)
         if _pxv > 0:
             _dl = (f" ({(_pxv/_dbclose-1)*100:+.2f}%)" if (_islive and _dbclose) else "")
+            # Was: only add "OI as of" when NOT live -- backwards. The title below always
+            # shows the OI capture date, never today's date, so a LIVE price next to a
+            # title dated yesterday read as contradictory (user 2026-10-08: "why is it
+            # showing for already completed day, not live"). The clarifier is needed
+            # whenever the OI date is not today, live or not -- that is the actual
+            # condition that makes it ambiguous.
+            _today_iso = datetime.now().strftime("%Y-%m-%d")
+            _oi_stale = str(latest_date)[:10] != _today_iso
             _px_line = (f"{'🟢' if _islive else '⏺'} <b>${_pxv:,.2f}</b>{_dl}  "
-                        f"<i>{_asof}{'' if _islive else ' · OI as of '+str(latest_date)}</i>")
+                        f"<i>{_asof}{' · OI as of '+str(latest_date) if _oi_stale else ''}</i>")
     except Exception:
         log.debug("oi-detail price line failed", exc_info=True)
 
+    # Title date: today's date when the price line is genuinely live (so it never reads
+    # as a report "about" a stale day), the OI capture date otherwise. The OI date itself
+    # is still always visible -- in the price-line clarifier above, not lost.
+    _title_date = datetime.now().strftime("%Y-%m-%d") if (_pxv > 0 and _islive) else latest_date
     parts = [
-        hdr(f"📊 {tk} · {latest_date}"),
+        hdr(f"📊 {tk} · {_title_date}"),
     ]
     if _px_line:
         parts.append(_px_line)

@@ -29,6 +29,25 @@ reply, and add the missing half as its own tracked item.
 - Dashboard: a live headless-browser DOM check with Playwright. `py_compile` and `curl` do not
   count (CLAUDE.md hard rule).
 
+## Closing a change (standing process, user 2026-10-07)
+
+Every change follows this order, every time:
+
+1. **Build it in both surfaces.** Telegram and dashboard, per the table below — never ship
+   one half.
+2. **Verify both.** Telegram: render to a UTF-8 file and read it. Dashboard: a live
+   headless-browser DOM check (CLAUDE.md hard rule) — `py_compile`/`curl` do not count.
+3. **Commit and push**, to both `origin` and `backup` (git workflow memory) — right after
+   each change, not batched up and pushed later.
+4. **Cloud deploy happens automatically.** A git post-commit hook on `main`
+   (`.git/hooks/post-commit`, installed 2026-09-04) runs `tools/deploy_cloud.py` in the
+   background on every push: compiles, mirrors to the cloud repo, pushes it, pulls on the
+   VM, restarts `nyse-bot` + `nyse-dashboard`. Confirmed working 2026-10-07 — three commits
+   that day each auto-deployed and restarted cloud services within ~60-80s, verified
+   against the VM directly (commit hash and `systemctl is-active` both matched).
+   **Check `logs/auto_deploy.log` to confirm a deploy actually happened — don't assume.**
+   No manual `deploy_cloud.py` run is needed unless that log shows a failure.
+
 ## Where features are listed
 
 Add every new feature to this file's table so the two surfaces can be checked against each

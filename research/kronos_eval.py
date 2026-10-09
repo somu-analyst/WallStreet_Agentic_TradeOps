@@ -64,6 +64,7 @@ def load_bars(ticker, end=None, limit=None):
     q += " ORDER BY trade_date"
     df = pd.read_sql(q, con, params=p)
     con.close()
+    df = df.dropna(subset=COLS).reset_index(drop=True)    # Kronos rejects any NaN (volume too)
     df["timestamps"] = pd.to_datetime(df["trade_date"])
     if limit:
         df = df.tail(limit).reset_index(drop=True)
@@ -131,16 +132,29 @@ def smoke(args):
 
 
 # ---------------------------------------------------------------- out-of-sample run
-def _universe(con, n):
-    """Most liquid names by dollar volume in the 6 months BEFORE the test window, so the
-    pick cannot know which names did well inside it. Must still trade at the end."""
+def _universe(con, n, start):
+    """Most liquid names by dollar volume in the ~6 months BEFORE `start` (the window's first
+    origin), trading on `start` itself. Uses nothing at or after the window.
+
+    Audit fix 2026-10-09: this used to rank on 2025-H1 volume and require the name to trade
+    TODAY for every window. For the 2023-24 window that picked PLTR (x3.3), MSTR (x11.6),
+    NVDA (x7.4) etc. *because* they later got huge -- strong trends, exactly where a
+    mean-reverting model looks worst -- which confounded the memorisation comparison. The
+    post-freeze universe is unchanged by the fix (checked)."""
+    lo = (pd.Timestamp(start) - pd.Timedelta(days=182)).strftime("%Y-%m-%d")
     q = ("SELECT ticker, AVG(close*volume) dv FROM stock_history "
-         "WHERE trade_date BETWEEN '2025-01-01' AND ? AND volume>0 AND open IS NOT NULL "
+         "WHERE trade_date >= ? AND trade_date < ? AND volume>0 AND open IS NOT NULL "
          "GROUP BY ticker HAVING COUNT(*)>100 ORDER BY dv DESC")
-    last = con.execute("SELECT MAX(trade_date) FROM stock_history").fetchone()[0]
     live = {r[0] for r in con.execute(
-        "SELECT DISTINCT ticker FROM stock_history WHERE trade_date=?", (last,))}
-    return [t for t, _ in con.execute(q, (WEIGHTS_FROZEN,)) if t in live][:n]
+        "SELECT DISTINCT ticker FROM stock_history WHERE trade_date=?", (start,))}
+    return [t for t, _ in con.execute(q, (lo, start)) if t in live][:n]
+
+
+def _calendar(con):
+    """Trading days (SPY's bars): window bounds and de-overlap distances use real sessions."""
+    return [r[0] for r in con.execute(
+        "SELECT trade_date FROM stock_history WHERE ticker='SPY' AND close IS NOT NULL "
+        "ORDER BY trade_date")]
 
 
 def _ensure_out(oc):
@@ -155,31 +169,23 @@ def _ensure_out(oc):
     # only real skill is vol, and that vol measured ALONG each path beats the spread BETWEEN
     # paths). All annualised: pvol = median per-path realised vol over the h bars, rv = what
     # actually happened over those h bars, ewma = RiskMetrics(0.94) baseline at the origin.
-    for c in ("pvol", "rv", "ewma"):
+    for c in ("pvol", "rv", "ewma", "pvol_nj"):
         if c not in cols:
             oc.execute(f"ALTER TABLE kr_fc ADD COLUMN {c} REAL")
+    if "universe" not in cols:     # which names the run used: audits selection per window
+        oc.execute("ALTER TABLE kr_fc ADD COLUMN universe TEXT")
     oc.commit()
 
 
 def run(args):
     import torch
-    torch.set_num_threads(max(1, (os.cpu_count() or 2) - 2))   # leave room for the bot
+    torch.set_num_threads(args.threads or max(1, (os.cpu_count() or 2) - 2))  # room for the bot
     con = sqlite3.connect(DB)
-    tickers = _universe(con, args.universe)
-    bars = {}
-    for t in tickers:
-        df = pd.read_sql("SELECT trade_date, open, high, low, close, volume FROM stock_history "
-                         "WHERE ticker=? ORDER BY trade_date", con, params=(t,))
-        df = df.dropna(subset=COLS).reset_index(drop=True)
-        df["timestamps"] = pd.to_datetime(df["trade_date"])
-        bars[t] = df
-    con.close()
-
     hmax = max(HORIZONS)
     mdir, tdir, mctx = MODELS[args.arch]
     ctx = min(args.ctx, mctx)
     label = args.model or f"{args.arch}-c{ctx}"
-    cal = bars["SPY"]["trade_date"] if "SPY" in bars else next(iter(bars.values()))["trade_date"]
+    cal = pd.Series(_calendar(con))
     if args.insample:
         # Pre-cutoff window: these bars ARE in pretraining, so this measures MEMORISATION,
         # never skill. Labelled -IS so it can never be pooled with the out-of-sample rows.
@@ -197,6 +203,15 @@ def run(args):
         cal = cal[cal > WEIGHTS_FROZEN].tolist()
         cal = cal[:len(cal) - hmax]
     origins = cal[::ORIGIN_STEP]
+    tickers = _universe(con, args.universe, origins[0])
+    bars = {}
+    for t in tickers:
+        df = pd.read_sql("SELECT trade_date, open, high, low, close, volume FROM stock_history "
+                         "WHERE ticker=? ORDER BY trade_date", con, params=(t,))
+        df = df.dropna(subset=COLS).reset_index(drop=True)
+        df["timestamps"] = pd.to_datetime(df["trade_date"])
+        bars[t] = df
+    con.close()
     rng = np.random.default_rng(0)
     order = rng.permutation(len(origins))     # partial results stay spread across the window
     if args.max_origins:
@@ -232,20 +247,27 @@ def run(args):
             frames.append(win)
         if not frames:
             continue
+        # Same seed per origin for every config: common random numbers, so a difference
+        # between configs is the config, not sampling luck. Also makes reruns reproducible.
+        torch.manual_seed(int(o.replace("-", "")))
         cl = forecast_paths(pred, frames, hmax, args.paths)
         rows = []
         ann = np.sqrt(252)
         for j, (t, s0, fut, s21, s63, wm, ewma) in enumerate(meta):
             for h in HORIZONS:
                 pth = np.log(np.column_stack([np.full(cl.shape[1], s0), cl[j, :, :h]]))
-                pvol = float(np.median(np.diff(pth, axis=1).std(axis=1))) * ann
+                steps = np.diff(pth, axis=1)
+                pvol = float(np.median(steps.std(axis=1))) * ann
+                # Without the spot -> first-predicted-bar step: de-normalisation can make that
+                # first bar jump (Kronos issue #26), which would inflate pvol on its own.
+                pvol_nj = float(np.median(steps[:, 1:].std(axis=1))) * ann if h > 2 else None
                 rv = float(np.diff(np.log(np.r_[s0, fut[:h]])).std()) * ann
                 rows.append((o, t, h, s0, float(fut[h - 1]), s21, s63,
                              json.dumps([round(float(v), 4) for v in cl[j, :, h - 1]]), label, wm,
-                             pvol, rv, ewma * ann))
+                             pvol, rv, ewma * ann, pvol_nj, ",".join(tickers)[:2000]))
         oc.executemany("INSERT OR REPLACE INTO kr_fc (origin, ticker, h, spot0, real_close, sig21, "
-                       "sig63, paths, model, winmean, pvol, rv, ewma) "
-                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                       "sig63, paths, model, winmean, pvol, rv, ewma, pvol_nj, universe) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
         oc.commit()
         print(f"[{k + 1}/{len(origins)}] {o}  {len(frames)} names  {time.time() - t0:.0f}s", flush=True)
     oc.close()
@@ -254,9 +276,35 @@ def run(args):
 
 # ---------------------------------------------------------------- scoring (main python)
 def _crps(samples, y):
-    """Sample CRPS: E|X-y| - 0.5 E|X-X'|. Lower is better."""
+    """FAIR sample CRPS: E|X-y| - 1/(2N(N-1)) sum_{i!=j}|Xi-Xj|. Lower is better.
+    Audit fix 2026-10-09: the plain estimator divides the spread term by N^2 (counting the
+    zero diagonal), which at N=4 understates spread by 25% and penalises wide forecasts."""
     s = np.asarray(samples)
-    return np.mean(np.abs(s - y)) - 0.5 * np.mean(np.abs(s[:, None] - s[None, :]))
+    n = len(s)
+    return np.mean(np.abs(s - y)) - np.abs(s[:, None] - s[None, :]).sum() / (2 * n * (n - 1))
+
+
+def _crps_normal(y, sd):
+    """Closed-form CRPS of N(0, sd) at y (log-return space): the lognormal baseline."""
+    from scipy import stats
+    z = y / sd
+    return sd * (z * (2 * stats.norm.cdf(z) - 1) + 2 * stats.norm.pdf(z) - 1 / np.sqrt(np.pi))
+
+
+def _spaced(origins, h, cal_idx):
+    """Origins kept so consecutive ones are >= h TRADING days apart: no shared forward days.
+    Audit fix 2026-10-09: de-overlap used to slice `[::ceil(h/10)]` on the assumption that
+    origins are 10 days apart, but --max-origins takes a random subset, so the gaps vary.
+    At h=21 that left <4 origins and every IC came back empty."""
+    keep, last = [], None
+    for o in sorted(origins):
+        i = cal_idx.get(o)
+        if i is None:
+            continue
+        if last is None or i - last >= h:
+            keep.append(o)
+            last = i
+    return keep
 
 
 def evaluate(model="kronos-small", db=OUT_DB):
@@ -277,37 +325,49 @@ def evaluate(model="kronos-small", db=OUT_DB):
     df["real_ret"] = df["real_close"] / df["spot0"] - 1
     df["pred_ret"] = np.median(P, axis=1) / df["spot0"] - 1
     df["pred_disp"] = (np.quantile(P, .95, axis=1) - np.quantile(P, .05, axis=1)) / df["spot0"]
-    df["k_lo90"], df["k_hi90"] = np.quantile(P, .05, axis=1), np.quantile(P, .95, axis=1)
-    df["k_lo50"], df["k_hi50"] = np.quantile(P, .25, axis=1), np.quantile(P, .75, axis=1)
-    z90, z50 = 1.6449, 0.6745
-    sd = df["sig21"] * np.sqrt(df["h"])
-    df["b_lo90"], df["b_hi90"] = df["spot0"] * np.exp(-z90 * sd), df["spot0"] * np.exp(z90 * sd)
-    df["b_lo50"], df["b_hi50"] = df["spot0"] * np.exp(-z50 * sd), df["spot0"] * np.exp(z50 * sd)
-    zq = stats.norm.ppf((np.arange(P.shape[1]) + 0.5) / P.shape[1])   # same count as Kronos
-    df["crps_k"] = [_crps(P[i], y) / s for i, (y, s) in enumerate(zip(df["real_close"], df["spot0"]))]
-    df["crps_b"] = [_crps(s * np.exp(zq * v), y) / s
-                    for y, s, v in zip(df["real_close"], df["spot0"], sd)]
+    # Everything probabilistic is scored in LOG-RETURN space, Kronos and baseline alike.
+    LP = np.log(P / df["spot0"].to_numpy()[:, None])
+    ly = np.log(df["real_close"] / df["spot0"]).to_numpy()
+    sd = (df["sig21"] * np.sqrt(df["h"])).to_numpy()          # lognormal baseline, zero drift
+    # Calibration via PIT (where the outcome falls in the forecast distribution; uniform when
+    # calibrated). Audit fix 2026-10-09: band coverage from np.quantile on 4 samples is not a
+    # 90% band at all, so "Kronos covers 25% vs baseline 86%" compared unlike things.
+    rng = np.random.default_rng(0)
+    n = P.shape[1]
+    df["pit_k"] = ((LP < ly[:, None]).sum(1) + rng.random(len(df))) / (n + 1)
+    df["pit_b"] = stats.norm.cdf(ly / sd)
+    df["crps_k"] = [_crps(LP[i], ly[i]) for i in range(len(df))]
+    df["crps_b"] = _crps_normal(ly, sd)
 
+    con = sqlite3.connect(DB)
+    cal_idx = {d_: i for i, d_ in enumerate(_calendar(con))}
+    con.close()
+    first, last = df["origin"].min(), df["origin"].max()
+    window = ("IN-SAMPLE (memorisation check, not skill)" if model.endswith("-IS") else
+              "2024-07..2025-06 (clean per paper; pre weights-freeze)" if model.endswith("-P") else
+              f"after weights froze {WEIGHTS_FROZEN} (clean by construction)")
     out = {"model": model, "n_origins": int(df["origin"].nunique()),
-           "n_names": int(df["ticker"].nunique()),
-           "first": df["origin"].min(), "last": df["origin"].max(), "rows": []}
+           "n_names": int(df["ticker"].nunique()), "window": window, "n_paths": n,
+           "first": first, "last": last, "rows": []}
     for h in HORIZONS:
         d = df[df["h"] == h]
         if d.empty:
             continue
         hit = float(((d["pred_ret"] > 0) == (d["real_ret"] > 0)).mean())
         base = float(max((d["real_ret"] > 0).mean(), 1 - (d["real_ret"] > 0).mean()))
-        sig = d.pivot(index="origin", columns="ticker", values="pred_ret").sort_index()
-        fwd = d.pivot(index="origin", columns="ticker", values="real_ret").sort_index()
-        disp = d.pivot(index="origin", columns="ticker", values="pred_disp").sort_index()
+        keep = _spaced(d["origin"].unique(), h, cal_idx)
+        di = d[d["origin"].isin(keep)]                         # non-overlapping origins only
+        sig = di.pivot(index="origin", columns="ticker", values="pred_ret").sort_index()
+        fwd = di.pivot(index="origin", columns="ticker", values="real_ret").sort_index()
+        disp = di.pivot(index="origin", columns="ticker", values="pred_disp").sort_index()
         absr = fwd.abs()
-        bvol = d.pivot(index="origin", columns="ticker", values="sig21").sort_index()
-        step = max(1, int(np.ceil(h / ORIGIN_STEP)))     # de-overlap: origins are 10d apart
+        bvol = di.pivot(index="origin", columns="ticker", values="sig21").sort_index()
+        step = 1
         ic_dir = daily_ic(sig, fwd, step=step)
         ic_vol_k = daily_ic(disp, absr, step=step)
         ic_vol_b = daily_ic(bvol, absr, step=step)
         ls = []
-        for o in sig.index[::step]:
+        for o in sig.index:
             a, f = sig.loc[o], fwd.loc[o]
             m = a.notna() & f.notna()
             if m.sum() < 10:
@@ -315,40 +375,41 @@ def evaluate(model="kronos-small", db=OUT_DB):
             q = a[m].rank(pct=True)
             ls.append(f[m][q >= .8].mean() - f[m][q <= .2].mean())
         ls_t = stats.ttest_1samp(ls, 0) if len(ls) > 3 else None
-        cr = d.groupby("origin")[["crps_k", "crps_b"]].mean()
-        cr_t = stats.ttest_1samp((cr["crps_k"] - cr["crps_b"]).iloc[::step], 0) if len(cr) > 3 else None
-        y = d["real_close"]
+        cr = di.groupby("origin")[["crps_k", "crps_b"]].mean()
+        cr_t = stats.ttest_1samp(cr["crps_k"] - cr["crps_b"], 0) if len(cr) > 3 else None
         # The window-mean pull (found 2026-10-09): how much of the forecast is just "revert to
         # the context average". Real returns show ~0 here, so a high value is an artifact.
         g = (d["spot0"] / d["winmean"] - 1) if "winmean" in d and d["winmean"].notna().all() else None
         vr = {}
-        if "pvol" in d and d["pvol"].notna().sum() > 50:
-            dv = d[d["pvol"].notna() & (d["rv"] > 0)]
+        if "pvol" in di and di["pvol"].notna().sum() > 50:
+            dv = di[di["pvol"].notna() & (di["rv"] > 0)]
             rvp = dv.pivot(index="origin", columns="ticker", values="rv").sort_index()
             ql = {}
-            for name, col, scale in (("kronos", "pvol", 1.0), ("ewma", "ewma", 1.0),
-                                     ("trail21", "sig21", np.sqrt(252))):
+            racers = [("kronos", "pvol", 1.0), ("ewma", "ewma", 1.0), ("trail21", "sig21", np.sqrt(252))]
+            if "pvol_nj" in dv and dv["pvol_nj"].notna().all():
+                racers.insert(1, ("kronos_nj", "pvol_nj", 1.0))
+            for name, col, scale in racers:
                 fc = dv.pivot(index="origin", columns="ticker", values=col).sort_index() * scale
                 ic = daily_ic(fc, rvp, step=step)
                 r2 = (rvp / fc) ** 2
                 ql[name] = (r2 - np.log(r2) - 1).mean(axis=1)     # QLIKE per origin
                 vr[name] = {"ic": ic["ic"] if ic else None, "ic_t": ic["t"] if ic else None,
                             "qlike": float(ql[name].mean())}
-            dq = (ql["kronos"] - ql["ewma"]).iloc[::step].dropna()
+            dq = (ql["kronos"] - ql["ewma"]).dropna()
             vr["kronos_vs_ewma_t"] = float(stats.ttest_1samp(dq, 0).statistic) if len(dq) > 3 else None
         out["rows"].append({
             "vrace": vr,
             "pull":float(np.corrcoef(g, d["pred_ret"])[0, 1]) if g is not None else None,
             "pull_real": float(np.corrcoef(g, d["real_ret"])[0, 1]) if g is not None else None,
-            "h": h, "n": len(d),
+            "h": h, "n": len(d), "n_indep": len(keep),
             "bias_pred": float(d["pred_ret"].mean()), "bias_real": float(d["real_ret"].mean()),
             "hit": hit, "hit_base": base,
             "ic": ic_dir["ic"] if ic_dir else None, "ic_t": ic_dir["t"] if ic_dir else None,
             "ls": float(np.mean(ls)) if ls else None, "ls_t": float(ls_t.statistic) if ls_t else None,
-            "cov90_k": float(((y >= d["k_lo90"]) & (y <= d["k_hi90"])).mean()),
-            "cov90_b": float(((y >= d["b_lo90"]) & (y <= d["b_hi90"])).mean()),
-            "cov50_k": float(((y >= d["k_lo50"]) & (y <= d["k_hi50"])).mean()),
-            "cov50_b": float(((y >= d["b_lo50"]) & (y <= d["b_hi50"])).mean()),
+            "cov90_k": float(((d["pit_k"] - .5).abs() < .45).mean()),
+            "cov90_b": float(((d["pit_b"] - .5).abs() < .45).mean()),
+            "cov50_k": float(((d["pit_k"] - .5).abs() < .25).mean()),
+            "cov50_b": float(((d["pit_b"] - .5).abs() < .25).mean()),
             "crps_k": float(d["crps_k"].mean()), "crps_b": float(d["crps_b"].mean()),
             "crps_t": float(cr_t.statistic) if cr_t else None,
             "volic_k": ic_vol_k["ic"] if ic_vol_k else None,
@@ -363,12 +424,14 @@ def report(args):
         print("no forecasts yet - run `run` first")
         return 1
     f = lambda v, p=3: "-" if v is None else f"{v:.{p}f}"
-    print(f"{r['model']}: {r['n_origins']} origins x {r['n_names']} names, {r['first']}..{r['last']}"
-          f"  (all after weights froze {WEIGHTS_FROZEN})")
-    print("h  n     predRet realRet | hit  base  | IC    t     | L/S   t     | cov90 K/B   cov50 K/B   "
+    print(f"{r['model']}: {r['n_origins']} origins x {r['n_names']} names x {r['n_paths']} paths, "
+          f"{r['first']}..{r['last']}  [{r['window']}]")
+    print("h  n    ind predRet realRet | hit  base  | IC    t     | L/S   t     | cov90 K/B   cov50 K/B   "
           "| CRPS K/B  t(K-B) | volIC K/B   | pull K/real")
+    print("   (ind = non-overlapping origins behind IC / L-S / CRPS t; cov = PIT-based, nominal .90/.50;"
+          " CRPS in log-return units)")
     for x in r["rows"]:
-        print(f"{x['h']:<2} {x['n']:<5} {x['bias_pred']:+.4f} {x['bias_real']:+.4f} | "
+        print(f"{x['h']:<2} {x['n']:<4} {x['n_indep']:<3} {x['bias_pred']:+.4f} {x['bias_real']:+.4f} | "
               f"{x['hit']:.2f} {x['hit_base']:.2f} | {f(x['ic'])} {f(x['ic_t'], 2)} | "
               f"{f(x['ls'], 4)} {f(x['ls_t'], 2)} | {x['cov90_k']:.2f}/{x['cov90_b']:.2f}   "
               f"{x['cov50_k']:.2f}/{x['cov50_b']:.2f}   | {x['crps_k']:.4f}/{x['crps_b']:.4f} "
@@ -382,7 +445,7 @@ def report(args):
                 continue
             print(f"h={x['h']:<2} " + "  ".join(
                 f"{k}: IC {f(v[k]['ic'])} (t {f(v[k]['ic_t'], 1)}) QLIKE {v[k]['qlike']:.3f}"
-                for k in ("kronos", "ewma", "trail21")) +
+                for k in ("kronos", "kronos_nj", "ewma", "trail21") if k in v) +
                 f"  | t(QLIKE kronos-ewma) {f(v['kronos_vs_ewma_t'], 2)}")
     return 0
 
@@ -399,6 +462,8 @@ def main():
     ap.add_argument("--arch", choices=sorted(MODELS), default="small")
     ap.add_argument("--ctx", type=int, default=EVAL_CTX)
     ap.add_argument("--max-origins", type=int, default=0)
+    ap.add_argument("--threads", type=int, default=0,
+                    help="torch threads (default cores-2; set it on a 2-core VM)")
     ap.add_argument("--insample", default=None, metavar="START",
                     help="score the PRE-cutoff window from START (memorisation check)")
     ap.add_argument("--paper", action="store_true",

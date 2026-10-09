@@ -34003,16 +34003,22 @@ def _sync_history_from_daily(conn):
     The upsert refreshes a stored row ONLY when it is incomplete (high/volume NULL),
     so a partial row heals on the next run while complete rows -- including
     yfinance-sourced ones carrying `open` and dividend-adjusted closes that
-    stock_daily does not have -- are left untouched."""
+    stock_daily does not have -- are left untouched.
+
+    `open` is carried too (2026-10-09). It was hardcoded NULL from before stock_daily had an
+    open column, which blanked the open on 41k rows / 741 tickers from 2025-12-22 on and
+    silently fed stale bars to anything that drops NULL-open rows (Kronos, range-vol)."""
     try:
         conn.execute(
             "INSERT INTO stock_history (ticker, trade_date, open, high, low, close, volume) "
-            "SELECT UPPER(ticker), trade_date, NULL, high, low, close, volume "
+            "SELECT UPPER(ticker), trade_date, open, high, low, close, volume "
             "FROM stock_daily WHERE close IS NOT NULL "
             "ON CONFLICT(ticker, trade_date) DO UPDATE SET "
+            "  open=COALESCE(excluded.open, stock_history.open), "
             "  high=excluded.high, low=excluded.low, "
             "  close=excluded.close, volume=excluded.volume "
-            "WHERE stock_history.high IS NULL OR stock_history.volume IS NULL")
+            "WHERE stock_history.high IS NULL OR stock_history.volume IS NULL "
+            "   OR (stock_history.open IS NULL AND excluded.open IS NOT NULL)")
         conn.commit()
     except Exception:
         log.debug("stock_history sync-from-daily failed", exc_info=True)

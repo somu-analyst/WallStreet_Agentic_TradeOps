@@ -48,6 +48,21 @@ Every change follows this order, every time:
    **Check `logs/auto_deploy.log` to confirm a deploy actually happened — don't assume.**
    No manual `deploy_cloud.py` run is needed unless that log shows a failure.
 
+   **⚠️ The mirror step copies the LIVE FILE ON DISK, not the git-committed version**
+   (`tools/sync_cloud.py`: `shutil.copy2(src, dst)` — confirmed 2026-10-10). This means a
+   hook firing on ANY commit — including an unrelated one, from another session, or the
+   scheduled `NYSE_CodeSync` safety-net sync — can mirror and deploy whatever is currently
+   saved to `telegram_bot_optimized.py`/`dashboard.py`, finished or not, committed or not.
+   "I haven't committed yet" does not protect a mid-edit file from reaching the live
+   production bot — only "I haven't saved to disk yet" does. Found when two sessions were
+   editing the bot concurrently: a `py_compile`-clean, fully-finished (but not yet
+   git-committed) edit had already been deployed by an earlier, unrelated commit's hook
+   before its own commit landed — harmless that time because the file was already correct
+   and tested, but the sequencing was coincidental, not guaranteed. **Keep an in-progress
+   edit syntactically valid and in a state you would accept going live at every point where
+   you stop to think, not only at the point you intend to commit** — especially when another
+   session may be working on the same repo at the same time.
+
 ## Where features are listed
 
 Add every new feature to this file's table so the two surfaces can be checked against each

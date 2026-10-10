@@ -12772,10 +12772,23 @@ def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0
                     iv_ref = _iv
             iv_ref = max(iv_ref, 0.10)
 
+            # Per-strike IV, kept in lockstep with _hiprob_scan (tracker 450, skew) -- see
+            # that function's comment for why. Tuple index 1 is mid here, not a .loc column.
+            def _strike_iv(mid_px, K):
+                if mid_px > 0.10:
+                    try:
+                        _iv = _implied_vol_hp(mid_px, spot, K, T, r)
+                        if _iv and 0.10 <= _iv < 3.0:
+                            return _iv
+                    except Exception:
+                        pass
+                return iv_ref
+
             pl = sorted([p for p in puts if p[0] < spot and p[1] > 0.05], key=lambda p: -p[0])
             for i in range(len(pl)):
                 K, cr = pl[i][0], pl[i][2]            # sell the short leg at the sell side
-                pop = _pa(spot, K - cr, T, iv_ref)
+                iv_k = _strike_iv(pl[i][1], K)
+                pop = _pa(spot, K - cr, T, iv_k)
                 if pop is None or pop < min_pop:
                     continue
                 out.append({"tk": tk, "kind": "CSP", "setup": f"{K:g}P", "credit": cr,
@@ -12795,7 +12808,8 @@ def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0
             cu = sorted([c for c in calls if c[0] > spot and c[1] > 0.05], key=lambda c: c[0])
             for i in range(len(cu)):
                 K, cr = cu[i][0], cu[i][2]            # sell the short leg at the sell side
-                pa = _pa(spot, K + cr, T, iv_ref)
+                iv_k = _strike_iv(cu[i][1], K)
+                pa = _pa(spot, K + cr, T, iv_k)
                 if pa is None:
                     continue
                 pop = 1 - pa
@@ -31803,10 +31817,41 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045,
                     iv_ref = float(np.median(_ivs))
             except Exception:
                 pass
-            # Floor raised 0.10 -> 0.15: a sub-15% IV on a multi-week equity option is almost
-            # always a bad quote rather than a real market, and it is exactly what manufactured
-            # the ~100% POPs. Still low enough to leave genuinely quiet index names alone.
-            iv_ref = max(iv_ref, 0.15)
+            # Floor LOWERED 0.15 -> 0.10 (tracker 462, cross-session finding from nyse-data-01,
+            # 2026-10-09): the 0.15 floor bound for SPY on EVERY one of 4 days checked,
+            # overriding a real, liquidity-gated market IV of 11-12% with a fake 15%. SPY
+            # strikes landed 5-8 points further OTM than the real market supports and credit
+            # read 20-35% low as a direct result -- the opposite of a safety margin, it was
+            # silently understating edge on the most liquid name in the scanner. The "sub-15%
+            # is almost always a bad quote" assumption (2026-07-21, ARKX-style incident) does
+            # not hold for a name this liquid; 0.10 matches what _hiprob_scan_asof already
+            # used, closing the lockstep drift between the two at the same time. The POP cap
+            # at 0.99 (_pa, above) is the actual guard against a garbage near-zero IV turning
+            # into a fake-infinite edge -- that guard is independent of this floor and still
+            # fully in place.
+            iv_ref = max(iv_ref, 0.10)
+
+            # Per-strike IV, not the flat chain-wide iv_ref, for the ACTUAL candidate being
+            # priced (tracker 450, skew). Equity options skew: far-OTM puts trade at HIGHER
+            # implied vol than ATM (crash-insurance premium), far-OTM calls LOWER. Pricing
+            # every strike off one ATM-region number ignores that market-implied shape and
+            # was flagged as a real correctness gap, independent of todays measured
+            # calibration (tracker 490 found the opposite net effect -- POP underconfident,
+            # not over -- but that does not make the flat-IV modeling choice correct, it
+            # just means something else in the pipeline, now identified as the IV floor
+            # above, is ALSO conservative). Same solver already trusted for iv_ref
+            # (_implied_vol_hp), same 0.10 floor, so a bad solve falls back to iv_ref exactly
+            # as before -- this never makes POP MORE wrong than the prior behaviour, only
+            # more accurate when the solve succeeds.
+            def _strike_iv(mid_px, K):
+                if mid_px > 0.10:
+                    try:
+                        _iv = _implied_vol_hp(mid_px, spot, K, T, r)
+                        if _iv and 0.10 <= _iv < 3.0:
+                            return _iv
+                    except Exception:
+                        pass
+                return iv_ref
 
             if strike_filter:
                 # Exact-strike mode: show THIS strike, not the auto-picked nearest-qualifying
@@ -31834,7 +31879,8 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045,
 
             pl = puts[(puts["strike"] < spot) & (puts["mid"] > 0.05) & puts["_liq"]].sort_values("strike", ascending=False).reset_index(drop=True)
             for i in range(len(pl)):
-                K = float(pl.loc[i, "strike"]); cr = float(pl.loc[i, "_sell"]); iv = iv_ref
+                K = float(pl.loc[i, "strike"]); cr = float(pl.loc[i, "_sell"])
+                iv = _strike_iv(float(pl.loc[i, "mid"]), K)
                 pop = _pa(spot, K - cr, T, iv)
                 if pop is None or pop < min_pop:
                     continue
@@ -31855,7 +31901,8 @@ def _hiprob_scan(tickers, dte_lo=20, dte_hi=45, min_pop=0.80, r=0.045,
                 break
             cu = calls[(calls["strike"] > spot) & (calls["mid"] > 0.05) & calls["_liq"]].sort_values("strike").reset_index(drop=True)
             for i in range(len(cu)):
-                K = float(cu.loc[i, "strike"]); cr = float(cu.loc[i, "_sell"]); iv = iv_ref
+                K = float(cu.loc[i, "strike"]); cr = float(cu.loc[i, "_sell"])
+                iv = _strike_iv(float(cu.loc[i, "mid"]), K)
                 pa = _pa(spot, K + cr, T, iv)
                 if pa is None:
                     continue

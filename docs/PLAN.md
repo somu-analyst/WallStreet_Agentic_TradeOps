@@ -104,6 +104,11 @@ Options-trading edge system: Telegram bot + dashboard + our own capture-forward 
   Independent studies agree (Say43 ETF walk-forward, #323 benchmark, forex/CFD test).
   **Not shipped to bot/dashboard.** Reopen only for: fine-tuning on a GPU, or intraday bars once
   `US_intraday.db` holds months (16 days on 2026-10-09).
+  Environments DELETED 2026-10-09 (local venv/weights/vendored repo, VM `~/kronos-eval`); kept
+  `research/kronos_eval.py` + `research/kronos_eval.db` (results). To rerun: clone
+  shiyu-coder/Kronos into `research/kronos/`, `python -m venv research/kronos-venv` + torch (CPU),
+  numpy, pandas, einops, safetensors, huggingface_hub; fetch `config.json` + `model.safetensors`
+  for each model with **curl** (the venv's own HF download fails behind the AV's SSL interception).
 - [x] ~~Evaluate **Kronos**~~ (`github.com/shiyu-coder/Kronos`, MIT, AAAI 2026) — first open-source foundation model for K-lines (OHLCV), 45 exchanges. Family: mini 4.1M/2048ctx · small 24.7M/512 · base 102.3M/512 · large 499.2M (weights NOT public). Probabilistic: `sample_count` paths via temperature/top_p.
   - **Fit:** `stock_history` (multi-year OHLCV, 734 tickers) is already exactly the input format. Path ensembles map onto POP / expected-move / 1σ ranges — currently computed from a single ATM-backed IV under a lognormal assumption (`_hiprob_scan`).
   - **Machine reality (verified 2026-07-22):** NO GPU, no torch/transformers installed, Python 3.13.14, 12 cores/16.6GB RAM, 24GB disk free. CPU-only ⇒ favour **mini/small**; base is feasible but slow; large unavailable anyway.

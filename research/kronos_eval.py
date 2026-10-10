@@ -216,6 +216,15 @@ def run(args):
     order = rng.permutation(len(origins))     # partial results stay spread across the window
     if args.max_origins:
         order = order[:args.max_origins]
+    if args.dates:
+        # Explicit origins, so configs can be compared on the SAME dates. Audit 2026-10-09:
+        # the random subset depends on the window's length, and a calendar change (one SPY
+        # row with NULL volume) moved it from 30 to 31 dates and reshuffled 2 of 8 picks.
+        want = args.dates.split(",")
+        missing = [d_ for d_ in want if d_ not in origins]
+        if missing:
+            raise SystemExit(f"--dates not on this window's origin grid: {missing}")
+        order = [origins.index(d_) for d_ in want]
 
     oc = sqlite3.connect(OUT_DB)
     _ensure_out(oc)
@@ -307,9 +316,10 @@ def _spaced(origins, h, cal_idx):
     return keep
 
 
-def evaluate(model="kronos-small", db=OUT_DB):
+def evaluate(model="kronos-small", db=OUT_DB, dates=None):
     """Every number the report shows, as plain dicts, so the bot/dashboard can render the
-    same result. Returns None until there is data."""
+    same result. Returns None until there is data. `dates` restricts to those origins, so
+    configs can be scored on exactly the same days."""
     from scipy import stats
     sys.path.insert(0, os.path.join(HERE, "..", "tools"))
     from walkforward import daily_ic
@@ -319,6 +329,8 @@ def evaluate(model="kronos-small", db=OUT_DB):
     oc = sqlite3.connect(db)
     df = pd.read_sql("SELECT * FROM kr_fc WHERE model=?", oc, params=(model,))
     oc.close()
+    if dates is not None:
+        df = df[df["origin"].isin(dates)]
     if df.empty:
         return None
     P = np.array([json.loads(p) for p in df["paths"]])
@@ -450,9 +462,44 @@ def report(args):
     return 0
 
 
+COMPARE = ["small-c64", "small-c128", "small-c256", "small-c512", "base-c256", "mini-c1024",
+           "small-c256-P", "small-c256-IS"]
+
+
+def compare(args):
+    """One line per config. Post-freeze configs are scored on the origins they ALL share;
+    the -P / -IS windows are separate periods and are shown as-is, never pooled."""
+    oc = sqlite3.connect(OUT_DB)
+    have = {m: {r[0] for r in oc.execute("SELECT DISTINCT origin FROM kr_fc WHERE model=?", (m,))}
+            for m in COMPARE}
+    oc.close()
+    oos = [m for m in COMPARE if have[m] and not m.endswith(("-P", "-IS"))]
+    common = sorted(set.intersection(*(have[m] for m in oos))) if oos else []
+    print(f"post-freeze configs scored on {len(common)} shared origins: {common}")
+    f = lambda v, p=2: "  -  " if v is None else f"{v:+.{p}f}"
+    print(f"{'config':<15}{'h':>3} {'pull':>6} {'hit-base':>9} {'IC':>6} {'t':>6} {'CRPS K/B':>9} "
+          f"{'cov90':>6} {'cov50':>6} | {'volQLIKE K/E':>13} {'t':>6}")
+    for m in COMPARE:
+        if not have[m]:
+            continue
+        r = evaluate(m, dates=None if m.endswith(("-P", "-IS")) else common)
+        if not r:
+            continue
+        for x in r["rows"]:
+            v = x["vrace"] or {}
+            q = (f"{v['kronos']['qlike']:.2f}/{v['ewma']['qlike']:.2f}" if "kronos" in v else "     -")
+            print(f"{m:<15}{x['h']:>3} {f(x['pull']):>6} {x['hit'] - x['hit_base']:>+9.2f} "
+                  f"{f(x['ic'], 3):>6} {f(x['ic_t']):>6} {x['crps_k'] / x['crps_b']:>9.2f} "
+                  f"{x['cov90_k']:>6.2f} {x['cov50_k']:>6.2f} | {q:>13} "
+                  f"{f(v.get('kronos_vs_ewma_t')):>6}")
+    print("pull: corr(forecast, spot/window-mean - 1), real returns show ~0 | CRPS K/B > 1 = worse "
+          "than lognormal | cov nominal .90/.50 | volQLIKE lower = better, t > 2 = Kronos worse")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["smoke", "run", "report"])
+    ap.add_argument("mode", choices=["smoke", "run", "report", "compare"])
     ap.add_argument("--ticker", default="SPY")
     ap.add_argument("--horizon", type=int, default=10)
     ap.add_argument("--samples", type=int, default=1)
@@ -462,6 +509,8 @@ def main():
     ap.add_argument("--arch", choices=sorted(MODELS), default="small")
     ap.add_argument("--ctx", type=int, default=EVAL_CTX)
     ap.add_argument("--max-origins", type=int, default=0)
+    ap.add_argument("--dates", default=None,
+                    help="comma-separated origin dates to run (overrides --max-origins)")
     ap.add_argument("--threads", type=int, default=0,
                     help="torch threads (default cores-2; set it on a 2-core VM)")
     ap.add_argument("--insample", default=None, metavar="START",
@@ -471,7 +520,7 @@ def main():
     args = ap.parse_args()
     if args.mode == "report" and not args.model:
         args.model = f"small-c{EVAL_CTX}"
-    return {"smoke": smoke, "run": run, "report": report}[args.mode](args)
+    return {"smoke": smoke, "run": run, "report": report, "compare": compare}[args.mode](args)
 
 
 if __name__ == "__main__":

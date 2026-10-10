@@ -90,11 +90,24 @@ Options-trading edge system: Telegram bot + dashboard + our own capture-forward 
 - [x] ~~`/debate` weight rebalance~~ — **DONE 2026-07-27** (see A17 below / commit fb97b29): built the actual agent-level backtest. Technical has a real edge (rank-IC +0.047, t=+7.05) — the earlier "-0.039 reversal" number also didn't replicate, it was equally unverified. Macro has zero edge vs SPY's own fwd return (t=-0.01), same verdict as Flow. Weights: Technical 1.0→1.3, Macro 0.7→0.3; Flow and Position (GEX, untested) left untouched.
 - [x] ~~`_lib` orphan triage~~ — **DONE 2026-07-24** (commit d47908d): deleted `options_tracker.py`, `market_news_aggregator.py`, `news_and_earnings.py` (100% dead, verified zero call sites); underlying tables (`trades`/`market_snapshots`/`news_feed`) remain alive via separate direct code in the main files.
 
-## Kronos foundation model (user ask 2026-07-22 — RESEARCHED, not built)
-- [ ] Evaluate **Kronos** (`github.com/shiyu-coder/Kronos`, MIT, AAAI 2026) — first open-source foundation model for K-lines (OHLCV), 45 exchanges. Family: mini 4.1M/2048ctx · small 24.7M/512 · base 102.3M/512 · large 499.2M (weights NOT public). Probabilistic: `sample_count` paths via temperature/top_p.
+## Kronos foundation model (user ask 2026-07-22 — EVALUATED 2026-10-09: REJECTED on our data)
+- [x] **Out-of-sample eval done 2026-10-09** (`research/kronos_eval.py compare`, tracker 484/486/489).
+  Leakage resolved: paper App. D says pretraining data ends **June 2024**; HF weights frozen
+  2025-06-30. 8 configs (small c64/128/256/512, base, mini, plus the 2024-25 paper window and a
+  2023-24 in-sample check), 20 liquid names, 8 shared origins, 5/10/21d. Every config:
+  hit rate at or below the always-up base; CRPS **1.2-3.8x worse** than a zero-drift lognormal
+  on trailing vol; 50% band covers 8-34%; volatility **loses to EWMA in 17 of 18** cells (t +1.7
+  to +7.8; one tie). small/base forecasts are 63-90% "revert to the context-window mean" (the
+  author confirms the reversal bias, issue #33); mini is biased UP instead. The scattered
+  |t|>2 direction ICs flip sign between windows (21d: +0.27 post-freeze vs -0.25 in 2024-25) on
+  5-8 independent dates = noise. In-sample is no better, so no memorisation either.
+  Independent studies agree (Say43 ETF walk-forward, #323 benchmark, forex/CFD test).
+  **Not shipped to bot/dashboard.** Reopen only for: fine-tuning on a GPU, or intraday bars once
+  `US_intraday.db` holds months (16 days on 2026-10-09).
+- [x] ~~Evaluate **Kronos**~~ (`github.com/shiyu-coder/Kronos`, MIT, AAAI 2026) — first open-source foundation model for K-lines (OHLCV), 45 exchanges. Family: mini 4.1M/2048ctx · small 24.7M/512 · base 102.3M/512 · large 499.2M (weights NOT public). Probabilistic: `sample_count` paths via temperature/top_p.
   - **Fit:** `stock_history` (multi-year OHLCV, 734 tickers) is already exactly the input format. Path ensembles map onto POP / expected-move / 1σ ranges — currently computed from a single ATM-backed IV under a lognormal assumption (`_hiprob_scan`).
   - **Machine reality (verified 2026-07-22):** NO GPU, no torch/transformers installed, Python 3.13.14, 12 cores/16.6GB RAM, 24GB disk free. CPU-only ⇒ favour **mini/small**; base is feasible but slow; large unavailable anyway.
-  - **BLOCKER for validation — pretraining leakage.** Kronos was pretrained on historical market data through an unpublished cutoff. Backtesting it on `stock_history` 2016–2026 is CONTAMINATED and will manufacture a fake edge. Any test must be strictly out-of-sample vs that cutoff (or forward-tested live). This is the single biggest trap.
+  - ~~**BLOCKER for validation — pretraining leakage.**~~ (Resolved 2026-10-09: the cutoff IS published, June 2024.) Kronos was pretrained on historical market data through an unpublished cutoff. Backtesting it on `stock_history` 2016–2026 is CONTAMINATED and will manufacture a fake edge. Any test must be strictly out-of-sample vs that cutoff (or forward-tested live). This is the single biggest trap.
   - Note repo's own caveat: its backtest demo is "not a production-ready quantitative trading system"; no accuracy benchmarks published. Qlib is needed only for their fine-tune demo — **inference does not require Qlib** (which stays out of scope).
 
 ## Adjacent-framework ideas (user 2026-07-24 — RESEARCHED, not built)

@@ -58,7 +58,16 @@ RENAME = {
     "_ssl_fix.py":               "cloud_ssl_fix.py",
     "cloud_smoke.py":            "cloud_smoke.py",          # already unambiguous
 }
-FILES = list(RENAME) + ["requirements.txt", "requirements_openbb.txt"]
+FILES = list(RENAME) + ["requirements.txt", "requirements_openbb.txt",
+                        # ID 356's public showcase: standalone, imports neither canonical
+                        # module, so no rename/rewrite is needed -- it is not a mirror of an
+                        # existing private file, there is nothing for its name to be confused
+                        # with. export_public_data.py must run ON the VM (against the VM's own
+                        # production DB) to keep public_export.db current there, but it is a
+                        # SINGLE file, not the whole tools/ directory -- most of tools/ is
+                        # laptop-side operational scripts (this file included) that have no
+                        # business running on the deployment target.
+                        "public_dashboard.py", "tools/export_public_data.py"]
 DIRS = ["_lib", "static", ".streamlit"]
 
 # A copy is not a place to be clever: anything matching these never crosses, whatever the

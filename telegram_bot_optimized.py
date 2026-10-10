@@ -12764,12 +12764,19 @@ def _hiprob_scan_asof(conn, trade_date, tickers, dte_lo=20, dte_hi=45, min_pop=0
             calls = [x for x in (_leg(s, bc, ac) for s, bc, ac, lc, _, _, _ in chain) if x]
             puts = [x for x in (_leg(s, bp, ap) for s, _, _, _, bp, ap, lp in chain) if x]
 
-            iv_ref = 0.40                      # ATM-backed IV — same ladder as the live scanner
-            atm = min(calls, key=lambda c: abs(c[0] - spot)) if calls else None
-            if atm and atm[1] > 0:
-                _iv = _implied_vol_hp(atm[1], spot, atm[0], T, r)
-                if _iv and 0.05 < _iv < 3.0:
-                    iv_ref = _iv
+            # ATM-backed IV, same ladder as the live scanner: MEDIAN of the 5 strikes nearest
+            # spot, so one stale/wide mid cannot set iv_ref for the whole ticker. This was a
+            # single nearest strike until 2026-10-10 -- drift from _hiprob_scan found by the
+            # live-vs-backtest per-trade check (tracker 462/499).
+            iv_ref = 0.40
+            _ivs = []
+            for _k, _m, _s, _b in sorted(calls, key=lambda c: abs(c[0] - spot))[:5]:
+                if _m > 0:
+                    _iv = _implied_vol_hp(_m, spot, _k, T, r)
+                    if _iv and 0.05 < _iv < 3.0:
+                        _ivs.append(_iv)
+            if _ivs:
+                iv_ref = float(np.median(_ivs))
             iv_ref = max(iv_ref, 0.10)
 
             # Per-strike IV, kept in lockstep with _hiprob_scan (tracker 450, skew) -- see

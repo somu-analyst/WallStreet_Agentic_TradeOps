@@ -77,5 +77,6 @@ other.
 | Gamma exposure walls | `/gex` | 📐 GEX Command |
 | Paper trading | paper book commands | 📝 Paper Trading |
 | Watchlist | `/watchlist` | 👀 Watchlist |
+| Order-side options flow (buyers at ask vs sellers at bid, reel filter, scorecard) | `/sideflow [TICKER]` | 📡 Macro/Event Hub → 💸 Flow, "Who started the trade" |
 
 Keep this table current. Anything that exists on only one surface is listed with "not yet".

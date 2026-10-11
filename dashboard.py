@@ -26484,6 +26484,72 @@ elif page == "📡 Macro/Event Hub":
             except Exception as _fbe:
                 st.caption(f"Flow board unavailable: {_fbe}")
 
+            # ── Order-side flow (tracker 506) ───────────────────────────────────────────
+            # The board above cannot see who started a trade; this can. Same engine as the
+            # bot's /sideflow (_side_flow / _side_flow_scorecard), so the numbers match.
+            st.markdown("##### Who started the trade: buyers at the ask vs sellers at the bid")
+            try:
+                _sf_tk = (st.text_input("Drill into one ticker (optional)", key="sideflow_tk",
+                                        placeholder="e.g. NVDA") or "").strip().upper() or None
+                _sf = _tbmod._side_flow(ticker=_sf_tk)
+                _sfc = _tbmod._side_flow_scorecard()
+                if _sf.get("status") != "ok":
+                    _render_tg(_tbmod._fmt_side_flow(_sf, _sfc))
+                else:
+                    _s = _sf["split"]
+                    _mc = st.columns(4)
+                    for _m, (_lbl, _k, _hlp) in zip(_mc, (
+                            ("Calls bought at ask", "AC", "Buyer paid up for calls: bullish"),
+                            ("Puts bought at ask", "AP", "Buyer paid up for puts: bearish or a hedge"),
+                            ("Puts sold at bid", "BP", "Seller wrote puts: bullish"),
+                            ("Calls sold at bid", "BC", "Seller wrote calls: often covered calls"))):
+                        _m.metric(_lbl, f"${_s[_k] / 1e6:,.1f}M", help=_hlp)
+                    _bc = st.columns(2)
+                    for _cx, (_key, _ttl) in zip(_bc, (("bullish", "📈 Buyers of OTM calls"),
+                                                        ("bearish", "📉 Buyers of OTM puts"))):
+                        with _cx:
+                            st.markdown(f"**{_ttl}**")
+                            _rws = _sf[_key]
+                            if not _rws:
+                                st.caption("nothing passed the filter on this side")
+                                continue
+                            st.dataframe(pd.DataFrame([{
+                                "Ticker": r["ticker"], "Prints": r["prints"],
+                                "Net premium": abs(r["net"]) / 1e6,
+                                "Biggest": r["top"], "Biggest $": r["top_prem"] / 1e6,
+                            } for r in _rws]), hide_index=True, use_container_width=True,
+                                column_config={
+                                    "Prints": st.column_config.NumberColumn(
+                                        format="%d", help="Qualifying prints: the reel's "
+                                                          "'45, 45, 45 in one ticker'"),
+                                    "Net premium": st.column_config.NumberColumn(format="$%.2fM"),
+                                    "Biggest $": st.column_config.NumberColumn(format="$%.2fM"),
+                                })
+                    if _sf["drill"]:
+                        st.markdown(f"**🔎 {_sf['drill_ticker']} biggest intervals today**")
+                        _sidelbl = {"A": "A · bought at ask", "B": "B · sold at bid",
+                                    "M": "M · between", "?": "? · no quote"}
+                        st.dataframe(pd.DataFrame([{
+                            "UTC": r["time"], "Contract": r["contract"],
+                            "Side": _sidelbl.get(r["side"], r["side"]),
+                            "Contracts": r["contracts"], "Premium": r["premium"] / 1e6,
+                            "OTM": r["otm"], "Opening": r["opening"],
+                        } for r in _sf["drill"]]), hide_index=True, use_container_width=True,
+                            column_config={
+                                "Contracts": st.column_config.NumberColumn(format="%d"),
+                                "Premium": st.column_config.NumberColumn(format="$%.2fM"),
+                            })
+                    elif _sf_tk:
+                        st.caption(f"No intervals for {_sf_tk} on {_sf['day']}.")
+                    st.caption(f"Session **{_sf['day']}** · last poll {_sf['last_poll'][11:16]} "
+                               f"UTC, quotes ~15 min delayed · {_sf['tickers']} names · "
+                               f"{_sf['prints']:,} two-minute intervals with trades")
+                    _render_tg(_tbmod._fmt_side_scorecard(_sfc))
+                    _render_tg(_tbmod._side_flow_note())
+            except Exception as _sfe:
+                st.caption(f"Order-side flow unavailable: {_sfe}")
+            st.markdown("---")
+
             st.caption("Money-flow / rotation across US sectors, style, continents, countries, "
                        "currencies, commodities, bonds, crypto (bot /flow) — Chaikin Money Flow + "
                        "relative strength + RRG quadrant, plus 'what moves together' correlations.")

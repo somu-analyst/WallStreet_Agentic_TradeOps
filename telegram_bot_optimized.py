@@ -29027,6 +29027,277 @@ def _fmt_flow_board(conn, top=8):
     return "\n\n".join(parts)
 
 
+# ── ORDER-SIDE FLOW (tracker 506) ─────────────────────────────────────────────
+# Reads opt_flow (US_intraday.db), written every 2 min by NYSE_intraday.py: per-contract
+# volume traded since the previous poll, with the side inferred from the last trade against
+# the quote (A = at the ask, B = at the bid, M = between). This is what the snapshot-based
+# _flow_board above says it cannot see. Built after an Unusual-Whales flow filter from a reel
+# (tracker 500-505): on EOD chains, OTM/vol>OI/$45k flow beat the base rate only on the
+# bullish side and pointed the WRONG way on the bearish side. The side rule is the part that
+# could not be tested then, so the scorecard below grades it as history accrues.
+_SIDE_FLOW_MIN_PRINT = 45_000     # the reel's per-order premium bar
+_SIDE_FLOW_H = 5                  # forward horizon, trading days
+_SIDE_FLOW_MIN_INDEP = 8          # independent H-day periods before any verdict is printed
+_SIDE_FLOW_START = "2026-10-12"   # first session of collection (no backfill is possible)
+
+
+def _side_flow(iconn=None, day=None, top=10, ticker=None):
+    """Buyer/seller premium split, the reel-filter board and an optional ticker drilldown.
+
+    Bullish money = calls bought at the ask + puts sold at the bid; bearish = puts bought at
+    the ask + calls sold at the bid. The reel counts only the ask side, so seller flow is
+    reported SEPARATELY rather than folded into the board: put selling is a bullish act, but
+    call selling is often covered calls, so mixing it in would blur the rule being tested.
+
+    Reel filter, per print: side A, out of the money, opening (day volume above start-of-day
+    OI, the same proxy the reel uses - tracker 502 measured that only ~41-46% of such volume
+    is really new OI), premium >= $45k, and not an index/sector ETF (_FLOW_INDEXY, whose
+    flow is mostly hedging). Never raises; returns {"status": ...} when there is no data.
+    """
+    own = iconn is None
+    if own:
+        iconn = _idb_conn()
+    if iconn is None:
+        return {"status": "no_db"}
+    try:
+        try:
+            last, first, ndays = iconn.execute(
+                "SELECT MAX(trade_date), MIN(trade_date), COUNT(DISTINCT trade_date) "
+                "FROM opt_flow").fetchone()
+        except sqlite3.OperationalError:
+            return {"status": "no_table"}
+        if not last:
+            return {"status": "empty"}
+        day = day or last
+        df = pd.read_sql("SELECT * FROM opt_flow WHERE trade_date=?", iconn, params=(day,))
+    except Exception:
+        log.debug("side flow read failed", exc_info=True)
+        return {"status": "error"}
+    finally:
+        if own:
+            iconn.close()
+    if df.empty:
+        return {"status": "empty", "day": day}
+    df["premium"] = pd.to_numeric(df["premium"], errors="coerce").fillna(0.0)
+    sp = pd.to_numeric(df["spot"], errors="coerce")
+    df["otm"] = ((df["cp"] == "C") & (df["strike"] > sp)) | ((df["cp"] == "P") & (df["strike"] < sp))
+    df["opening"] = pd.to_numeric(df["vol_cum"], errors="coerce") > pd.to_numeric(df["oi"], errors="coerce")
+    df["index"] = df["ticker"].isin(_FLOW_INDEXY)
+
+    split = {f"{s}{c}": float(df[(df["side"] == s) & (df["cp"] == c)]["premium"].sum())
+             for s in ("A", "B", "M") for c in ("C", "P")}
+    split["unknown"] = float(df[df["side"] == "?"]["premium"].sum())
+
+    q = df[(df["side"] == "A") & df["otm"] & df["opening"]
+           & (df["premium"] >= _SIDE_FLOW_MIN_PRINT) & ~df["index"]]
+    board = []
+    for tk, g in q.groupby("ticker"):
+        cp_ = float(g[g["cp"] == "C"]["premium"].sum())
+        pp_ = float(g[g["cp"] == "P"]["premium"].sum())
+        big = g.loc[g["premium"].idxmax()]
+        board.append({"ticker": tk, "prints": int(len(g)), "calls": int((g["cp"] == "C").sum()),
+                      "puts": int((g["cp"] == "P").sum()), "call_prem": cp_, "put_prem": pp_,
+                      "net": cp_ - pp_,
+                      "top": f"{big['strike']:g}{big['cp']} {str(big['expiry'])[5:]}",
+                      "top_k": f"{big['strike']:g}{big['cp']}", "top_exp": str(big["expiry"])[5:],
+                      "top_prem": float(big["premium"])})
+    bull = sorted([b for b in board if b["net"] > 0], key=lambda b: -b["net"])[:top]
+    bear = sorted([b for b in board if b["net"] < 0], key=lambda b: b["net"])[:top]
+
+    drill = []
+    if ticker:
+        t = df[df["ticker"] == str(ticker).upper()].sort_values("premium", ascending=False).head(12)
+        for _, r in t.iterrows():
+            drill.append({"time": str(r["ts_utc"])[11:16], "contract":
+                          f"{r['strike']:g}{r['cp']} {str(r['expiry'])[5:]}",
+                          "k": f"{r['strike']:g}{r['cp']}", "exp": str(r["expiry"])[5:],
+                          "side": r["side"], "contracts": int(r["dvol"] or 0),
+                          "premium": float(r["premium"]), "otm": bool(r["otm"]),
+                          "opening": bool(r["opening"])})
+    return {"status": "ok", "day": day, "first": first, "days": int(ndays),
+            "last_poll": str(df["ts_utc"].max()), "tickers": int(df["ticker"].nunique()),
+            "prints": int(len(df)), "split": split, "bullish": bull, "bearish": bear,
+            "qualifying": int(len(q)), "drill": drill, "drill_ticker": (ticker or "").upper()}
+
+
+def _side_flow_scorecard(iconn=None, mconn=None):
+    """Does reel-filter flow call the next H days? Graded on OUR collected history only.
+
+    Signal per (ticker, day) = sign of qualifying ask-side call premium minus put premium.
+    Scored the house way (bot-conventions): hit rate vs the SAME days' base rate over the
+    same universe, and a t-test on one excess return per day taken only on days at least H
+    sessions apart, so overlapping 5-day windows are never counted twice. No pooled t-stat.
+    Bullish and bearish are graded separately - on EOD chains bearish flow pointed the wrong
+    way (tracker 502), so a combined score would hide exactly the failure worth seeing.
+    """
+    own_i, own_m = iconn is None, mconn is None
+    if own_i:
+        iconn = _idb_conn()
+    if iconn is None:
+        return {"status": "no_db", "indep": 0}
+    try:
+        try:
+            sig = pd.read_sql(
+                "SELECT trade_date, ticker, "
+                "SUM(CASE WHEN cp='C' THEN premium ELSE -premium END) AS net, COUNT(*) AS n "
+                "FROM opt_flow WHERE side='A' AND premium>=? AND vol_cum>oi AND "
+                "((cp='C' AND strike>spot) OR (cp='P' AND strike<spot)) "
+                "GROUP BY trade_date, ticker", iconn, params=(_SIDE_FLOW_MIN_PRINT,))
+            uni = pd.read_sql("SELECT DISTINCT trade_date, ticker FROM opt_flow", iconn)
+        except Exception:
+            return {"status": "no_table", "indep": 0}
+    finally:
+        if own_i:
+            iconn.close()
+    if uni.empty:
+        return {"status": "collecting", "indep": 0, "days": 0}
+    if own_m:
+        mconn = get_conn()
+    try:
+        tks = sorted(set(uni["ticker"]))
+        px = pd.read_sql("SELECT ticker, trade_date, close FROM stock_daily WHERE ticker IN (%s)"
+                         % ",".join("?" * len(tks)), mconn, params=tks)
+    finally:
+        if own_m:
+            mconn.close()
+    # stock_daily carries duplicate (ticker, date) rows (tracker 503); one per day or the
+    # shift below pairs a close with itself.
+    px = px.drop_duplicates(["ticker", "trade_date"], keep="last").sort_values(["ticker", "trade_date"])
+    px["fwd"] = px.groupby("ticker")["close"].shift(-_SIDE_FLOW_H) / px["close"] - 1
+    fwd = px.set_index(["ticker", "trade_date"])["fwd"]
+    uni = uni[~uni["ticker"].isin(_FLOW_INDEXY)].copy()
+    uni["fwd"] = [fwd.get((t, d)) for t, d in zip(uni["ticker"], uni["trade_date"])]
+    uni = uni.dropna(subset=["fwd"])
+    sig = sig[~sig["ticker"].isin(_FLOW_INDEXY)].copy()
+    sig["fwd"] = [fwd.get((t, d)) for t, d in zip(sig["ticker"], sig["trade_date"])]
+    sig = sig.dropna(subset=["fwd"])
+    days = sorted(uni["trade_date"].unique())
+    out = {"status": "collecting", "days": len(days), "h": _SIDE_FLOW_H,
+           "need": _SIDE_FLOW_MIN_INDEP}
+    if not days:
+        out["indep"] = 0
+        return out
+    cal = {d: i for i, d in enumerate(days)}
+    keep, lastk = [], None
+    for d in days:
+        if lastk is None or cal[d] - cal[lastk] >= _SIDE_FLOW_H:
+            keep.append(d)
+            lastk = d
+    out["indep"] = len(keep)
+    base = uni.groupby("trade_date")["fwd"].mean()
+    up_base = float((uni["fwd"] > 0).mean())
+    from scipy import stats as _st
+    for name, sub, want_up in (("bull", sig[sig["net"] > 0], True), ("bear", sig[sig["net"] < 0], False)):
+        hit = float((sub["fwd"] > 0).mean() if want_up else (sub["fwd"] < 0).mean()) if len(sub) else None
+        ex = (sub.groupby("trade_date")["fwd"].mean() - base).dropna()
+        ex = ex[ex.index.isin(keep)]
+        t = _st.ttest_1samp(ex, 0) if len(ex) >= 3 else None
+        out[name] = {"n": int(len(sub)), "hit": hit,
+                     "base": up_base if want_up else 1 - up_base,
+                     "excess": float(ex.mean()) if len(ex) else None,
+                     "t": float(t.statistic) if t is not None else None,
+                     "p": float(t.pvalue) if t is not None else None, "periods": int(len(ex))}
+    if out["indep"] >= _SIDE_FLOW_MIN_INDEP:
+        out["status"] = "graded"
+    return out
+
+
+def _fmt_side_scorecard(sc):
+    """Telegram HTML for the scorecard. Refuses to print a verdict before enough periods."""
+    if sc.get("status") in ("no_db", "no_table") or not sc.get("days"):
+        return (f"🧪 <b>Scorecard</b>: collecting. Order-side capture starts {_SIDE_FLOW_START}; "
+                f"the first {_SIDE_FLOW_H}-day results exist a week later and a verdict needs "
+                f"{_SIDE_FLOW_MIN_INDEP} independent {_SIDE_FLOW_H}-day periods "
+                f"(about {_SIDE_FLOW_MIN_INDEP * _SIDE_FLOW_H + _SIDE_FLOW_H} sessions).")
+    head = (f"🧪 <b>Scorecard</b> · {sc['days']} scored sessions · {sc['indep']} independent "
+            f"{sc['h']}-day periods (need {sc['need']})")
+    if sc["status"] != "graded":
+        return head + "\n<i>NOT VALIDATED: too few independent periods to tell an edge from luck. " \
+                      "Numbers withheld on purpose.</i>"
+    lines = [head]
+    for name, label, good in (("bull", "Bullish (buyers of OTM calls)", "up"),
+                              ("bear", "Bearish (buyers of OTM puts)", "down")):
+        r = sc.get(name) or {}
+        if not r.get("n"):
+            lines.append(f"{label}: no signals yet")
+            continue
+        verdict = ("holds so far" if (r["t"] or 0) > 2 and (r["p"] or 1) < 0.05 and
+                   ((r["excess"] or 0) > 0 if name == "bull" else (r["excess"] or 0) < 0)
+                   else "no proven edge")
+        lines.append(f"{label}: {r['hit']:.0%} went {good} vs {r['base']:.0%} base · "
+                     f"excess {r['excess']:+.2%} over {r['periods']} periods "
+                     f"(t {r['t']:+.2f}, p {r['p']:.2f}) → <b>{verdict}</b>")
+    return "\n".join(lines)
+
+
+def _fmt_side_flow(d, sc):
+    """Telegram body: split, reel-filter boards, optional drilldown, scorecard, limits."""
+    if d.get("status") != "ok":
+        return "\n\n".join([
+            hdr("🧭 ORDER-SIDE FLOW"),
+            f"No order-side data yet. Capture runs every 2 minutes in market hours and starts "
+            f"{_SIDE_FLOW_START}; this fills in from the first session.",
+            _fmt_side_scorecard(sc)])
+    s = d["split"]
+    parts = [hdr(f"🧭 ORDER-SIDE FLOW · {d['day']}"),
+             f"Last poll {d['last_poll'][11:16]} UTC (quotes ~15 min delayed) · {d['tickers']} "
+             f"names · {d['prints']:,} intervals with trades"]
+    parts.append(_pipe_table(
+        ("Who", "Calls", "Puts"),
+        [("Buyers (ask)", _compact_money(s["AC"]).lstrip("+"), _compact_money(s["AP"]).lstrip("+")),
+         ("Sellers (bid)", _compact_money(s["BC"]).lstrip("+"), _compact_money(s["BP"]).lstrip("+")),
+         ("Between (mid)", _compact_money(s["MC"]).lstrip("+"), _compact_money(s["MP"]).lstrip("+"))],
+        right_cols={1, 2}, title="💵 Premium by who started the trade"))
+
+    # Kept inside the 38-cell table budget on purpose: _pipe_table truncates any TEXT column
+    # that overflows, which turned "390C 10-16 $9.1M" into "390C 10-16 9…". Strike and expiry
+    # as their own short columns never need cutting.
+    def _tbl(rows, title):
+        return _pipe_table(("Tkr", "#", "Net", "Top", "Exp"),
+                           [(r["ticker"][:5], str(r["prints"]),
+                             _compact_money(abs(r["net"])).lstrip("+"), r["top_k"], r["top_exp"])
+                            for r in rows], right_cols={1, 2}, title=title,
+                           legend="# = qualifying prints · Top = biggest contract")
+    if d["bullish"]:
+        parts.append(_tbl(d["bullish"], "📈 Buyers of OTM calls"))
+    if d["bearish"]:
+        parts.append(_tbl(d["bearish"], "📉 Buyers of OTM puts"))
+    if not d["bullish"] and not d["bearish"]:
+        parts.append("No prints passed the filter today.")
+    if d["drill"]:
+        parts.append(_pipe_table(
+            ("UTC", "K", "Exp", "S", "Prem"),
+            [(r["time"], r["k"], r["exp"], r["side"],
+              _compact_money(r["premium"]).lstrip("+")) for r in d["drill"]],
+            right_cols={4}, title=f"🔎 {d['drill_ticker']} biggest intervals",
+            legend="S: A = bought at ask · B = sold at bid · M = between"))
+    parts.append(_fmt_side_scorecard(sc))
+    parts.append(_side_flow_note())
+    return "\n\n".join(parts)
+
+
+def _side_flow_note():
+    """The filter definition and its limits, shared word-for-word by /sideflow and the
+    dashboard Flow tab so the two surfaces can never describe the rule differently."""
+    return (f"<i>Filter (from the reel, tracker 502): bought at the ask, out of the money, "
+            f"day volume above open interest, ≥ {_compact_money(_SIDE_FLOW_MIN_PRINT).lstrip('+')} "
+            f"per 2-min interval, index/sector ETFs excluded. Side comes from the LAST trade "
+            f"in each interval, so it is approximate on busy contracts; multi-leg orders "
+            f"cannot be told apart. On end-of-day data the bullish side beat the base rate "
+            f"and the bearish side pointed the wrong way, so treat put buying as hedging "
+            f"until the scorecard says otherwise.</i>")
+
+
+async def sideflow_command(update, ctx):
+    """/sideflow [TICKER] — who started today's option trades: buyers at the ask or sellers at
+    the bid, the reel-filter boards, a per-ticker drilldown, and the self-grading scorecard.
+    Same engine (_side_flow / _side_flow_scorecard) as the dashboard Flow tab section."""
+    args = [a for a in (getattr(ctx, "args", []) or []) if a.strip()]
+    tk = args[0].upper().strip() if args else None
+    d, sc = await asyncio.to_thread(lambda: (_side_flow(ticker=tk), _side_flow_scorecard()))
+    await _safe_reply(update.message, _fmt_side_flow(d, sc))
+
+
 def _valuation_inputs(ticker):
     """Everything a DCF needs, pulled once. Returns a dict, or raises with a plain reason.
 
@@ -46941,6 +47212,7 @@ async def _post_init(app):
             BotCommand("wan", "Live 24-model ensemble signals"),
             BotCommand("building", "Positioning: new long/short OI building"),
             BotCommand("uoa", "Unusual options activity (vol>>OI)"),
+            BotCommand("sideflow", "Order-side flow: buyers at ask vs sellers at bid"),
             BotCommand("vrp", "Variance risk premium (IV vs realized)"),
             BotCommand("screen", "Master-investor screens (graham/lynch/munger/...)"),
             BotCommand("gexplan", "GEX pre-market blueprint (flip/walls/scenarios)"),
@@ -47059,6 +47331,7 @@ def main():
     app.add_handler(CommandHandler("ic", ic_command))
     app.add_handler(CommandHandler("building", building_command))
     app.add_handler(CommandHandler("uoa", uoa_command))
+    app.add_handler(CommandHandler("sideflow", sideflow_command))
     app.add_handler(CommandHandler("vrp", vrp_command))
     app.add_handler(CommandHandler("rs", rs_command))
     app.add_handler(CommandHandler("breakout", breakout_command))
